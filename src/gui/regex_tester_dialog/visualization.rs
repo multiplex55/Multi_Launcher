@@ -11,7 +11,7 @@ use eframe::egui;
 
 use super::JumpTargets;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct VisualizationState {
     accepted_generation: Option<u64>,
     selected: Option<RegexSyntaxNodeRef>,

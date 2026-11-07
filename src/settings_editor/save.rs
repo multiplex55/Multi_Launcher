@@ -9,6 +9,22 @@ use egui_toast::{Toast, ToastKind, ToastOptions};
 use std::sync::Arc;
 
 impl SettingsEditor {
+    pub(crate) fn apply_committed_programmer_inspector_preference(
+        app: &mut LauncherApp,
+        preferences: crate::settings::ProgrammerInspectorPreferences,
+    ) {
+        let previous = app.settings_editor.baseline_settings.programmer_inspector;
+        if app.settings_editor.programmer_inspector == previous {
+            app.settings_editor.programmer_inspector = preferences;
+        }
+        app.settings_editor.baseline_settings.programmer_inspector = preferences;
+        let newer_choice_pending = app.pending_programmer_inspector_preference.is_some();
+        app.programmer_inspector_dialog.preference_saved(
+            previous,
+            preferences,
+            newer_choice_pending,
+        );
+    }
     pub(crate) fn apply_committed_calculation_pad_preference(app: &mut LauncherApp, enabled: bool) {
         let previous_baseline = app
             .settings_editor
@@ -62,6 +78,13 @@ impl SettingsEditor {
         new_settings: Settings,
         show_success_toast: bool,
     ) {
+        let previous_inspector = app.settings_editor.baseline_settings.programmer_inspector;
+        let newer_choice_pending = app.pending_programmer_inspector_preference.is_some();
+        app.programmer_inspector_dialog.preference_saved(
+            previous_inspector,
+            new_settings.programmer_inspector,
+            newer_choice_pending,
+        );
         crate::gui::theme::publish_committed(ctx, &new_settings.theme);
         if let Err(error) = app
             .calculation_pad_dialog
@@ -231,6 +254,7 @@ impl SettingsEditor {
         app.settings_editor.baseline_settings = new_settings.clone();
         app.settings_editor.calculation_pad_remember_source =
             new_settings.calculation_pad_remember_source;
+        app.settings_editor.programmer_inspector = new_settings.programmer_inspector;
         app.settings_editor
             .sync_paste_sequence_preferences(&new_settings.paste_sequence);
         if let Some(routes) = app.sequence_routes.as_mut() {

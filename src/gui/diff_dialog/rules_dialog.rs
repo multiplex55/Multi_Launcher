@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::diff::model::TextViewModel;
 use crate::diff::text_compare::{CompiledRules, RegexReplacement, TextComparisonRules};
 use crate::gui::theme::widgets::{
@@ -60,6 +61,7 @@ impl RulesDialogState {
         CompiledRules::compile(&rules).map_err(|errors| errors.join("\n"))?;
         Ok(rules)
     }
+    #[cfg(test)]
     pub fn apply(&mut self, model: &mut TextViewModel) -> bool {
         match self.candidate() {
             Ok(rules) => {
@@ -76,18 +78,34 @@ impl RulesDialogState {
     }
 }
 
-pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
-    let id = egui::Id::new(("diff-rules", view));
-    let mut state = ctx
-        .data_mut(|d| d.get_temp::<RulesDialogState>(id))
-        .unwrap_or_else(|| RulesDialogState::new(&model.rules));
+pub(super) fn state_id(workspace: u64, view: u64) -> egui::Id {
+    egui::Id::new(("diff-rules", workspace, view))
+}
+
+pub(super) fn state(ctx: &egui::Context, workspace: u64, view: u64) -> Option<RulesDialogState> {
+    ctx.data(|data| data.get_temp(state_id(workspace, view)))
+}
+
+pub(super) fn window_id(workspace: u64, view: u64) -> egui::Id {
+    state_id(workspace, view).with("window")
+}
+
+pub(super) fn show(
+    ctx: &egui::Context,
+    workspace: u64,
+    view: u64,
+    input_allowed: bool,
+) -> Option<TextComparisonRules> {
+    let mut state = state(ctx, workspace, view)?;
     if !state.open {
-        return;
+        return None;
     }
+    let mut applied = None;
     let mut open = true;
-    let window_id = id.with("window");
+    let window_id = window_id(workspace, view);
     egui::Window::new("Comparison rules")
         .id(window_id)
+        .enabled(input_allowed)
         .collapsible(false)
         .resizable(true)
         .max_width(ctx.content_rect().width().max(1.0))
@@ -160,7 +178,14 @@ pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
                     let apply_button = ui.button("Apply");
                     let apply = with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary);
                     if apply.clicked() {
-                        state.apply(model);
+                        match state.candidate() {
+                            Ok(rules) => {
+                                applied = Some(rules);
+                                state.open = false;
+                                state.error = None;
+                            }
+                            Err(error) => state.error = Some(error),
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         state.open = false;
@@ -168,8 +193,11 @@ pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
                 });
             },
         );
-    state.open &= open;
-    ctx.data_mut(|d| d.insert_temp(id, state));
+    if input_allowed {
+        state.open &= open;
+        ctx.data_mut(|data| data.insert_temp(state_id(workspace, view), state));
+    }
+    applied
 }
 
 pub(super) fn action_footer_reserved_height(ui: &egui::Ui, labels: &[&str]) -> f32 {
@@ -295,7 +323,6 @@ mod tests {
             settings.utility_dialog_sizes,
         );
         manager.install_in_context(&ctx);
-        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
         let screen = egui::vec2(1200.0, 800.0);
         ctx.run_ui(
             egui::RawInput {
@@ -304,16 +331,24 @@ mod tests {
             },
             |root| {
                 manager.begin_frame(root.ctx()).unwrap();
-                show(root.ctx(), 1, &mut model);
-                show(root.ctx(), 2, &mut model);
+                let workspace = 42;
+                for view in [1, 2] {
+                    root.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            state_id(workspace, view),
+                            RulesDialogState::new(&TextComparisonRules::default()),
+                        );
+                    });
+                    assert!(show(root.ctx(), workspace, view, true).is_none());
+                }
             },
         )
         .drop_without_applying_deltas();
 
         let key = UtilityToolKey::parse("diff-comparison-rules").unwrap();
         let tracked = manager.tracked_windows();
-        assert!(tracked.contains(&(egui::Id::new(("diff-rules", 1_u64)).with("window"), key)));
-        assert!(tracked.contains(&(egui::Id::new(("diff-rules", 2_u64)).with("window"), key)));
+        assert!(tracked.contains(&(window_id(42, 1), key)));
+        assert!(tracked.contains(&(window_id(42, 2), key)));
         assert_eq!(tracked.len(), 2);
         workers.join_all();
     }

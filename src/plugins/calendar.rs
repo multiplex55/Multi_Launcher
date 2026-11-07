@@ -1054,7 +1054,7 @@ pub fn snooze_event(event_id: &str, duration: Duration) -> anyhow::Result<bool> 
     snooze_event_at(CALENDAR_EVENTS_FILE, event_id, duration)
 }
 
-fn snooze_event_at(path: &str, event_id: &str, duration: Duration) -> anyhow::Result<bool> {
+pub(crate) fn snooze_event_at(path: &str, event_id: &str, duration: Duration) -> anyhow::Result<bool> {
     let mut updated = false;
     let now = chrono::Local::now().naive_local();
     let event_id = event_id.to_owned();

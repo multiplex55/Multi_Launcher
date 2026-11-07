@@ -576,9 +576,9 @@ fn map_watch_backend_failure(error: BackendFailure) -> NativeWatchError {
         BackendFailureKind::ParentChanged => NativeWatchErrorKind::ParentChanged,
         BackendFailureKind::PathEscapedRoot => NativeWatchErrorKind::OutsideRoot,
         BackendFailureKind::UnsupportedIdentity => NativeWatchErrorKind::UnsupportedIdentity,
-        BackendFailureKind::Inaccessible | BackendFailureKind::ObjectChanged => {
-            NativeWatchErrorKind::Inaccessible
-        }
+        BackendFailureKind::Inaccessible
+        | BackendFailureKind::CloudPlaceholderExcluded
+        | BackendFailureKind::ObjectChanged => NativeWatchErrorKind::Inaccessible,
         BackendFailureKind::InvalidEntry => NativeWatchErrorKind::InvalidPath,
         BackendFailureKind::ResourceLimit | BackendFailureKind::Cancelled => {
             NativeWatchErrorKind::Inaccessible
@@ -1605,6 +1605,7 @@ struct EnumeratedName {
 enum BackendFailureKind {
     InvalidRoot,
     Inaccessible,
+    CloudPlaceholderExcluded,
     UnsupportedIdentity,
     RootChanged,
     ParentChanged,
@@ -1621,6 +1622,17 @@ struct BackendFailure {
     path: Option<PathBuf>,
     message: String,
 }
+
+#[derive(Debug)]
+struct CloudPlaceholderExcluded(&'static str);
+
+impl std::fmt::Display for CloudPlaceholderExcluded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for CloudPlaceholderExcluded {}
 
 impl std::fmt::Display for BackendFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1684,6 +1696,66 @@ trait RenameScanBackend {
     ) -> Result<OpenDirectoryChain<Self::Handle>, BackendFailure>;
 }
 
+/// One object observed after it has been admitted through the guarded scan
+/// backend. Excluded or inaccessible entries carry no identity or size.
+pub(crate) struct MetadataScanEntry<'a> {
+    pub(crate) parent_path: &'a Path,
+    pub(crate) parent_identity: NativeFileIdentity,
+    pub(crate) path: &'a Path,
+    pub(crate) relative_path: &'a Path,
+    pub(crate) name: &'a OsStr,
+    pub(crate) kind: SnapshotEntryKind,
+    pub(crate) identity: Option<NativeFileIdentity>,
+    pub(crate) logical_length: Option<u64>,
+    pub(crate) depth: usize,
+    pub(crate) state: MetadataScanEntryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataScanEntryState {
+    Verified,
+    ReparseExcluded,
+    CloudPlaceholderExcluded,
+    Inaccessible,
+    UnsupportedIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataScanControl {
+    Continue,
+    SkipDescendants,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataRootControl {
+    Continue,
+    Stop,
+}
+
+/// Consumer for the metadata-only mode of the existing root-confined scan.
+/// It never receives file contents or handles.
+pub(crate) trait MetadataScanObserver {
+    fn admitted_root(&mut self, path: &Path, identity: NativeFileIdentity) -> MetadataRootControl;
+
+    fn entry(&mut self, entry: MetadataScanEntry<'_>) -> MetadataScanControl;
+
+    fn progress(&mut self, _summary: &RenameScanSummary) {}
+
+    fn directory_enumeration_completed(&mut self, _identity: NativeFileIdentity) {}
+
+    fn directory_became_cloud_placeholder(&mut self, _identity: NativeFileIdentity) {}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MetadataScanBounds {
+    pub(crate) max_entries: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_directories: usize,
+    pub(crate) max_depth: usize,
+    pub(crate) max_path_bytes: usize,
+}
+
 #[derive(Debug)]
 struct PendingRow {
     relative_path: PathBuf,
@@ -1739,7 +1811,7 @@ fn dff_cloud_attribute_preflight(
     if has_cloud_placeholder_attributes(attributes) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "cloud-placeholder object excluded before open",
+            CloudPlaceholderExcluded("cloud-placeholder object excluded before open"),
         ));
     }
     Ok(())
@@ -1759,6 +1831,18 @@ impl ScanBounds {
     }
 
     fn duplicate_discovery(limits: DuplicateDiscoveryScanLimits) -> Self {
+        Self {
+            max_entries: limits.max_entries,
+            max_files: limits.max_files,
+            max_directories: limits.max_directories,
+            max_scheduled_directories: Some(limits.max_directories),
+            max_depth: limits.max_depth,
+            max_path_bytes: limits.max_path_bytes,
+            build_rename_snapshot: false,
+        }
+    }
+
+    fn metadata(limits: MetadataScanBounds) -> Self {
         Self {
             max_entries: limits.max_entries,
             max_files: limits.max_files,
@@ -1840,6 +1924,64 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
     bounds: ScanBounds,
     progress: &mut dyn FnMut(&RenameScanSummary),
 ) -> RenameScanResult {
+    scan_with_backend_bounded_progress_and_observer(
+        backend,
+        request,
+        cancellation,
+        bounds,
+        progress,
+        None,
+    )
+}
+
+fn observe_metadata_entry(
+    observer: &mut Option<&mut dyn MetadataScanObserver>,
+    entry: MetadataScanEntry<'_>,
+) -> MetadataScanControl {
+    observer
+        .as_deref_mut()
+        .map_or(MetadataScanControl::Continue, |observer| {
+            observer.entry(entry)
+        })
+}
+
+fn report_scan_progress(
+    observer: &mut Option<&mut dyn MetadataScanObserver>,
+    summary: &RenameScanSummary,
+    progress: &mut dyn FnMut(&RenameScanSummary),
+) {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer.progress(summary);
+    }
+    progress(summary);
+}
+
+pub(crate) fn scan_metadata_with_observer(
+    mut request: RenameScanRequest,
+    limits: MetadataScanBounds,
+    cancellation: &ScanCancellation,
+    progress: &mut dyn FnMut(&RenameScanSummary),
+    observer: &mut dyn MetadataScanObserver,
+) -> RenameScanResult {
+    request.exclude_cloud_placeholders = true;
+    scan_with_backend_bounded_progress_and_observer(
+        &NativeRenameScanBackend,
+        request,
+        cancellation,
+        ScanBounds::metadata(limits),
+        progress,
+        Some(observer),
+    )
+}
+
+fn scan_with_backend_bounded_progress_and_observer<B: RenameScanBackend>(
+    backend: &B,
+    request: RenameScanRequest,
+    cancellation: &ScanCancellation,
+    bounds: ScanBounds,
+    progress: &mut dyn FnMut(&RenameScanSummary),
+    mut metadata_observer: Option<&mut dyn MetadataScanObserver>,
+) -> RenameScanResult {
     let mut result = empty_scan_result(&request, RenameScanStatus::InvalidRoot);
     if cancellation.is_cancelled() {
         result.status = RenameScanStatus::Cancelled;
@@ -1886,6 +2028,23 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
         );
         return result;
     };
+    if let Some(observer) = metadata_observer.as_deref_mut() {
+        match observer.admitted_root(&admission.proof.canonical_path, admission.proof.identity) {
+            MetadataRootControl::Continue => {}
+            MetadataRootControl::Stop => {
+                result.status = RenameScanStatus::ResourceLimit;
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&admission.proof.canonical_path),
+                        "metadata observer could not retain the admitted root within its bounds",
+                    ),
+                );
+                return result;
+            }
+        }
+    }
     if bounds.max_scheduled_directories.is_some() {
         // The selected root itself consumes one admitted directory even
         // before its first enumeration. Keep this separate from scanned
@@ -2045,8 +2204,25 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
             )
             .then_with(|| left.name.cmp(&right.name))
         });
+        if metadata_observer.is_some()
+            && let Some(duplicate) = names.windows(2).find(|pair| pair[0].name == pair[1].name)
+        {
+            let path = frame.directory.canonical_path.join(&duplicate[1].name);
+            record_failure(
+                &mut result.summary,
+                BackendFailure::new(
+                    BackendFailureKind::ObjectChanged,
+                    Some(&path),
+                    "a directory enumeration returned the same exact sibling name more than once",
+                ),
+            );
+            scan_status = RenameScanStatus::ChangedDuringScan;
+            break;
+        }
         result.summary.directories_scanned += 1;
-        progress(&result.summary);
+        if metadata_observer.is_none() {
+            progress(&result.summary);
+        }
 
         for entry in names {
             if cancellation.is_cancelled() {
@@ -2070,32 +2246,120 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
             }
             result.summary.entries_seen += 1;
             if result.summary.entries_seen.is_multiple_of(256) {
-                progress(&result.summary);
+                report_scan_progress(&mut metadata_observer, &result.summary, progress);
+            }
+            if metadata_observer.is_some()
+                && frame.relative_path.components().count().saturating_add(1) > bounds.max_depth
+            {
+                scan_status = RenameScanStatus::ResourceLimit;
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&frame.directory.canonical_path.join(&entry.name)),
+                        format!("folder-size depth limit of {} reached", bounds.max_depth),
+                    ),
+                );
+                break;
             }
             if admission.proof.exclude_cloud_placeholders && entry.cloud_placeholder {
                 result.summary.cloud_placeholders_excluded += 1;
-                record_issue(
-                    &mut result.summary,
-                    RenameScanIssue {
-                        path: Some(frame.directory.canonical_path.join(&entry.name)),
-                        kind: RenameScanIssueKind::ReparsePointExcluded,
-                        message: "cloud placeholder skipped from directory metadata without opening or requesting hydration".into(),
-                    },
-                );
+                if metadata_observer.is_some() {
+                    let observed_path = frame.directory.canonical_path.join(&entry.name);
+                    let relative_path = frame.relative_path.join(&entry.name);
+                    record_issue(
+                        &mut result.summary,
+                        RenameScanIssue {
+                            path: Some(observed_path.clone()),
+                            kind: RenameScanIssueKind::ReparsePointExcluded,
+                            message: "cloud placeholder skipped from directory metadata without opening or requesting hydration".into(),
+                        },
+                    );
+                    if observe_metadata_entry(
+                        &mut metadata_observer,
+                        MetadataScanEntry {
+                            parent_path: &frame.directory.canonical_path,
+                            parent_identity: frame.directory.identity,
+                            path: &observed_path,
+                            relative_path: &relative_path,
+                            name: &entry.name,
+                            kind: if entry.is_directory {
+                                SnapshotEntryKind::Directory
+                            } else {
+                                SnapshotEntryKind::File
+                            },
+                            identity: None,
+                            logical_length: None,
+                            depth: relative_path.components().count(),
+                            state: MetadataScanEntryState::CloudPlaceholderExcluded,
+                        },
+                    ) == MetadataScanControl::Stop
+                    {
+                        scan_status = RenameScanStatus::ResourceLimit;
+                        break;
+                    }
+                } else {
+                    record_issue(
+                        &mut result.summary,
+                        RenameScanIssue {
+                            path: Some(frame.directory.canonical_path.join(&entry.name)),
+                            kind: RenameScanIssueKind::ReparsePointExcluded,
+                            message: "cloud placeholder skipped from directory metadata without opening or requesting hydration".into(),
+                        },
+                    );
+                }
                 continue;
             }
             if admission.proof.exclude_cloud_placeholders && entry.is_reparse_point {
                 result.summary.reparse_entries_excluded += 1;
-                record_issue(
-                    &mut result.summary,
-                    RenameScanIssue {
-                        path: Some(frame.directory.canonical_path.join(&entry.name)),
-                        kind: RenameScanIssueKind::ReparsePointExcluded,
-                        message:
-                            "reparse entry skipped from directory metadata without opening or following it"
-                                .into(),
-                    },
-                );
+                if metadata_observer.is_some() {
+                    let observed_path = frame.directory.canonical_path.join(&entry.name);
+                    let relative_path = frame.relative_path.join(&entry.name);
+                    record_issue(
+                        &mut result.summary,
+                        RenameScanIssue {
+                            path: Some(observed_path.clone()),
+                            kind: RenameScanIssueKind::ReparsePointExcluded,
+                            message:
+                                "reparse entry skipped from directory metadata without opening or following it"
+                                    .into(),
+                        },
+                    );
+                    if observe_metadata_entry(
+                        &mut metadata_observer,
+                        MetadataScanEntry {
+                            parent_path: &frame.directory.canonical_path,
+                            parent_identity: frame.directory.identity,
+                            path: &observed_path,
+                            relative_path: &relative_path,
+                            name: &entry.name,
+                            kind: if entry.is_directory {
+                                SnapshotEntryKind::Directory
+                            } else {
+                                SnapshotEntryKind::File
+                            },
+                            identity: None,
+                            logical_length: None,
+                            depth: relative_path.components().count(),
+                            state: MetadataScanEntryState::ReparseExcluded,
+                        },
+                    ) == MetadataScanControl::Stop
+                    {
+                        scan_status = RenameScanStatus::ResourceLimit;
+                        break;
+                    }
+                } else {
+                    record_issue(
+                        &mut result.summary,
+                        RenameScanIssue {
+                            path: Some(frame.directory.canonical_path.join(&entry.name)),
+                            kind: RenameScanIssueKind::ReparsePointExcluded,
+                            message:
+                                "reparse entry skipped from directory metadata without opening or following it"
+                                    .into(),
+                        },
+                    );
+                }
                 continue;
             }
             if admission.proof.recursive
@@ -2125,12 +2389,79 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                 Some(&entry),
             ) {
                 Ok(opened) => opened,
-                Err(error) => {
+                Err(mut error) => {
+                    if error.kind == BackendFailureKind::CloudPlaceholderExcluded
+                        && metadata_observer.is_some()
+                    {
+                        result.summary.cloud_placeholders_excluded += 1;
+                        let observed_path = error
+                            .path
+                            .clone()
+                            .unwrap_or_else(|| frame.directory.canonical_path.join(&entry.name));
+                        record_failure(&mut result.summary, error.clone());
+                        let relative_path = frame.relative_path.join(&entry.name);
+                        if observe_metadata_entry(
+                            &mut metadata_observer,
+                            MetadataScanEntry {
+                                parent_path: &frame.directory.canonical_path,
+                                parent_identity: frame.directory.identity,
+                                path: &observed_path,
+                                relative_path: &relative_path,
+                                name: &entry.name,
+                                kind: if entry.is_directory {
+                                    SnapshotEntryKind::Directory
+                                } else {
+                                    SnapshotEntryKind::File
+                                },
+                                identity: None,
+                                logical_length: None,
+                                depth: relative_path.components().count(),
+                                state: MetadataScanEntryState::CloudPlaceholderExcluded,
+                            },
+                        ) == MetadataScanControl::Stop
+                        {
+                            scan_status = RenameScanStatus::ResourceLimit;
+                            break;
+                        }
+                        if scan_status == RenameScanStatus::Complete {
+                            scan_status = RenameScanStatus::Partial;
+                        }
+                        continue;
+                    }
+                    // Keep the existing DFF scan's classification for
+                    // objects rejected by the same no-recall preflight.
+                    if error.kind == BackendFailureKind::CloudPlaceholderExcluded {
+                        error.kind = BackendFailureKind::Inaccessible;
+                    }
                     if error.kind == BackendFailureKind::Inaccessible {
                         result.summary.inaccessible_entries += 1;
                         record_failure(&mut result.summary, error);
                         if scan_status == RenameScanStatus::Complete {
                             scan_status = RenameScanStatus::Partial;
+                        }
+                        if metadata_observer.is_some()
+                            && observe_metadata_entry(
+                                &mut metadata_observer,
+                                MetadataScanEntry {
+                                    parent_path: &frame.directory.canonical_path,
+                                    parent_identity: frame.directory.identity,
+                                    path: &frame.directory.canonical_path.join(&entry.name),
+                                    relative_path: &frame.relative_path.join(&entry.name),
+                                    name: &entry.name,
+                                    kind: if entry.is_directory {
+                                        SnapshotEntryKind::Directory
+                                    } else {
+                                        SnapshotEntryKind::File
+                                    },
+                                    identity: None,
+                                    logical_length: None,
+                                    depth: frame.relative_path.components().count() + 1,
+                                    state: MetadataScanEntryState::Inaccessible,
+                                },
+                            ) == MetadataScanControl::Stop
+                        {
+                            scan_status = RenameScanStatus::ResourceLimit;
+                            break;
                         }
                         continue;
                     }
@@ -2207,7 +2538,8 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                 SnapshotEntryKind::Other => result.summary.other_entries_seen += 1,
             }
             if opened.kind == SnapshotEntryKind::File
-                && (opened.length.is_none() || opened.modified.is_none())
+                && (opened.length.is_none()
+                    || (metadata_observer.is_none() && opened.modified.is_none()))
             {
                 record_failure(
                     &mut result.summary,
@@ -2220,10 +2552,10 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                 scan_status = RenameScanStatus::Unsupported;
                 break;
             }
-            if admission.proof.exclude_cloud_placeholders
+            let unsupported_directory_identity = admission.proof.exclude_cloud_placeholders
                 && opened.kind == SnapshotEntryKind::Directory
-                && !identity_is_supported(opened.identity)
-            {
+                && !identity_is_supported(opened.identity);
+            if unsupported_directory_identity && metadata_observer.is_none() {
                 record_issue(
                     &mut result.summary,
                     RenameScanIssue {
@@ -2260,10 +2592,71 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                     },
                 );
             }
+            let metadata_state = if unsupported_directory_identity {
+                MetadataScanEntryState::UnsupportedIdentity
+            } else if excluded_cloud_placeholder {
+                MetadataScanEntryState::CloudPlaceholderExcluded
+            } else if opened.reparse_point {
+                MetadataScanEntryState::ReparseExcluded
+            } else {
+                MetadataScanEntryState::Verified
+            };
+            let metadata_control = if metadata_observer.is_some() {
+                observe_metadata_entry(
+                    &mut metadata_observer,
+                    MetadataScanEntry {
+                        parent_path: &frame.directory.canonical_path,
+                        parent_identity: frame.directory.identity,
+                        path: &opened.canonical_path,
+                        relative_path: &relative_path,
+                        name: &entry.name,
+                        kind: opened.kind,
+                        identity: (metadata_state == MetadataScanEntryState::Verified)
+                            .then_some(opened.identity),
+                        logical_length: (metadata_state == MetadataScanEntryState::Verified
+                            && opened.kind == SnapshotEntryKind::File)
+                            .then_some(opened.length)
+                            .flatten(),
+                        depth: relative_path.components().count(),
+                        state: metadata_state,
+                    },
+                )
+            } else {
+                MetadataScanControl::Continue
+            };
+            if metadata_control == MetadataScanControl::Stop {
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&opened.canonical_path),
+                        "metadata observer reached a bounded accounting limit",
+                    ),
+                );
+                scan_status = RenameScanStatus::ResourceLimit;
+                break;
+            }
+            if unsupported_directory_identity {
+                record_issue(
+                    &mut result.summary,
+                    RenameScanIssue {
+                        path: Some(opened.canonical_path.clone()),
+                        kind: RenameScanIssueKind::UnsupportedIdentity,
+                        message:
+                            "directory identity is unsupported; its descendants were not traversed"
+                                .into(),
+                    },
+                );
+                if scan_status == RenameScanStatus::Complete {
+                    scan_status = RenameScanStatus::Partial;
+                }
+            }
             if opened.kind == SnapshotEntryKind::Directory
                 && admission.proof.recursive
                 && !opened.reparse_point
                 && !excluded_cloud_placeholder
+                && !unsupported_directory_identity
+                && metadata_control != MetadataScanControl::SkipDescendants
             {
                 let child_chain_path_bytes = directory_proof_path_bytes(&frame.chain)
                     .saturating_add(path_storage_bytes(&opened.lookup_path))
@@ -2312,6 +2705,20 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                     &opened,
                 ) {
                     Ok(child_directory) => Some(child_directory),
+                    Err(error)
+                        if error.kind == BackendFailureKind::CloudPlaceholderExcluded
+                            && metadata_observer.is_some() =>
+                    {
+                        result.summary.cloud_placeholders_excluded += 1;
+                        record_failure(&mut result.summary, error.clone());
+                        if let Some(observer) = metadata_observer.as_deref_mut() {
+                            observer.directory_became_cloud_placeholder(opened.identity);
+                        }
+                        if scan_status == RenameScanStatus::Complete {
+                            scan_status = RenameScanStatus::Partial;
+                        }
+                        None
+                    }
                     Err(error) if error.kind == BackendFailureKind::Inaccessible => {
                         result.summary.inaccessible_entries += 1;
                         record_failure(&mut result.summary, error);
@@ -2322,7 +2729,10 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                         // as a sibling blocker even though traversal is denied.
                         None
                     }
-                    Err(error) => {
+                    Err(mut error) => {
+                        if error.kind == BackendFailureKind::CloudPlaceholderExcluded {
+                            error.kind = BackendFailureKind::Inaccessible;
+                        }
                         record_failure(&mut result.summary, error.clone());
                         scan_status = status_for_scan_failure(error.kind);
                         break;
@@ -2346,22 +2756,73 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                 }
             }
             result_path_bytes = next_path_bytes;
-            pending_rows.push(PendingRow {
-                relative_path,
-                path: opened.canonical_path,
-                kind: opened.kind,
-                identity: opened.identity,
-                parent_identity: frame.directory.identity,
-                parent_chain: if bounds.build_rename_snapshot {
-                    frame.chain.clone()
-                } else {
-                    Vec::new()
-                },
-                length: opened.length,
-                modified: opened.modified,
-                reparse_point: opened.reparse_point,
-                cloud_placeholder: opened.cloud_placeholder,
-            });
+            if metadata_observer.is_none() {
+                pending_rows.push(PendingRow {
+                    relative_path,
+                    path: opened.canonical_path,
+                    kind: opened.kind,
+                    identity: opened.identity,
+                    parent_identity: frame.directory.identity,
+                    parent_chain: if bounds.build_rename_snapshot {
+                        frame.chain.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    length: opened.length,
+                    modified: opened.modified,
+                    reparse_point: opened.reparse_point,
+                    cloud_placeholder: opened.cloud_placeholder,
+                });
+            }
+        }
+        if metadata_observer.is_some()
+            && matches!(
+                scan_status,
+                RenameScanStatus::Complete | RenameScanStatus::Partial
+            )
+        {
+            match backend.reopen_chain(
+                &frame.chain,
+                &admission.proof,
+                DirectoryOpenAccess::Metadata,
+            ) {
+                Ok(chain)
+                    if chain.last().is_some_and(|directory| {
+                        directory.identity == frame.directory.identity
+                            && batch_rename::compare_paths_windows_ordinal(
+                                &directory.canonical_path,
+                                &frame.directory.canonical_path,
+                            ) == std::cmp::Ordering::Equal
+                    }) =>
+                {
+                    if let Some(observer) = metadata_observer.as_deref_mut() {
+                        observer.directory_enumeration_completed(frame.directory.identity);
+                    }
+                }
+                Ok(_) => {
+                    record_failure(
+                        &mut result.summary,
+                        BackendFailure::new(
+                            BackendFailureKind::ObjectChanged,
+                            Some(&frame.directory.canonical_path),
+                            "the directory changed before its metadata enumeration completed",
+                        ),
+                    );
+                    scan_status = RenameScanStatus::ChangedDuringScan;
+                }
+                Err(error) => {
+                    scan_status = status_for_scan_failure(error.kind);
+                    record_failure(&mut result.summary, error);
+                }
+            }
+        }
+        if metadata_observer.is_some()
+            && matches!(
+                scan_status,
+                RenameScanStatus::Complete | RenameScanStatus::Partial
+            )
+        {
+            report_scan_progress(&mut metadata_observer, &result.summary, progress);
         }
         if scan_status != RenameScanStatus::Complete && scan_status != RenameScanStatus::Partial {
             break;
@@ -2381,6 +2842,12 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
     ) {
         record_failure(&mut result.summary, error.clone());
         scan_status = status_for_scan_failure(error.kind);
+    }
+
+    if metadata_observer.is_some() {
+        result.status = scan_status;
+        report_scan_progress(&mut metadata_observer, &result.summary, progress);
+        return result;
     }
 
     pending_rows.sort_by(|left, right| {
@@ -2519,6 +2986,7 @@ fn record_issue(summary: &mut RenameScanSummary, issue: RenameScanIssue) {
 fn record_failure(summary: &mut RenameScanSummary, failure: BackendFailure) {
     let kind = match failure.kind {
         BackendFailureKind::Inaccessible => RenameScanIssueKind::Inaccessible,
+        BackendFailureKind::CloudPlaceholderExcluded => RenameScanIssueKind::ReparsePointExcluded,
         BackendFailureKind::UnsupportedIdentity => RenameScanIssueKind::UnsupportedIdentity,
         BackendFailureKind::RootChanged => RenameScanIssueKind::RootChanged,
         BackendFailureKind::ParentChanged => RenameScanIssueKind::ParentChanged,
@@ -2545,7 +3013,9 @@ fn status_for_root_failure(kind: BackendFailureKind) -> RenameScanStatus {
         BackendFailureKind::InvalidRoot | BackendFailureKind::InvalidEntry => {
             RenameScanStatus::InvalidRoot
         }
-        BackendFailureKind::Inaccessible => RenameScanStatus::Inaccessible,
+        BackendFailureKind::Inaccessible | BackendFailureKind::CloudPlaceholderExcluded => {
+            RenameScanStatus::Inaccessible
+        }
         BackendFailureKind::UnsupportedIdentity => RenameScanStatus::Unsupported,
         BackendFailureKind::Cancelled => RenameScanStatus::Cancelled,
         BackendFailureKind::ResourceLimit => RenameScanStatus::ResourceLimit,
@@ -2561,15 +3031,23 @@ fn status_for_directory_failure(
     root_directory: bool,
 ) -> RenameScanStatus {
     match kind {
-        BackendFailureKind::Inaccessible if root_directory => RenameScanStatus::Inaccessible,
-        BackendFailureKind::Inaccessible => RenameScanStatus::Partial,
+        BackendFailureKind::Inaccessible | BackendFailureKind::CloudPlaceholderExcluded
+            if root_directory =>
+        {
+            RenameScanStatus::Inaccessible
+        }
+        BackendFailureKind::Inaccessible | BackendFailureKind::CloudPlaceholderExcluded => {
+            RenameScanStatus::Partial
+        }
         other => status_for_root_failure(other),
     }
 }
 
 fn status_for_scan_failure(kind: BackendFailureKind) -> RenameScanStatus {
     match kind {
-        BackendFailureKind::Inaccessible => RenameScanStatus::Partial,
+        BackendFailureKind::Inaccessible | BackendFailureKind::CloudPlaceholderExcluded => {
+            RenameScanStatus::Partial
+        }
         other => status_for_root_failure(other),
     }
 }
@@ -2581,9 +3059,9 @@ fn fresh_status_for_failure(kind: BackendFailureKind) -> FreshCheckStatus {
         | BackendFailureKind::PathEscapedRoot => FreshCheckStatus::RootChanged,
         BackendFailureKind::ObjectChanged => FreshCheckStatus::SourceChanged,
         BackendFailureKind::ParentChanged => FreshCheckStatus::ParentChanged,
-        BackendFailureKind::Inaccessible | BackendFailureKind::InvalidEntry => {
-            FreshCheckStatus::Inaccessible
-        }
+        BackendFailureKind::Inaccessible
+        | BackendFailureKind::CloudPlaceholderExcluded
+        | BackendFailureKind::InvalidEntry => FreshCheckStatus::Inaccessible,
         BackendFailureKind::UnsupportedIdentity => FreshCheckStatus::Unsupported,
         BackendFailureKind::ResourceLimit => FreshCheckStatus::Inaccessible,
         BackendFailureKind::Cancelled => FreshCheckStatus::Cancelled,
@@ -9092,7 +9570,7 @@ fn open_native_object(
             "DFF cloud placeholder recheck",
             std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "cloud-placeholder object became ineligible during open",
+                CloudPlaceholderExcluded("cloud-placeholder object became ineligible during open"),
             ),
         ));
     }
@@ -9176,6 +9654,28 @@ fn native_raw_os_error(error: &std::io::Error) -> Option<i32> {
             .source
             .raw_os_error()
     })
+}
+
+#[cfg(windows)]
+fn is_cloud_placeholder_io_error(error: &std::io::Error) -> bool {
+    fn contains_marker(error: &(dyn std::error::Error + 'static)) -> bool {
+        if error.downcast_ref::<CloudPlaceholderExcluded>().is_some() {
+            return true;
+        }
+        if let Some(context) = error.downcast_ref::<NativeIoContext>() {
+            return contains_marker(&context.source);
+        }
+        if let Some(nested) = error.downcast_ref::<std::io::Error>()
+            && let Some(inner) = nested.get_ref()
+        {
+            return contains_marker(inner);
+        }
+        false
+    }
+
+    error
+        .get_ref()
+        .is_some_and(|source| contains_marker(source))
 }
 
 #[cfg(windows)]
@@ -9504,10 +10004,14 @@ fn classify_root_io(path: &Path, error: std::io::Error) -> BackendFailure {
 
 #[cfg(windows)]
 fn classify_child_io(path: &Path, error: std::io::Error) -> BackendFailure {
-    let code = native_raw_os_error(&error).unwrap_or_default() as u32;
-    let kind = match code {
-        50 | 1 | 87 => BackendFailureKind::UnsupportedIdentity,
-        _ => BackendFailureKind::Inaccessible,
+    let kind = if is_cloud_placeholder_io_error(&error) {
+        BackendFailureKind::CloudPlaceholderExcluded
+    } else {
+        let code = native_raw_os_error(&error).unwrap_or_default() as u32;
+        match code {
+            50 | 1 | 87 => BackendFailureKind::UnsupportedIdentity,
+            _ => BackendFailureKind::Inaccessible,
+        }
     };
     BackendFailure::new(
         kind,
@@ -9953,7 +10457,13 @@ mod tests {
                 })
                 .map_err(|error| {
                     BackendFailure::new(
-                        BackendFailureKind::UnsupportedIdentity,
+                        if error.get_ref().is_some_and(|source| {
+                            source.downcast_ref::<CloudPlaceholderExcluded>().is_some()
+                        }) {
+                            BackendFailureKind::CloudPlaceholderExcluded
+                        } else {
+                            BackendFailureKind::UnsupportedIdentity
+                        },
                         Some(&path),
                         error.to_string(),
                     )
@@ -10113,6 +10623,235 @@ mod tests {
             recursive,
             RenameScanGeneration(generation),
         )
+    }
+
+    fn scan_fake_folder_size(
+        backend: &FakeBackend,
+        root: &Path,
+        generation: u64,
+        bounds: MetadataScanBounds,
+    ) -> crate::folder_size::FolderSizeResult {
+        let mut ignore_progress = |_progress| {};
+        let mut accumulator = crate::folder_size::FolderSizeAccumulator::new(
+            root.to_path_buf(),
+            generation,
+            &mut ignore_progress,
+        );
+        let mut scan_request = request(root, true, generation);
+        scan_request.exclude_cloud_placeholders = true;
+        let mut ignore_scan_progress = |_summary: &RenameScanSummary| {};
+        let scanned = scan_with_backend_bounded_progress_and_observer(
+            backend,
+            scan_request,
+            &ScanCancellation::new(),
+            ScanBounds::metadata(bounds),
+            &mut ignore_scan_progress,
+            Some(&mut accumulator),
+        );
+        accumulator.finish(scanned.status(), scanned.summary())
+    }
+
+    fn folder_size_test_bounds(
+        max_entries: usize,
+        max_files: usize,
+        max_directories: usize,
+    ) -> MetadataScanBounds {
+        MetadataScanBounds {
+            max_entries,
+            max_files,
+            max_directories,
+            max_depth: 64,
+            max_path_bytes: usize::MAX,
+        }
+    }
+
+    #[test]
+    fn folder_size_scan_fake_metadata_preserves_root_subtotal_when_child_limit_hits() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        let known = backend.add_file(root, "known.bin", 2);
+        backend.change_metadata(&known, 23, std::time::UNIX_EPOCH);
+        let wide = backend.add_directory(root, "wide", 3);
+        for index in 0..4 {
+            backend.add_file(&wide, &format!("item-{index}.bin"), 10 + index);
+        }
+
+        let result = scan_fake_folder_size(&backend, root, 201, folder_size_test_bounds(4, 10, 10));
+
+        assert_eq!(
+            result.status(),
+            crate::folder_size::FolderSizeStatus::Partial
+        );
+        assert_eq!(result.total_logical_bytes(), 23);
+        assert_eq!(result.summary().files_seen(), 1);
+        let wide_row = result
+            .entries()
+            .iter()
+            .find(|entry| entry.path() == wide.as_path())
+            .expect("admitted child remains visible when enumeration hits a limit");
+        assert_eq!(wide_row.subtree_logical_bytes(), 0);
+        assert!(!wide_row.is_complete());
+        assert!(!result.entries()[0].is_complete());
+        assert!(result.issues().iter().any(|issue| {
+            issue.path() == Some(wide.as_path())
+                && issue.kind() == crate::folder_size::FolderSizeIssueKind::ResourceLimit
+        }));
+    }
+
+    #[test]
+    fn folder_size_scan_fake_metadata_records_policy_exclusions_and_open_time_cloud_change() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        let known = backend.add_file(root, "known.bin", 2);
+        backend.change_metadata(&known, 31, std::time::UNIX_EPOCH);
+        let cloud = backend.add_file(root, "cloud.bin", 3);
+        backend
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(root)
+            .unwrap()
+            .children
+            .iter_mut()
+            .find(|entry| entry.name == OsStr::new("cloud.bin"))
+            .unwrap()
+            .cloud_placeholder = true;
+        let linked = backend.add_reparse_directory(root, "linked", 4);
+        let outside = backend.add_file(&linked, "outside.bin", 5);
+
+        let result =
+            scan_fake_folder_size(&backend, root, 202, folder_size_test_bounds(20, 20, 20));
+
+        assert_eq!(
+            result.status(),
+            crate::folder_size::FolderSizeStatus::Partial
+        );
+        assert_eq!(result.total_logical_bytes(), 31);
+        assert_eq!(result.summary().cloud_placeholders_excluded(), 1);
+        assert_eq!(result.summary().reparse_entries_excluded(), 1);
+        assert!(result.entries().iter().any(|entry| {
+            entry.path() == cloud.as_path()
+                && entry.kind()
+                    == crate::folder_size::FolderSizeEntryKind::Omitted(
+                        crate::folder_size::FolderSizeOmission::CloudPlaceholder,
+                    )
+        }));
+        assert!(result.entries().iter().any(|entry| {
+            entry.path() == linked.as_path()
+                && entry.kind()
+                    == crate::folder_size::FolderSizeEntryKind::Omitted(
+                        crate::folder_size::FolderSizeOmission::ReparsePoint,
+                    )
+        }));
+        assert!(
+            !result
+                .entries()
+                .iter()
+                .any(|entry| entry.path() == outside.as_path())
+        );
+
+        let changing_backend = FakeBackend::new_root(root);
+        let became_cloud = changing_backend.add_file(root, "became-cloud.bin", 6);
+        changing_backend.mark_cloud_before_next_open(&became_cloud);
+        let changed = scan_fake_folder_size(
+            &changing_backend,
+            root,
+            203,
+            folder_size_test_bounds(20, 20, 20),
+        );
+        assert_eq!(
+            changed.status(),
+            crate::folder_size::FolderSizeStatus::Partial
+        );
+        assert_eq!(changed.summary().cloud_placeholders_excluded(), 1);
+        assert_eq!(changed.summary().inaccessible_entries(), 0);
+        assert!(changed.entries().iter().any(|entry| {
+            entry.path() == became_cloud.as_path()
+                && entry.kind()
+                    == crate::folder_size::FolderSizeEntryKind::Omitted(
+                        crate::folder_size::FolderSizeOmission::CloudPlaceholder,
+                    )
+        }));
+    }
+
+    #[test]
+    fn folder_size_scan_fake_metadata_keeps_denied_and_changed_branches_incomplete() {
+        let temp = test_root();
+        let root = temp.path();
+        let denied_backend = FakeBackend::new_root(root);
+        let known = denied_backend.add_file(root, "known.bin", 2);
+        denied_backend.change_metadata(&known, 19, std::time::UNIX_EPOCH);
+        let denied = denied_backend.add_directory(root, "denied", 3);
+        denied_backend.deny_directory_listing(&denied);
+
+        let denied_result = scan_fake_folder_size(
+            &denied_backend,
+            root,
+            204,
+            folder_size_test_bounds(20, 20, 20),
+        );
+        assert_eq!(
+            denied_result.status(),
+            crate::folder_size::FolderSizeStatus::Partial
+        );
+        assert_eq!(denied_result.total_logical_bytes(), 19);
+        assert!(
+            !denied_result
+                .entries()
+                .iter()
+                .find(|entry| entry.path() == denied.as_path())
+                .unwrap()
+                .is_complete()
+        );
+
+        let changed_backend = FakeBackend::new_root(root);
+        changed_backend.add_file(root, "will-change.bin", 4);
+        changed_backend.substitute_parent_during_next_open(root, 99);
+        let changed_result = scan_fake_folder_size(
+            &changed_backend,
+            root,
+            205,
+            folder_size_test_bounds(20, 20, 20),
+        );
+        assert_eq!(
+            changed_result.status(),
+            crate::folder_size::FolderSizeStatus::Failed
+        );
+        assert_eq!(changed_result.total_logical_bytes(), 0);
+        assert_eq!(
+            changed_result.root_identity(),
+            Some(FakeBackend::identity(1))
+        );
+        assert!(!changed_result.entries()[0].is_complete());
+    }
+
+    #[test]
+    fn folder_size_scan_metadata_rejects_duplicate_exact_sibling_names() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        backend.add_file(root, "same-name.bin", 2);
+        backend.add_file(root, "same-name.bin", 3);
+
+        let result =
+            scan_fake_folder_size(&backend, root, 206, folder_size_test_bounds(20, 20, 20));
+
+        assert_eq!(
+            result.status(),
+            crate::folder_size::FolderSizeStatus::Failed
+        );
+        assert_eq!(result.total_logical_bytes(), 0);
+        assert_eq!(
+            result.entries().len(),
+            1,
+            "only the verified root is retained"
+        );
+        assert_eq!(backend.child_open_calls.load(Ordering::Acquire), 0);
+        assert!(result.issues().iter().any(|issue| {
+            issue.kind() == crate::folder_size::FolderSizeIssueKind::InvalidEntry
+        }));
     }
 
     #[test]

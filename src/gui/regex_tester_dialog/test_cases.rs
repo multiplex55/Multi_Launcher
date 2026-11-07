@@ -152,6 +152,33 @@ pub(super) fn show(
     )
 }
 
+/// Test-case work captured by a hosted pass. Draft edits are checkpointed by
+/// the owner; revisions and clipboard writes are applied only after retention.
+#[derive(Default)]
+pub(super) struct DeferredCaseEffects {
+    changed: bool,
+    copy: Option<(u64, u64, RegexTestCaseSummary)>,
+}
+impl DeferredCaseEffects {
+    pub(super) fn apply(
+        self,
+        session: &mut RegexSession,
+        clipboard: &dyn ClipboardBackend,
+        feedback: &mut Option<Result<&'static str, String>>,
+    ) {
+        if self.changed {
+            session.mark_test_cases_changed(Instant::now());
+            *feedback = None;
+        }
+        if let Some((revision, cases, summary)) = self.copy
+            && session.revision() == revision
+            && session.test_case_revision() == cases
+        {
+            *feedback = Some(copy_summary(clipboard, summary));
+        }
+    }
+}
+
 pub(super) fn show_scoped(
     ui: &mut egui::Ui,
     session: &mut RegexSession,
@@ -161,6 +188,54 @@ pub(super) fn show_scoped(
     process_actions: bool,
     form_targets: &mut JumpTargets<'_>,
     targets: &mut JumpTargets<'_>,
+) -> CaseToolbarGeometry {
+    show_scoped_inner(
+        ui,
+        session,
+        expanded,
+        clipboard,
+        copy_feedback,
+        process_actions,
+        form_targets,
+        targets,
+        None,
+    )
+}
+
+pub(super) fn show_scoped_deferred(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    expanded: &mut bool,
+    clipboard: &dyn ClipboardBackend,
+    copy_feedback: &mut Option<Result<&'static str, String>>,
+    process_actions: bool,
+    form_targets: &mut JumpTargets<'_>,
+    targets: &mut JumpTargets<'_>,
+    deferred: &mut DeferredCaseEffects,
+) -> CaseToolbarGeometry {
+    show_scoped_inner(
+        ui,
+        session,
+        expanded,
+        clipboard,
+        copy_feedback,
+        process_actions,
+        form_targets,
+        targets,
+        Some(deferred),
+    )
+}
+
+fn show_scoped_inner(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    expanded: &mut bool,
+    clipboard: &dyn ClipboardBackend,
+    copy_feedback: &mut Option<Result<&'static str, String>>,
+    process_actions: bool,
+    form_targets: &mut JumpTargets<'_>,
+    targets: &mut JumpTargets<'_>,
+    mut deferred: Option<&mut DeferredCaseEffects>,
 ) -> CaseToolbarGeometry {
     let mut changed = false;
     let mut next_action = None;
@@ -431,12 +506,20 @@ pub(super) fn show_scoped(
         }
     }
     if changed {
-        session.mark_test_cases_changed(Instant::now());
-        *copy_feedback = None;
+        if let Some(effects) = deferred.as_mut() {
+            effects.changed = true;
+        } else {
+            session.mark_test_cases_changed(Instant::now());
+            *copy_feedback = None;
+        }
         ui.ctx().request_repaint();
     } else if copy_requested {
         let summary = session.test_case_summary().copied().unwrap_or_default();
-        *copy_feedback = Some(copy_summary(clipboard, summary));
+        if let Some(effects) = deferred.as_mut() {
+            effects.copy = Some((session.revision(), session.test_case_revision(), summary));
+        } else {
+            *copy_feedback = Some(copy_summary(clipboard, summary));
+        }
     }
     CaseToolbarGeometry {
         add_rect,
@@ -454,6 +537,23 @@ pub(super) struct CaseToolbarGeometry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deferred_case_edit_advances_revision_only_when_applied() {
+        let mut session = crate::regex_tester::RegexSession::default();
+        let initial = session.test_case_revision();
+        let effects = super::DeferredCaseEffects {
+            changed: true,
+            copy: None,
+        };
+        assert_eq!(session.test_case_revision(), initial);
+        effects.apply(
+            &mut session,
+            &crate::clipboard_modify::clipboard::ArboardClipboardBackend,
+            &mut None,
+        );
+        assert_ne!(session.test_case_revision(), initial);
+    }
+
     use super::*;
     use crate::clipboard_modify::clipboard::ClipboardError;
     use crate::regex_tester::{

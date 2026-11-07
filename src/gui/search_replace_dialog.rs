@@ -144,6 +144,20 @@ pub(crate) enum SearchReplaceUiCommand {
     Closed,
 }
 
+#[derive(Default)]
+pub(crate) struct SearchReplaceHostActions {
+    pub(crate) commands: Vec<SearchReplaceUiCommand>,
+    pub(crate) host_request: Option<bool>,
+    pub(crate) picker_requested: bool,
+    pub(crate) session_epoch: u64,
+    search_generation: Option<SearchGeneration>,
+    preview_revision: u64,
+    invalidate: Option<String>,
+    recompute: bool,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileSort {
     Path,
@@ -157,6 +171,7 @@ struct SearchReplaceNativePopupAnchor {
     layer_id: egui::LayerId,
 }
 
+#[derive(Clone)]
 struct SearchReplaceFormDraft {
     recursive: bool,
     include_extensions: String,
@@ -666,6 +681,10 @@ impl RecoveryReceiptLoader {
 /// immutable candidate computation, and C owns all writes and durable receipts.
 pub(crate) struct SearchReplaceDialogState {
     pub open: bool,
+    host_session_epoch: u64,
+    hosted_render: bool,
+    hosted_invalidate: Option<String>,
+    hosted_recompute: bool,
     root: Option<PathBuf>,
     recursive: bool,
     include_extensions: String,
@@ -683,11 +702,11 @@ pub(crate) struct SearchReplaceDialogState {
     search_ticket: Option<crate::search_replace::SearchTicket>,
     search_progress: Option<SearchProgress>,
     search_result: Option<Arc<TextSearchResult>>,
-    selected_matches: HashSet<MatchId>,
+    selected_matches: Arc<HashSet<MatchId>>,
     selected_file: Option<PathBuf>,
     file_filter: String,
     file_sort: FileSort,
-    visible_file_indices: Vec<usize>,
+    visible_file_indices: Arc<Vec<usize>>,
     file_view_revision: u64,
     native_popup_anchors: Vec<SearchReplaceNativePopupAnchor>,
     preview_revision: u64,
@@ -697,10 +716,10 @@ pub(crate) struct SearchReplaceDialogState {
     candidate_unified_diffs: HashMap<PathBuf, Arc<str>>,
     candidate_error: Option<String>,
     inspected_match: Option<MatchId>,
-    pending_confirmed_request: Option<ConfirmedReplacementRequest>,
+    pending_confirmed_request: Option<Arc<ConfirmedReplacementRequest>>,
     apply_confirmation_open: bool,
     apply_confirmation_pending: bool,
-    apply_review: Option<ApplyReview>,
+    apply_review: Option<Arc<ApplyReview>>,
     next_confirmation_instance: u64,
     apply_confirmation_instance: Option<u64>,
     recovery_review: Option<RecoveryReview>,
@@ -718,10 +737,87 @@ pub(crate) struct SearchReplaceDialogState {
     preview_result_publications: usize,
 }
 
+/// Retained-pass rollback without copying or replacing live workers.
+#[derive(Clone)]
+pub(crate) struct SearchReplaceInteractionCheckpoint {
+    session_epoch: u64,
+    search_generation: Option<SearchGeneration>,
+    preview_revision: u64,
+    form: SearchReplaceFormDraft,
+    selected_matches: Arc<HashSet<MatchId>>,
+    selected_file: Option<PathBuf>,
+    visible_file_indices: Arc<Vec<usize>>,
+    file_view_revision: u64,
+    inspected_match: Option<MatchId>,
+    pending_confirmed_request: Option<Arc<ConfirmedReplacementRequest>>,
+    apply_confirmation_open: bool,
+    apply_confirmation_pending: bool,
+    apply_review: Option<Arc<ApplyReview>>,
+    next_confirmation_instance: u64,
+    apply_confirmation_instance: Option<u64>,
+    recovery_review: Option<RecoveryReview>,
+    recovery_confirmation_instance: Option<u64>,
+    status_message: Option<String>,
+    reveal_receipts: bool,
+}
+impl SearchReplaceInteractionCheckpoint {
+    pub(crate) fn capture(state: &SearchReplaceDialogState) -> Self {
+        Self {
+            session_epoch: state.host_session_epoch,
+            search_generation: state.current_generation,
+            preview_revision: state.preview_revision,
+            form: state.form_draft_snapshot(),
+            selected_matches: state.selected_matches.clone(),
+            selected_file: state.selected_file.clone(),
+            visible_file_indices: state.visible_file_indices.clone(),
+            file_view_revision: state.file_view_revision,
+            inspected_match: state.inspected_match.clone(),
+            pending_confirmed_request: state.pending_confirmed_request.clone(),
+            apply_confirmation_open: state.apply_confirmation_open,
+            apply_confirmation_pending: state.apply_confirmation_pending,
+            apply_review: state.apply_review.clone(),
+            next_confirmation_instance: state.next_confirmation_instance,
+            apply_confirmation_instance: state.apply_confirmation_instance,
+            recovery_review: state.recovery_review.clone(),
+            recovery_confirmation_instance: state.recovery_confirmation_instance,
+            status_message: state.status_message.clone(),
+            reveal_receipts: state.reveal_receipts,
+        }
+    }
+    pub(crate) fn restore(self, state: &mut SearchReplaceDialogState) {
+        if state.host_session_epoch != self.session_epoch
+            || state.current_generation != self.search_generation
+            || state.preview_revision != self.preview_revision
+        {
+            return;
+        }
+        state.restore_form_draft(self.form);
+        state.selected_matches = self.selected_matches;
+        state.selected_file = self.selected_file;
+        state.visible_file_indices = self.visible_file_indices;
+        state.file_view_revision = self.file_view_revision;
+        state.inspected_match = self.inspected_match;
+        state.pending_confirmed_request = self.pending_confirmed_request;
+        state.apply_confirmation_open = self.apply_confirmation_open;
+        state.apply_confirmation_pending = self.apply_confirmation_pending;
+        state.apply_review = self.apply_review;
+        state.next_confirmation_instance = self.next_confirmation_instance;
+        state.apply_confirmation_instance = self.apply_confirmation_instance;
+        state.recovery_review = self.recovery_review;
+        state.recovery_confirmation_instance = self.recovery_confirmation_instance;
+        state.status_message = self.status_message;
+        state.reveal_receipts = self.reveal_receipts;
+    }
+}
+
 impl Default for SearchReplaceDialogState {
     fn default() -> Self {
         Self {
             open: false,
+            host_session_epoch: 0,
+            hosted_render: false,
+            hosted_invalidate: None,
+            hosted_recompute: false,
             root: None,
             recursive: false,
             include_extensions: "rs, txt, md, toml, json".into(),
@@ -739,11 +835,11 @@ impl Default for SearchReplaceDialogState {
             search_ticket: None,
             search_progress: None,
             search_result: None,
-            selected_matches: HashSet::new(),
+            selected_matches: Arc::default(),
             selected_file: None,
             file_filter: String::new(),
             file_sort: FileSort::Path,
-            visible_file_indices: Vec::new(),
+            visible_file_indices: Arc::default(),
             file_view_revision: 0,
             native_popup_anchors: Vec::new(),
             preview_revision: 0,
@@ -778,8 +874,10 @@ impl Default for SearchReplaceDialogState {
 
 impl SearchReplaceDialogState {
     pub(crate) fn open(&mut self) {
-        self.native_popup_anchors.clear();
-        self.open = true;
+        if !self.open {
+            self.native_popup_anchors.clear();
+            self.open = true;
+        }
     }
 
     pub(crate) fn jump_mode_parent_targets_allowed(&self, operation_active: bool) -> bool {
@@ -797,22 +895,6 @@ impl SearchReplaceDialogState {
             && !self.apply_confirmation_pending
             && self.pending_confirmed_request.is_none()
             && self.recovery_review.is_none()
-    }
-
-    pub(crate) fn native_confirmation_layer_id(&self) -> Option<egui::LayerId> {
-        if self.apply_confirmation_open {
-            Some(egui::LayerId::new(
-                egui::Order::Middle,
-                egui::Id::new("replace_apply_confirmation"),
-            ))
-        } else if self.recovery_review.is_some() {
-            Some(egui::LayerId::new(
-                egui::Order::Middle,
-                egui::Id::new("replace_recovery_confirmation"),
-            ))
-        } else {
-            None
-        }
     }
 
     pub(crate) fn jump_mode_confirmation_identity(
@@ -879,6 +961,24 @@ impl SearchReplaceDialogState {
     #[cfg(test)]
     pub(crate) fn test_pattern(&self) -> &str {
         &self.pattern
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_seed_replacement(&mut self, pattern: &str, replacement: &str) {
+        self.pattern = pattern.into();
+        self.replacement = replacement.into();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_approve_first_match(&mut self) {
+        let file = &self.search_result.as_ref().unwrap().matched_files()[0];
+        let id = file.matches()[0].id().clone();
+        self.set_match_selected(&id, true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_receipt_count(&self) -> usize {
+        self.receipts.len()
     }
 
     #[cfg(test)]
@@ -1179,6 +1279,9 @@ impl SearchReplaceDialogState {
         coordinator: Option<&crate::search_replace::SearchCoordinator>,
         replace_worker: Option<&ReplaceExecutorWorker>,
     ) {
+        if self.open {
+            self.host_session_epoch = self.host_session_epoch.wrapping_add(1);
+        }
         self.open = false;
         self.native_popup_anchors.clear();
         self.reveal_receipts = false;
@@ -1245,11 +1348,20 @@ impl SearchReplaceDialogState {
         })
     }
 
+    pub(super) fn has_ready_host_submission(&self) -> bool {
+        self.open
+            && self.apply_confirmation_open
+            && self.apply_confirmation_pending
+            && self.pending_confirmed_request.is_some()
+    }
+
     pub(crate) fn take_confirmed_request(&mut self) -> Option<ConfirmedReplacementRequest> {
         if !self.apply_confirmation_open || !self.apply_confirmation_pending {
             return None;
         }
-        self.pending_confirmed_request.take()
+        self.pending_confirmed_request
+            .take()
+            .map(Arc::unwrap_or_clone)
     }
 
     pub(crate) fn confirm_request_submitted(&mut self) {
@@ -1258,7 +1370,7 @@ impl SearchReplaceDialogState {
         self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.search_result = None;
-        self.selected_matches.clear();
+        self.selected_matches = Arc::default();
         self.selected_file = None;
         self.candidate = None;
         self.candidate_unified_diffs.clear();
@@ -1352,7 +1464,7 @@ impl SearchReplaceDialogState {
         }
         self.search_ticket = None;
         self.search_result = Some(Arc::new(result));
-        self.selected_matches.clear();
+        self.selected_matches = Arc::default();
         self.selected_file = None;
         self.inspected_match = None;
         self.status_message = None;
@@ -1397,7 +1509,7 @@ impl SearchReplaceDialogState {
             {
                 self.preview_pending = false;
                 match request {
-                    Ok(request) => self.pending_confirmed_request = Some(request),
+                    Ok(request) => self.pending_confirmed_request = Some(Arc::new(request)),
                     Err(error) => {
                         self.apply_confirmation_pending = false;
                         self.candidate_error = Some(error.clone());
@@ -1447,15 +1559,19 @@ impl SearchReplaceDialogState {
     }
 
     fn invalidate_search(&mut self, message: String) {
+        if self.hosted_render {
+            self.hosted_invalidate = Some(message);
+            return;
+        }
         if let Some(ticket) = self.search_ticket.take() {
             ticket.cancel();
         }
         self.current_generation = None;
         self.search_progress = None;
         self.search_result = None;
-        self.selected_matches.clear();
+        self.selected_matches = Arc::default();
         self.selected_file = None;
-        self.visible_file_indices.clear();
+        self.visible_file_indices = Arc::default();
         self.candidate = None;
         self.candidate_unified_diffs.clear();
         self.inspected_match = None;
@@ -1475,6 +1591,10 @@ impl SearchReplaceDialogState {
     }
 
     fn queue_candidate_recompute(&mut self) {
+        if self.hosted_render {
+            self.hosted_recompute = true;
+            return;
+        }
         self.preview_revision = self.preview_revision.saturating_add(1);
         self.candidate = None;
         self.candidate_unified_diffs.clear();
@@ -1490,9 +1610,9 @@ impl SearchReplaceDialogState {
 
     fn set_match_selected(&mut self, id: &MatchId, selected: bool) {
         let changed = if selected {
-            self.selected_matches.insert(id.clone())
+            Arc::make_mut(&mut self.selected_matches).insert(id.clone())
         } else {
-            self.selected_matches.remove(id)
+            Arc::make_mut(&mut self.selected_matches).remove(id)
         };
         if changed {
             self.queue_candidate_recompute();
@@ -1514,9 +1634,9 @@ impl SearchReplaceDialogState {
         let mut changed = false;
         for id in ids {
             changed |= if selected {
-                self.selected_matches.insert(id)
+                Arc::make_mut(&mut self.selected_matches).insert(id)
             } else {
-                self.selected_matches.remove(&id)
+                Arc::make_mut(&mut self.selected_matches).remove(&id)
             };
         }
         if changed {
@@ -1527,7 +1647,7 @@ impl SearchReplaceDialogState {
     fn set_visible_files_selected(&mut self, selected: bool) {
         let indices = self.visible_file_indices.clone();
         let mut changed = false;
-        for index in indices {
+        for index in indices.iter().copied() {
             let Some(file) = self
                 .search_result
                 .as_ref()
@@ -1537,9 +1657,9 @@ impl SearchReplaceDialogState {
             };
             for span in file.matches() {
                 changed |= if selected {
-                    self.selected_matches.insert(span.id().clone())
+                    Arc::make_mut(&mut self.selected_matches).insert(span.id().clone())
                 } else {
-                    self.selected_matches.remove(span.id())
+                    Arc::make_mut(&mut self.selected_matches).remove(span.id())
                 };
             }
         }
@@ -1551,7 +1671,7 @@ impl SearchReplaceDialogState {
     fn rebuild_visible_files(&mut self) {
         self.file_view_revision = self.file_view_revision.saturating_add(1);
         let Some(search) = self.search_result.as_ref() else {
-            self.visible_file_indices.clear();
+            self.visible_file_indices = Arc::default();
             return;
         };
         let filter = self.file_filter.trim().to_lowercase();
@@ -1582,10 +1702,10 @@ impl SearchReplaceDialogState {
                     })
             }),
         }
-        self.visible_file_indices = indices;
+        self.visible_file_indices = Arc::new(indices);
     }
 
-    fn build_apply_review(&self) -> Option<ApplyReview> {
+    fn build_apply_review(&self) -> Option<Arc<ApplyReview>> {
         let candidate = self.candidate.as_ref()?;
         if candidate.readiness() != ReplacementCandidateReadiness::Ready {
             return None;
@@ -1621,14 +1741,14 @@ impl SearchReplaceDialogState {
         }
         roots.sort();
         files.sort_by(|left, right| left.path.cmp(&right.path));
-        Some(ApplyReview {
+        Some(Arc::new(ApplyReview {
             roots,
             files,
             approved_matches: candidate.selected_match_ids().len(),
             estimated_changed_bytes: candidate.summary().estimated_changed_bytes(),
             search_generation: search.generation(),
             replacement_revision: candidate.replacement_revision(),
-        })
+        }))
     }
 
     fn draw_diff(&self, ui: &mut egui::Ui, file_index: usize) {
@@ -1768,11 +1888,127 @@ impl SearchReplaceDialogState {
         dialog_instance: u64,
         runtime: &ReplaceWorkerSnapshot,
     ) -> Vec<SearchReplaceUiCommand> {
+        let actions = self.show_host_inner(
+            ctx,
+            jump_mode_scope,
+            confirmation_scope,
+            native_ui_owner,
+            first_ui_pass,
+            native_confirmation_owner,
+            dialog_instance,
+            runtime,
+            None,
+            None,
+        );
+        actions.commands
+    }
+
+    pub(crate) fn host_session_epoch(&self) -> u64 {
+        self.host_session_epoch
+    }
+
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        native_confirmation_owner: bool,
+        dialog_instance: u64,
+        runtime: &ReplaceWorkerSnapshot,
+        child_ui: Option<&mut egui::Ui>,
+        is_popout: bool,
+    ) -> SearchReplaceHostActions {
+        self.show_host_inner(
+            ctx,
+            jump_mode_scope,
+            confirmation_scope,
+            native_ui_owner,
+            first_ui_pass,
+            native_confirmation_owner,
+            dialog_instance,
+            runtime,
+            child_ui,
+            Some(is_popout),
+        )
+    }
+
+    /// Apply only after the host has retained the root and actual owner pass.
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        actions: SearchReplaceHostActions,
+        owner_hwnd: Option<usize>,
+    ) -> Vec<SearchReplaceUiCommand> {
+        if !self.open
+            || self.host_session_epoch != actions.session_epoch
+            || self.current_generation != actions.search_generation
+            || self.preview_revision != actions.preview_revision
+        {
+            return Vec::new();
+        }
+        if let Some(message) = actions.invalidate {
+            self.invalidate_search(message);
+        } else if actions.recompute {
+            self.queue_candidate_recompute();
+        }
+        let mut commands = actions.commands;
+        if actions.picker_requested {
+            #[cfg(target_os = "windows")]
+            let mut picker =
+                match owner_hwnd.and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize)) {
+                    Some(hwnd) => rfd::FileDialog::new()
+                        .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)),
+                    None => {
+                        self.status_message = Some(
+                            "The Search and Replace window is not ready to own the folder picker."
+                                .into(),
+                        );
+                        return commands;
+                    }
+                };
+            #[cfg(not(target_os = "windows"))]
+            let mut picker = {
+                let _ = owner_hwnd;
+                rfd::FileDialog::new()
+            };
+            if let Some(root) = &self.root {
+                picker = picker.set_directory(root);
+            }
+            if let Some(root) = picker.pick_folder() {
+                commands.push(SearchReplaceUiCommand::SelectRoot(root));
+            }
+        }
+        commands
+    }
+
+    fn show_host_inner(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        native_confirmation_owner: bool,
+        dialog_instance: u64,
+        runtime: &ReplaceWorkerSnapshot,
+        child_ui: Option<&mut egui::Ui>,
+        host_presentation: Option<bool>,
+    ) -> SearchReplaceHostActions {
+        let mut actions = SearchReplaceHostActions {
+            session_epoch: self.host_session_epoch,
+            search_generation: self.current_generation,
+            preview_revision: self.preview_revision,
+            ..Default::default()
+        };
         let mut commands = Vec::new();
         if !self.open {
             self.native_popup_anchors.clear();
-            return commands;
+            return actions;
         }
+        self.hosted_render = host_presentation.is_some();
+        self.hosted_invalidate = None;
+        self.hosted_recompute = false;
         self.native_popup_anchors.clear();
         let jump_mode_scope = jump_mode_scope.filter(|_| native_ui_owner);
         let confirmation_scope = confirmation_scope.filter(|_| native_confirmation_owner);
@@ -1780,44 +2016,74 @@ impl SearchReplaceDialogState {
         let mut discarded_form_draft = None;
         let mut visual_order = 0;
         let mut window_open = self.open;
-        let window = egui::Window::new("Search and Replace")
-            .id(egui::Id::new(WINDOW_ID))
-
-            .resizable(true)
-            .default_size(egui::vec2(1120.0, 820.0))
-            .min_size(egui::vec2(560.0, 360.0))
-            .show_utility(ctx, "search-replace", egui::Id::new("Search and Replace"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(1120.0, 820.0)), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(560.0, 360.0)), |ui| {
-                let native_visible_pass = native_ui_owner
-                    && ui.is_enabled()
-                    && ui.is_visible()
-                    && !ui.is_sizing_pass();
-                process_interactions = native_visible_pass
-                    && first_ui_pass
-                    && ctx.current_pass_index() == 0
-                    && !self.apply_confirmation_open
-                    && !self.apply_confirmation_pending
-                    && self.recovery_review.is_none();
-                if !process_interactions {
-                    discarded_form_draft = Some(self.form_draft_snapshot());
-                }
-                let header_start = ui.cursor().min;
-                self.draw_header(
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let native_visible_pass =
+                native_ui_owner && ui.is_enabled() && ui.is_visible() && !ui.is_sizing_pass();
+            process_interactions = native_visible_pass
+                && first_ui_pass
+                && ctx.current_pass_index() == 0
+                && !self.apply_confirmation_open
+                && !self.apply_confirmation_pending
+                && self.recovery_review.is_none();
+            if !process_interactions {
+                discarded_form_draft = Some(self.form_draft_snapshot());
+            }
+            if let Some(popout) = host_presentation {
+                let presentation = if popout {
+                    super::utility_host::UtilityPresentation::Popout
+                } else {
+                    super::utility_host::UtilityPresentation::Docked
+                };
+                let (response, requested) = super::utility_host::presentation_button(
                     ui,
-                    &mut commands,
-                    jump_mode_scope,
-                    native_visible_pass,
+                    presentation,
                     process_interactions,
+                );
+                register_search_replace_target(
+                    jump_mode_scope,
+                    ui,
+                    &response,
+                    "form/host",
+                    if popout { "Dock" } else { "Pop Out" },
+                    crate::gui::jump_mode::TargetKind::Button,
                     &mut visual_order,
                 );
-                ui.separator();
-                let header = egui::Rect::from_min_max(header_start, ui.cursor().min + egui::vec2(ui.available_width(), 0.0));
-                let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
-                // Include the ScrollArea's trailing item gap as well as the
-                // separator and the two fixed rows; otherwise settled sizing
-                // can grow the framed window below the short viewport.
-                let footer_height = row * 2.0 + ui.spacing().item_spacing.y * 5.0;
-                self.body_viewport_height = (ui.available_height() - footer_height).max(0.0);
-                let body = egui::ScrollArea::vertical()
+                #[cfg(test)]
+                {
+                    actions.host_button = Some((response.rect, ui.clip_rect(), response.enabled()));
+                }
+                if response.clicked() && process_interactions && !ctx.will_discard() {
+                    actions.host_request =
+                        Some(requested == super::utility_host::UtilityPresentation::Popout);
+                }
+            }
+            let header_start = ui.cursor().min;
+            self.draw_header(
+                ui,
+                &mut commands,
+                &mut actions.picker_requested,
+                host_presentation.is_some(),
+                jump_mode_scope,
+                native_visible_pass,
+                process_interactions,
+                &mut visual_order,
+            );
+            ui.separator();
+            let header = egui::Rect::from_min_max(
+                header_start,
+                ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+            );
+            let row = ui
+                .spacing()
+                .interact_size
+                .y
+                .max(ui.text_style_height(&egui::TextStyle::Body));
+            // Include the ScrollArea's trailing item gap as well as the
+            // separator and the two fixed rows; otherwise settled sizing
+            // can grow the framed window below the short viewport.
+            let footer_height = row * 2.0 + ui.spacing().item_spacing.y * 5.0;
+            self.body_viewport_height = (ui.available_height() - footer_height).max(0.0);
+            let body = egui::ScrollArea::vertical()
                     .id_salt("replace_dialog_body")
                     .min_scrolled_height(0.0)
                     .max_height(self.body_viewport_height)
@@ -1869,96 +2135,125 @@ impl SearchReplaceDialogState {
                             self.reveal_receipts = false;
                         }
                     });
-                #[cfg(test)]
-                let footer_start = ui.cursor().min;
-                ui.separator();
-                    self.draw_operation_status(
-                    ui,
-                    runtime,
-                    &mut commands,
+            #[cfg(test)]
+            let footer_start = ui.cursor().min;
+            ui.separator();
+            self.draw_operation_status(
+                ui,
+                runtime,
+                &mut commands,
+                jump_mode_scope,
+                native_visible_pass,
+                process_interactions,
+                &mut visual_order,
+            );
+            ui.horizontal(|ui| {
+                let close = ui.add_enabled(native_visible_pass, egui::Button::new("Close"));
+                register_search_replace_target(
                     jump_mode_scope,
-                    native_visible_pass,
-                    process_interactions,
+                    ui,
+                    &close,
+                    "footer/close",
+                    "Close",
+                    crate::gui::jump_mode::TargetKind::Button,
                     &mut visual_order,
                 );
-                ui.horizontal(|ui| {
-                    let close = ui.add_enabled(native_visible_pass, egui::Button::new("Close"));
-                    register_search_replace_target(
-                        jump_mode_scope,
-                        ui,
-                        &close,
-                        "footer/close",
-                        "Close",
-                        crate::gui::jump_mode::TargetKind::Button,
-                        &mut visual_order,
-                    );
-                    if process_interactions && close.clicked() {
-                        commands.push(SearchReplaceUiCommand::Closed);
-                    }
-                    let reveal_receipts = ui.add_enabled(
-                        native_visible_pass,
-                        egui::Button::new("Restore / Recovery"),
-                    );
-                    register_search_replace_target(
-                        jump_mode_scope,
-                        ui,
-                        &reveal_receipts,
-                        "footer/reveal-receipts",
-                        "Reveal recovery receipts",
-                        crate::gui::jump_mode::TargetKind::Button,
-                        &mut visual_order,
-                    );
-                    if process_interactions && reveal_receipts.clicked() {
-                        self.reveal_receipts = true;
-                        ctx.request_repaint();
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let can_preview = native_visible_pass
-                            && self.search_result.is_some()
-                            && !self.preview_pending
-                            && self.candidate.is_some();
-                        let apply = ui.add_enabled(can_preview, egui::Button::new("Review Apply\u{2026}"));
-                        let apply_identity = self.search_result.as_ref().map(|search| {
-                            format!(
-                                "footer/review-apply/{}/{}",
-                                search.generation().0,
-                                self.preview_revision
-                            )
-                        });
-                        if let Some(identity) = apply_identity {
-                            register_search_replace_target(
-                                jump_mode_scope,
-                                ui,
-                                &apply,
-                                identity,
-                                "Review Apply",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut visual_order,
-                            );
-                        }
-                        if process_interactions && apply.clicked() {
-                            if self.apply_review.is_none() { self.apply_review = self.build_apply_review(); }
-                            if self.apply_review.is_some() {
-                                self.apply_confirmation_open = true;
-                                self.apply_confirmation_instance = Some(self.allocate_confirmation_instance());
-                                if let Some(scope) = jump_mode_scope {
-                                    scope.discard_registered_targets();
-                                }
-                                commands.push(SearchReplaceUiCommand::ReviewApply);
-                            }
-                        }
-                    });
-                });
-                #[cfg(test)] {
-                    self.geometry.header = header;
-                    self.geometry.body = body.inner_rect;
-                    self.geometry.footer = egui::Rect::from_min_max(footer_start, ui.min_rect().max);
-                    self.geometry.content = body.content_size;
-                    self.geometry.body_id = Some(body.id);
-                    self.geometry.offset = body.state.offset.y;
+                if process_interactions && close.clicked() {
+                    commands.push(SearchReplaceUiCommand::Closed);
                 }
-                #[cfg(not(test))] let _ = (header, body);
+                let reveal_receipts =
+                    ui.add_enabled(native_visible_pass, egui::Button::new("Restore / Recovery"));
+                register_search_replace_target(
+                    jump_mode_scope,
+                    ui,
+                    &reveal_receipts,
+                    "footer/reveal-receipts",
+                    "Reveal recovery receipts",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut visual_order,
+                );
+                if process_interactions && reveal_receipts.clicked() {
+                    self.reveal_receipts = true;
+                    ctx.request_repaint();
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let can_preview = native_visible_pass
+                        && self.search_result.is_some()
+                        && !self.preview_pending
+                        && self.candidate.is_some();
+                    let apply =
+                        ui.add_enabled(can_preview, egui::Button::new("Review Apply\u{2026}"));
+                    let apply_identity = self.search_result.as_ref().map(|search| {
+                        format!(
+                            "footer/review-apply/{}/{}",
+                            search.generation().0,
+                            self.preview_revision
+                        )
+                    });
+                    if let Some(identity) = apply_identity {
+                        register_search_replace_target(
+                            jump_mode_scope,
+                            ui,
+                            &apply,
+                            identity,
+                            "Review Apply",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                    }
+                    if process_interactions && apply.clicked() {
+                        if self.apply_review.is_none() {
+                            self.apply_review = self.build_apply_review();
+                        }
+                        if self.apply_review.is_some() {
+                            self.apply_confirmation_open = true;
+                            self.apply_confirmation_instance =
+                                Some(self.allocate_confirmation_instance());
+                            if let Some(scope) = jump_mode_scope {
+                                scope.discard_registered_targets();
+                            }
+                            commands.push(SearchReplaceUiCommand::ReviewApply);
+                        }
+                    }
+                });
             });
+            #[cfg(test)]
+            {
+                self.geometry.header = header;
+                self.geometry.body = body.inner_rect;
+                self.geometry.footer = egui::Rect::from_min_max(footer_start, ui.min_rect().max);
+                self.geometry.content = body.content_size;
+                self.geometry.body_id = Some(body.id);
+                self.geometry.offset = body.state.offset.y;
+            }
+            #[cfg(not(test))]
+            let _ = (header, body);
+        };
+        let window = if let Some(ui) = child_ui {
+            draw_body(ui);
+            None
+        } else {
+            egui::Window::new("Search and Replace")
+                .id(egui::Id::new(WINDOW_ID))
+                .resizable(true)
+                .default_size(egui::vec2(1120.0, 820.0))
+                .min_size(egui::vec2(560.0, 360.0))
+                .show_utility(
+                    ctx,
+                    "search-replace",
+                    egui::Id::new("Search and Replace"),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(1120.0, 820.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(560.0, 360.0)),
+                    draw_body,
+                )
+        };
         #[cfg(test)]
         if let Some(window) = window {
             self.geometry.window = window.response.rect;
@@ -1975,11 +2270,17 @@ impl SearchReplaceDialogState {
             && ctx.current_pass_index() == 0
             && (!window_open || commands.contains(&SearchReplaceUiCommand::Closed))
         {
-            self.end_session(None, None);
+            if host_presentation.is_none() {
+                self.end_session(None, None);
+            }
             if !commands.contains(&SearchReplaceUiCommand::Closed) {
                 commands.push(SearchReplaceUiCommand::Closed);
             }
-            return commands;
+            self.hosted_render = false;
+            actions.invalidate = self.hosted_invalidate.take();
+            actions.recompute = std::mem::take(&mut self.hosted_recompute);
+            actions.commands = commands;
+            return actions;
         }
 
         self.draw_confirmations(
@@ -1990,7 +2291,11 @@ impl SearchReplaceDialogState {
             native_confirmation_owner,
             first_ui_pass,
         );
-        commands
+        self.hosted_render = false;
+        actions.invalidate = self.hosted_invalidate.take();
+        actions.recompute = std::mem::take(&mut self.hosted_recompute);
+        actions.commands = commands;
+        actions
     }
 
     fn form_draft_snapshot(&self) -> SearchReplaceFormDraft {
@@ -2029,6 +2334,8 @@ impl SearchReplaceDialogState {
         &mut self,
         ui: &mut egui::Ui,
         commands: &mut Vec<SearchReplaceUiCommand>,
+        picker_requested: &mut bool,
+        hosted: bool,
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         native_ui_owner: bool,
         process_interactions: bool,
@@ -2048,7 +2355,9 @@ impl SearchReplaceDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 visual_order,
             );
-            if process_interactions && choose.clicked() {
+            if process_interactions && choose.clicked() && hosted {
+                *picker_requested = true;
+            } else if process_interactions && choose.clicked() {
                 let mut choose = rfd::FileDialog::new();
                 if let Some(root) = &self.root {
                     choose = choose.set_directory(root);
@@ -3755,6 +4064,43 @@ fn split_csv_or_lines(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_checkpoint_restores_draft_and_confirmation() {
+        let mut state = super::SearchReplaceDialogState::default();
+        state.open();
+        state.pattern = "before".into();
+        let checkpoint = super::SearchReplaceInteractionCheckpoint::capture(&state);
+        state.pattern = "after".into();
+        state.apply_confirmation_open = true;
+        checkpoint.restore(&mut state);
+        assert_eq!(state.pattern, "before");
+        assert!(!state.apply_confirmation_open);
+        assert!(state.open);
+    }
+
+    #[test]
+    fn hosted_invalidation_waits_for_retained_completion() {
+        let mut state = super::SearchReplaceDialogState::default();
+        state.open();
+        state.current_generation = Some(crate::search_replace::SearchGeneration(5));
+        state.hosted_render = true;
+        state.invalidate_search("changed".into());
+        assert_eq!(
+            state.current_generation,
+            Some(crate::search_replace::SearchGeneration(5))
+        );
+        state.hosted_render = false;
+        let actions = super::SearchReplaceHostActions {
+            session_epoch: state.host_session_epoch,
+            search_generation: state.current_generation,
+            preview_revision: state.preview_revision,
+            invalidate: state.hosted_invalidate.take(),
+            ..Default::default()
+        };
+        assert!(state.complete_host_actions(actions, None).is_empty());
+        assert_eq!(state.current_generation, None);
+    }
+
     use super::*;
     use std::time::Instant;
 
@@ -4149,7 +4495,7 @@ mod tests {
         );
         assert!(!state.apply_confirmation_open && !state.apply_confirmation_pending);
         assert!(state.take_confirmed_request().is_none());
-        assert_eq!(state.selected_matches, ids);
+        assert_eq!(*state.selected_matches, ids);
         assert_eq!(state.receipts, receipts);
 
         assert!(
@@ -4230,7 +4576,7 @@ mod tests {
         );
         assert_ne!(ctx.memory(|memory| memory.focused()), focused);
         assert_eq!(state.pattern, "needle");
-        assert_eq!(state.selected_matches, ids);
+        assert_eq!(*state.selected_matches, ids);
         let request = state.build_search_request().unwrap();
         state.record_search_ticket(coordinator.submit(request).unwrap());
         let active = ReplaceWorkerSnapshot {
@@ -4501,7 +4847,7 @@ mod tests {
             revisions
         );
         assert_eq!(
-            state.selected_matches,
+            *state.selected_matches,
             ids.iter().cloned().collect::<HashSet<_>>()
         );
 
@@ -4597,7 +4943,7 @@ mod tests {
             .collect();
         let mut expected = main_ids.clone();
         expected.extend(other.matches().iter().take(2).map(|span| span.id().clone()));
-        state.selected_matches = expected.clone();
+        state.selected_matches = Arc::new(expected.clone());
         state.selected_file = Some(main.path().to_path_buf());
         state.inspected_match = Some(main.matches()[350].id().clone());
         let inspected = state.inspected_match.clone();
@@ -4645,7 +4991,7 @@ mod tests {
         click_body_label(&mut state, &ctx, size, "File Approvals");
         assert_eq!(state.geometry.file_scroll_id, Some(file_id));
         assert_eq!(state.geometry.match_scroll_id, Some(match_id));
-        assert_eq!(state.selected_matches, expected);
+        assert_eq!(*state.selected_matches, expected);
         assert_eq!(state.selected_file.as_deref(), Some(main.path()));
         assert_eq!(state.inspected_match, inspected);
 
@@ -4694,7 +5040,7 @@ mod tests {
             .0
             .is_empty()
         );
-        assert_eq!(state.visible_file_indices, vec![other_index]);
+        assert_eq!(*state.visible_file_indices, vec![other_index]);
         assert_eq!(
             state.selected_file.as_deref(),
             Some(main.path()),
@@ -4710,7 +5056,7 @@ mod tests {
             false,
         );
         assert_eq!(state.file_filter, "file000");
-        assert_eq!(state.selected_matches, expected);
+        assert_eq!(*state.selected_matches, expected);
         assert!(Arc::ptr_eq(state.search_result.as_ref().unwrap(), &search));
         assert_eq!(
             (
@@ -4723,14 +5069,14 @@ mod tests {
 
         click_body_label(&mut state, &ctx, size, "Clear visible matches");
         assert_eq!(
-            state.selected_matches, main_ids,
+            *state.selected_matches, main_ids,
             "only filtered file IDs clear"
         );
         click_body_label(&mut state, &ctx, size, "Select visible matches");
         expected = main_ids;
         expected.extend(other.matches().iter().map(|span| span.id().clone()));
         assert_eq!(
-            state.selected_matches, expected,
+            *state.selected_matches, expected,
             "only filtered file IDs approve"
         );
         assert!(state.search_ticket.is_none());
@@ -4950,7 +5296,7 @@ mod tests {
             .take(2)
             .map(|span| span.id().clone())
             .collect();
-        state.selected_matches = ids.clone();
+        state.selected_matches = Arc::new(ids.clone());
         state.root = Some(PathBuf::from(format!(
             "owned/{}",
             "long root segment/".repeat(70)
@@ -5115,7 +5461,7 @@ mod tests {
                 g.offset > 0.0 && g.offset + g.body.height() >= g.content.y - 2.0,
                 "recovery entry reveals bottom: {g:?}"
             );
-            assert_eq!(state.selected_matches, ids);
+            assert_eq!(*state.selected_matches, ids);
             assert_eq!(
                 (
                     state.search_revision,

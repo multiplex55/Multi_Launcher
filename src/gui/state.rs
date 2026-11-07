@@ -75,6 +75,8 @@ pub enum WatchEvent {
     ScreenDrawEmergency(crate::screen_draw::ScreenDrawRecoveryIntent),
     /// Main-owned Paste Sequence shortcut with only a stable ID or control action.
     PasteSequenceHotkey(crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction),
+    /// Stop request admitted with the exact recording generation at the key edge.
+    RecordingStopGeneration(u64),
     PhysicalPaste(crate::paste_sequence::admission::PhysicalPasteNotice),
     ClipboardModify(ClipboardModifyGuiEvent),
     VirtualDesktop(VirtualDesktopGuiCompletion),
@@ -389,7 +391,8 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRoutes(_)
-            | WatchEvent::HotkeyDirectorySource(_) => TestWatchEvent::Actions,
+            | WatchEvent::HotkeyDirectorySource(_)
+            | WatchEvent::RecordingStopGeneration(_) => TestWatchEvent::Actions,
             WatchEvent::RadialDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialSubmenuPlacementFailure(_) => TestWatchEvent::Actions,
             WatchEvent::RadialPlacementActionResult { .. } => TestWatchEvent::Actions,

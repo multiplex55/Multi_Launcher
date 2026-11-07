@@ -12,9 +12,49 @@ const PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(120);
 const MAX_FILTER_BYTES: usize = 1024;
 const MAX_DESTINATION_TEXT_BYTES: usize = 128 * 1024;
 
+#[cfg(windows)]
+struct ZipHostFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    source_revision: Option<crate::archive::ArchiveRevision>,
+    destination_revision: u64,
+    selection_revision: u64,
+    actions: Vec<UiAction>,
+    copies: Vec<String>,
+    request: Option<super::utility_host::UtilityPresentation>,
+    close: bool,
+    info: Option<egui::ViewportInfo>,
+    native: bool,
+}
+#[cfg(windows)]
+#[derive(Default)]
+pub(super) struct ZipHostOutcome {
+    pub(super) closed: bool,
+    pub(super) show_root: bool,
+    pub(super) copies: Vec<String>,
+}
+
 #[derive(Default)]
 pub(crate) struct ZipExtractorDialog {
     pub(crate) open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    #[cfg(windows)]
+    host_pending: Option<ZipHostFrame>,
+    #[cfg(windows)]
+    host_os_close_pending: bool,
+    #[cfg(windows)]
+    host_focus: bool,
+    #[cfg(windows)]
+    host_jump: crate::gui::jump_mode::ui::JumpModeUi,
+    #[cfg(windows)]
+    host_jump_frame: Option<u64>,
+    #[cfg(all(windows, test))]
+    test_host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(all(windows, test))]
+    test_picker_paths: std::collections::VecDeque<Option<PathBuf>>,
     filter: String,
     source_path: Option<PathBuf>,
     destination_path: Option<PathBuf>,
@@ -94,12 +134,15 @@ enum UiAction {
 
 impl ZipExtractorDialog {
     pub(crate) fn open(&mut self) {
+        if !self.open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
     }
 
     #[cfg(windows)]
     pub(crate) fn open_with_snapshot(&mut self, snapshot: crate::archive::ArchiveSessionSnapshot) {
-        self.open = true;
+        self.open();
         self.update_session_snapshot(snapshot, Instant::now());
     }
 
@@ -226,17 +269,23 @@ impl ZipExtractorDialog {
     }
 
     #[cfg(windows)]
-    pub(crate) fn show(
+    fn render_host_body(
         &mut self,
         ctx: &egui::Context,
-        session: &mut crate::archive::ArchiveSession,
         first_ui_pass: bool,
+        owner: bool,
         jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> (
+        Vec<UiAction>,
+        Vec<String>,
+        Option<super::utility_host::UtilityPresentation>,
+        bool,
     ) {
         if !self.open {
-            return;
+            return (Vec::new(), Vec::new(), None, false);
         }
-
         let snapshot = self.snapshot.as_ref();
         let catalog = self.catalog.clone();
         let visible_rows = &self.visible_rows;
@@ -260,12 +309,11 @@ impl ZipExtractorDialog {
         let status_message = self.status_message.as_deref();
         let source_display = self.source_path.as_ref().map(|path| path.to_string_lossy());
         let sort_by_name = self.sort_by_name;
-        let filter = &mut self.filter;
+        let filter = &self.filter;
         let destination_text = self.destination_text.clone();
         let mut destination_ready = !destination_text.trim().is_empty();
-        let confirmed_token = &mut self.confirmed_token;
-        let open = &mut self.open;
-        let was_open = *open;
+        let confirmed_token = &self.confirmed_token;
+        let mut open = self.open;
         let mut actions = Vec::new();
         let mut visual_order = 0;
         let recipe = UtilityWindowSizeRecipe::new(
@@ -276,17 +324,35 @@ impl ZipExtractorDialog {
                 Some(ctx.content_rect().height().max(1.0)),
             ],
         );
-        Window::new("ZIP Extractor")
-            .id(Id::new("zip_extractor_dialog"))
-            .resizable(true)
-            .default_size(Vec2::new(900.0, 620.0))
-            .show_utility(
-                ctx,
-                WINDOW_SIZE_KEY,
-                Id::new("zip_extractor_dialog"),
-                Some(open),
-                recipe,
-                |ui| {
+        let mut request = None;
+        let output_start = ctx.output(|o| o.commands.len());
+        let mut draw = |ui: &mut egui::Ui| {
+            let visible = owner && ui.is_visible() && !ui.is_sizing_pass();
+            if let Some(presentation) = presentation {
+                let (button, target) =
+                    super::utility_host::presentation_button(ui, presentation, visible);
+                register_target(
+                    jump_scope,
+                    ui,
+                    &button,
+                    "host-presentation",
+                    if presentation == super::utility_host::UtilityPresentation::Docked {
+                        "Pop Out"
+                    } else {
+                        "Dock"
+                    },
+                    crate::gui::jump_mode::TargetKind::Action,
+                    &mut visual_order,
+                );
+                #[cfg(test)]
+                {
+                    self.test_host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+                }
+                if button.clicked() && visible {
+                    request = Some(target);
+                }
+            }
+            ui.add_enabled_ui(visible, |ui| {
                     ui.label("Choose a ZIP archive, select entries, and review the destination before extraction.");
                     ui.label("Only supported Stored entries can be extracted. Existing files are never overwritten.");
 
@@ -374,7 +440,7 @@ impl ZipExtractorDialog {
                     ui.separator();
                     let mut filter_draft = filter.clone();
                     let filter_response = ui.add_enabled(
-                        first_ui_pass,
+                        owner,
                         egui::TextEdit::singleline(&mut filter_draft)
                             .hint_text("Filter catalog names"),
                     );
@@ -485,7 +551,7 @@ impl ZipExtractorDialog {
                             });
                         }
                         let response = ui.add_enabled(
-                            confirmed && first_ui_pass,
+                            confirmed && owner,
                             egui::Button::new("Confirm and extract"),
                         );
                         register_target(
@@ -507,7 +573,7 @@ impl ZipExtractorDialog {
                         let can_preview = catalog.is_some()
                             && selection_count > 0
                             && destination_ready
-                            && first_ui_pass
+                            && owner
                             && !matches!(
                                 phase,
                                 Some(crate::archive::ArchiveSessionPhase::Opening
@@ -535,7 +601,7 @@ impl ZipExtractorDialog {
                                 | crate::archive::ArchiveSessionPhase::Extracting
                                 | crate::archive::ArchiveSessionPhase::Closing)
                         );
-                        let response = ui.add_enabled(can_cancel && first_ui_pass, egui::Button::new("Cancel operation"));
+                        let response = ui.add_enabled(can_cancel && owner, egui::Button::new("Cancel operation"));
                         register_target(
                             jump_scope,
                             ui,
@@ -643,7 +709,7 @@ impl ZipExtractorDialog {
                                     .push_id(id, |ui| {
                                         ui.horizontal(|ui| {
                                             let checkbox = ui.add_enabled(
-                                                first_ui_pass,
+                                                owner,
                                                 egui::Checkbox::new(&mut next_selected, ""),
                                             );
                                             let name = entry.name().display_lossy();
@@ -682,24 +748,605 @@ impl ZipExtractorDialog {
                                 }
                             }
                         });
-                },
-            );
-
-        if !first_ui_pass {
-            *open = was_open;
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            Window::new("ZIP Extractor")
+                .id(Id::new("zip_extractor_dialog"))
+                .resizable(true)
+                .default_size(Vec2::new(900.0, 620.0))
+                .show_utility(
+                    ctx,
+                    WINDOW_SIZE_KEY,
+                    Id::new("zip_extractor_dialog"),
+                    Some(&mut open),
+                    recipe,
+                    |ui| draw(ui),
+                );
+        }
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for command in output.commands.split_off(output_start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
+        let allowed = first_ui_pass && owner && !ctx.will_discard();
+        (
+            if allowed { actions } else { Vec::new() },
+            if allowed { copies } else { Vec::new() },
+            if allowed { request } else { None },
+            allowed && !open,
+        )
+    }
+    #[cfg(windows)]
+    pub(crate) fn target_generation(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.host_epoch.hash(&mut h);
+        self.host.identity().generation.hash(&mut h);
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.source_revision.hash(&mut h);
+            snapshot.destination_revision.hash(&mut h);
+            snapshot.selection_revision.hash(&mut h);
+            snapshot
+                .catalog
+                .as_ref()
+                .map(|catalog| std::sync::Arc::as_ptr(catalog) as usize)
+                .hash(&mut h);
+            snapshot
+                .preview
+                .as_ref()
+                .map(|preview| preview.token)
+                .hash(&mut h);
+        }
+        h.finish()
+    }
+    #[cfg(not(windows))]
+    pub(crate) fn target_generation(&self) -> u64 {
+        self.host_epoch
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then(|| crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor.layer_id())
+        .flatten()
+    }
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host.request_focus();
+        #[cfg(windows)]
+        {
+            self.host_focus = true;
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("zip-extractor-viewport")
+    }
+    #[cfg(windows)]
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse(WINDOW_SIZE_KEY).expect("stable zip key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
+        }
+    }
+    pub(crate) fn retire_host(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+                let identity = self.native_identity(self.host.identity());
+                super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+            }
+            self.host_pending = None;
+            self.host_os_close_pending = false;
+            self.host_focus = false;
+            self.host_jump.cancel_all();
+            self.host_jump_frame = None;
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
+        self.host.retire_to_docked();
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_host_button
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn test_native_jump(&self) -> &crate::gui::jump_mode::ui::JumpModeUi {
+        &self.host_jump
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn test_picker_queue_len(&self) -> usize {
+        self.test_picker_paths.len()
+    }
+    #[cfg(all(windows, test))]
+    pub(super) fn test_presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn queue_picker_for_test(&mut self, path: Option<PathBuf>) {
+        self.test_picker_paths.push_back(path);
+    }
+    #[cfg(windows)]
+    pub(super) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        session: &crate::archive::ArchiveSession,
+        root_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        root_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        input_allowed: bool,
+        root_native_owner: bool,
+        launcher_jump: &crate::gui::jump_mode::ui::JumpModeUi,
+        jump_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+        root_shortcut_allowed: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
+        };
+        self.host_pending = None;
+        if !self.open {
             return;
         }
-        let open_after_show = *open;
-        if !open_after_show && was_open {
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let snapshot = session.snapshot();
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let mut owner = None;
+        let mut staged = None;
+        let mut info = None;
+        let mut native_owner = false;
+        #[cfg(test)]
+        {
+            self.test_host_button = None;
+        }
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = root_native_owner && input_allowed && !egui::Popup::is_any_open(ctx);
+                let scope = root_scope.map(|s| {
+                    if first && !ctx.will_discard() {
+                        s.clone()
+                    } else {
+                        s.registration_only()
+                    }
+                });
+                let shortcut = first
+                    && allowed
+                    && root_shortcut_allowed
+                    && !pinned
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let mut result = self.render_host_body(
+                    ctx,
+                    first,
+                    allowed,
+                    scope.as_ref(),
+                    None,
+                    Some(host.host),
+                );
+                result.3 |= shortcut;
+                staged = Some(result);
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title("ZIP Extractor")
+                .with_inner_size([900.0, 620.0])
+                .with_min_inner_size([560.0, 380.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                let native = class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    native_owner = native;
+                    if native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                }
+                let allowed = if native {
+                    input_allowed
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && !egui::Popup::is_any_open(&c)
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == egui::LayerId::background())
+                } else {
+                    input_allowed && root_native_owner && !egui::Popup::is_any_open(&c)
+                };
+                if native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                if native {
+                    let (chord, alphabet) = launcher_jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    let binding = instance.map(|instance| NavigationViewportBinding {
+                        viewport,
+                        owner: NavigationOwner::Dialog {
+                            kind: NavigationDialogKind::ZipExtractor,
+                            instance,
+                        },
+                        base_layer: egui::LayerId::background(),
+                    });
+                    let nav = binding.map_or(NavigationOwner::Blocked, |b| {
+                        self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            b,
+                            input_allowed && jump_enabled,
+                        )
+                    });
+                    let active = self.host_jump.active_session().is_some();
+                    self.host_jump.handle_viewport_input(
+                        &c,
+                        binding.is_some_and(|b| b.owner == nav),
+                        child_first,
+                        viewport,
+                    );
+                    let shortcut = child_first
+                        && allowed
+                        && !pinned
+                        && !active
+                        && self.host_jump.active_session().is_none()
+                        && c.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    self.host_jump.begin_ui_pass();
+                    let generation = self.target_generation();
+                    let scope = binding
+                        .filter(|b| b.owner == nav)
+                        .and_then(|b| {
+                            self.host_jump.scope_for_viewport_binding(
+                                crate::gui::jump_mode::SurfaceId::dialog(
+                                    "zip-extractor",
+                                    instance.unwrap_or_default(),
+                                ),
+                                crate::gui::jump_mode::TargetGeneration(generation),
+                                "zip-extractor",
+                                b,
+                            )
+                        })
+                        .map(|s| {
+                            if child_first && !c.will_discard() {
+                                s
+                            } else {
+                                s.registration_only()
+                            }
+                        });
+                    egui::CentralPanel::default().show(child, |ui| {
+                        staged = Some(self.render_host_body(
+                            &c,
+                            child_first,
+                            allowed,
+                            scope.as_ref(),
+                            Some(ui),
+                            Some(host.host),
+                        ));
+                    });
+                    if let Some(result) = &mut staged {
+                        result.3 |= shortcut || (!pinned && self.host_os_close_pending);
+                    }
+                    self.host_jump.finish_ui_pass();
+                    if let Some(binding) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            binding,
+                            input_allowed && jump_enabled,
+                        );
+                        if self.host_jump.prepare_pass_for_viewport(
+                            &c,
+                            binding,
+                            current,
+                            input_allowed && jump_enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&c, &self.host_jump);
+                        }
+                        if !c.will_discard() {
+                            self.host_jump.complete_frame_for_viewport(
+                                &c,
+                                binding,
+                                current,
+                                input_allowed && jump_enabled,
+                            );
+                        }
+                    }
+                } else {
+                    let scope = root_scope.map(|s| {
+                        if child_first && !c.will_discard() {
+                            s.clone()
+                        } else {
+                            s.registration_only()
+                        }
+                    });
+                    let shortcut = child_first
+                        && allowed
+                        && root_shortcut_allowed
+                        && !pinned
+                        && c.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    let mut result = self.render_host_body(
+                        &c,
+                        child_first,
+                        allowed,
+                        scope.as_ref(),
+                        None,
+                        Some(host.host),
+                    );
+                    result.3 |= shortcut;
+                    staged = Some(result);
+                }
+            });
+        }
+        let _ = root_owner;
+        if let (Some(owner), Some((mut actions, copies, request, mut close))) = (owner, staged) {
+            if pinned {
+                close = false;
+                actions.retain(|action| !matches!(action, UiAction::Close));
+            }
+            if first && !ctx.will_discard() {
+                self.host_pending = Some(ZipHostFrame {
+                    root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                    source_revision: snapshot.source_revision,
+                    destination_revision: snapshot.destination_revision,
+                    selection_revision: snapshot.selection_revision,
+                    actions,
+                    copies,
+                    request,
+                    close,
+                    info,
+                    native: native_owner,
+                });
+            }
+        }
+    }
+    #[cfg(windows)]
+    pub(super) fn on_hosted_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        session: &mut crate::archive::ArchiveSession,
+    ) -> ZipHostOutcome {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            return ZipHostOutcome::default();
+        };
+        let now = session.snapshot();
+        if !self.open
+            || frame.epoch != self.host_epoch
+            || frame.host != self.host.identity()
+            || frame.source_revision != now.source_revision
+            || frame.destination_revision != now.destination_revision
+            || frame.selection_revision != now.selection_revision
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+        {
+            return ZipHostOutcome::default();
+        }
+        let identity = self.native_identity(frame.host);
+        if let Some(info) = frame.info.as_ref() {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                "ZIP Extractor",
+                identity,
+                info,
+                egui::vec2(900.0, 620.0),
+                Some(egui::vec2(560.0, 380.0)),
+                None,
+            );
+            if self.host_focus {
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+            }
+        } else if self.host_focus {
+            if let Some(layer) = self.root_layer() {
+                ctx.move_to_top(layer);
+            }
+        }
+        self.host_focus = false;
+        if frame.close || frame.actions.iter().any(|a| matches!(a, UiAction::Close)) {
+            self.retire_host(ctx);
             session.close();
             self.clear_presentation();
             self.update_session_snapshot(session.snapshot(), Instant::now());
-            ctx.request_repaint();
+            return ZipHostOutcome {
+                closed: true,
+                ..Default::default()
+            };
+        }
+        let show_root = frame.request == Some(UtilityPresentation::Docked);
+        if let Some(next) = frame.request {
+            if self.host.transition(next) {
+                self.host_jump.cancel_all();
+                self.host_jump_frame = None;
+                if next == UtilityPresentation::Docked {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+                self.host_focus = true;
+                ctx.request_repaint();
+            }
+        } else {
+            for action in frame.actions {
+                self.apply_host_action(action, session, ctx, frame.host, frame.epoch, frame.native);
+            }
+        }
+        if frame.host.host == UtilityPresentation::Popout {
+            self.host.complete_bootstrap(
+                frame.host,
+                (!frame.native)
+                    .then(|| {
+                        crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor.layer_id()
+                    })
+                    .flatten(),
+                None,
+            );
+        }
+        ZipHostOutcome {
+            closed: false,
+            show_root,
+            copies: if frame.request.is_none() {
+                frame.copies
+            } else {
+                Vec::new()
+            },
+        }
+    }
+    #[cfg(windows)]
+    fn apply_host_action(
+        &mut self,
+        action: UiAction,
+        session: &mut crate::archive::ArchiveSession,
+        ctx: &egui::Context,
+        host: super::utility_host::HostIdentity,
+        epoch: u64,
+        native: bool,
+    ) {
+        if matches!(action, UiAction::PickArchive | UiAction::PickDestination) {
+            let choose_archive = matches!(action, UiAction::PickArchive);
+            let before = session.snapshot();
+            let identity = native.then(|| self.native_identity(host));
+            let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, identity);
+            #[cfg(test)]
+            let queued = self.test_picker_paths.pop_front();
+            #[cfg(test)]
+            let selected = if let Some(path) = queued {
+                path
+            } else {
+                self.host_picker(hwnd, choose_archive)
+            };
+            #[cfg(not(test))]
+            let selected = self.host_picker(hwnd, choose_archive);
+            let after = session.snapshot();
+            if !self.open
+                || self.host_epoch != epoch
+                || self.host.identity() != host
+                || before.source_revision != after.source_revision
+                || before.destination_revision != after.destination_revision
+                || before.selection_revision != after.selection_revision
+            {
+                return;
+            }
+            #[cfg(not(test))]
+            if hwnd.is_none()
+                || hwnd != super::utility_dialog_size::utility_picker_hwnd(ctx, identity)
+            {
+                return;
+            }
+            if let Some(path) = selected {
+                if choose_archive {
+                    self.load_archive_path(path, session);
+                } else {
+                    self.select_destination_path(path, session);
+                }
+            }
+        } else {
+            self.apply_ui_action(action, session, ctx);
+        }
+    }
+    #[cfg(windows)]
+    fn host_picker(&mut self, hwnd: Option<usize>, archive: bool) -> Option<PathBuf> {
+        let Some(hwnd) = hwnd.and_then(|h| std::num::NonZeroIsize::new(h as isize)) else {
+            self.status_message = Some(
+                "Cannot verify the ZIP picker window. Focus the extractor and try again.".into(),
+            );
+            return None;
+        };
+        let picker =
+            rfd::FileDialog::new().set_parent(&super::add_action_dialog::NativeDialogParent(hwnd));
+        if archive {
+            picker.add_filter("ZIP archives", &["zip"]).pick_file()
+        } else {
+            picker.pick_folder()
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        session: &mut crate::archive::ArchiveSession,
+        first: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
+        if !self.open {
             return;
         }
-
-        for action in actions {
-            self.apply_ui_action(action, session, ctx);
+        let snapshot = session.snapshot();
+        let replay = scope.map(|scope| {
+            if first && !ctx.will_discard() {
+                scope.clone()
+            } else {
+                scope.registration_only()
+            }
+        });
+        let (actions, copies, request, close) =
+            self.render_host_body(ctx, first, true, replay.as_ref(), None, None);
+        if first && !ctx.will_discard() {
+            let root =
+                super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            self.host_pending = Some(ZipHostFrame {
+                root,
+                owner: root,
+                host: self.host.identity(),
+                epoch: self.host_epoch,
+                source_revision: snapshot.source_revision,
+                destination_revision: snapshot.destination_revision,
+                selection_revision: snapshot.selection_revision,
+                actions,
+                copies,
+                request,
+                close,
+                info: None,
+                native: false,
+            });
         }
     }
 
@@ -711,18 +1358,8 @@ impl ZipExtractorDialog {
         ctx: &egui::Context,
     ) {
         match action {
-            UiAction::PickArchive => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("ZIP archives", &["zip"])
-                    .pick_file()
-                {
-                    self.load_archive_path(path, session);
-                }
-            }
-            UiAction::PickDestination => {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.select_destination_path(path, session);
-                }
+            UiAction::PickArchive | UiAction::PickDestination => {
+                self.status_message = Some("ZIP pickers require a verified window owner.".into());
             }
             UiAction::Session(action) => self.apply_session_action(action, session),
             UiAction::SetFilter(filter) => {
@@ -739,7 +1376,13 @@ impl ZipExtractorDialog {
                 self.rebuild_visible_rows();
             }
             UiAction::SetConfirmation { token, confirmed } => {
-                self.confirmed_token = confirmed.then_some(token);
+                self.confirmed_token = (confirmed
+                    && session
+                        .snapshot()
+                        .preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.token == token))
+                .then_some(token);
             }
             UiAction::Close => {
                 session.close();
@@ -1251,6 +1894,7 @@ mod tests {
             dialog.show(ctx, session, true, Some(&scope));
             jump.finish_ui_pass();
         });
+        let _ = dialog.on_hosted_frame_complete(ctx, session);
         output.drop_without_applying_deltas();
     }
 

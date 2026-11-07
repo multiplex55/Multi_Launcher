@@ -70,8 +70,12 @@ pub trait DialogCommandHost {
     fn open_bookmark_dialog(&mut self);
     fn open_snippet_dialog(&mut self);
     fn open_paste_sequence_dialog(&mut self) {}
+    fn stage_explorer_tabs(&mut self, _command: super::ExplorerTabsCommand, _source: super::ActivationSource) -> Result<(), String> {
+        Err("Explorer Tabs requires the launcher interface".into())
+    }
     fn open_hash_generator_dialog(&mut self) {}
     fn open_activity_dialog(&mut self) {}
+    fn open_file_lock_dialog(&mut self, _path: Option<&std::path::Path>) {}
     fn run_paste_sequence(
         &mut self,
         _id: crate::paste_sequence::SequenceId,
@@ -100,6 +104,7 @@ pub trait DialogCommandHost {
     fn open_theme_dialog(&mut self);
     fn open_image_compare_dialog(&mut self) {}
     fn open_duplicate_finder_dialog(&mut self) {}
+    fn open_folder_size_dialog(&mut self) {}
     fn open_volume_dialog(&mut self);
     fn open_brightness_dialog(&mut self);
     fn open_cpu_list_dialog(&mut self, count: usize);
@@ -257,6 +262,15 @@ pub trait ScreenDrawCommandHost {
     ) -> Result<(), String>;
 }
 
+pub trait RecordingCommandHost {
+    fn execute_recording_command(
+        &mut self,
+        _command: super::RecordingCommand,
+    ) -> Result<(), String> {
+        Err("screen recording commands require the launcher interface".into())
+    }
+}
+
 pub trait ClipboardModifyCommandHost {
     fn open_clipboard_modify(&mut self, section: ClipboardModifySectionPayload);
     fn undo_clipboard_modify(&mut self) -> Result<(), String>;
@@ -361,6 +375,7 @@ pub trait CommandHost:
     + DiffCommandHost
     + ScreenshotCommandHost
     + PinboardCommandHost
+    + RecordingCommandHost
     + ScreenDrawCommandHost
     + ClipboardModifyCommandHost
     + DataCommandHost
@@ -390,6 +405,7 @@ impl<T> CommandHost for T where
         + DiffCommandHost
         + ScreenshotCommandHost
         + PinboardCommandHost
+        + RecordingCommandHost
         + ScreenDrawCommandHost
         + ClipboardModifyCommandHost
         + DataCommandHost

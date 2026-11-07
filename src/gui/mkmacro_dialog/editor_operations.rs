@@ -4,7 +4,7 @@ use crate::mkmacro::{MkStep, editor_mutation as mutation};
 use mutation::InsertionAnchor;
 use std::collections::BTreeSet;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct EditorState {
     pub clipboard: Vec<MkStep>,
     pub folds: FoldState,
@@ -13,11 +13,12 @@ pub(super) struct EditorState {
     pub shortcut_state: ClipboardShortcutState,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ClipboardShortcutState {
     paste_on_press: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct StepDrag {
     pub macro_id: u64,
     pub ids: BTreeSet<u64>,

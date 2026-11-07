@@ -251,6 +251,7 @@ mod tests {
             self.refocus
         }
     }
+    impl crate::commands::RecordingCommandHost for Host {}
     impl crate::commands::HotFolderCommandHost for Host {}
     impl crate::commands::host::RadialCommandHost for Host {
         fn radial_is_enabled(&self) -> bool {

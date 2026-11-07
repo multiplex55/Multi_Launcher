@@ -323,8 +323,10 @@ pub fn execute_explorer_action(action: ExplorerAction) -> anyhow::Result<()> {
     }
 }
 
-pub fn windows_reveal_args(path: &Path) -> Vec<String> {
-    vec![format!("/select,{}", path.display())]
+pub fn windows_reveal_args(path: &Path) -> Vec<std::ffi::OsString> {
+    let mut argument = std::ffi::OsString::from("/select,");
+    argument.push(path.as_os_str());
+    vec![argument]
 }
 
 pub fn open_path(path: &Path) -> anyhow::Result<()> {
@@ -463,7 +465,7 @@ mod tests {
     fn windows_reveal_argument_construction_selects_path() {
         assert_eq!(
             windows_reveal_args(Path::new(r"C:\Users\alice\file.txt")),
-            vec![r"/select,C:\Users\alice\file.txt".to_string()]
+            vec![std::ffi::OsString::from(r"/select,C:\Users\alice\file.txt")]
         );
     }
 
@@ -627,6 +629,9 @@ mod tests {
         let args = windows_reveal_args(Path::new(r"C:\Users\alice\space dir\雪 file.txt"));
 
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0], r"/select,C:\Users\alice\space dir\雪 file.txt");
+        assert_eq!(
+            args[0],
+            std::ffi::OsString::from(r"/select,C:\Users\alice\space dir\雪 file.txt")
+        );
     }
 }

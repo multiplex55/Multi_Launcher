@@ -391,9 +391,15 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Pinboard(_) => anyhow::bail!("pinboard commands require the launcher interface"),
+        Command::Recording(_) => {
+            anyhow::bail!("screen recording commands require the launcher interface")
+        }
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
         Command::PasteSequence(_) => {
             anyhow::bail!("paste sequence commands require the launcher interface")
+        }
+        Command::ExplorerTabs(_) => {
+            anyhow::bail!("Explorer Tabs commands require the launcher interface")
         }
         Command::ColorPick(_) => {
             anyhow::bail!("screen color picking requires the launcher interface")
@@ -409,6 +415,12 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::DuplicateFinder) => {
             anyhow::bail!("Duplicate Finder requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::FolderSize) => {
+            anyhow::bail!("Folder Size requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::FileLock { .. }) => {
+            anyhow::bail!("File Lock Inspector requires the launcher interface")
         }
         Command::Dialog(DialogCommand::Activity) => {
             anyhow::bail!("Activity requires the launcher interface")
@@ -1405,6 +1417,70 @@ mod calculation_pad_headless_tests {
             "Calculation Pad requires the launcher interface"
         );
         assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod folder_size_headless_tests {
+    use super::*;
+
+    #[test]
+    fn folder_size_command_requires_the_launcher_interface() {
+        let original = Action {
+            label: "Open Folder Size".into(),
+            desc: String::new(),
+            action: "foldersize:open".into(),
+            args: None,
+        };
+        let mut external_calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::FolderSize),
+            &original,
+            &mut |_, _| {
+                external_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Folder Size requires the launcher interface"
+        );
+        assert_eq!(external_calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod file_lock_headless_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    #[test]
+    fn file_lock_ui_route_requires_the_launcher_without_external_fallback() {
+        let action = Action {
+            label: "Inspect File Users".into(),
+            desc: String::new(),
+            action: "filelock:open".into(),
+            args: Some(r"C:\Users\Jay\file.txt".into()),
+        };
+        let mut external_calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::FileLock {
+                path: Some(std::path::PathBuf::from(r"C:\Users\Jay\file.txt")),
+            }),
+            &action,
+            &mut |_, _| {
+                external_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "File Lock Inspector requires the launcher interface"
+        );
+        assert_eq!(external_calls, 0);
     }
 }
 

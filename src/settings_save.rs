@@ -26,6 +26,7 @@ pub(crate) enum SettingsSaveSource {
     General,
     PluginSelection,
     CalculationPadRecovery,
+    ProgrammerInspector,
 }
 
 macro_rules! rollback_field {
@@ -85,6 +86,7 @@ define_general_settings_fields!(
     hotkey,
     quit_hotkey,
     help_hotkey,
+    recording_stop_hotkey,
     paste_sequence,
     debug_logging,
     enable_toasts,
@@ -98,6 +100,7 @@ define_general_settings_fields!(
     note_confirm_discard_unsaved_changes,
     note_always_overwrite,
     calculation_pad_remember_source,
+    programmer_inspector,
     note_images_as_links,
     note_show_details,
     note_more_limit,
@@ -147,6 +150,7 @@ enum SaveOwnership {
     },
     PluginSelection,
     CalculationPadRecovery,
+    ProgrammerInspector,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,6 +162,7 @@ struct InvocationSettingsBaseline {
     hotkey: Option<String>,
     quit_hotkey: Option<String>,
     help_hotkey: Option<String>,
+    recording_stop_hotkey: Option<String>,
     radial: crate::radial::model::RadialFeatureSettings,
     screen_draw: ScreenDrawChordBaseline,
 }
@@ -201,6 +206,7 @@ impl InvocationSettingsBaseline {
             paste_sequence: settings.paste_sequence.clone(),
             quit_hotkey: settings.quit_hotkey.clone(),
             help_hotkey: settings.help_hotkey.clone(),
+            recording_stop_hotkey: settings.recording_stop_hotkey.clone(),
             radial: settings.radial.clone(),
             screen_draw,
         }
@@ -217,6 +223,7 @@ pub(crate) struct SettingsSaveIntent {
     source: SettingsSaveSource,
     invocation_baseline: Option<InvocationSettingsBaseline>,
     calculation_pad_remember_source_baseline: Option<bool>,
+    programmer_inspector_baseline: Option<crate::settings::ProgrammerInspectorPreferences>,
 }
 
 impl SettingsSaveIntent {
@@ -243,6 +250,7 @@ impl SettingsSaveIntent {
             calculation_pad_remember_source_baseline: Some(
                 baseline.calculation_pad_remember_source,
             ),
+            programmer_inspector_baseline: Some(baseline.programmer_inspector),
         }
     }
 
@@ -259,6 +267,7 @@ impl SettingsSaveIntent {
             source: SettingsSaveSource::PluginSelection,
             invocation_baseline: None,
             calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
         }
     }
 
@@ -271,6 +280,33 @@ impl SettingsSaveIntent {
             source: SettingsSaveSource::CalculationPadRecovery,
             invocation_baseline: None,
             calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
+        }
+    }
+
+    pub(crate) fn programmer_inspector(
+        mut preferences: crate::settings::ProgrammerInspectorPreferences,
+    ) -> Self {
+        preferences.grouping = preferences.grouping.min(128);
+        let mut desired = Settings::default();
+        desired.programmer_inspector = preferences;
+        Self {
+            desired,
+            ownership: SaveOwnership::ProgrammerInspector,
+            source: SettingsSaveSource::ProgrammerInspector,
+            invocation_baseline: None,
+            calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
+        }
+    }
+
+    fn owns_programmer_inspector(&self) -> bool {
+        match &self.ownership {
+            SaveOwnership::General { .. } => {
+                self.programmer_inspector_baseline != Some(self.desired.programmer_inspector)
+            }
+            SaveOwnership::ProgrammerInspector => true,
+            _ => false,
         }
     }
 
@@ -286,6 +322,7 @@ impl SettingsSaveIntent {
             }
             SaveOwnership::PluginSelection => false,
             SaveOwnership::CalculationPadRecovery => true,
+            SaveOwnership::ProgrammerInspector => false,
         }
     }
 
@@ -293,7 +330,11 @@ impl SettingsSaveIntent {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
                 let latest_recovery_preference = latest.calculation_pad_remember_source;
+                let latest_inspector = latest.programmer_inspector;
                 copy_general_fields(latest, &self.desired);
+                if !self.owns_programmer_inspector() {
+                    latest.programmer_inspector = latest_inspector;
+                }
                 if !self.owns_calculation_pad_recovery_preference() {
                     latest.calculation_pad_remember_source = latest_recovery_preference;
                 }
@@ -313,6 +354,9 @@ impl SettingsSaveIntent {
                 latest.calculation_pad_remember_source =
                     self.desired.calculation_pad_remember_source;
             }
+            SaveOwnership::ProgrammerInspector => {
+                latest.programmer_inspector = self.desired.programmer_inspector;
+            }
         }
     }
 
@@ -323,7 +367,7 @@ impl SettingsSaveIntent {
             .is_some_and(|expected| *expected != InvocationSettingsBaseline::from_settings(latest))
         {
             anyhow::bail!(
-                "launcher, Jump, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
+                "launcher, recorder, Jump, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
             );
         }
         Ok(())
@@ -333,7 +377,11 @@ impl SettingsSaveIntent {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
                 let latest_recovery_preference = latest.calculation_pad_remember_source;
+                let latest_inspector = latest.programmer_inspector;
                 copy_general_fields(latest, committed);
+                if !self.owns_programmer_inspector() {
+                    latest.programmer_inspector = latest_inspector;
+                }
                 if !self.owns_calculation_pad_recovery_preference() {
                     latest.calculation_pad_remember_source = latest_recovery_preference;
                 }
@@ -352,6 +400,9 @@ impl SettingsSaveIntent {
             SaveOwnership::CalculationPadRecovery => {
                 latest.calculation_pad_remember_source = committed.calculation_pad_remember_source;
             }
+            SaveOwnership::ProgrammerInspector => {
+                latest.programmer_inspector = committed.programmer_inspector;
+            }
         }
         overlay_acknowledged_invocation(latest, committed);
     }
@@ -363,10 +414,14 @@ impl SettingsSaveIntent {
             SaveOwnership::General { .. } => GENERAL_SETTINGS_FIELDS,
             SaveOwnership::PluginSelection => &["enabled_plugins", "enabled_capabilities"],
             SaveOwnership::CalculationPadRecovery => &["calculation_pad_remember_source"],
+            SaveOwnership::ProgrammerInspector => &["programmer_inspector"],
         };
         let mut changed = Vec::new();
         if let (Some(latest_value), Some(committed_value)) = (latest_value, committed_value) {
             for field in fields {
+                if *field == "programmer_inspector" && !self.owns_programmer_inspector() {
+                    continue;
+                }
                 if *field == "calculation_pad_remember_source"
                     && !self.owns_calculation_pad_recovery_preference()
                 {
@@ -426,6 +481,9 @@ impl SettingsSaveIntent {
                     conflicts
                 );
             }
+            SaveOwnership::ProgrammerInspector => {
+                rollback_field!(latest, before, written, programmer_inspector, conflicts);
+            }
         }
         conflicts
     }
@@ -439,6 +497,7 @@ fn overlay_acknowledged_invocation(latest: &mut Settings, committed: &Settings) 
     latest.hotkey = committed.hotkey.clone();
     latest.quit_hotkey = committed.quit_hotkey.clone();
     latest.help_hotkey = committed.help_hotkey.clone();
+    latest.recording_stop_hotkey = committed.recording_stop_hotkey.clone();
     latest.radial = committed.radial.clone();
     overlay_screen_draw_route_chords(latest, committed);
 }
@@ -515,6 +574,9 @@ fn append_invocation_route_changes(
     }
     if latest.help_hotkey != committed.help_hotkey {
         push_changed_field(changed, "help_hotkey".into());
+    }
+    if latest.recording_stop_hotkey != committed.recording_stop_hotkey {
+        push_changed_field(changed, "recording_stop_hotkey".into());
     }
     if latest.radial != committed.radial {
         push_changed_field(changed, "radial".into());
@@ -699,6 +761,13 @@ impl SettingsSaveWorkerRegistry {
         }
         bind_utility_settings_path(&mut state, &settings_path)?;
         let revision = next_utility_size_revision(&mut state, key)?;
+        let mut mutation = mutation;
+        if let Some(failed) = state.utility_sizes_failed.remove(&key) {
+            mutation = failed.mutation.followed_by(mutation);
+        }
+        if let Some(pending) = state.utility_sizes_pending.remove(&key) {
+            mutation = pending.mutation.followed_by(mutation);
+        }
         state.utility_sizes_latest_revision.insert(key, revision);
         state
             .utility_sizes_pending
@@ -853,7 +922,7 @@ impl SettingsSaveWorkerRegistry {
     }
 
     #[cfg(test)]
-    fn set_utility_size_before_write_hook(
+    pub(crate) fn set_utility_size_before_write_hook(
         &self,
         hook: Arc<dyn Fn(UtilityToolKey, UtilitySizeRevision) + Send + Sync>,
     ) {
@@ -896,7 +965,7 @@ impl SettingsSaveWorkerRegistry {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match result {
-                    Ok(preference) => {
+                    Ok((preference, native_geometry)) => {
                         if state.utility_sizes_latest_revision.get(&key) == Some(&pending.revision)
                         {
                             state.utility_sizes_acknowledgements.insert(
@@ -905,6 +974,8 @@ impl SettingsSaveWorkerRegistry {
                                     key,
                                     revision: pending.revision,
                                     preference,
+                                    native_geometry,
+                                    affects_size: pending.mutation.affects_size(),
                                 },
                             );
                             if state
@@ -920,9 +991,14 @@ impl SettingsSaveWorkerRegistry {
                         // Keep the failed intent separately so the worker
                         // cannot spin on it. A new event replaces it; retry
                         // explicitly moves it back to the pending queue.
-                        if !state.utility_sizes_pending.contains_key(&key)
-                            && state.utility_sizes_latest_revision.get(&key)
-                                == Some(&pending.revision)
+                        if let Some(newer_pending) = state.utility_sizes_pending.get_mut(&key) {
+                            // A later component write can recover a failed
+                            // in-flight write. Carry forward any unaffected
+                            // component from that failed intent.
+                            newer_pending.mutation =
+                                pending.mutation.followed_by(newer_pending.mutation);
+                        } else if state.utility_sizes_latest_revision.get(&key)
+                            == Some(&pending.revision)
                         {
                             state.utility_sizes_failed.insert(key, pending);
                             state
@@ -1114,6 +1190,31 @@ impl LauncherApp {
         self.start_pending_calculation_pad_recovery_preference_save(context);
     }
 
+    pub(crate) fn request_programmer_inspector_preference_save(
+        &mut self,
+        context: &egui::Context,
+        preferences: crate::settings::ProgrammerInspectorPreferences,
+    ) {
+        self.pending_programmer_inspector_preference = Some(preferences);
+        self.start_pending_programmer_inspector_preference_save(context);
+    }
+
+    fn start_pending_programmer_inspector_preference_save(&mut self, context: &egui::Context) {
+        if self.settings_save_pending() {
+            return;
+        }
+        let Some(preferences) = self.pending_programmer_inspector_preference.take() else {
+            return;
+        };
+        if self.settings_editor.baseline_settings.programmer_inspector == preferences {
+            return;
+        }
+        self.begin_settings_save(
+            context,
+            SettingsSaveIntent::programmer_inspector(preferences),
+        );
+    }
+
     fn start_pending_calculation_pad_recovery_preference_save(&mut self, context: &egui::Context) {
         if self.settings_save_pending() {
             return;
@@ -1208,22 +1309,32 @@ impl LauncherApp {
                     cancel_requested,
                 });
             }
-            Err(error) => self.report_ui_error(crate::gui::UiErrorEvent::new(
-                match source {
-                    SettingsSaveSource::General => "settings_editor.save",
-                    SettingsSaveSource::PluginSelection => "plugin_editor.save",
-                    SettingsSaveSource::CalculationPadRecovery => {
-                        "calculation_pad.recovery.preference"
-                    }
-                },
-                format!("Could not start settings save worker: {error}"),
-            )),
+            Err(error) => {
+                if source == SettingsSaveSource::ProgrammerInspector {
+                    self.programmer_inspector_dialog
+                        .preference_save_failed(&error.to_string());
+                }
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    match source {
+                        SettingsSaveSource::General => "settings_editor.save",
+                        SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                        SettingsSaveSource::CalculationPadRecovery => {
+                            "calculation_pad.recovery.preference"
+                        }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
+                    },
+                    format!("Could not start settings save worker: {error}"),
+                ));
+            }
         }
     }
 
     pub(crate) fn drain_settings_save(&mut self, context: &egui::Context) {
         if self.pending_settings_save.is_none() {
             self.start_pending_calculation_pad_recovery_preference_save(context);
+            self.start_pending_programmer_inspector_preference_save(context);
         }
         let Some(pending) = self.pending_settings_save.as_ref() else {
             return;
@@ -1252,6 +1363,9 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
                     },
                     message,
                 ));
@@ -1271,6 +1385,8 @@ impl LauncherApp {
                         self,
                         completion.settings.calculation_pad_remember_source,
                     );
+                } else if result.source == SettingsSaveSource::ProgrammerInspector {
+                    crate::settings_editor::SettingsEditor::apply_committed_programmer_inspector_preference(self, completion.settings.programmer_inspector);
                 } else {
                     crate::settings_editor::SettingsEditor::apply_saved_settings(
                         context,
@@ -1287,23 +1403,36 @@ impl LauncherApp {
                             SettingsSaveSource::CalculationPadRecovery => {
                                 "calculation_pad.recovery.preference"
                             }
+                            SettingsSaveSource::ProgrammerInspector => {
+                                "programmer_inspector.preferences"
+                            }
                         },
                         warning,
                     ));
                 }
             }
-            Err(message) => self.report_ui_error(crate::gui::UiErrorEvent::new(
-                match result.source {
-                    SettingsSaveSource::General => "settings_editor.save",
-                    SettingsSaveSource::PluginSelection => "plugin_editor.save",
-                    SettingsSaveSource::CalculationPadRecovery => {
-                        "calculation_pad.recovery.preference"
-                    }
-                },
-                message,
-            )),
+            Err(message) => {
+                if result.source == SettingsSaveSource::ProgrammerInspector {
+                    self.programmer_inspector_dialog
+                        .preference_save_failed(&message);
+                }
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    match result.source {
+                        SettingsSaveSource::General => "settings_editor.save",
+                        SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                        SettingsSaveSource::CalculationPadRecovery => {
+                            "calculation_pad.recovery.preference"
+                        }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
+                    },
+                    message,
+                ));
+            }
         }
         self.start_pending_calculation_pad_recovery_preference_save(context);
+        self.start_pending_programmer_inspector_preference_save(context);
     }
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
@@ -1880,6 +2009,43 @@ mod tests {
         root.join("settings.json").to_string_lossy().into_owned()
     }
 
+    #[test]
+    fn recording_stop_shortcut_is_owned_and_tracked_as_an_invocation_route() {
+        let before = Settings::default();
+        let mut desired = before.clone();
+        desired.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let intent = SettingsSaveIntent::general(desired.clone(), &before);
+
+        let mut concurrent = before.clone();
+        concurrent.recording_stop_hotkey = Some("Ctrl+Shift+F11".into());
+        assert!(intent.verify_invocation_baseline(&concurrent).is_err());
+
+        let mut written = before.clone();
+        intent.apply(&mut written);
+        assert_eq!(written.recording_stop_hotkey, desired.recording_stop_hotkey);
+        assert!(
+            intent
+                .changed_owned_fields(&before, &written)
+                .iter()
+                .any(|field| field == "recording_stop_hotkey")
+        );
+
+        let mut acknowledged = before.clone();
+        intent.overlay_applied(&mut acknowledged, &written);
+        assert_eq!(
+            acknowledged.recording_stop_hotkey,
+            Some("Ctrl+Shift+F10".into())
+        );
+
+        let mut rollback = written.clone();
+        assert!(
+            intent
+                .rollback_owned(&mut rollback, &before, &written)
+                .is_empty()
+        );
+        assert_eq!(rollback.recording_stop_hotkey, before.recording_stop_hotkey);
+    }
+
     fn intent_with_hotkey(baseline: &Settings, hotkey: &str) -> SettingsSaveIntent {
         let mut desired = baseline.clone();
         desired.hotkey = Some(hotkey.to_owned());
@@ -1908,6 +2074,118 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (context, app)
+    }
+
+    #[test]
+    fn inspector_preferences_owned_save_and_stale_editor_reconciliation() {
+        let baseline = Settings::default();
+        let general = SettingsSaveIntent::general(baseline.clone(), &baseline);
+        let chosen = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            pad_to_width: true,
+            grouping: 4,
+        };
+        let mut latest = baseline.clone();
+        latest.programmer_inspector = chosen;
+        latest.theme.mode = crate::settings::ThemeMode::Light;
+        let theme = latest.theme.mode;
+        let mut committed = latest.clone();
+        general.apply(&mut committed);
+        assert_eq!(committed.programmer_inspector, chosen);
+        general.overlay_applied(&mut latest, &committed);
+        assert_eq!(latest.programmer_inspector, chosen);
+        let intent = SettingsSaveIntent::programmer_inspector(
+            crate::settings::ProgrammerInspectorPreferences {
+                grouping: 8,
+                ..chosen
+            },
+        );
+        let before = latest.clone();
+        intent.apply(&mut latest);
+        assert_eq!(latest.programmer_inspector.grouping, 8);
+        assert_eq!(latest.theme.mode, theme);
+        let written = latest.clone();
+        assert!(
+            intent
+                .rollback_owned(&mut latest, &before, &written)
+                .is_empty()
+        );
+        assert_eq!(latest.programmer_inspector, chosen);
+        assert_eq!(latest.theme.mode, theme);
+    }
+
+    #[test]
+    fn inspector_queued_newer_preference_survives_older_acknowledgement() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (_ctx, mut app) = test_app(directory.path(), Settings::default());
+        let original = crate::settings::ProgrammerInspectorPreferences::default();
+        let older = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            ..original
+        };
+        app.programmer_inspector_dialog
+            .initialize_preferences(original);
+        app.pending_programmer_inspector_preference = Some(original);
+        crate::settings_editor::SettingsEditor::apply_committed_programmer_inspector_preference(
+            &mut app, older,
+        );
+        assert!(!app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(
+            app.settings_editor.baseline_settings.programmer_inspector,
+            older
+        );
+        assert_eq!(app.pending_programmer_inspector_preference, Some(original));
+        let intent = SettingsSaveIntent::programmer_inspector(original);
+        let mut latest = app.settings_editor.baseline_settings.clone();
+        intent.apply(&mut latest);
+        assert_eq!(latest.programmer_inspector, original);
+    }
+
+    #[test]
+    fn inspector_preference_runtime_failure_rolls_back_without_touching_unrelated_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let baseline = Settings::default();
+        baseline.save(&path).unwrap();
+        let desired = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            grouping: 4,
+            ..Default::default()
+        };
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        let (worker, _) = spawn_save(
+            path.clone(),
+            SettingsSaveIntent::programmer_inspector(desired),
+            SettingsSaveSource::ProgrammerInspector,
+            move |settings| client.prepare(settings),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+            panic!("expected preparation")
+        };
+        complete_prepare(request, 170);
+        let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
+            panic!("expected apply")
+        };
+        Settings::update(&path, |latest| {
+            latest.theme.mode = crate::settings::ThemeMode::Dark;
+            Ok(())
+        })
+        .unwrap();
+        application
+            .complete_restored(HotkeyReconfigurationError::RuntimeTransition(
+                "injected failure".into(),
+            ))
+            .unwrap();
+        assert!(worker.join().unwrap().0.is_err());
+        let persisted = Settings::load(&path).unwrap();
+        assert_eq!(
+            persisted.programmer_inspector,
+            baseline.programmer_inspector
+        );
+        assert_eq!(persisted.theme.mode, crate::settings::ThemeMode::Dark);
     }
 
     fn drain_until_complete(app: &mut LauncherApp, context: &egui::Context) {
@@ -3406,6 +3684,197 @@ mod tests {
         assert_eq!(
             workers.utility_size_latest_revision(key),
             Some(UtilitySizeRevision(2))
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_later_native_write_recovers_failed_inflight_size() {
+        use crate::settings::utility_dialog_sizes::{
+            NativeWindowGeometry, PreferredWindowSize, SavedWindowPosition, UtilitySizeMutation,
+            UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        Settings::default().save(&path_text).unwrap();
+        let key = UtilityToolKey::parse("calculation-pad").unwrap();
+        let size = PreferredWindowSize::new(640.0, 480.0).unwrap();
+        let geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -100.0).unwrap(),
+            PreferredWindowSize::new(920.0, 700.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
+
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (first_release_sender, first_release_receiver) = mpsc::channel();
+        let (second_started_sender, second_started_receiver) = mpsc::channel();
+        let (second_release_sender, second_release_receiver) = mpsc::channel();
+        let first_release_receiver = Arc::new(Mutex::new(first_release_receiver));
+        let second_release_receiver = Arc::new(Mutex::new(second_release_receiver));
+        let before_write = {
+            let first_release_receiver = Arc::clone(&first_release_receiver);
+            let second_release_receiver = Arc::clone(&second_release_receiver);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                let (sender, receiver) = match revision.0 {
+                    1 => (&first_started_sender, &first_release_receiver),
+                    2 => (&second_started_sender, &second_release_receiver),
+                    _ => return,
+                };
+                let _ = sender.send(revision);
+                let _ = receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Set(size))
+            .unwrap();
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+
+        // Make the in-flight size write fail, then queue an independent
+        // geometry update before allowing the worker to continue.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::SetNative(geometry),
+            )
+            .unwrap();
+        first_release_sender.send(()).unwrap();
+        assert_eq!(
+            second_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(2)
+        );
+
+        // The newer revision is now processing the merged intent. Restore a
+        // valid settings file so that the retry can commit both components.
+        std::fs::remove_dir(&path).unwrap();
+        Settings::default().save(&path_text).unwrap();
+        second_release_sender.send(()).unwrap();
+        workers.join_all();
+
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(saved.utility_dialog_sizes.preferred(key), Some(size));
+        assert_eq!(
+            saved.utility_dialog_sizes.native_geometry(key),
+            Some(geometry)
+        );
+        assert_eq!(workers.utility_size_write_error(key), None);
+        assert!(workers.utility_size_shutdown_failures().is_empty());
+
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(
+            acknowledgements.len(),
+            1,
+            "the failed stale revision is not published"
+        );
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(2));
+        assert!(acknowledgements[0].affects_size);
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(size)
+        );
+        assert_eq!(acknowledgements[0].native_geometry, Some(geometry));
+    }
+
+    #[test]
+    fn utility_dialog_sizes_latest_size_after_reset_survives_older_write_failure() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        Settings::default().save(&path_text).unwrap();
+        let key = UtilityToolKey::parse("calculation-pad").unwrap();
+        let old_size = PreferredWindowSize::new(640.0, 480.0).unwrap();
+        let latest_size = PreferredWindowSize::new(920.0, 720.0).unwrap();
+
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (first_release_sender, first_release_receiver) = mpsc::channel();
+        let (latest_started_sender, latest_started_receiver) = mpsc::channel();
+        let (latest_release_sender, latest_release_receiver) = mpsc::channel();
+        let first_release_receiver = Arc::new(Mutex::new(first_release_receiver));
+        let latest_release_receiver = Arc::new(Mutex::new(latest_release_receiver));
+        let before_write = {
+            let first_release_receiver = Arc::clone(&first_release_receiver);
+            let latest_release_receiver = Arc::clone(&latest_release_receiver);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                let (sender, receiver) = match revision.0 {
+                    1 => (&first_started_sender, &first_release_receiver),
+                    3 => (&latest_started_sender, &latest_release_receiver),
+                    _ => return,
+                };
+                let _ = sender.send(revision);
+                let _ = receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Set(old_size))
+            .unwrap();
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Reset)
+            .unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(latest_size),
+            )
+            .unwrap();
+        first_release_sender.send(()).unwrap();
+        assert_eq!(
+            latest_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(3)
+        );
+
+        std::fs::remove_dir(&path).unwrap();
+        Settings::default().save(&path_text).unwrap();
+        latest_release_sender.send(()).unwrap();
+        workers.join_all();
+
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(saved.utility_dialog_sizes.preferred(key), Some(latest_size));
+        assert_eq!(saved.utility_dialog_sizes.native_geometry(key), None);
+        assert_eq!(workers.utility_size_write_error(key), None);
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(3));
+        assert!(acknowledgements[0].affects_size);
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(latest_size)
         );
     }
 

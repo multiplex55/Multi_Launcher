@@ -8,6 +8,77 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Only display-format preferences; inspector work and comparisons are transient.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ProgrammerInspectorPreferences {
+    pub prefix: bool,
+    pub pad_to_width: bool,
+    pub grouping: u8,
+}
+
+impl<'de> Deserialize<'de> for ProgrammerInspectorPreferences {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ProgrammerInspectorPreferences, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut preferences = ProgrammerInspectorPreferences::default();
+        if let Some(map) = value.as_object() {
+            preferences.prefix = map
+                .get("prefix")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            preferences.pad_to_width = map
+                .get("pad_to_width")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            preferences.grouping = map
+                .get("grouping")
+                .and_then(|value| value.as_u64())
+                .filter(|value| *value <= 128)
+                .unwrap_or(0) as u8;
+        }
+        Ok(preferences)
+    }
+}
+
+#[cfg(test)]
+mod programmer_inspector_preference_tests {
+    use super::*;
+    #[test]
+    fn inspector_preferences_default_bound_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("programmer_inspector");
+        let old: Settings = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            old.programmer_inspector,
+            ProgrammerInspectorPreferences::default()
+        );
+        legacy["programmer_inspector"] =
+            serde_json::json!({"prefix":"yes","pad_to_width":true,"grouping":999});
+        let malformed: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            malformed.programmer_inspector,
+            ProgrammerInspectorPreferences {
+                prefix: false,
+                pad_to_width: true,
+                grouping: 0
+            }
+        );
+        let mut settings = Settings::default();
+        settings.programmer_inspector = ProgrammerInspectorPreferences {
+            prefix: true,
+            pad_to_width: true,
+            grouping: 4,
+        };
+        let decoded: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(decoded.programmer_inspector, settings.programmer_inspector);
+    }
+}
+
 /// Non-sensitive UI preferences for the Clipboard Modify plugin.
 ///
 /// The modifier catalog and all clipboard-derived working data deliberately
@@ -690,6 +761,8 @@ pub struct Settings {
     pub quit_hotkey: Option<String>,
     pub help_hotkey: Option<String>,
     #[serde(default)]
+    pub recording_stop_hotkey: Option<String>,
+    #[serde(default)]
     pub paste_sequence: PasteSequencePreferences,
     #[serde(default)]
     pub table_utility_resources: TableUtilityResourcePreferences,
@@ -716,6 +789,8 @@ pub struct Settings {
     pub note_always_overwrite: bool,
     #[serde(default)]
     pub calculation_pad_remember_source: bool,
+    #[serde(default)]
+    pub programmer_inspector: ProgrammerInspectorPreferences,
     #[serde(default)]
     pub note_images_as_links: bool,
     #[serde(default = "default_note_show_details")]
@@ -1147,6 +1222,7 @@ impl Default for Settings {
             hotkey: default_launcher_hotkey(),
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
+            recording_stop_hotkey: None,
             paste_sequence: PasteSequencePreferences::default(),
             table_utility_resources: TableUtilityResourcePreferences::default(),
             index_paths: None,
@@ -1163,6 +1239,7 @@ impl Default for Settings {
             note_confirm_discard_unsaved_changes: default_note_confirm_discard_unsaved_changes(),
             note_always_overwrite: false,
             calculation_pad_remember_source: false,
+            programmer_inspector: ProgrammerInspectorPreferences::default(),
             note_images_as_links: false,
             note_show_details: default_note_show_details(),
             note_more_limit: default_note_more_limit(),

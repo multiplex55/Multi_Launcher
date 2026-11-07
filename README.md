@@ -33,6 +33,8 @@ It’s designed to be “one hotkey away” from:
 - [Table Utility](#table-utility)
 - [Image Comparison](#image-comparison)
 - [Duplicate Finder](#duplicate-finder)
+- [Folder Size](#folder-size)
+- [File Lock Inspector](#file-lock-inspector)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -46,6 +48,7 @@ It’s designed to be “one hotkey away” from:
 - [MultiManager](#multimanager)
 - [Calendar](#calendar)
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
+- [Silent Screen Recorder](#silent-screen-recorder)
 - [Screenshot pinboard](#screenshot-pinboard)
 - [Screen Draw](#screen-draw)
 - [Configuration](#configuration)
@@ -140,6 +143,7 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `ocr` | Local English text recognition from a screen region | `ocr` |
 | `pinboard` | Session-only static and live reference pins | `pinboard capture` / `pinboard live` / `pinboard list` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
+| `record` | Silent GIF and MP4 screen recording | `record` / `record:open` / `record:stop` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
 | `date` | Local date arithmetic and date differences | `date tomorrow` / `date days between 2026-10-05 and 2026-12-25` |
@@ -910,6 +914,40 @@ bytes are logical totals; hard links and filesystem allocation mean they are
 not a promise of recoverable disk space. The tool never deletes or changes
 files.
 
+## Folder Size
+
+Type `foldersize` and choose **Open Folder Size**. Choose a local folder, then
+press **Scan**. Opening the tool or choosing a folder does not start a scan.
+You can also right-click a directory result in File Search and choose
+**Analyze folder size…** to fill in that folder. The result list shows the
+largest measured entries in the current directory first, including during a
+scan.
+Double-click a directory row to drill down, or use **Copy Path** and **Reveal/Open**
+to work with the displayed path. Use **Refresh** to scan again or **Cancel** to
+keep the last verified subtotal while the worker settles. ActivityCenter shows
+scans that have started and can cancel the current scan.
+
+The tool sums logical file bytes per directory entry. Each hard-link name
+contributes its file length; the subtotal does not measure allocated disk space.
+Shares use the measured subtotal, and no percentage is shown when it is zero.
+The scan reads metadata and skips reparse points and cloud placeholders without
+recalling file contents. Incomplete branches and skipped entries are marked so
+a partial subtotal is not mistaken for a complete result. Folder Size does not
+delete or change files.
+
+## File Lock Inspector
+
+Type `filelock` and choose **Inspect File Users**, or right-click a file result
+in File Search and choose **Inspect file users…**. Choose or confirm the file,
+then press **Inspect**. Use **Refresh** for a new snapshot. You can copy the
+reported details or select a process and reveal its executable in Explorer
+after verifying the process is still running and its path matches the snapshot.
+
+Windows Restart Manager reports applications and services using the selected
+file. **No processes reported** does not guarantee that the file is unlocked.
+An unavailable process name or executable does not erase its reported row.
+Inspection does not unlock files or stop applications.
+
 ## JSON and screen color utilities
 
 `json` opens a compact, local JSON editor. `json format` and `json pretty` prefer
@@ -1341,6 +1379,39 @@ Screenshot behavior is controlled by settings:
 - `screenshot_dir`
 - `screenshot_auto_save`
 - `screenshot_use_editor`
+
+## Silent Screen Recorder
+
+Type `record` and choose **Open Screen Recorder**, or enter `record:open`.
+Opening the setup or choosing a format does not start a recording.
+
+1. Choose a window, a display, or a rectangle contained within one display.
+2. Choose **GIF** (10 fps by default) or **MP4** (30 fps by default). Both
+   formats are silent. Set the frame rate, clip limit (30 seconds by default,
+   up to 120 seconds), and whether to include the cursor.
+3. Choose **Fit**, **Half**, or **Quarter**. The output is limited to
+   1920 × 1080. Check the displayed output size; MP4 pads odd dimensions
+   to even values for the encoder.
+4. Click **Choose output and record…** and select an output file. Recording
+   starts after the three-second countdown. Canceling the file chooser does
+   not start anything. Escape cancels the rectangle selection or countdown
+   while that control has focus.
+5. Use **Stop** in the compact controller or enter `record:stop` while
+   recording. The compact controller stays available when the launcher is
+   hidden. Use **Discard** to stop without saving. The optional shortcut is
+   disabled by default. In **Settings → Hotkeys**, turn on **Enable Stop & Save
+   hotkey** and choose a chord that does not conflict with other bindings.
+   Escape is reserved by the launcher.
+
+The recorder saves only after the encoder finishes. It will not overwrite an
+existing file; choose a new name if another file takes the selected path.
+Check the last result in setup for the saved path or failure details, including
+missing Windows capture or H.264 capability and partial files that could not be
+removed. If the target closes mid-clip, the recorder stops and can save what
+it captured before the window closed. It uses a fixed capture area and can
+skip intermediate frames to keep memory bounded. While recording owns capture,
+the launcher blocks conflicting new screenshot, Crop, Pinboard, or Screen Draw
+capture actions.
 
 ## Screenshot pinboard
 

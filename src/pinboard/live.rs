@@ -1177,32 +1177,25 @@ mod native {
     use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
     use windows::Graphics::Capture::{
         Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
-        GraphicsCaptureSession, IDirect3D11CaptureFramePoolStatics2,
-        IGraphicsCaptureSessionStatics,
+        GraphicsCaptureSession,
     };
     use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
     use windows::Graphics::DirectX::DirectXPixelFormat;
     use windows::Graphics::SizeInt32;
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::D3D11_BOX;
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+        D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
     };
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
-    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-    use windows::Win32::System::WinRT::Direct3D11::{
-        CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
-    };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
     use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
     use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     };
-    use windows::core::{Interface, Type, factory};
+    use windows::core::{Interface, factory};
 
     struct RoApartment;
 
@@ -1230,40 +1223,6 @@ mod native {
         frame_token: Option<EventRegistrationToken>,
         closed_token: Option<EventRegistrationToken>,
         capture_session: Option<GraphicsCaptureSession>,
-    }
-
-    fn create_free_threaded_frame_pool(
-        device: &IDirect3DDevice,
-        pixel_format: DirectXPixelFormat,
-        number_of_buffers: i32,
-        size: SizeInt32,
-    ) -> windows::core::Result<Direct3D11CaptureFramePool> {
-        let statics = factory::<Direct3D11CaptureFramePool, IDirect3D11CaptureFramePoolStatics2>()?;
-        // SAFETY: the typed factory and borrowed device are alive for this ABI
-        // call. The factory writes the declared interface output, which
-        // `from_abi` validates and takes ownership of only on success.
-        unsafe {
-            let mut result = std::ptr::null_mut();
-            (statics.vtable().CreateFreeThreaded)(
-                statics.as_raw(),
-                device.as_raw(),
-                pixel_format,
-                number_of_buffers,
-                size,
-                &mut result,
-            )
-            .and_then(|| Type::from_abi(result))
-        }
-    }
-
-    fn graphics_capture_is_supported() -> windows::core::Result<bool> {
-        let statics = factory::<GraphicsCaptureSession, IGraphicsCaptureSessionStatics>()?;
-        // SAFETY: the scoped typed factory remains live for this synchronous
-        // call, and the ABI writes the declared boolean result.
-        unsafe {
-            let mut result = false;
-            (statics.vtable().IsSupported)(statics.as_raw(), &mut result).map(|| result)
-        }
     }
 
     impl NativeCaptureResources {
@@ -1321,7 +1280,7 @@ mod native {
             validate_source_frame_geometry(binding, source_dimensions, false)?;
             gpu_reservation.resize(estimate_gpu_bytes(source_dimensions, binding.crop)?)?;
 
-            let frame_pool = create_free_threaded_frame_pool(
+            let frame_pool = crate::platform::windows_capture::create_free_threaded_frame_pool(
                 &self.winrt_device,
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 FRAME_POOL_BUFFERS as i32,
@@ -1435,14 +1394,14 @@ mod native {
         first_frame_sender: SyncSender<Result<(), String>>,
     ) -> Result<(), String> {
         let _apartment = RoApartment::initialize()?;
-        if !graphics_capture_is_supported()
+        if !crate::platform::windows_capture::graphics_capture_is_supported()
             .map_err(|error| format!("Windows Graphics Capture support check failed: {error}"))?
         {
             return Err("Windows Graphics Capture is not supported on this Windows version".into());
         }
         let identity = binding.window;
-        let (d3d_device, context) = create_device()?;
-        let winrt_device = create_winrt_device(&d3d_device)?;
+        let (d3d_device, context) = crate::platform::windows_capture::create_device()?;
+        let winrt_device = crate::platform::windows_capture::create_winrt_device(&d3d_device)?;
         let item = create_window_item(identity)?;
         let initial_size = item
             .Size()
@@ -1710,7 +1669,12 @@ mod native {
             {
                 staging = Some((
                     (binding.crop.width, binding.crop.height),
-                    create_staging_texture(&d3d_device, binding.crop, source_desc.Format)?,
+                    crate::platform::windows_capture::create_staging_texture(
+                        &d3d_device,
+                        binding.crop.width,
+                        binding.crop.height,
+                        source_desc.Format,
+                    )?,
                 ));
             }
             let Some((_, staging_texture)) = staging.as_ref() else {
@@ -1814,42 +1778,6 @@ mod native {
             slot.set_status(generation, PinLiveStatus::SourceClosed);
         }
         Ok(())
-    }
-
-    fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                None,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        }
-        .map_err(|error| format!("could not create a BGRA Direct3D device: {error}"))?;
-        Ok((
-            device.ok_or_else(|| "Direct3D did not return a device".to_owned())?,
-            context.ok_or_else(|| "Direct3D did not return an immediate context".to_owned())?,
-        ))
-    }
-
-    fn create_winrt_device(device: &ID3D11Device) -> Result<IDirect3DDevice, String> {
-        let dxgi: IDXGIDevice = device
-            .cast()
-            .map_err(|error| format!("could not query the Direct3D DXGI device: {error}"))?;
-        let inspectable =
-            unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.map_err(|error| {
-                format!("could not create the Windows Graphics Capture device: {error}")
-            })?;
-        inspectable
-            .cast()
-            .map_err(|error| format!("could not query the Windows capture device: {error}"))
     }
 
     fn create_window_item(
@@ -1958,89 +1886,18 @@ mod native {
         Ok((size.Width as u32, size.Height as u32))
     }
 
-    fn create_staging_texture(
-        device: &ID3D11Device,
-        crop: PinSourceCrop,
-        format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
-    ) -> Result<ID3D11Texture2D, String> {
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: crop.width,
-            Height: crop.height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: format,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: 0,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: 0,
-        };
-        let mut texture = None;
-        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
-            .map_err(|error| format!("could not create crop staging texture: {error}"))?;
-        texture.ok_or_else(|| "Direct3D did not return a crop staging texture".into())
-    }
-
     fn read_staging_rgba(
         context: &ID3D11DeviceContext,
         texture: &ID3D11Texture2D,
         crop: PinSourceCrop,
     ) -> Result<RgbaImage, String> {
-        let resource: ID3D11Resource = texture
-            .cast()
-            .map_err(|error| format!("could not query crop staging resource: {error}"))?;
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe { context.Map(&resource, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
-            .map_err(|error| format!("could not map captured crop: {error}"))?;
-        let result = copy_mapped_bgra_to_rgba(
-            mapped.pData.cast(),
-            mapped.RowPitch as usize,
+        let rgba = crate::platform::windows_capture::read_staging_rgba(
+            context,
+            texture,
             crop.width,
             crop.height,
-        );
-        unsafe { context.Unmap(&resource, 0) };
-        result
-    }
-
-    fn copy_mapped_bgra_to_rgba(
-        source: *const u8,
-        row_pitch: usize,
-        width: u32,
-        height: u32,
-    ) -> Result<RgbaImage, String> {
-        let row_bytes = usize::try_from(width)
-            .ok()
-            .and_then(|width| width.checked_mul(4))
-            .ok_or_else(|| "captured crop row size overflowed".to_owned())?;
-        if source.is_null() || row_pitch < row_bytes {
-            return Err("captured crop has an invalid Direct3D row pitch".into());
-        }
-        let len = row_bytes
-            .checked_mul(usize::try_from(height).map_err(|_| "invalid crop height")?)
-            .ok_or_else(|| "captured crop byte size overflowed".to_owned())?;
-        let mut rgba = vec![0; len];
-        for row in 0..height as usize {
-            // SAFETY: D3D11 guarantees the mapped staging bytes are readable
-            // for each row; the row pitch and crop dimensions were checked.
-            let bgra_row =
-                unsafe { std::slice::from_raw_parts(source.add(row * row_pitch), row_bytes) };
-            let rgba_row = &mut rgba[row * row_bytes..(row + 1) * row_bytes];
-            for (source, target) in bgra_row
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(rgba_row.as_chunks_mut::<4>().0.iter_mut())
-            {
-                target[0] = source[2];
-                target[1] = source[1];
-                target[2] = source[0];
-                target[3] = source[3];
-            }
-        }
-        RgbaImage::from_raw(width, height, rgba)
+        )?;
+        RgbaImage::from_raw(crop.width, crop.height, rgba)
             .ok_or_else(|| "could not construct RGBA image from captured crop".into())
     }
 }
@@ -2683,253 +2540,15 @@ mod tests {
         use super::*;
         use crate::pinboard::source::{NativePinSourceResolver, PinSourceResolver};
         use crate::pinboard::{Pin, PinCaptureOperationId, Pinboard, PinboardLimits};
+        use crate::platform::windows_capture_test_support::OwnedSourceFixture;
         use image::Rgba;
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::windows::process::CommandExt;
         use std::path::PathBuf;
-        use std::process::{Child, ChildStdin, Command, Stdio};
         use std::sync::mpsc::{self, Receiver, SyncSender};
         use std::time::SystemTime;
 
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CROP_X: u32 = 43;
         const CROP_Y: u32 = 57;
         const CROP_SIZE: u32 = 64;
-
-        struct SourceReady {
-            nonce: String,
-            hwnd: usize,
-            process_id: u32,
-            thread_id: u32,
-            bounds: ScreenRect,
-        }
-
-        impl SourceReady {
-            fn parse(line: &str) -> Result<Self, String> {
-                let fields: Vec<_> = line.split('|').collect();
-                if fields.len() != 9 || fields[0] != "READY" {
-                    return Err(format!("invalid source fixture handshake: {line}"));
-                }
-                let parse = |value: &str, name: &str| {
-                    value
-                        .parse::<u64>()
-                        .map_err(|error| format!("invalid {name} in fixture handshake: {error}"))
-                };
-                let hwnd = usize::try_from(parse(fields[2], "HWND")?)
-                    .map_err(|_| "fixture HWND does not fit usize".to_owned())?;
-                let process_id = u32::try_from(parse(fields[3], "PID")?)
-                    .map_err(|_| "fixture PID does not fit u32".to_owned())?;
-                let thread_id = u32::try_from(parse(fields[4], "thread ID")?)
-                    .map_err(|_| "fixture thread ID does not fit u32".to_owned())?;
-                let x = i32::try_from(
-                    fields[5]
-                        .parse::<i64>()
-                        .map_err(|error| error.to_string())?,
-                )
-                .map_err(|_| "fixture X coordinate does not fit i32".to_owned())?;
-                let y = i32::try_from(
-                    fields[6]
-                        .parse::<i64>()
-                        .map_err(|error| error.to_string())?,
-                )
-                .map_err(|_| "fixture Y coordinate does not fit i32".to_owned())?;
-                let width = u32::try_from(parse(fields[7], "width")?)
-                    .map_err(|_| "fixture width does not fit u32".to_owned())?;
-                let height = u32::try_from(parse(fields[8], "height")?)
-                    .map_err(|_| "fixture height does not fit u32".to_owned())?;
-                Ok(Self {
-                    nonce: fields[1].to_owned(),
-                    hwnd,
-                    process_id,
-                    thread_id,
-                    bounds: ScreenRect::new(x, y, width, height),
-                })
-            }
-        }
-
-        struct OwnedSourceFixture {
-            child: Child,
-            stdin: Option<ChildStdin>,
-            lines: Receiver<String>,
-            reader: Option<thread::JoinHandle<()>>,
-            next_command_id: u64,
-            finished: bool,
-        }
-
-        impl OwnedSourceFixture {
-            fn spawn(nonce: &str) -> Result<Self, String> {
-                let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests")
-                    .join("fixtures")
-                    .join("pinboard_live_source.ps1");
-                let mut child = Command::new("powershell.exe")
-                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File"])
-                    .arg(script)
-                    .arg(nonce)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .map_err(|error| {
-                        format!("could not start the owned PowerShell fixture: {error}")
-                    })?;
-                let stdout = child.stdout.take().ok_or_else(|| {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    "PowerShell fixture has no stdout pipe".to_owned()
-                })?;
-                let (line_tx, lines) = mpsc::sync_channel(32);
-                let reader = match thread::Builder::new()
-                    .name("pinboard-live-fixture-output".into())
-                    .spawn(move || {
-                        for line in BufReader::new(stdout).lines() {
-                            match line {
-                                Ok(line) => {
-                                    if line_tx.try_send(line).is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }) {
-                    Ok(reader) => reader,
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(format!("could not read fixture output: {error}"));
-                    }
-                };
-                Ok(Self {
-                    stdin: child.stdin.take(),
-                    child,
-                    lines,
-                    reader: Some(reader),
-                    next_command_id: 1,
-                    finished: false,
-                })
-            }
-
-            fn next_line(&self, timeout: Duration) -> Result<String, String> {
-                self.lines.recv_timeout(timeout).map_err(|error| {
-                    format!("timed out waiting for the owned source fixture: {error}")
-                })
-            }
-
-            fn wait_ready(&self, nonce: &str) -> Result<SourceReady, String> {
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(
-                        "owned source fixture did not become ready within 10 seconds".into(),
-                    );
-                }
-                let line = self.next_line(remaining)?;
-                if line.starts_with("ERROR|") {
-                    return Err(format!("owned source fixture reported {line}"));
-                }
-                let ready = SourceReady::parse(&line)?;
-                if ready.nonce != nonce {
-                    return Err("owned source fixture nonce did not match the test".into());
-                }
-                Ok(ready)
-            }
-
-            fn command(&mut self, command: &str) -> Result<(), String> {
-                let id = self.next_command_id;
-                self.next_command_id = self
-                    .next_command_id
-                    .checked_add(1)
-                    .ok_or_else(|| "fixture command identity exhausted".to_owned())?;
-                let stdin = self
-                    .stdin
-                    .as_mut()
-                    .ok_or_else(|| "owned source fixture stdin is closed".to_owned())?;
-                writeln!(stdin, "{command} {id}")
-                    .and_then(|()| stdin.flush())
-                    .map_err(|error| format!("could not send command to owned fixture: {error}"))?;
-                let deadline = Instant::now() + Duration::from_secs(3);
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(format!(
-                        "owned source fixture did not acknowledge {command}"
-                    ));
-                }
-                let line = self.next_line(remaining)?;
-                if line == format!("ACK|{id}") {
-                    return Ok(());
-                }
-                if line.starts_with(&format!("ERROR|{id}|")) || line.starts_with("ERROR|") {
-                    return Err(format!("owned source fixture rejected {command}: {line}"));
-                }
-                Err(format!(
-                    "unexpected output from owned source fixture: {line}"
-                ))
-            }
-
-            fn finish(&mut self) -> Result<(), String> {
-                if self
-                    .child
-                    .try_wait()
-                    .map_err(|error| error.to_string())?
-                    .is_none()
-                {
-                    self.command("QUIT")?;
-                }
-                let deadline = Instant::now() + Duration::from_secs(2);
-                let status = loop {
-                    if let Some(status) =
-                        self.child.try_wait().map_err(|error| error.to_string())?
-                    {
-                        break status;
-                    }
-                    if Instant::now() >= deadline {
-                        self.child.kill().map_err(|error| {
-                            format!("could not reap the owned fixture: {error}")
-                        })?;
-                        break self.child.wait().map_err(|error| error.to_string())?;
-                    }
-                    thread::yield_now();
-                };
-                self.stdin.take();
-                if let Some(reader) = self.reader.take() {
-                    reader.join().map_err(|_| {
-                        "owned fixture stdout reader terminated unexpectedly".to_owned()
-                    })?;
-                }
-                self.finished = true;
-                if !status.success() {
-                    return Err(format!("owned PowerShell fixture exited with {status}"));
-                }
-                Ok(())
-            }
-        }
-
-        impl Drop for OwnedSourceFixture {
-            fn drop(&mut self) {
-                if !self.finished && self.child.try_wait().ok().flatten().is_none() {
-                    if let Some(stdin) = self.stdin.as_mut() {
-                        let id = self.next_command_id;
-                        let _ = writeln!(stdin, "QUIT {id}").and_then(|()| stdin.flush());
-                    }
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    while self.child.try_wait().ok().flatten().is_none()
-                        && Instant::now() < deadline
-                    {
-                        thread::yield_now();
-                    }
-                    if self.child.try_wait().ok().flatten().is_none() {
-                        let _ = self.child.kill();
-                        let _ = self.child.wait();
-                    }
-                }
-                self.stdin.take();
-                if let Some(reader) = self.reader.take() {
-                    let _ = reader.join();
-                }
-            }
-        }
 
         struct LocalLiveSession(Option<PinLiveCaptureSession>);
 
@@ -3077,7 +2696,7 @@ mod tests {
             let ready = fixture
                 .wait_ready(&nonce)
                 .unwrap_or_else(|error| panic!("native source fixture was not ready: {error}"));
-            assert_eq!(ready.process_id, fixture.child.id());
+            assert_eq!(ready.process_id, fixture.process_id());
             assert_ne!(ready.process_id, std::process::id());
             assert_eq!((ready.bounds.width, ready.bounds.height), (360, 240));
             let hwnd = HWND(ready.hwnd as *mut core::ffi::c_void);

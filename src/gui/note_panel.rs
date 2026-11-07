@@ -13,6 +13,10 @@ use crate::gui::note_find_preview::{
 };
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::gui::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+};
+use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use crate::notes_markdown::{
     MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION, MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout,
     MarkdownEditError, MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading,
@@ -58,7 +62,28 @@ const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
+const NOTE_PANEL_VIEWPORT_ID: &str = "note-panel-editor";
 static NEXT_NOTE_PANEL_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn note_panel_viewport_id(prompt_identity: u64) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of((NOTE_PANEL_VIEWPORT_ID, prompt_identity))
+}
+
+fn note_panel_viewport_title(prompt_identity: u64) -> String {
+    format!("Note editor #{prompt_identity}")
+}
+
+fn native_note_panel_identity(
+    host: HostIdentity,
+    prompt_identity: u64,
+) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse("note-editor").ok()?,
+        viewport_id: note_panel_viewport_id(prompt_identity),
+        owner_generation: prompt_identity,
+        host_generation: host.generation,
+    })
+}
 
 fn effective_note_font_size(ctx: &egui::Context, local_size: f32) -> f32 {
     let overall_scale = crate::gui::theme::resolved_for_current_context(ctx)
@@ -888,8 +913,8 @@ fn classify_markdown_link(target: &str) -> MarkdownLinkAction {
     }
 }
 
-fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
-    let open_url = ui.ctx().output_mut(|output| {
+fn take_markdown_link(ui: &egui::Ui) -> Option<egui::OpenUrl> {
+    ui.ctx().output_mut(|output| {
         let command_index = output
             .commands
             .iter()
@@ -898,26 +923,44 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
             egui::OutputCommand::OpenUrl(open_url) => Some(open_url),
             _ => unreachable!("the selected output command was checked as an OpenUrl"),
         }
-    });
-    if let Some(mut open_url) = open_url {
-        match classify_markdown_link(&open_url.url) {
-            MarkdownLinkAction::NoteReference(slug) => app.open_note_panel(&slug, None),
-            MarkdownLinkAction::TodoReference(todo_id) => open_todo_reference(app, &todo_id),
-            MarkdownLinkAction::Filesystem(action) => {
-                if let Err(err) = execute_explorer_action(action) {
-                    app.report_error("filesystem link", err);
-                }
-            }
-            MarkdownLinkAction::ExternalUrl(url) => {
-                open_url.url = url;
-                ui.ctx().open_url(open_url);
-            }
-            MarkdownLinkAction::InvalidNoteLink(err) => app.report_error("note link", err),
-            MarkdownLinkAction::InvalidFilesystemUrl(err) => {
+    })
+}
+
+fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
+    if let Some(open_url) = take_markdown_link(ui) {
+        dispatch_note_link(ui.ctx(), app, open_url);
+    }
+}
+
+pub(super) fn dispatch_note_link(
+    ctx: &egui::Context,
+    app: &mut LauncherApp,
+    mut open_url: egui::OpenUrl,
+) -> bool {
+    match classify_markdown_link(&open_url.url) {
+        MarkdownLinkAction::NoteReference(slug) => {
+            return app.open_note_panel_from_link(&slug);
+        }
+        MarkdownLinkAction::TodoReference(todo_id) => {
+            open_todo_reference(app, &todo_id);
+            return true;
+        }
+        MarkdownLinkAction::Filesystem(action) => {
+            if let Err(err) = execute_explorer_action(action) {
                 app.report_error("filesystem link", err);
             }
         }
+        MarkdownLinkAction::ExternalUrl(url) => {
+            open_url.url = url;
+            ctx.open_url(open_url);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        MarkdownLinkAction::InvalidNoteLink(err) => app.report_error("note link", err),
+        MarkdownLinkAction::InvalidFilesystemUrl(err) => {
+            app.report_error("filesystem link", err);
+        }
     }
+    false
 }
 
 fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
@@ -935,6 +978,7 @@ struct PendingPlainLinkConversion {
     report: PlainLinkConversionReport,
 }
 
+#[derive(Clone)]
 struct RetainedTextEditHistory {
     undoer: egui::util::undoer::Undoer<(egui::text::CCursorRange, String)>,
     cursor: egui::text::CCursorRange,
@@ -1055,6 +1099,16 @@ enum PlainLinkConfirmOutcome {
 pub struct NotePanel {
     pub open: bool,
     prompt_identity: u64,
+    host_state: UtilityHostState,
+    show_root_after_host_change: bool,
+    pending_host_frame: Option<PendingNotePanelHostFrame>,
+    active_host_pass: Option<(HostIdentity, ViewportPassProvenance)>,
+    active_host_layer: Option<egui::LayerId>,
+    accepted_host_effect_receipt: Option<(HostIdentity, Option<ViewportPassProvenance>)>,
+    accepted_host_modal_layer: Option<(HostIdentity, Option<egui::LayerId>)>,
+    defer_host_actions: bool,
+    pending_host_actions: NotePanelPendingHostActions,
+    picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
     activation_handoff_pending: bool,
     note: Note,
     saved_content_baseline: String,
@@ -1198,6 +1252,14 @@ pub struct NotePanel {
     #[cfg(test)]
     test_markdown_export_picker_calls: usize,
     #[cfg(test)]
+    test_host_button_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_host_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_host_button_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_host_button_enabled: Option<bool>,
+    #[cfg(test)]
     test_markdown_export_feedback_rect: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_note_toolbar_edit_button: Option<(egui::Id, egui::Rect, egui::Rect)>,
@@ -1309,15 +1371,104 @@ pub(crate) struct NoteMermaidOrigin {
 }
 
 struct PendingNoteRootEffect {
-    frame_nr: u64,
-    pass_nr: u64,
+    root_pass: ViewportPassProvenance,
+    host: Option<HostIdentity>,
+    owner_pass: Option<ViewportPassProvenance>,
     effect: NotePanelEffect,
+}
+
+#[derive(Default)]
+struct NotePanelPendingHostActions {
+    host_request: Option<UtilityPresentation>,
+    close_requested: bool,
+    save_requested: bool,
+    save_alias_metadata_requested: bool,
+    discard_requested: bool,
+    keep_editing_requested: bool,
+    save_and_close_requested: bool,
+    conflict_action: Option<ConflictSaveAction>,
+    external_open: Option<NoteExternalOpen>,
+    attachment_picker_requested: bool,
+    screenshot_requested: bool,
+    clipboard_image: Option<(egui::Id, RgbaImage)>,
+    open_note_slugs: Vec<String>,
+    open_image_paths: Vec<PathBuf>,
+    links: Vec<egui::OpenUrl>,
+}
+
+struct PendingNotePanelHostFrame {
+    root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    owner_context: egui::Context,
+    owner_viewport_id: egui::ViewportId,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_pass_accepted: bool,
+    callback_observed: bool,
+    callback_class: egui::ViewportClass,
+    native_viewport: Option<egui::ViewportInfo>,
+    embedded_root_layer: Option<egui::LayerId>,
+    embedded_root_focused_id: Option<egui::Id>,
+    owner_modal_layer: Option<egui::LayerId>,
+    close_requested: bool,
+    os_close_requested: bool,
+    draft_checkpoint: NotePanelDraftCheckpoint,
+    actions: NotePanelPendingHostActions,
+}
+
+struct NotePanelDraftCheckpoint {
+    note: Note,
+    saved_content_baseline: String,
+    pending_selection: Option<(usize, usize)>,
+    pending_cursor_position: Option<usize>,
+    retained_text_edit_history: Option<RetainedTextEditHistory>,
+    replacement_undo_boundaries: Vec<ReplacementUndoBoundary>,
+    replacement_redo_boundaries: Vec<ReplacementUndoBoundary>,
+    replacement_history_mutation: Option<ReplacementHistoryMutation>,
+}
+
+impl NotePanelDraftCheckpoint {
+    fn capture(panel: &NotePanel) -> Self {
+        Self {
+            note: panel.note.clone(),
+            saved_content_baseline: panel.saved_content_baseline.clone(),
+            pending_selection: panel.pending_selection,
+            pending_cursor_position: panel.pending_cursor_position,
+            retained_text_edit_history: panel.retained_text_edit_history.clone(),
+            replacement_undo_boundaries: panel.replacement_undo_boundaries.clone(),
+            replacement_redo_boundaries: panel.replacement_redo_boundaries.clone(),
+            replacement_history_mutation: panel.replacement_history_mutation,
+        }
+    }
+
+    fn restore(self, panel: &mut NotePanel) {
+        panel.note = self.note;
+        panel.saved_content_baseline = self.saved_content_baseline;
+        panel.pending_selection = self.pending_selection;
+        panel.pending_cursor_position = self.pending_cursor_position;
+        panel.retained_text_edit_history = self.retained_text_edit_history;
+        panel.replacement_undo_boundaries = self.replacement_undo_boundaries;
+        panel.replacement_redo_boundaries = self.replacement_redo_boundaries;
+        panel.replacement_history_mutation = self.replacement_history_mutation;
+        panel.note_find.content_changed();
+        panel.note_find_preview = None;
+        panel.pending_find_navigation = None;
+        panel.fast_derived_dirty = true;
+        panel.heavy_recompute_requested = true;
+        panel.heavy_refresh_retry = None;
+    }
+}
+
+enum NotePanelBodyShell<'a> {
+    Window,
+    CentralPanel(&'a mut egui::Ui),
+    Embedded(&'a mut egui::Ui),
 }
 
 #[derive(Clone, Copy)]
 struct PendingNoteToolbarFocusRestore {
-    frame_nr: u64,
-    pass_nr: u64,
+    root_pass: ViewportPassProvenance,
+    host: Option<HostIdentity>,
+    owner_pass: Option<ViewportPassProvenance>,
     editor_id: egui::Id,
 }
 
@@ -1351,6 +1502,16 @@ pub(crate) enum NotePanelEffect {
         origin: NoteMermaidOrigin,
     },
     Export(NoteExportRequest),
+}
+
+pub(crate) struct NotePanelHostCompletion {
+    pub(crate) panel_identity: u64,
+    pub(crate) effect: Option<NotePanelEffect>,
+    pub(crate) closed: bool,
+    pub(crate) show_root: bool,
+    pub(crate) open_note_slugs: Vec<String>,
+    pub(crate) open_image_paths: Vec<PathBuf>,
+    pub(crate) links: Vec<egui::OpenUrl>,
 }
 
 pub(crate) struct NoteExportRequest {
@@ -1642,6 +1803,16 @@ impl NotePanel {
         let mut panel = Self {
             open: true,
             prompt_identity: NEXT_NOTE_PANEL_PROMPT_ID.fetch_add(1, Ordering::Relaxed),
+            host_state: UtilityHostState::docked(),
+            show_root_after_host_change: false,
+            pending_host_frame: None,
+            active_host_pass: None,
+            active_host_layer: None,
+            accepted_host_effect_receipt: None,
+            accepted_host_modal_layer: None,
+            defer_host_actions: false,
+            pending_host_actions: NotePanelPendingHostActions::default(),
+            picker_owner: None,
             activation_handoff_pending: false,
             note,
             saved_content_baseline,
@@ -1780,6 +1951,14 @@ impl NotePanel {
             test_next_markdown_export_path: None,
             #[cfg(test)]
             test_markdown_export_picker_calls: 0,
+            #[cfg(test)]
+            test_host_button_id: None,
+            #[cfg(test)]
+            test_host_button_rect: None,
+            #[cfg(test)]
+            test_host_button_clip_rect: None,
+            #[cfg(test)]
+            test_host_button_enabled: None,
             #[cfg(test)]
             test_markdown_export_feedback_rect: None,
             #[cfg(test)]
@@ -1924,6 +2103,11 @@ impl NotePanel {
     }
 
     fn save_alias_metadata_change(&mut self, app: &mut LauncherApp) {
+        if self.defer_host_actions {
+            self.sync_aliases_from_content();
+            self.pending_host_actions.save_alias_metadata_requested = true;
+            return;
+        }
         self.note_find.content_changed();
         self.note_find_preview = None;
         self.pending_find_navigation = None;
@@ -2406,16 +2590,114 @@ impl NotePanel {
         &self.note.slug
     }
 
+    pub(crate) fn prompt_identity(&self) -> u64 {
+        self.prompt_identity
+    }
+
+    pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        match self.host_state.presentation() {
+            UtilityPresentation::Docked => Some(self.show_query_focus_layer()),
+            UtilityPresentation::Popout => self.host_state.embedded_root_layer(),
+        }
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        (self.open && self.host_state.presentation() == UtilityPresentation::Popout)
+            || self.host_state.bootstrap_pending()
+            || self.pending_host_frame.is_some()
+            || self.pending_root_effect.is_some()
+    }
+
+    pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        if self.host_state.presentation() != UtilityPresentation::Popout
+            || ctx.viewport_id() != egui::ViewportId::ROOT
+            || !ctx.input(|input| input.focused)
+        {
+            return false;
+        }
+        let Some(layer) = self.host_layer_if_root() else {
+            return false;
+        };
+        self.owns_embedded_fallback_layer(ctx, layer)
+    }
+
+    pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_state.request_focus();
+    }
+
+    fn note_prompt_layers(&self) -> [egui::LayerId; 6] {
+        [
+            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("close")),
+            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("save-conflict")),
+            self.custom_table_builder_layer(),
+            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("link")),
+            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("link-new")),
+            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("plain-link-conversion")),
+        ]
+    }
+
+    fn owns_embedded_fallback_layer(
+        &self,
+        ctx: &egui::Context,
+        layer: egui::LayerId,
+    ) -> bool {
+        if ctx.viewport_id() != egui::ViewportId::ROOT || !ctx.input(|input| input.focused) {
+            return false;
+        }
+        let visible_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+        let focused_layer = crate::gui::jump_mode::ui::focused_response_layer(ctx);
+        let own_prompt = self.note_prompt_layers().into_iter().find(|prompt| {
+            visible_layer == Some(*prompt)
+                || ctx.memory(|memory| memory.top_modal_layer()) == Some(*prompt)
+        });
+        let top_modal = ctx.memory(|memory| memory.top_modal_layer());
+        let modal_allowed = top_modal.is_none_or(|modal| modal == layer || Some(modal) == own_prompt);
+        let layer_is_focused = visible_layer == Some(layer)
+            && focused_layer.is_none_or(|focused| focused == layer);
+        modal_allowed && (layer_is_focused || own_prompt.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pop_out(&mut self) {
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_identity(&self) -> (bool, u64) {
+        let identity = self.host_state.identity();
+        (identity.host == UtilityPresentation::Popout, identity.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> (egui::Id, egui::Rect, egui::Rect, bool) {
+        (
+            self.test_host_button_id.expect("host control rendered"),
+            self.test_host_button_rect.expect("host control rendered"),
+            self.test_host_button_clip_rect
+                .expect("host control rendered"),
+            self.test_host_button_enabled
+                .expect("host control rendered"),
+        )
+    }
+
     pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> Option<NotePanelEffect> {
         self.complete_toolbar_focus_restore(ctx);
 
         let Some(staged) = self.pending_root_effect.take() else {
             return None;
         };
-        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == staged.frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == staged.pass_nr.saturating_add(1);
+        let host_retained = staged.host.is_none_or(|host| {
+            self.accepted_host_effect_receipt == Some((host, staged.owner_pass))
+                && staged.owner_pass.is_some_and(|pass| pass.was_retained(ctx))
+        });
+        let retained = staged.root_pass.was_retained(ctx) && host_retained;
         let still_matches = match &staged.effect {
             NotePanelEffect::OpenDiagram { origin, .. } => {
                 self.open
@@ -2454,6 +2736,235 @@ impl NotePanel {
         }
     }
 
+    pub(crate) fn on_host_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+    ) -> NotePanelHostCompletion {
+        let panel_identity = self.prompt_identity;
+        let Some(frame) = self.pending_host_frame.take() else {
+            return NotePanelHostCompletion {
+                panel_identity,
+                effect: self.on_ui_frame_complete(ctx),
+                closed: !self.open,
+                show_root: self.take_show_root_after_host_change(),
+                open_note_slugs: Vec::new(),
+                open_image_paths: Vec::new(),
+                links: Vec::new(),
+            };
+        };
+        let owner_retained = frame.owner_pass_accepted
+            && frame.callback_observed
+            && match (frame.host.host, frame.callback_class, frame.owner_pass) {
+                (UtilityPresentation::Docked, _, None) => {
+                    frame.owner_viewport_id == egui::ViewportId::ROOT
+                }
+                (UtilityPresentation::Popout, egui::ViewportClass::Immediate, Some(pass)) => {
+                    let identity = note_panel_viewport_id(panel_identity);
+                    frame.owner_viewport_id == identity
+                        && pass.viewport_id == identity
+                        && pass.was_retained(ctx)
+                }
+                (UtilityPresentation::Popout, _, Some(pass)) => {
+                    frame.owner_viewport_id == egui::ViewportId::ROOT
+                        && pass.viewport_id == egui::ViewportId::ROOT
+                        && pass.was_retained(ctx)
+                }
+                _ => false,
+            };
+        let retained = frame.root_pass.was_retained(ctx)
+            && frame.host == self.host_state.identity()
+            && owner_retained;
+        if !retained {
+            self.accepted_host_effect_receipt = None;
+            self.accepted_host_modal_layer = None;
+            frame.draft_checkpoint.restore(self);
+            if frame.os_close_requested {
+                ctx.send_viewport_cmd_to(
+                    note_panel_viewport_id(panel_identity),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            let effect = self.on_ui_frame_complete(ctx);
+            return NotePanelHostCompletion {
+                panel_identity,
+                effect,
+                closed: false,
+                show_root: false,
+                open_note_slugs: Vec::new(),
+                open_image_paths: Vec::new(),
+                links: Vec::new(),
+            };
+        }
+
+        self.accepted_host_effect_receipt = Some((frame.host, frame.owner_pass));
+        self.accepted_host_modal_layer = Some((frame.host, frame.owner_modal_layer));
+        self.host_state.complete_bootstrap(
+            frame.host,
+            frame.embedded_root_layer,
+            frame.embedded_root_focused_id,
+        );
+        let native_identity = native_note_panel_identity(frame.host, panel_identity);
+        self.picker_owner = match (frame.host.host, frame.callback_class) {
+            (UtilityPresentation::Popout, egui::ViewportClass::Immediate) => {
+                Some((frame.owner_context.clone(), native_identity))
+            }
+            _ => Some((frame.owner_context.clone(), None)),
+        };
+        if self.host_state.focus_pending() {
+            if frame.callback_class == egui::ViewportClass::Immediate {
+                ctx.send_viewport_cmd_to(
+                    note_panel_viewport_id(panel_identity),
+                    egui::ViewportCommand::Focus,
+                );
+            } else if let Some(layer) = frame.embedded_root_layer {
+                ctx.move_to_top(layer);
+            }
+            self.host_state.complete_focus(frame.host);
+        }
+        if frame.os_close_requested {
+            ctx.send_viewport_cmd_to(
+                note_panel_viewport_id(panel_identity),
+                egui::ViewportCommand::CancelClose,
+            );
+        }
+        if let (Some(identity), Some(viewport_info)) =
+            (native_identity, frame.native_viewport.as_ref())
+            && frame.callback_class == egui::ViewportClass::Immediate
+            && !frame.os_close_requested
+            && frame.actions.host_request != Some(UtilityPresentation::Docked)
+            && !frame.close_requested
+        {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                frame.callback_class,
+                true,
+                &note_panel_viewport_title(panel_identity),
+                identity,
+                viewport_info,
+                egui::Vec2::from(app.note_panel_default_size),
+                Some(egui::vec2(200.0, 150.0)),
+                None,
+            );
+        }
+
+        let effect = self.on_ui_frame_complete(&frame.owner_context);
+        let mut show_root = false;
+        if frame.actions.save_alias_metadata_requested {
+            self.save_alias_metadata_change(app);
+        }
+        if frame.actions.save_and_close_requested {
+            self.pending_close_after_save = true;
+            self.save(app);
+        } else if frame.actions.save_requested {
+            self.save(app);
+        }
+        if let Some(choice) = frame.actions.external_open {
+            self.open_external(app, choice);
+        }
+        if let Some((editor_id, image)) = frame.actions.clipboard_image {
+            match save_note_image_asset(&image) {
+                Ok(filename) => {
+                    let markdown = note_image_markdown(&filename);
+                    self.insert_text_at_cursor_or_selection(
+                        &frame.owner_context,
+                        editor_id,
+                        &markdown,
+                    );
+                }
+                Err(error) => app.report_error(
+                    "clipboard image paste",
+                    format!("could not persist clipboard image asset or PNG: {error}"),
+                ),
+            }
+        }
+        #[cfg(not(test))]
+        if frame.actions.attachment_picker_requested {
+            self.complete_attachment_picker(&frame.owner_context, app);
+        }
+        #[cfg(not(test))]
+        if frame.actions.screenshot_requested {
+            self.complete_screenshot_capture(&frame.owner_context, app);
+        }
+        if frame.actions.close_requested || frame.close_requested || frame.os_close_requested {
+            self.request_close(app);
+        }
+        if frame.actions.discard_requested {
+            self.discard_changes();
+        } else if frame.actions.keep_editing_requested {
+            self.keep_editing();
+        }
+        if let Some(action) = frame.actions.conflict_action {
+            match action {
+                ConflictSaveAction::Overwrite => {
+                    self.save_with_overwrite(app, self.note.clone());
+                }
+                ConflictSaveAction::SaveAsNew => {
+                    let mut candidate = self.note.clone();
+                    candidate.slug.clear();
+                    candidate.path = PathBuf::new();
+                    self.save_with_overwrite(app, candidate);
+                }
+                ConflictSaveAction::Cancel => {
+                    self.overwrite_prompt = false;
+                    if self.pending_close_after_save {
+                        self.keep_editing();
+                    } else {
+                        self.focus_textedit_next_frame = true;
+                    }
+                }
+            }
+        }
+        let mut native_identity = native_identity;
+        if let Some(requested) = frame.actions.host_request
+            && requested != self.host_state.presentation()
+            && effect.is_none()
+        {
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = native_identity.take() {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+                }
+                ctx.send_viewport_cmd_to(
+                    note_panel_viewport_id(panel_identity),
+                    egui::ViewportCommand::Close,
+                );
+            }
+            if self.host_state.transition(requested) {
+                self.accepted_host_effect_receipt = None;
+                self.accepted_host_modal_layer = None;
+                if requested == UtilityPresentation::Docked {
+                    self.show_root_after_host_change = true;
+                    ctx.move_to_top(self.show_query_focus_layer());
+                    show_root = true;
+                } else {
+                    ctx.request_repaint_of(note_panel_viewport_id(panel_identity));
+                }
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        }
+        if !self.open && self.host_state.presentation() == UtilityPresentation::Popout {
+            if let Some(identity) = native_identity {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            }
+            ctx.send_viewport_cmd_to(
+                note_panel_viewport_id(panel_identity),
+                egui::ViewportCommand::Close,
+            );
+            self.host_state.retire_to_docked();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        self.pending_host_actions = NotePanelPendingHostActions::default();
+        NotePanelHostCompletion {
+            panel_identity,
+            effect,
+            closed: !self.open,
+            show_root: show_root || self.take_show_root_after_host_change(),
+            open_note_slugs: frame.actions.open_note_slugs,
+            open_image_paths: frame.actions.open_image_paths,
+            links: frame.actions.links,
+        }
+    }
+
     fn export_snapshot_matches(&self, request: &NoteExportRequest) -> bool {
         self.open
             && self.note.slug == request.note_slug
@@ -2473,11 +2984,7 @@ impl NotePanel {
         if self.query_focus_protected_state_blocks() {
             return Err("Resolve the open Note dialog or decision before exporting.".into());
         }
-        let note_layer = self.show_query_focus_layer();
-        if ctx
-            .memory(|memory| memory.top_modal_layer())
-            .is_some_and(|modal_layer| modal_layer != note_layer)
-        {
+        if self.foreign_modal_blocks(ctx) {
             return Err("Resolve the active dialog before exporting this Note.".into());
         }
         Ok(())
@@ -2532,20 +3039,124 @@ impl NotePanel {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .filter(|stem| !stem.is_empty())
+                .map(str::to_owned)
                 .unwrap_or_else(|| {
                     if self.note.slug.is_empty() {
-                        "note"
+                        "note".to_owned()
                     } else {
-                        &self.note.slug
+                        self.note.slug.clone()
                     }
                 });
-            FileDialog::new()
+            let Some(mut picker) = self.owned_file_dialog() else {
+                return None;
+            };
+            picker
                 .add_filter("Markdown export", &[extension])
                 .set_directory(default_directory)
                 .set_file_name(format!("{stem}.{extension}"))
                 .save_file()
                 .map(|path| ensure_extension(path, extension))
         }
+    }
+
+    #[cfg(not(test))]
+    fn owned_file_dialog(&mut self) -> Option<FileDialog> {
+        let Some((ctx, identity)) = self.picker_owner.as_ref() else {
+            return Some(FileDialog::new());
+        };
+        #[cfg(windows)]
+        {
+            let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+                .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
+            let Some(hwnd) = hwnd else {
+                self.markdown_export_feedback = Some((
+                    true,
+                    "The current Note editor window is not ready to own the file dialog. Focus it and try again.".into(),
+                ));
+                return None;
+            };
+            Some(FileDialog::new().set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (ctx, identity);
+            Some(FileDialog::new())
+        }
+    }
+
+    #[cfg(not(test))]
+    fn complete_attachment_picker(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        let Some(mut picker) = self.owned_file_dialog() else {
+            if let Some((true, message)) = self.markdown_export_feedback.as_ref() {
+                app.report_error("ui operation", message.clone());
+            }
+            return;
+        };
+        let Some(path) = picker
+            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.copy_and_insert_note_image(ctx, app, &path);
+    }
+
+    #[cfg(not(test))]
+    fn complete_screenshot_capture(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        match capture(ScreenshotMode::Region, true) {
+            Ok(path) => {
+                let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                    app.report_error("ui operation", "Screenshot path has no usable filename.");
+                    return;
+                };
+                let destination = assets_dir().join(filename);
+                let result = std::fs::rename(&path, &destination).or_else(|_| {
+                    std::fs::copy(&path, &destination)
+                        .map(|_| std::fs::remove_file(&path).unwrap_or(()))
+                });
+                match result {
+                    Ok(()) => self.insert_note_image_markdown(ctx, filename),
+                    Err(error) => app.report_error(
+                        "ui operation",
+                        format!("Failed to save screenshot: {error}"),
+                    ),
+                }
+            }
+            Err(error) => app.report_error("ui operation", format!("Screenshot failed: {error}")),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn copy_and_insert_note_image(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        path: &Path,
+    ) {
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            app.report_error("ui operation", "Selected image has no usable filename.");
+            return;
+        };
+        let destination = assets_dir().join(filename);
+        match std::fs::copy(path, &destination) {
+            Ok(_) => self.insert_note_image_markdown(ctx, filename),
+            Err(error) => {
+                app.report_error("ui operation", format!("Failed to copy image: {error}"));
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    fn insert_note_image_markdown(
+        &mut self,
+        ctx: &egui::Context,
+        filename: &str,
+    ) {
+        let insert = format!("![{filename}](assets/{filename})");
+        if let Some(editor_id) = self.last_textedit_id {
+            self.insert_text_at_cursor_or_selection(ctx, editor_id, &insert);
+        }
+        self.image_search.clear();
     }
 
     pub(crate) fn export_active_path(&self) -> Option<&Path> {
@@ -2569,8 +3180,9 @@ impl NotePanel {
         };
         self.markdown_export_feedback = None;
         self.pending_root_effect = Some(PendingNoteRootEffect {
-            frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-            pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.active_host_pass.map(|(host, _)| host),
+            owner_pass: self.active_host_pass.map(|(_, pass)| pass),
             effect: NotePanelEffect::Export(request),
         });
     }
@@ -2583,9 +3195,7 @@ impl NotePanel {
         {
             return false;
         }
-        let note_layer = self.show_query_focus_layer();
-        !ctx.memory(|memory| memory.top_modal_layer())
-            .is_some_and(|modal_layer| modal_layer != note_layer)
+        !self.foreign_modal_blocks(ctx)
     }
 
     fn complete_toolbar_focus_restore(&mut self, ctx: &egui::Context) {
@@ -2600,10 +3210,11 @@ impl NotePanel {
             return;
         }
 
-        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == pending.frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == pending.pass_nr.saturating_add(1);
+        let host_retained = pending.host.is_none_or(|host| {
+            self.accepted_host_effect_receipt == Some((host, pending.owner_pass))
+                && pending.owner_pass.is_some_and(|pass| pass.was_retained(ctx))
+        });
+        let retained = pending.root_pass.was_retained(ctx) && host_retained;
         if !retained {
             // The source action has already been applied by the established
             // Note editing path. Keep its focus intent until a retained ROOT
@@ -2615,7 +3226,7 @@ impl NotePanel {
         self.pending_toolbar_focus_restore = None;
         let modal_allows_focus = ctx
             .memory(|memory| memory.top_modal_layer())
-            .is_none_or(|modal| modal == self.show_query_focus_layer());
+            .is_none_or(|modal| modal == self.panel_layer_for_context(ctx));
         let editor_is_available = ctx
             .read_response(pending.editor_id)
             .is_some_and(|response| response.enabled());
@@ -2697,11 +3308,7 @@ impl NotePanel {
         if self.query_focus_protected_state_blocks() {
             return Some("Resolve the open Note dialog or decision before using this Diagram.");
         }
-        let note_layer = self.show_query_focus_layer();
-        if ctx
-            .memory(|memory| memory.top_modal_layer())
-            .is_some_and(|modal_layer| modal_layer != note_layer)
-        {
+        if self.foreign_modal_blocks(ctx) {
             return Some("Resolve the active dialog before using this Diagram.");
         }
         None
@@ -2929,7 +3536,11 @@ impl NotePanel {
     }
 
     pub(crate) fn request_activation_handoff(&mut self) {
-        self.activation_handoff_pending = true;
+        if self.host_state.presentation() == UtilityPresentation::Popout {
+            self.host_state.request_focus();
+        } else {
+            self.activation_handoff_pending = true;
+        }
     }
 
     pub fn note_content(&self) -> &str {
@@ -2981,6 +3592,38 @@ impl NotePanel {
         )
     }
 
+    fn panel_layer_for_context(&self, ctx: &egui::Context) -> egui::LayerId {
+        if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+            egui::LayerId::background()
+        } else {
+            self.active_host_layer
+                .or_else(|| self.host_layer_if_root())
+                .unwrap_or_else(|| self.show_query_focus_layer())
+        }
+    }
+
+    fn foreign_modal_blocks(&self, ctx: &egui::Context) -> bool {
+        if ctx.viewport_id() == note_panel_viewport_id(self.prompt_identity) {
+            return ctx.memory(|memory| memory.top_modal_layer().is_some());
+        }
+        if self.host_state.presentation() == UtilityPresentation::Popout
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+        {
+            if let Some(layer) = self.active_host_layer {
+                return ctx
+                    .memory(|memory| memory.top_modal_layer())
+                    .is_some_and(|modal| modal != layer);
+            }
+            return self
+                .accepted_host_modal_layer
+                .filter(|(host, _)| *host == self.host_state.identity())
+                .is_none_or(|(_, modal)| modal.is_some());
+        }
+        let layer = self.panel_layer_for_context(ctx);
+        ctx.memory(|memory| memory.top_modal_layer())
+            .is_some_and(|modal| modal != layer)
+    }
+
     fn custom_table_builder_layer(&self) -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, self.custom_table_builder_id())
     }
@@ -3000,7 +3643,7 @@ impl NotePanel {
     pub(crate) fn owns_query_focus_layer(&self, ctx: &egui::Context) -> bool {
         self.open
             && crate::gui::jump_mode::ui::focused_response_layer(ctx)
-                == Some(self.show_query_focus_layer())
+                == Some(self.panel_layer_for_context(ctx))
     }
 
     pub(crate) fn find_query(&self) -> &str {
@@ -3053,7 +3696,7 @@ impl NotePanel {
             return false;
         }
 
-        let window_layer = self.show_query_focus_layer();
+        let window_layer = self.panel_layer_for_context(ctx);
         if ctx
             .memory(|memory| memory.top_modal_layer())
             .is_some_and(|modal_layer| modal_layer != window_layer)
@@ -4083,8 +4726,9 @@ impl NotePanel {
             builder.error = None;
         }
         self.pending_root_effect = Some(PendingNoteRootEffect {
-            frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-            pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.active_host_pass.map(|(host, _)| host),
+            owner_pass: self.active_host_pass.map(|(_, pass)| pass),
             effect: NotePanelEffect::InsertCustomTable(PendingCustomTableInsertion {
                 origin,
                 prepared,
@@ -4134,6 +4778,14 @@ impl NotePanel {
     }
 
     fn show_custom_table_builder(&mut self, ctx: &egui::Context) {
+        self.show_custom_table_builder_with_input(ctx, true);
+    }
+
+    fn show_custom_table_builder_with_input(
+        &mut self,
+        ctx: &egui::Context,
+        input_allowed: bool,
+    ) {
         if !self.open || self.custom_table_builder.is_none() {
             return;
         }
@@ -4168,9 +4820,13 @@ impl NotePanel {
             .default_size(default_size)
             .default_pos(default_pos)
             .min_size(egui::vec2(320.0, 280.0))
+            .enabled(input_allowed)
             .open(&mut window_open)
             .show(ctx, |ui| {
-                authorized = !ctx.will_discard() && ui.is_visible() && !ui.is_sizing_pass();
+                authorized = input_allowed
+                    && !ctx.will_discard()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
                 let builder = self
                     .custom_table_builder
                     .as_mut()
@@ -4511,6 +5167,224 @@ impl NotePanel {
         app: &mut LauncherApp,
         observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
+        self.ui_with_note_close_observation_shell(
+            ctx,
+            app,
+            observed_discard,
+            NotePanelBodyShell::Window,
+            true,
+        );
+    }
+
+    pub(super) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        first_ui_pass: bool,
+        root_visible: bool,
+        application_input_allowed: bool,
+        root_input_allowed: bool,
+        mut observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
+    ) {
+        #[cfg(test)]
+        {
+            self.test_host_button_id = None;
+            self.test_host_button_rect = None;
+            self.test_host_button_clip_rect = None;
+            self.test_host_button_enabled = None;
+        }
+        let previous_host_frame = self.pending_host_frame.take();
+        self.pending_host_actions = NotePanelPendingHostActions::default();
+        self.defer_host_actions = true;
+        if !self.open && self.host_state.presentation() == UtilityPresentation::Docked {
+            self.defer_host_actions = false;
+            return;
+        }
+
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let draft_checkpoint = previous_host_frame
+            .filter(|_| !first_ui_pass)
+            .map(|frame| frame.draft_checkpoint)
+            .unwrap_or_else(|| NotePanelDraftCheckpoint::capture(self));
+        let host = self.host_state.identity();
+        let mut owner_context = ctx.clone();
+        let mut owner_viewport_id = egui::ViewportId::ROOT;
+        let mut owner_pass = None;
+        let mut owner_pass_accepted = false;
+        let mut callback_observed = false;
+        let mut callback_class = egui::ViewportClass::Root;
+        let mut native_viewport = None;
+        let mut embedded_root_layer = None;
+        let mut embedded_root_focused_id = None;
+        let mut owner_modal_layer = None;
+        let mut os_close_requested = false;
+        let pass_authorized = first_ui_pass && !ctx.will_discard();
+
+        match host.host {
+            UtilityPresentation::Docked => {
+                callback_observed = true;
+                owner_pass_accepted = pass_authorized;
+                self.active_host_layer = Some(self.show_query_focus_layer());
+                self.ui_with_note_close_observation_shell(
+                    ctx,
+                    app,
+                    observed_discard.as_deref_mut(),
+                    NotePanelBodyShell::Window,
+                    root_visible && application_input_allowed && root_input_allowed,
+                );
+                embedded_root_layer = Some(self.show_query_focus_layer());
+                embedded_root_focused_id = ctx.memory(|memory| memory.focused());
+                owner_modal_layer = ctx.memory(|memory| memory.top_modal_layer());
+            }
+            UtilityPresentation::Popout => {
+                let viewport_id = note_panel_viewport_id(self.prompt_identity);
+                let title = note_panel_viewport_title(self.prompt_identity);
+                ctx.show_viewport_immediate(
+                    viewport_id,
+                    egui::ViewportBuilder::default()
+                        .with_title(title)
+                        .with_inner_size(app.note_panel_default_size)
+                        .with_min_inner_size(egui::vec2(200.0, 150.0))
+                        .with_resizable(true)
+                        .with_visible(true),
+                    |child, class| {
+                        callback_observed = true;
+                        callback_class = class;
+                        let child_ctx = child.ctx().clone();
+                        owner_context = child_ctx.clone();
+                        let independent = class == egui::ViewportClass::Immediate
+                            && child_ctx.viewport_id() == viewport_id;
+                        owner_viewport_id = if independent {
+                            viewport_id
+                        } else {
+                            egui::ViewportId::ROOT
+                        };
+                        let child_pass = ViewportPassProvenance::current(
+                            &child_ctx,
+                            child_ctx.viewport_id(),
+                        );
+                        let accepted = first_ui_pass
+                            && child.current_pass_index() == 0
+                            && !ctx.will_discard()
+                            && !child_ctx.will_discard();
+                        owner_pass_accepted = accepted;
+                        let focused = child_ctx.input(|input| input.focused);
+                        let own_modal_open = child_ctx
+                            .memory(|memory| memory.top_modal_layer())
+                            .is_some();
+                        let fallback_keyboard_owner = !independent
+                            && root_visible
+                            && root_input_allowed
+                            && self.owns_embedded_fallback_layer(&child_ctx, child.layer_id());
+                        let keyboard_input_allowed = application_input_allowed
+                            && focused
+                            && (independent || fallback_keyboard_owner);
+                        let shortcuts_allowed = accepted
+                            && keyboard_input_allowed
+                            && !own_modal_open
+                            && !egui::Popup::is_any_open(&child_ctx);
+                        if shortcuts_allowed && independent {
+                            let find = child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::COMMAND, Key::F)
+                            });
+                            if find {
+                                self.open_find();
+                            } else if self.is_find_open()
+                                && child_ctx.input_mut(|input| {
+                                    input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                                })
+                            {
+                                self.close_find(&child_ctx);
+                            }
+                        }
+                        let keyboard_close = shortcuts_allowed
+                            && child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                                    || input.consume_key(egui::Modifiers::COMMAND, Key::W)
+                            });
+                        if keyboard_close {
+                            self.pending_host_actions.close_requested = true;
+                        }
+                        if independent {
+                            owner_pass = Some(child_pass);
+                            native_viewport = Some(
+                                child.input(|input| input.viewport().clone()),
+                            );
+                            self.active_host_pass = Some((host, child_pass));
+                            self.active_host_layer = Some(egui::LayerId::background());
+                            let native_input_allowed = application_input_allowed
+                                && child_ctx.viewport_id() == viewport_id
+                                && focused
+                                && !keyboard_close
+                                && !child_ctx.will_discard();
+                            self.ui_with_note_close_observation_shell(
+                                &child_ctx,
+                                app,
+                                observed_discard.as_deref_mut(),
+                                NotePanelBodyShell::CentralPanel(child),
+                                native_input_allowed,
+                            );
+                        } else {
+                            owner_pass = Some(child_pass);
+                            self.active_host_pass = Some((host, child_pass));
+                            self.active_host_layer = Some(child.layer_id());
+                            self.ui_with_note_close_observation_shell(
+                                &child_ctx,
+                                app,
+                                observed_discard.as_deref_mut(),
+                                NotePanelBodyShell::Embedded(child),
+                                root_visible
+                                    && application_input_allowed
+                                    && root_input_allowed
+                                    && focused
+                                    && !keyboard_close,
+                            );
+                            embedded_root_layer = Some(child.layer_id());
+                            embedded_root_focused_id =
+                                child_ctx.memory(|memory| memory.focused());
+                        }
+                        owner_modal_layer =
+                            child_ctx.memory(|memory| memory.top_modal_layer());
+                        if independent {
+                            os_close_requested = child
+                                .input(|input| input.viewport().close_requested());
+                        }
+                    },
+                );
+                self.active_host_pass = None;
+            }
+        }
+
+        self.active_host_layer = None;
+        self.defer_host_actions = false;
+        self.pending_host_frame = Some(PendingNotePanelHostFrame {
+            root_pass,
+            host,
+            owner_context,
+            owner_viewport_id,
+            owner_pass,
+            owner_pass_accepted,
+            callback_observed,
+            callback_class,
+            native_viewport,
+            embedded_root_layer,
+            embedded_root_focused_id,
+            owner_modal_layer,
+            close_requested: self.pending_host_actions.close_requested,
+            os_close_requested,
+            draft_checkpoint,
+            actions: std::mem::take(&mut self.pending_host_actions),
+        });
+    }
+
+    fn ui_with_note_close_observation_shell(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
+        shell: NotePanelBodyShell<'_>,
+        input_allowed: bool,
+    ) {
         #[cfg(test)]
         {
             self.test_save_changes_rect = None;
@@ -4540,30 +5414,11 @@ impl NotePanel {
         let scroll_id_source = ("note_scroll", slug.clone());
         let text_id_source = ("note_text", slug);
 
-        let window_response = egui::Window::new(self.note.title.clone())
-            .id(window_id)
-            .resizable(true)
-            .default_size(app.note_panel_default_size)
-            .min_size(egui::vec2(200.0, 150.0))
-            .max_width(max_width)
-            .max_height(max_height)
-            .movable(true)
-            .show_utility(
-                ctx,
-                "note-editor",
-                window_id,
-                Some(&mut open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(app.note_panel_default_size),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::vec2(200.0, 150.0))
-                .with_max_width(max_width)
-                .with_max_height(max_height),
-                |ui| {
+        let panel_body_id = egui::Id::new(("note-panel-body", self.prompt_identity));
+        let title = self.note.title.clone();
+        let default_size = app.note_panel_default_size;
+        let mut draw_panel_body = |ui: &mut egui::Ui| {
+            ui.scope_builder(egui::UiBuilder::new().id(panel_body_id), |ui| {
                     #[cfg(test)]
                     {
                         self.last_ui_sections = NotePanelUiSections::default();
@@ -4622,13 +5477,54 @@ impl NotePanel {
                         scroll_id_source.clone(),
                         text_id_source.clone(),
                     );
-                },
-            );
+                });
+        };
+        let window_response = match shell {
+            NotePanelBodyShell::Window => egui::Window::new(title)
+                .id(window_id)
+                .resizable(true)
+                .default_size(default_size)
+                .min_size(egui::vec2(200.0, 150.0))
+                .max_width(max_width)
+                .max_height(max_height)
+                .movable(true)
+                .enabled(input_allowed)
+                .show_utility(
+                    ctx,
+                    "note-editor",
+                    window_id,
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from(default_size),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(200.0, 150.0))
+                    .with_max_width(max_width)
+                    .with_max_height(max_height),
+                    |ui| draw_panel_body(ui),
+                )
+                .map(|output| output.response),
+            NotePanelBodyShell::CentralPanel(child) => Some(
+                egui::CentralPanel::default()
+                    .show(child, |ui| {
+                        ui.add_enabled_ui(input_allowed, |ui| draw_panel_body(ui));
+                    })
+                    .response,
+            ),
+            NotePanelBodyShell::Embedded(ui) => Some(
+                ui.add_enabled_ui(input_allowed, |ui| draw_panel_body(ui))
+                    .response,
+            ),
+        };
+        drop(draw_panel_body);
         #[cfg(feature = "qa-framebuffer-capture")]
         if let Some(window_response) = window_response.as_ref() {
             self.record_note_replace_control(
                 NoteReplaceControl::NotePanelWindow,
-                &window_response.response,
+                window_response,
             );
         }
 
@@ -4654,7 +5550,7 @@ impl NotePanel {
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
         }
 
-        self.show_custom_table_builder(ctx);
+        self.show_custom_table_builder_with_input(ctx, input_allowed);
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
@@ -4663,8 +5559,10 @@ impl NotePanel {
         if self.link_dialog_open {
             let mut open_link = true;
             egui::Window::new("Insert Link")
+                .id(self.note_prompt_id("link"))
                 .collapsible(false)
                 .resizable(false)
+                .enabled(input_allowed)
                 .open(&mut open_link)
                 .show(ctx, |ui| {
                     ui.label("Text:");
@@ -4691,8 +5589,10 @@ impl NotePanel {
         if self.link_new_dialog_open {
             let mut open_link_new = true;
             egui::Window::new("Link new note")
+                .id(self.note_prompt_id("link-new"))
                 .collapsible(false)
                 .resizable(false)
+                .enabled(input_allowed)
                 .open(&mut open_link_new)
                 .show(ctx, |ui| {
                     widgets::compact_section_heading(ui, "New note name", None);
@@ -4726,8 +5626,10 @@ impl NotePanel {
             let mut convert = false;
             let mut cancel = false;
             egui::Window::new("Convert plain links?")
+                .id(self.note_prompt_id("plain-link-conversion"))
                 .collapsible(false)
                 .resizable(false)
+                .enabled(input_allowed)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut dialog_open)
                 .show(ctx, |ui| {
@@ -4768,10 +5670,19 @@ impl NotePanel {
             }
         }
         if save_now {
-            self.save(app);
+            if self.defer_host_actions {
+                self.pending_host_actions.save_requested = true;
+            } else {
+                self.save(app);
+            }
         }
         if !open {
-            self.request_close(app);
+            if self.defer_host_actions {
+                self.pending_host_actions.close_requested = true;
+                open = true;
+            } else {
+                self.request_close(app);
+            }
         }
 
         if self.discard_unsaved_prompt {
@@ -4783,6 +5694,7 @@ impl NotePanel {
                 .id(self.note_prompt_id("close"))
                 .collapsible(false)
                 .resizable(false)
+                .enabled(input_allowed)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut prompt_open)
                 .show(ctx, |ui| {
@@ -4832,7 +5744,11 @@ impl NotePanel {
                         keep_editing = keep_editing_response.clicked();
                     });
                 });
-            if discard {
+            if self.defer_host_actions {
+                self.pending_host_actions.discard_requested |= discard;
+                self.pending_host_actions.save_and_close_requested |= save_changes;
+                self.pending_host_actions.keep_editing_requested |= keep_editing || !prompt_open;
+            } else if discard {
                 self.discard_changes();
             } else if save_changes {
                 self.pending_close_after_save = true;
@@ -4857,6 +5773,7 @@ impl NotePanel {
                 .id(self.note_prompt_id("save-conflict"))
                 .collapsible(false)
                 .resizable(false)
+                .enabled(input_allowed)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut prompt_open)
                 .show(ctx, |ui| {
@@ -4899,7 +5816,10 @@ impl NotePanel {
                         }
                     });
                 });
-            match selected_action {
+            if self.defer_host_actions {
+                self.pending_host_actions.conflict_action = selected_action;
+            } else {
+                match selected_action {
                 Some(ConflictSaveAction::Overwrite) => {
                     let candidate = self.note.clone();
                     self.save_with_overwrite(app, candidate);
@@ -4927,6 +5847,7 @@ impl NotePanel {
                     }
                 }
                 None => {}
+                }
             }
         }
         self.request_heavy_refresh_retry(ctx);
@@ -4946,6 +5867,26 @@ impl NotePanel {
             // Keep native button labels intact; the wrapping layout moves whole
             // controls to another row when they do not fit.
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            if self.defer_host_actions {
+                let requested = match self.host_state.presentation() {
+                    UtilityPresentation::Docked => UtilityPresentation::Popout,
+                    UtilityPresentation::Popout => UtilityPresentation::Docked,
+                };
+                let response = ui.button(match requested {
+                    UtilityPresentation::Docked => "Dock",
+                    UtilityPresentation::Popout => "Pop Out",
+                });
+                #[cfg(test)]
+                if ui.is_visible() && !ui.is_sizing_pass() {
+                    self.test_host_button_id = Some(response.id);
+                    self.test_host_button_rect = Some(response.rect);
+                    self.test_host_button_clip_rect = Some(ui.clip_rect());
+                    self.test_host_button_enabled = Some(ui.is_enabled());
+                }
+                if response.clicked() {
+                    self.pending_host_actions.host_request = Some(requested);
+                }
+            }
             let save = ui.button("Save");
             let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
             #[cfg(feature = "qa-framebuffer-capture")]
@@ -4970,16 +5911,13 @@ impl NotePanel {
             if open_resp.clicked() {
                 match app.note_external_open {
                     NoteExternalOpen::Powershell => {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Powershell);
+                        self.save_and_open_external(app, NoteExternalOpen::Powershell);
                     }
                     NoteExternalOpen::Notepad => {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Notepad);
+                        self.save_and_open_external(app, NoteExternalOpen::Notepad);
                     }
                     NoteExternalOpen::Wezterm => {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Wezterm);
+                        self.save_and_open_external(app, NoteExternalOpen::Wezterm);
                     }
                     NoteExternalOpen::Neither => {
                         self.show_open_with_menu = true;
@@ -4993,18 +5931,15 @@ impl NotePanel {
                     .open_memory(None)
                     .show(|ui| {
                         if ui.button("Powershell").clicked() {
-                            self.save(app);
-                            self.open_external(app, NoteExternalOpen::Powershell);
+                            self.save_and_open_external(app, NoteExternalOpen::Powershell);
                             close = true;
                         }
                         if ui.button("WezTerm").clicked() {
-                            self.save(app);
-                            self.open_external(app, NoteExternalOpen::Wezterm);
+                            self.save_and_open_external(app, NoteExternalOpen::Wezterm);
                             close = true;
                         }
                         if ui.button("Notepad").clicked() {
-                            self.save(app);
-                            self.open_external(app, NoteExternalOpen::Notepad);
+                            self.save_and_open_external(app, NoteExternalOpen::Notepad);
                             close = true;
                         }
                     })
@@ -5131,6 +6066,16 @@ impl NotePanel {
             }
         }
         save_now
+    }
+
+    fn save_and_open_external(&mut self, app: &mut LauncherApp, choice: NoteExternalOpen) {
+        if self.defer_host_actions {
+            self.pending_host_actions.save_requested = true;
+            self.pending_host_actions.external_open = Some(choice);
+        } else {
+            self.save(app);
+            self.open_external(app, choice);
+        }
     }
 
     fn render_find_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &LauncherApp) {
@@ -5762,6 +6707,12 @@ impl NotePanel {
                     return ClipboardImagePasteOutcome::Handled;
                 }
             };
+            if self.defer_host_actions {
+                ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
+                self.pending_host_actions.clipboard_image = Some((editor_id, image));
+                tracing::debug!("staged clipboard image attachment for retained Note frame");
+                return ClipboardImagePasteOutcome::Handled;
+            }
             let filename = match save(&image) {
                 Ok(filename) => filename,
                 Err(error) => {
@@ -5963,10 +6914,23 @@ impl NotePanel {
             for l in all_links.iter().take(limit) {
                 match l {
                     LinkKind::Wiki(s) => {
-                        let _ = show_wiki_link(ui, app, s);
+                        let (response, actions) = show_wiki_link_actions(ui, s);
+                        let _ = response;
+                        for action in actions {
+                            match action {
+                                WikiLinkAction::OpenNote(slug) if self.defer_host_actions => {
+                                    self.pending_host_actions.open_note_slugs.push(slug);
+                                }
+                                WikiLinkAction::OpenNote(slug) => app.open_note_panel(&slug, None),
+                                WikiLinkAction::Report(message) => {
+                                    app.report_error("ui operation", message);
+                                }
+                            }
+                        }
                     }
                     LinkKind::Url(label, url) => {
-                        let _ = ui.hyperlink_to(label, url);
+                        let response = ui.hyperlink_to(label, url);
+                        self.retain_hyperlink(ui, &response);
                     }
                 }
             }
@@ -5984,6 +6948,31 @@ impl NotePanel {
                 }
             }
         });
+    }
+
+    fn activate_note_reference(&mut self, app: &mut LauncherApp, slug: &str) {
+        if self.defer_host_actions {
+            self.pending_host_actions.open_note_slugs.push(slug.to_owned());
+        } else {
+            app.open_note_panel(slug, None);
+        }
+    }
+
+    fn activate_todo_reference(&mut self, app: &mut LauncherApp, id: &str) {
+        if self.defer_host_actions {
+            self.pending_host_actions.links.push(egui::OpenUrl::same_tab(format!("todo:{id}")));
+        } else {
+            open_todo_reference(app, id);
+        }
+    }
+
+    fn retain_hyperlink(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if self.defer_host_actions
+            && (response.clicked() || response.middle_clicked())
+            && let Some(link) = take_markdown_link(ui)
+        {
+            self.pending_host_actions.links.push(link);
+        }
     }
 
     fn render_backlinks(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
@@ -6025,23 +7014,16 @@ impl NotePanel {
                     let resp = ui.selectable_label(false, &row.title);
                     if resp.clicked() {
                         if let Some(slug) = &row.note_slug {
-                            app.open_note_panel(slug, None);
+                            self.activate_note_reference(app, slug);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos_or_last_good(TODO_FILE);
-                            if let Some((todo_idx, _)) =
-                                todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
-                            {
-                                app.todo_view_dialog.open_edit(todo_idx);
-                            } else {
-                                app.todo_view_dialog.open();
-                            }
+                            self.activate_todo_reference(app, todo_id);
                         }
                     }
                     if resp.has_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         && let Some(slug) = &row.note_slug
                     {
-                        app.open_note_panel(slug, None);
+                        self.activate_note_reference(app, slug);
                     }
                     ui.horizontal_wrapped(|ui| {
                         ui.small(format!("[{}]", row.type_badge));
@@ -6051,16 +7033,9 @@ impl NotePanel {
                     ui.small(&row.snippet);
                     if ui.button("Open").clicked() {
                         if let Some(slug) = &row.note_slug {
-                            app.open_note_panel(slug, None);
+                            self.activate_note_reference(app, slug);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos_or_last_good(TODO_FILE);
-                            if let Some((todo_idx, _)) =
-                                todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
-                            {
-                                app.todo_view_dialog.open_edit(todo_idx);
-                            } else {
-                                app.todo_view_dialog.open();
-                            }
+                            self.activate_todo_reference(app, todo_id);
                         }
                     }
                 });
@@ -6450,8 +7425,9 @@ impl NotePanel {
             Ok(source) => {
                 self.pending_mermaid_origin = Some(origin.clone());
                 self.pending_root_effect = Some(PendingNoteRootEffect {
-                    frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                    pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                    root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                    host: self.active_host_pass.map(|(host, _)| host),
+                    owner_pass: self.active_host_pass.map(|(_, pass)| pass),
                     effect: NotePanelEffect::OpenDiagram {
                         source: source.with_origin(identity),
                         origin,
@@ -6593,7 +7569,11 @@ impl NotePanel {
                 let label = if alt.is_empty() { rel } else { alt };
                 let response = ui.link(label);
                 if response.clicked() {
-                    app.open_image_panel(&full);
+                    if self.defer_host_actions {
+                        self.pending_host_actions.open_image_paths.push(full.clone());
+                    } else {
+                        app.open_image_panel(&full);
+                    }
                 }
                 self.ensure_find_preview_index();
                 let visible_ranges = self
@@ -6637,7 +7617,11 @@ impl NotePanel {
                         .sense(egui::Sense::click()),
                 );
                 if response.clicked() {
-                    app.open_image_panel(&full);
+                    if self.defer_host_actions {
+                        self.pending_host_actions.open_image_paths.push(full.clone());
+                    } else {
+                        app.open_image_panel(&full);
+                    }
                 }
                 if response.hovered() {
                     let scroll = ui.ctx().input(|i| {
@@ -7099,8 +8083,9 @@ impl NotePanel {
         if self.focus_textedit_after_toolbar_action && !self.note_find.is_open() && resp.enabled() {
             self.focus_textedit_after_toolbar_action = false;
             self.pending_toolbar_focus_restore = Some(PendingNoteToolbarFocusRestore {
-                frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                host: self.active_host_pass.map(|(host, _)| host),
+                owner_pass: self.active_host_pass.map(|(_, pass)| pass),
                 editor_id: resp.id,
             });
         } else if resp.enabled()
@@ -7109,8 +8094,9 @@ impl NotePanel {
                 .is_some_and(|pending| pending.editor_id == resp.id)
         {
             self.pending_toolbar_focus_restore = Some(PendingNoteToolbarFocusRestore {
-                frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                host: self.active_host_pass.map(|(host, _)| host),
+                owner_pass: self.active_host_pass.map(|(_, pass)| pass),
                 editor_id: resp.id,
             });
         }
@@ -7411,6 +8397,11 @@ impl NotePanel {
                 ));
             }
             match render_result {
+                Ok(_) if self.defer_host_actions => {
+                    if let Some(link) = take_markdown_link(ui) {
+                        self.pending_host_actions.links.push(link);
+                    }
+                }
                 Ok(_) => handle_markdown_links(ui, app),
                 Err(_) => self.render_preview_fallback(ui, app, fragment),
             }
@@ -7586,7 +8577,7 @@ impl NotePanel {
                 let resp = ui.link(RichText::new(label).font(font.clone()));
                 if resp.clicked() {
                     match resolve_note_query(target) {
-                            NoteTarget::Resolved(slug) => app.open_note_panel(&slug, None),
+                            NoteTarget::Resolved(slug) => self.activate_note_reference(app, &slug),
                             NoteTarget::Ambiguous(slugs) => app.report_error("ui operation", format!(
                                 "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
                                 slugs.join(", ")
@@ -7596,7 +8587,7 @@ impl NotePanel {
                                     "ui operation",
                                     format!("Broken note link: [[{target}]]"),
                                 );
-                                app.open_note_panel(&slugify(target), None);
+                                self.activate_note_reference(app, &slugify(target));
                             }
                         }
                 }
@@ -7616,7 +8607,8 @@ impl NotePanel {
                     if url.starts_with("http://") || url.starts_with("https://") {
                         ui.scope(|ui| {
                             ui.style_mut().override_font_id = Some(font.clone());
-                            ui.hyperlink_to(label, url);
+                            let response = ui.hyperlink_to(label, url);
+                            self.retain_hyperlink(ui, &response);
                         });
                         cursor = url_end + 1;
                         continue;
@@ -7634,7 +8626,7 @@ impl NotePanel {
                     let resp =
                         ui.link(RichText::new(format!("@todo:{todo_id}")).font(font.clone()));
                     if resp.clicked() {
-                        open_todo_reference(app, todo_id);
+                        self.activate_todo_reference(app, todo_id);
                     }
                     cursor += "@todo:".len() + id_len;
                     continue;
@@ -8099,24 +9091,31 @@ impl NotePanel {
 
         ui.menu_button("Insert image", |ui| {
             ui.set_min_width(200.0);
-            if ui.button("Upload...").clicked()
-                && let Some(path) = FileDialog::new()
+            if ui.button("Upload...").clicked() {
+                if self.defer_host_actions {
+                    self.pending_host_actions.attachment_picker_requested = true;
+                } else if let Some(path) = FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
                     .pick_file()
-                && let Some(fname) = path.file_name().and_then(|s| s.to_str())
-            {
-                let dest = assets_dir().join(fname);
-                if let Err(e) = std::fs::copy(&path, &dest) {
-                    app.report_error("ui operation", format!("Failed to copy image: {e}"));
-                } else {
-                    let insert = format!("![{0}](assets/{0})", fname);
-                    self.insert_text_at_cursor_or_selection(ctx, id, &insert);
-                    self.image_search.clear();
-                    ui.close();
+                    && let Some(fname) = path.file_name().and_then(|s| s.to_str())
+                {
+                    let dest = assets_dir().join(fname);
+                    if let Err(e) = std::fs::copy(&path, &dest) {
+                        app.report_error("ui operation", format!("Failed to copy image: {e}"));
+                    } else {
+                        let insert = format!("![{0}](assets/{0})", fname);
+                        self.insert_text_at_cursor_or_selection(ctx, id, &insert);
+                        self.image_search.clear();
+                    }
                 }
+                ui.close();
             }
             if ui.button("Screenshot...").clicked() {
-                match capture(ScreenshotMode::Region, true) {
+                if self.defer_host_actions {
+                    self.pending_host_actions.screenshot_requested = true;
+                    ui.close();
+                } else {
+                    match capture(ScreenshotMode::Region, true) {
                     Ok(path) => {
                         if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
                             let dest = assets_dir().join(fname);
@@ -8138,6 +9137,7 @@ impl NotePanel {
                         }
                     }
                     Err(e) => app.report_error("ui operation", format!("Screenshot failed: {e}")),
+                    }
                 }
             }
             ui.label("Insert image:");
@@ -8413,16 +9413,26 @@ pub fn spawn_external(path: &Path, choice: NoteExternalOpen) -> std::io::Result<
     }
 }
 
-pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
+enum WikiLinkAction {
+    OpenNote(String),
+    Report(String),
+}
+
+fn show_wiki_link_actions(
+    ui: &mut egui::Ui,
+    l: &str,
+) -> (egui::Response, Vec<WikiLinkAction>) {
     let text = format!("[[{l}]]");
     let target = l.split('|').next().unwrap_or(l).trim();
     match resolve_note_query(target) {
         NoteTarget::Resolved(slug) => {
             let resp = ui.link(text);
-            if resp.clicked() {
-                app.open_note_panel(&slug, None);
-            }
-            resp
+            let actions = resp
+                .clicked()
+                .then_some(WikiLinkAction::OpenNote(slug))
+                .into_iter()
+                .collect();
+            (resp, actions)
         }
         NoteTarget::Ambiguous(slugs) => {
             let label = format!("{text} (ambiguous)");
@@ -8430,13 +9440,15 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                 egui::Label::new(egui::RichText::new(label).color(ui.visuals().warn_fg_color))
                     .sense(egui::Sense::click()),
             );
-            if resp.clicked() {
-                app.report_error("ui operation", format!(
+            let actions = if resp.clicked() {
+                vec![WikiLinkAction::Report(format!(
                     "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
                     slugs.join(", ")
-                ));
-            }
-            resp
+                ))]
+            } else {
+                Vec::new()
+            };
+            (resp, actions)
         }
         NoteTarget::Broken => {
             let slug = slugify(target);
@@ -8447,13 +9459,28 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
                 )
                 .sense(egui::Sense::click()),
             );
-            if resp.clicked() {
-                app.report_error("ui operation", format!("Broken note link: [[{target}]]"));
-                app.open_note_panel(&slug, None);
-            }
-            resp
+            let actions = if resp.clicked() {
+                vec![
+                    WikiLinkAction::Report(format!("Broken note link: [[{target}]]")),
+                    WikiLinkAction::OpenNote(slug),
+                ]
+            } else {
+                Vec::new()
+            };
+            (resp, actions)
         }
     }
+}
+
+pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui::Response {
+    let (response, actions) = show_wiki_link_actions(ui, l);
+    for action in actions {
+        match action {
+            WikiLinkAction::OpenNote(slug) => app.open_note_panel(&slug, None),
+            WikiLinkAction::Report(message) => app.report_error("ui operation", message),
+        }
+    }
+    response
 }
 
 fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
@@ -15297,6 +16324,155 @@ mod tests {
         .drop_without_applying_deltas();
     }
 
+    fn hosted_note_panel_frame(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        root_events: Vec<egui::Event>,
+        child_events: Vec<egui::Event>,
+    ) -> NotePanelHostCompletion {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 800.0),
+            )),
+            focused: true,
+            events: root_events,
+            ..Default::default()
+        };
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            super::super::render::with_immediate_viewport_test_events(child_events, || {
+                ctx.run_ui(raw_input, |root_ui| {
+                    let frame_ctx = root_ui.ctx();
+                    panel.ui_with_host(
+                        frame_ctx,
+                        app,
+                        frame_ctx.current_pass_index() == 0,
+                        true,
+                        true,
+                        true,
+                        None,
+                    );
+                })
+                .drop_without_applying_deltas();
+            });
+        });
+        panel.on_host_frame_complete(ctx, app)
+    }
+
+    fn note_panel_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(rect.center()),
+            egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn note_panel_visible_host_buttons_move_the_same_dirty_note_and_discard_rejected_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(note_with_slug("Host lifecycle", "host-lifecycle"));
+        panel.note.content.push_str("\n\nUnsaved text");
+        let original_draft = panel.note.content.clone();
+
+        for _ in 0..3 {
+            hosted_note_panel_frame(&ctx, &mut panel, &mut app, Vec::new(), Vec::new());
+        }
+        let (was_popout, docked_generation) = panel.test_host_identity();
+        assert!(!was_popout);
+        let (_, root_button, root_clip, root_enabled) = panel.test_host_button();
+        assert!(root_enabled, "the docked Pop Out control is enabled");
+        assert!(root_clip.contains_rect(root_button));
+
+        for pressed in [true, false] {
+            hosted_note_panel_frame(
+                &ctx,
+                &mut panel,
+                &mut app,
+                note_panel_pointer_events(root_button, pressed),
+                Vec::new(),
+            );
+        }
+        let (is_popout, popout_generation) = panel.test_host_identity();
+        assert!(is_popout, "an actual docked toolbar click pops the panel out");
+        assert!(popout_generation > docked_generation);
+        assert_eq!(panel.note_content(), original_draft);
+        assert!(panel.has_unsaved_changes());
+
+        for (key, modifiers, find_open) in [
+            (Key::F, windows_command_modifiers(egui::Modifiers::CTRL), true),
+            (Key::Escape, egui::Modifiers::NONE, false),
+        ] {
+            let completion = hosted_note_panel_frame(
+                &ctx,
+                &mut panel,
+                &mut app,
+                Vec::new(),
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+            );
+            assert!(!completion.closed);
+            assert!(!panel.discard_unsaved_prompt);
+            assert_eq!(panel.is_find_open(), find_open);
+        }
+
+        hosted_note_panel_frame(&ctx, &mut panel, &mut app, Vec::new(), Vec::new());
+        let (_, child_button, child_clip, child_enabled) = panel.test_host_button();
+        assert!(child_enabled, "the child viewport owns an enabled Dock control");
+        assert!(child_clip.contains_rect(child_button));
+        let mut dock_completion = None;
+        for pressed in [true, false] {
+            dock_completion = Some(hosted_note_panel_frame(
+                &ctx,
+                &mut panel,
+                &mut app,
+                Vec::new(),
+                note_panel_pointer_events(child_button, pressed),
+            ));
+        }
+        let (is_popout, docked_again_generation) = panel.test_host_identity();
+        assert!(!is_popout, "an actual child toolbar click docks the same panel");
+        assert!(docked_again_generation > popout_generation);
+        assert!(dock_completion.expect("release frame completed").show_root);
+        assert_eq!(panel.note_content(), original_draft);
+        assert!(panel.has_unsaved_changes());
+
+        let discarded_content = panel.note.content.clone();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 800.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw_input, |root_ui| {
+            let frame_ctx = root_ui.ctx();
+            let first_pass = frame_ctx.current_pass_index() == 0;
+            panel.ui_with_host(frame_ctx, &mut app, first_pass, true, true, true, None);
+            if first_pass {
+                panel.note.content.push_str(" rejected pass");
+                frame_ctx.request_discard("NotePanel host pass rollback coverage");
+            }
+        });
+        output.drop_without_applying_deltas();
+        let rejected = panel.on_host_frame_complete(&ctx, &mut app);
+        assert!(!rejected.closed);
+        assert_eq!(panel.note_content(), discarded_content);
+        assert!(panel.has_unsaved_changes());
+    }
+
     fn render_panel_with_events(
         ctx: &egui::Context,
         panel: &mut NotePanel,
@@ -17730,6 +18906,24 @@ More text.
                 classify_markdown_link(url),
                 MarkdownLinkAction::ExternalUrl(url.into())
             );
+        }
+    }
+
+    #[test]
+    fn note_links_raise_the_resolved_docked_target() {
+        let notes = TempNotesDir::new();
+        notes.write_note("target.md", "# Target\nAlias: Shortcut\n\nBody");
+        notes.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, notes.dir.path());
+
+        for (reference, resolved_slug) in [("note://Shortcut", "target"), ("note://new-draft", "")] {
+            assert!(dispatch_note_link(
+                &ctx,
+                &mut app,
+                egui::OpenUrl::same_tab(reference),
+            ));
+            assert_eq!(app.note_panels.last().unwrap().note_slug(), resolved_slug);
         }
     }
 

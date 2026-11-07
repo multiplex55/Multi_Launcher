@@ -58,7 +58,7 @@ impl From<(f32, f32)> for Point {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GestureTracker {
     dir_mode: DirMode,
     threshold_px: f32,

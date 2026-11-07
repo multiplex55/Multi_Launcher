@@ -19,6 +19,16 @@ pub(super) struct PresetState {
     feedback: Option<Result<&'static str, String>>,
 }
 
+/// Mutable preset editor state. The persisted store keeps a single owner.
+pub(super) struct PresetEditorCheckpoint {
+    selected: Option<PresetId>,
+    name: String,
+    include_sample: bool,
+    include_replacement: bool,
+    delete_confirmation: Option<PresetId>,
+    delete_generation: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,6 +627,26 @@ impl PresetState {
             target_generation: 0,
             feedback: None,
         }
+    }
+
+    pub(super) fn checkpoint_editor(&self) -> PresetEditorCheckpoint {
+        PresetEditorCheckpoint {
+            selected: self.selected,
+            name: self.name.clone(),
+            include_sample: self.include_sample,
+            include_replacement: self.include_replacement,
+            delete_confirmation: self.delete_confirmation,
+            delete_generation: self.delete_generation,
+        }
+    }
+
+    pub(super) fn restore_editor(&mut self, checkpoint: PresetEditorCheckpoint) {
+        self.selected = checkpoint.selected;
+        self.name = checkpoint.name;
+        self.include_sample = checkpoint.include_sample;
+        self.include_replacement = checkpoint.include_replacement;
+        self.delete_confirmation = checkpoint.delete_confirmation;
+        self.delete_generation = checkpoint.delete_generation;
     }
 
     fn select(&mut self, id: PresetId) {

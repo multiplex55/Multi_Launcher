@@ -141,6 +141,9 @@ impl HelpWindow {
                             }
                             ui.label("Settings > Paste Sequences, also reached through Playback Settings in the editor, configures playback controls and optional Escape cancellation. Cancel Run or configured Cancel ends early; Esc also cancels when enabled and available. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
                             ui.separator();
+                            ui.label(egui::RichText::new("Explorer Tabs").strong());
+                            ui.label("Search explorertabs to manage saved folder lists or run a saved list. Commands explorertabs:open, explorertabs:run:<id>, and explorertabs:cancel can also be assigned to actions or shortcuts. Runs use the saved list and report verified, unverified, and remaining folders.");
+                            ui.separator();
                             ui.label(egui::RichText::new("Reusable macro parameters").strong());
                             ui.label(
                                 "In the Signature Editor, String parameters can be Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a path, and selecting a choice fills its value; neither runs the macro. Review the values and choose Run separately. Canceled or unavailable file and folder choosers leave the path editable.",

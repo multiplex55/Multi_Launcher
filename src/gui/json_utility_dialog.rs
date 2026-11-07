@@ -244,7 +244,7 @@ impl JsonTreeWorker {
                     let published = state.publish_if_current(completion);
                     drop(state);
                     if published {
-                        repaint_ctx.request_repaint();
+                        repaint_ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                     wake.notify_one();
                 }
@@ -1052,9 +1052,39 @@ impl JsonEditorState {
     }
 }
 
+#[derive(Default)]
+pub(super) struct JsonUtilityHostActions {
+    pub(super) host_request: Option<super::utility_host::UtilityPresentation>,
+    pub(super) close: bool,
+    session_epoch: u64,
+    generation: u64,
+    source_changed: bool,
+    search_changed: bool,
+    focus_applied: bool,
+    scroll_revealed: Option<JsonTreeNodeId>,
+    top_action: Option<JsonUtilityAction>,
+    tree_copy: Option<(TreeCopyAction, JsonTreeNodeId)>,
+    copies: Vec<String>,
+    #[cfg(test)]
+    pub(super) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+impl JsonUtilityHostActions {
+    pub(crate) fn needs_completion(&self) -> bool {
+        self.close
+            || self.source_changed
+            || self.search_changed
+            || self.focus_applied
+            || self.scroll_revealed.is_some()
+            || self.top_action.is_some()
+            || self.tree_copy.is_some()
+            || !self.copies.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct JsonUtilityDialogState {
     pub open: bool,
+    host_session_epoch: u64,
     pub intent: JsonUtilityIntent,
     editor: JsonEditorState,
     focus_editor: bool,
@@ -1066,10 +1096,96 @@ pub struct JsonUtilityDialogState {
     rendered_tree_rows: usize,
 }
 
+/// Reversible interaction fields; the worker and virtualized projection stay live.
+pub(crate) struct JsonUtilityInteractionCheckpoint {
+    session_epoch: u64,
+    generation: u64,
+    snapshot: Option<Arc<JsonTreeSnapshot>>,
+    text: String,
+    view: JsonUtilityView,
+    selected: Option<JsonTreeNodeId>,
+    expanded: HashSet<JsonTreeNodeId>,
+    target_revision: u64,
+    pending_scroll_to: Option<JsonTreeNodeId>,
+    search_query: String,
+    search_revision: u64,
+    search_requested: Option<(u64, u64)>,
+    search_result_generation: Option<u64>,
+    search_fields: JsonSearchFields,
+    active_match: Option<usize>,
+    focus_editor: bool,
+    target_generation: u64,
+    observed_target_map_state: Option<(u64, u64, u64, JsonUtilityView)>,
+}
+impl JsonUtilityInteractionCheckpoint {
+    pub(crate) fn capture(state: &JsonUtilityDialogState) -> Self {
+        let tree = &state.editor.tree;
+        Self {
+            session_epoch: state.host_session_epoch,
+            generation: state.editor.generation,
+            snapshot: tree.snapshot.clone(),
+            text: state.editor.text.clone(),
+            view: tree.view,
+            selected: tree.selected,
+            expanded: tree.expanded.clone(),
+            target_revision: tree.target_revision,
+            pending_scroll_to: tree.pending_scroll_to,
+            search_query: tree.search.query.clone(),
+            search_revision: tree.search.revision,
+            search_requested: tree.search.requested,
+            search_result_generation: tree.search.result_generation,
+            search_fields: tree.search.fields,
+            active_match: tree.search.active_match,
+            focus_editor: state.focus_editor,
+            target_generation: state.jump_mode_target_generation,
+            observed_target_map_state: state.observed_target_map_state,
+        }
+    }
+    pub(crate) fn restore(self, state: &mut JsonUtilityDialogState) {
+        let same_snapshot = match (&self.snapshot, &state.editor.tree.snapshot) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if state.host_session_epoch != self.session_epoch
+            || state.editor.generation != self.generation
+            || !same_snapshot
+            || state.editor.tree.search.revision != self.search_revision
+            || state.editor.tree.search.requested != self.search_requested
+            || state.editor.tree.search.result_generation != self.search_result_generation
+        {
+            return;
+        }
+        state.editor.text = self.text;
+        let tree = &mut state.editor.tree;
+        tree.view = self.view;
+        if tree.expanded != self.expanded {
+            tree.expanded = self.expanded;
+            tree.rebuild_visible_rows();
+        }
+        if let Some(selected) = self.selected {
+            tree.select(selected);
+        } else {
+            tree.selected = None;
+            tree.selected_path = None;
+            tree.selected_details = None;
+        }
+        tree.target_revision = self.target_revision;
+        tree.pending_scroll_to = self.pending_scroll_to;
+        tree.search.query = self.search_query;
+        tree.search.fields = self.search_fields;
+        tree.search.active_match = self.active_match;
+        state.focus_editor = self.focus_editor;
+        state.jump_mode_target_generation = self.target_generation;
+        state.observed_target_map_state = self.observed_target_map_state;
+    }
+}
+
 impl Default for JsonUtilityDialogState {
     fn default() -> Self {
         Self {
             open: false,
+            host_session_epoch: 0,
             intent: JsonUtilityIntent::General,
             editor: JsonEditorState::default(),
             focus_editor: false,
@@ -1093,6 +1209,9 @@ impl JsonUtilityDialogState {
         intent: JsonUtilityIntent,
         clipboard: &impl ClipboardBackend,
     ) {
+        if !self.open {
+            self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
+        }
         self.intent = intent;
         self.editor.initialize(clipboard);
         self.focus_editor = true;
@@ -1100,6 +1219,10 @@ impl JsonUtilityDialogState {
     }
 
     pub(crate) fn reopen_existing(&mut self) {
+        if self.open {
+            return;
+        }
+        self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
         self.open = true;
         self.editor.queue_current_text_if_needed();
     }
@@ -1121,24 +1244,6 @@ impl JsonUtilityDialogState {
         );
     }
 
-    pub(crate) fn show_with_jump_mode(
-        &mut self,
-        ctx: &egui::Context,
-        form_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
-        dialog_instance: Option<u64>,
-        native_ui_owner: bool,
-        first_ui_pass: bool,
-    ) {
-        self.show_with_jump_mode_and_clipboard(
-            ctx,
-            form_scope,
-            dialog_instance,
-            native_ui_owner,
-            first_ui_pass,
-            &ArboardClipboardBackend,
-        );
-    }
-
     fn show_with_jump_mode_and_clipboard(
         &mut self,
         ctx: &egui::Context,
@@ -1152,7 +1257,95 @@ impl JsonUtilityDialogState {
             return;
         }
         self.editor.service_projection(ctx);
-        let editor_generation_before_ui = self.editor.generation;
+        let actions = self.render_inner(
+            ctx,
+            form_scope,
+            dialog_instance,
+            native_ui_owner,
+            first_ui_pass,
+            false,
+            None,
+            None,
+        );
+        self.complete_host_actions_with_clipboard(ctx, actions, clipboard);
+        if self.open {
+            self.editor.service_projection(ctx);
+        }
+    }
+
+    pub(crate) fn host_session_epoch(&self) -> u64 {
+        self.host_session_epoch
+    }
+
+    pub(crate) fn poll_host_background(&mut self, root_ctx: &egui::Context) -> bool {
+        if !self.open {
+            return false;
+        }
+        let before = (
+            self.editor.generation,
+            self.editor.tree.snapshot_generation,
+            self.editor.tree.search.result_generation,
+            self.editor.clipboard_load_generation,
+            self.editor.tree.search.requested,
+            self.editor.tree_worker_error.clone(),
+        );
+        self.editor.service_projection(root_ctx);
+        before
+            != (
+                self.editor.generation,
+                self.editor.tree.snapshot_generation,
+                self.editor.tree.search.result_generation,
+                self.editor.clipboard_load_generation,
+                self.editor.tree.search.requested,
+                self.editor.tree_worker_error.clone(),
+            )
+    }
+
+    pub(super) fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        form_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        dialog_instance: Option<u64>,
+        owner_current: bool,
+        first: bool,
+        pinned: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> JsonUtilityHostActions {
+        self.render_inner(
+            ctx,
+            form_scope,
+            dialog_instance,
+            owner_current,
+            first,
+            pinned,
+            child_ui,
+            Some(presentation),
+        )
+    }
+
+    fn render_inner(
+        &mut self,
+        ctx: &egui::Context,
+        form_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        dialog_instance: Option<u64>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        pinned: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> JsonUtilityHostActions {
+        let mut actions = JsonUtilityHostActions {
+            session_epoch: self.host_session_epoch,
+            generation: self.editor.generation,
+            ..Default::default()
+        };
+        if !self.open {
+            return actions;
+        }
+        let copy_start = presentation
+            .is_some()
+            .then(|| ctx.output(|output| output.commands.len()));
         let tree_target_generation = self.observe_tree_target_generation();
         let tree_scope = form_scope.zip(dialog_instance).map(|(scope, instance)| {
             scope.child_namespace("tree").with_surface(
@@ -1180,259 +1373,369 @@ impl JsonUtilityDialogState {
         let mut form_visual_order = 0;
         let mut tree_visual_order = 0;
         let mut authorized_visible_pass = false;
-        egui::Window::new("JSON Utility")
-            .id(egui::Id::new("json_utility_dialog"))
-            .collapsible(false)
-            .resizable(true)
-            .default_size((700.0, 480.0))
-            .min_size((340.0, 220.0))
-            .show_utility(
-                ctx,
-                "json-utility",
-                egui::Id::new("JSON Utility"),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from((700.0, 480.0)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::Vec2::from((340.0, 220.0))),
-                |ui| {
-                    let committing_ui =
-                        native_ui_owner && first_ui_pass && ui.is_visible() && !ui.is_sizing_pass();
-                    authorized_visible_pass |= committing_ui;
-                    ui.add_enabled_ui(native_ui_owner, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let actions = if self.intent == JsonUtilityIntent::Minify {
-                                [("Minify", Transform::Minify), ("Format", Transform::Format)]
-                            } else {
-                                [("Format", Transform::Format), ("Minify", Transform::Minify)]
-                            };
-                            for (label, transform) in actions {
-                                let response = ui.add_enabled(
-                                    !self.editor.is_loading_clipboard(),
-                                    egui::Button::new(label),
-                                );
-                                let identity = match transform {
-                                    Transform::Format => "action/format",
-                                    Transform::Minify => "action/minify",
-                                };
-                                let target_label = match transform {
-                                    Transform::Format => "Format JSON",
-                                    Transform::Minify => "Minify JSON",
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let committing_ui =
+                native_ui_owner && first_ui_pass && ui.is_visible() && !ui.is_sizing_pass();
+            authorized_visible_pass |= committing_ui;
+            ui.add_enabled_ui(native_ui_owner, |ui| {
+                if let Some(current) = presentation {
+                    let (response, requested) = super::utility_host::presentation_button(
+                        ui,
+                        current,
+                        native_ui_owner && ui.is_visible() && !ui.is_sizing_pass(),
+                    );
+                    let _ = register_json_utility_target(
+                        form_scope,
+                        ui,
+                        &response,
+                        "host",
+                        if current == super::utility_host::UtilityPresentation::Docked {
+                            "Pop Out"
+                        } else {
+                            "Dock"
+                        },
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut form_visual_order,
+                    );
+                    #[cfg(test)]
+                    {
+                        actions.host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
+                    }
+                    if response.clicked() && committing_ui && !ctx.will_discard() {
+                        actions.host_request = Some(requested);
+                    }
+                }
+                ui.horizontal_wrapped(|ui| {
+                    let actions = if self.intent == JsonUtilityIntent::Minify {
+                        [("Minify", Transform::Minify), ("Format", Transform::Format)]
+                    } else {
+                        [("Format", Transform::Format), ("Minify", Transform::Minify)]
+                    };
+                    for (label, transform) in actions {
+                        let response = ui.add_enabled(
+                            !self.editor.is_loading_clipboard(),
+                            egui::Button::new(label),
+                        );
+                        let identity = match transform {
+                            Transform::Format => "action/format",
+                            Transform::Minify => "action/minify",
+                        };
+                        let target_label = match transform {
+                            Transform::Format => "Format JSON",
+                            Transform::Minify => "Minify JSON",
+                        };
+                        let _ = register_json_utility_target(
+                            document_action_scope.as_ref(),
+                            ui,
+                            &response,
+                            identity,
+                            target_label,
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut form_visual_order,
+                        );
+                        if response.clicked() && committing_ui {
+                            top_action = Some(JsonUtilityAction::Transform(transform));
+                        }
+                    }
+                    let response = ui.add_enabled(
+                        !self.editor.is_loading_clipboard(),
+                        egui::Button::new("Copy Result"),
+                    );
+                    let _ = register_json_utility_target(
+                        document_action_scope.as_ref(),
+                        ui,
+                        &response,
+                        "action/copy-result",
+                        "Copy Result",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut form_visual_order,
+                    );
+                    if response.clicked() && committing_ui {
+                        top_action = Some(JsonUtilityAction::CopyResult);
+                    }
+
+                    let response = ui.button("Paste from Clipboard");
+                    let _ = register_json_utility_target(
+                        form_scope,
+                        ui,
+                        &response,
+                        "action/paste-clipboard",
+                        "Paste from Clipboard",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut form_visual_order,
+                    );
+                    if response.clicked() && committing_ui {
+                        top_action = Some(JsonUtilityAction::PasteClipboard);
+                    }
+
+                    let response = ui.button("Clear");
+                    let _ = register_json_utility_target(
+                        form_scope,
+                        ui,
+                        &response,
+                        "action/clear",
+                        "Clear JSON",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut form_visual_order,
+                    );
+                    if response.clicked() && committing_ui {
+                        top_action = Some(JsonUtilityAction::Clear);
+                    }
+                });
+                if let Some(error) = &self.editor.parse_error {
+                    ui.colored_label(ui.visuals().error_fg_color, &error.message);
+                } else if let Some(error) = &self.editor.tree_worker_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                } else if let Some(feedback) = &self.editor.feedback {
+                    match feedback {
+                        Ok(message) => {
+                            ui.label(message);
+                        }
+                        Err(message) => {
+                            ui.colored_label(ui.visuals().error_fg_color, message);
+                        }
+                    }
+                } else if self.editor.is_loading_clipboard() {
+                    ui.weak("Checking clipboard JSON…");
+                } else {
+                    ui.weak("Strict JSON · Copy Result writes only when requested");
+                }
+
+                ui.horizontal(|ui| {
+                    let text_response =
+                        ui.selectable_value(&mut view_after_input, JsonUtilityView::Text, "Text");
+                    let _ = register_json_utility_target(
+                        form_scope,
+                        ui,
+                        &text_response,
+                        "view/text",
+                        "Text view",
+                        crate::gui::jump_mode::TargetKind::Tab,
+                        &mut form_visual_order,
+                    );
+                    let tree_response =
+                        ui.selectable_value(&mut view_after_input, JsonUtilityView::Tree, "Tree");
+                    let _ = register_json_utility_target(
+                        form_scope,
+                        ui,
+                        &tree_response,
+                        "view/tree",
+                        "Tree view",
+                        crate::gui::jump_mode::TargetKind::Tab,
+                        &mut form_visual_order,
+                    );
+                });
+                if committing_ui {
+                    self.editor.tree.view = view_after_input;
+                } else {
+                    view_after_input = self.editor.tree.view;
+                }
+                ui.separator();
+                match view_after_input {
+                    JsonUtilityView::Text => {
+                        let editor_size = ui.available_size();
+                        egui::ScrollArea::both()
+                            .id_salt("json_utility_editor_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let response = if committing_ui {
+                                    ui.add_sized(
+                                        editor_size,
+                                        egui::TextEdit::multiline(&mut self.editor.text)
+                                            .id(egui::Id::new("json_utility_editor"))
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(12)
+                                            .hint_text("Paste or type JSON here"),
+                                    )
+                                } else {
+                                    let mut source_shadow = self.editor.text.clone();
+                                    ui.add_sized(
+                                        editor_size,
+                                        egui::TextEdit::multiline(&mut source_shadow)
+                                            .id(egui::Id::new("json_utility_editor"))
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(12)
+                                            .hint_text("Paste or type JSON here"),
+                                    )
                                 };
                                 let _ = register_json_utility_target(
-                                    document_action_scope.as_ref(),
+                                    form_scope,
                                     ui,
                                     &response,
-                                    identity,
-                                    target_label,
-                                    crate::gui::jump_mode::TargetKind::Button,
+                                    "form/source",
+                                    "JSON source",
+                                    crate::gui::jump_mode::TargetKind::TextEntry,
                                     &mut form_visual_order,
                                 );
-                                if response.clicked() && committing_ui {
-                                    top_action = Some(JsonUtilityAction::Transform(transform));
+                                if self.focus_editor && committing_ui {
+                                    response.request_focus();
+                                    actions.focus_applied = true;
                                 }
-                            }
-                            let response = ui.add_enabled(
-                                !self.editor.is_loading_clipboard(),
-                                egui::Button::new("Copy Result"),
-                            );
-                            let _ = register_json_utility_target(
-                                document_action_scope.as_ref(),
-                                ui,
-                                &response,
-                                "action/copy-result",
-                                "Copy Result",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut form_visual_order,
-                            );
-                            if response.clicked() && committing_ui {
-                                top_action = Some(JsonUtilityAction::CopyResult);
-                            }
-
-                            let response = ui.button("Paste from Clipboard");
-                            let _ = register_json_utility_target(
-                                form_scope,
-                                ui,
-                                &response,
-                                "action/paste-clipboard",
-                                "Paste from Clipboard",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut form_visual_order,
-                            );
-                            if response.clicked() && committing_ui {
-                                top_action = Some(JsonUtilityAction::PasteClipboard);
-                            }
-
-                            let response = ui.button("Clear");
-                            let _ = register_json_utility_target(
-                                form_scope,
-                                ui,
-                                &response,
-                                "action/clear",
-                                "Clear JSON",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut form_visual_order,
-                            );
-                            if response.clicked() && committing_ui {
-                                top_action = Some(JsonUtilityAction::Clear);
-                            }
-                        });
-                        if let Some(error) = &self.editor.parse_error {
-                            ui.colored_label(ui.visuals().error_fg_color, &error.message);
-                        } else if let Some(error) = &self.editor.tree_worker_error {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
-                        } else if let Some(feedback) = &self.editor.feedback {
-                            match feedback {
-                                Ok(message) => {
-                                    ui.label(message);
-                                }
-                                Err(message) => {
-                                    ui.colored_label(ui.visuals().error_fg_color, message);
-                                }
-                            }
-                        } else if self.editor.is_loading_clipboard() {
-                            ui.weak("Checking clipboard JSON…");
-                        } else {
-                            ui.weak("Strict JSON · Copy Result writes only when requested");
-                        }
-
-                        ui.horizontal(|ui| {
-                            let text_response = ui.selectable_value(
-                                &mut view_after_input,
-                                JsonUtilityView::Text,
-                                "Text",
-                            );
-                            let _ = register_json_utility_target(
-                                form_scope,
-                                ui,
-                                &text_response,
-                                "view/text",
-                                "Text view",
-                                crate::gui::jump_mode::TargetKind::Tab,
-                                &mut form_visual_order,
-                            );
-                            let tree_response = ui.selectable_value(
-                                &mut view_after_input,
-                                JsonUtilityView::Tree,
-                                "Tree",
-                            );
-                            let _ = register_json_utility_target(
-                                form_scope,
-                                ui,
-                                &tree_response,
-                                "view/tree",
-                                "Tree view",
-                                crate::gui::jump_mode::TargetKind::Tab,
-                                &mut form_visual_order,
-                            );
-                        });
-                        if committing_ui {
-                            self.editor.tree.view = view_after_input;
-                        } else {
-                            view_after_input = self.editor.tree.view;
-                        }
-                        ui.separator();
-                        match view_after_input {
-                            JsonUtilityView::Text => {
-                                let editor_size = ui.available_size();
-                                egui::ScrollArea::both()
-                                    .id_salt("json_utility_editor_scroll")
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        let response = if committing_ui {
-                                            ui.add_sized(
-                                                editor_size,
-                                                egui::TextEdit::multiline(&mut self.editor.text)
-                                                    .id(egui::Id::new("json_utility_editor"))
-                                                    .font(egui::TextStyle::Monospace)
-                                                    .desired_width(f32::INFINITY)
-                                                    .desired_rows(12)
-                                                    .hint_text("Paste or type JSON here"),
-                                            )
-                                        } else {
-                                            let mut source_shadow = self.editor.text.clone();
-                                            ui.add_sized(
-                                                editor_size,
-                                                egui::TextEdit::multiline(&mut source_shadow)
-                                                    .id(egui::Id::new("json_utility_editor"))
-                                                    .font(egui::TextStyle::Monospace)
-                                                    .desired_width(f32::INFINITY)
-                                                    .desired_rows(12)
-                                                    .hint_text("Paste or type JSON here"),
-                                            )
-                                        };
-                                        let _ = register_json_utility_target(
-                                            form_scope,
-                                            ui,
-                                            &response,
-                                            "form/source",
-                                            "JSON source",
-                                            crate::gui::jump_mode::TargetKind::TextEntry,
-                                            &mut form_visual_order,
-                                        );
-                                        if self.focus_editor && native_ui_owner {
-                                            response.request_focus();
-                                            self.focus_editor = false;
-                                        }
-                                        source_changed |= committing_ui && response.changed();
-                                    });
-                            }
-                            JsonUtilityView::Tree => self.show_tree(
-                                ui,
-                                form_scope,
-                                tree_scope.as_ref(),
-                                tree_navigation_scope.as_ref(),
-                                clipboard,
-                                committing_ui,
-                                &mut form_visual_order,
-                                &mut tree_visual_order,
-                            ),
-                        }
-                    });
-                },
-            );
-
-        if authorized_visible_pass && !window_open {
-            self.close();
-            if let Some(scope) = form_scope {
-                scope.discard_registered_targets();
-            }
-        } else if authorized_visible_pass {
-            self.open = true;
-        }
-        if authorized_visible_pass && source_changed {
-            self.editor.source_edited();
-        }
-        if authorized_visible_pass {
-            match top_action {
-                Some(JsonUtilityAction::Transform(transform)) => self.editor.transform(transform),
-                Some(JsonUtilityAction::CopyResult) => self.editor.copy(clipboard),
-                Some(JsonUtilityAction::PasteClipboard) => self.editor.reload(clipboard),
-                Some(JsonUtilityAction::Clear) => {
-                    self.editor.clear();
-                    self.focus_editor = true;
+                                source_changed |= committing_ui && response.changed();
+                            });
+                    }
+                    JsonUtilityView::Tree => self.show_tree(
+                        ui,
+                        form_scope,
+                        tree_scope.as_ref(),
+                        tree_navigation_scope.as_ref(),
+                        &mut actions,
+                        committing_ui,
+                        &mut form_visual_order,
+                        &mut tree_visual_order,
+                    ),
                 }
-                None => {}
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw_body(ui);
+        } else {
+            egui::Window::new("JSON Utility")
+                .id(egui::Id::new("json_utility_dialog"))
+                .collapsible(false)
+                .resizable(true)
+                .default_size((700.0, 480.0))
+                .min_size((340.0, 220.0))
+                .show_utility(
+                    ctx,
+                    "json-utility",
+                    egui::Id::new("JSON Utility"),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from((700.0, 480.0)),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::Vec2::from((340.0, 220.0))),
+                    draw_body,
+                );
+        }
+
+        actions.close = authorized_visible_pass && !window_open && !pinned;
+        actions.source_changed = authorized_visible_pass && source_changed;
+        actions.top_action = if authorized_visible_pass {
+            top_action
+        } else {
+            None
+        };
+        if let Some(start) = copy_start {
+            let copies = ctx.output_mut(|output| {
+                let mut copies = Vec::new();
+                for command in output.commands.split_off(start) {
+                    match command {
+                        egui::OutputCommand::CopyText(text) => copies.push(text),
+                        other => output.commands.push(other),
+                    }
+                }
+                copies
+            });
+            if authorized_visible_pass {
+                actions.copies = copies;
             }
         }
-        if self.open {
-            self.editor.service_projection(ctx);
-        }
+        let source_invalidated = actions.source_changed
+            || matches!(
+                actions.top_action,
+                Some(
+                    JsonUtilityAction::Transform(_)
+                        | JsonUtilityAction::PasteClipboard
+                        | JsonUtilityAction::Clear
+                )
+            );
         let current_tree_target_generation = self.observe_tree_target_generation();
-        if current_tree_target_generation != tree_target_generation
+        if (source_invalidated
+            || actions.search_changed
+            || current_tree_target_generation != tree_target_generation)
             && let Some(scope) = tree_scope.as_ref()
         {
             scope.discard_registered_namespace();
         }
-        if self.editor.generation != editor_generation_before_ui
-            && let Some(scope) = document_action_scope.as_ref()
+        if (source_invalidated || actions.search_changed)
+            && let Some(scope) = tree_navigation_scope.as_ref()
         {
             scope.discard_registered_namespace();
         }
+        if source_invalidated && let Some(scope) = document_action_scope.as_ref() {
+            scope.discard_registered_namespace();
+        }
+        actions
+    }
+
+    pub(super) fn complete_host_actions(
+        &mut self,
+        ctx: &egui::Context,
+        actions: JsonUtilityHostActions,
+    ) -> bool {
+        self.complete_host_actions_with_clipboard(ctx, actions, &ArboardClipboardBackend)
+    }
+    pub(super) fn complete_host_actions_with_clipboard(
+        &mut self,
+        ctx: &egui::Context,
+        actions: JsonUtilityHostActions,
+        clipboard: &impl ClipboardBackend,
+    ) -> bool {
+        if !self.open
+            || self.host_session_epoch != actions.session_epoch
+            || self.editor.generation != actions.generation
+        {
+            return false;
+        }
+        for text in actions.copies {
+            if let Err(error) = clipboard.write_text(&text) {
+                self.editor.feedback = Some(Err(format!("Could not copy JSON: {error}")));
+            }
+        }
+        if actions.close {
+            self.close();
+            return true;
+        }
+        if actions.focus_applied {
+            self.focus_editor = false;
+        }
+        if actions.scroll_revealed.is_some()
+            && self.editor.tree.pending_scroll_to == actions.scroll_revealed
+        {
+            self.editor.tree.pending_scroll_to = None;
+        }
+        if actions.source_changed {
+            self.editor.source_edited();
+        } else if actions.search_changed {
+            self.editor.tree.search.invalidate_results();
+        }
+        if let Some(action) = actions.top_action {
+            match action {
+                JsonUtilityAction::Transform(transform) => self.editor.transform(transform),
+                JsonUtilityAction::CopyResult => self.editor.copy(clipboard),
+                JsonUtilityAction::PasteClipboard => self.editor.reload(clipboard),
+                JsonUtilityAction::Clear => {
+                    self.editor.clear();
+                    self.focus_editor = true;
+                }
+            }
+        }
+        if let Some((action, selected)) = actions.tree_copy
+            && self.editor.generation == actions.generation
+            && self.editor.tree.selected == Some(selected)
+        {
+            match action {
+                TreeCopyAction::Value => self.editor.copy_tree_value(clipboard, false),
+                TreeCopyAction::Subtree => self.editor.copy_tree_value(clipboard, true),
+                TreeCopyAction::Path => self.editor.copy_tree_path(clipboard),
+            }
+        }
+        if actions.source_changed
+            || actions.search_changed
+            || actions.top_action.is_some()
+            || actions.tree_copy.is_some()
+        {
+            ctx.request_repaint();
+        }
+        false
     }
 
     fn observe_tree_target_generation(&mut self) -> crate::gui::jump_mode::TargetGeneration {
@@ -1455,7 +1758,7 @@ impl JsonUtilityDialogState {
         form_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         tree_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         tree_navigation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
-        clipboard: &impl ClipboardBackend,
+        actions: &mut JsonUtilityHostActions,
         committing_ui: bool,
         form_visual_order: &mut u64,
         tree_visual_order: &mut u64,
@@ -1595,7 +1898,7 @@ impl JsonUtilityDialogState {
             search_inputs_changed = true;
         }
         if committing_ui && search_inputs_changed {
-            self.editor.tree.search.invalidate_results();
+            actions.search_changed = true;
         } else if committing_ui && previous_match {
             self.editor.move_search_match(true);
         } else if committing_ui && next_match {
@@ -1701,11 +2004,10 @@ impl JsonUtilityDialogState {
         let mut toggle_action = None;
         let (tree_height, details_height) =
             tree_panel_heights(ui.available_height(), ui.spacing().item_spacing.y);
-        let scroll_target = if committing_ui {
-            self.editor.tree.pending_scroll_to.take()
-        } else {
-            self.editor.tree.pending_scroll_to
-        };
+        let scroll_target = self.editor.tree.pending_scroll_to;
+        if committing_ui {
+            actions.scroll_revealed = scroll_target;
+        }
         let snapshot = self.editor.tree.current_snapshot(generation);
         if let Some(snapshot) = snapshot {
             let row_height = ui.spacing().interact_size.y.max(20.0);
@@ -1906,9 +2208,7 @@ impl JsonUtilityDialogState {
                 self.editor.tree.set_branch_expanded(id, expanded);
             }
             match copy_action {
-                Some(TreeCopyAction::Value) => self.editor.copy_tree_value(clipboard, false),
-                Some(TreeCopyAction::Subtree) => self.editor.copy_tree_value(clipboard, true),
-                Some(TreeCopyAction::Path) => self.editor.copy_tree_path(clipboard),
+                Some(action) => actions.tree_copy = selected.map(|id| (action, id)),
                 None => {}
             }
         }
@@ -1917,7 +2217,14 @@ impl JsonUtilityDialogState {
 
 #[cfg(test)]
 impl JsonUtilityDialogState {
+    pub(crate) fn test_source_generation(&self) -> u64 {
+        self.editor.generation
+    }
+
     pub(crate) fn test_open_with_source(&mut self, text: &str, tree_view: bool) {
+        if !self.open {
+            self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
         self.intent = JsonUtilityIntent::General;
         self.focus_editor = false;
@@ -1962,6 +2269,27 @@ enum TreeCopyAction {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_checkpoint_restores_draft_without_reissuing_projection() {
+        let mut dialog = super::JsonUtilityDialogState::default();
+        dialog.test_open_with_source("{\"a\":1}", false);
+        let generation = dialog.test_source_generation();
+        let initial_builds = dialog.editor.projection_builds_started;
+        let projection = dialog.editor.tree.snapshot.as_ref().unwrap().clone();
+        let checkpoint = super::JsonUtilityInteractionCheckpoint::capture(&dialog);
+        dialog.editor.text = "changed".into();
+        dialog.editor.tree.search.query = "draft".into();
+        checkpoint.restore(&mut dialog);
+        assert_eq!(dialog.editor.text, "{\"a\":1}");
+        assert!(dialog.editor.tree.search.query.is_empty());
+        assert_eq!(dialog.test_source_generation(), generation);
+        assert_eq!(dialog.editor.projection_builds_started, initial_builds);
+        assert!(Arc::ptr_eq(
+            &projection,
+            dialog.editor.tree.snapshot.as_ref().unwrap(),
+        ));
+    }
+
     use super::*;
     use crate::clipboard_modify::clipboard::ClipboardError;
     use std::sync::Mutex;

@@ -12,6 +12,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -266,8 +267,8 @@ pub struct LineEdit {
 }
 #[derive(Debug, Clone)]
 struct UndoRecord {
-    before: String,
-    after: String,
+    before: Arc<String>,
+    after: Arc<String>,
     ignored_before: Vec<IgnoredLineRange>,
     ignored_after: Vec<IgnoredLineRange>,
     bookmarks_before: Vec<usize>,
@@ -277,7 +278,7 @@ struct UndoRecord {
 #[derive(Clone)]
 pub struct TextDocument {
     source_id: u64,
-    source: String,
+    source: Arc<String>,
     pub revision: u64,
     pub saved_revision: u64,
     pub read_only: bool,
@@ -286,8 +287,8 @@ pub struct TextDocument {
     line_ending: LineEnding,
     trailing_newline: bool,
     preserve_source_line_endings: bool,
-    undo: Vec<UndoRecord>,
-    redo: Vec<UndoRecord>,
+    undo: Arc<Vec<UndoRecord>>,
+    redo: Arc<Vec<UndoRecord>>,
     ignored_line_ranges: Vec<IgnoredLineRange>,
     ignored_range_invalidation: bool,
     bookmarks: Vec<usize>,
@@ -323,7 +324,7 @@ impl TextDocument {
     pub fn empty() -> Self {
         Self {
             source_id: next_text_source_id(),
-            source: String::new(),
+            source: Arc::default(),
             revision: 0,
             saved_revision: 0,
             read_only: false,
@@ -332,8 +333,8 @@ impl TextDocument {
             line_ending: LineEnding::Lf,
             trailing_newline: false,
             preserve_source_line_endings: false,
-            undo: vec![],
-            redo: vec![],
+            undo: Arc::default(),
+            redo: Arc::default(),
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
             bookmarks: vec![],
@@ -348,7 +349,7 @@ impl TextDocument {
             content_text_policy(&LoadedContent::Text(source.clone()));
         Self {
             source_id: next_text_source_id(),
-            source,
+            source: Arc::new(source),
             revision: 0,
             saved_revision: 0,
             read_only: false,
@@ -357,8 +358,8 @@ impl TextDocument {
             line_ending,
             trailing_newline,
             preserve_source_line_endings: true,
-            undo: vec![],
-            redo: vec![],
+            undo: Arc::default(),
+            redo: Arc::default(),
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
             bookmarks: vec![],
@@ -368,13 +369,13 @@ impl TextDocument {
     #[cfg(test)]
     pub(crate) fn from_test_text(source: impl Into<String>) -> Self {
         let mut document = Self::empty();
-        document.source = source.into();
+        document.source = Arc::new(source.into());
         document
     }
     pub fn from_loaded(file: &LoadedTextFile) -> Option<Self> {
         Some(Self {
             source_id: next_text_source_id(),
-            source: file.text()?.into(),
+            source: Arc::new(file.text()?.into()),
             revision: 0,
             saved_revision: 0,
             read_only: file.read_only,
@@ -383,8 +384,8 @@ impl TextDocument {
             line_ending: file.line_ending,
             trailing_newline: file.trailing_newline,
             preserve_source_line_endings: false,
-            undo: vec![],
-            redo: vec![],
+            undo: Arc::default(),
+            redo: Arc::default(),
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
             bookmarks: vec![],
@@ -465,16 +466,16 @@ impl TextDocument {
         if self.read_only {
             return Err("document is read-only".into());
         }
-        if self.source == source {
+        if *self.source == source {
             return Ok(false);
         }
-        let before = std::mem::replace(&mut self.source, source);
+        let before = std::mem::replace(&mut self.source, Arc::new(source));
         let ignored_before = std::mem::take(&mut self.ignored_line_ranges);
         let bookmarks_before = std::mem::take(&mut self.bookmarks);
         self.ignored_range_invalidation = false;
         self.bookmark_invalidation = !bookmarks_before.is_empty();
         self.revision += 1;
-        self.undo.push(UndoRecord {
+        Arc::make_mut(&mut self.undo).push(UndoRecord {
             before,
             after: self.source.clone(),
             ignored_before,
@@ -482,7 +483,7 @@ impl TextDocument {
             bookmarks_before,
             bookmarks_after: self.bookmarks.clone(),
         });
-        self.redo.clear();
+        self.redo = Arc::default();
         Ok(true)
     }
     pub fn can_undo(&self) -> bool {
@@ -510,7 +511,7 @@ impl TextDocument {
             .collect::<Result<Vec<_>, _>>()?;
         let (mapped_bookmark_ranges, bookmark_invalidated) =
             map_ignored_ranges(&bookmark_ranges, edits)?;
-        self.source = if self.preserve_source_line_endings {
+        let source = if self.preserve_source_line_endings {
             apply_memory_line_edits(&self.source, edits)?
         } else {
             let mut lines = source_lines(&self.source);
@@ -524,9 +525,10 @@ impl TextDocument {
             }
             lines.join("\n")
         };
-        if self.source == before {
+        if source == *before {
             return Ok(());
         }
+        self.source = Arc::new(source);
         self.ignored_line_ranges = mapped_ignored;
         self.ignored_range_invalidation = invalidated;
         self.bookmarks = mapped_bookmark_ranges
@@ -535,7 +537,7 @@ impl TextDocument {
             .collect();
         self.bookmark_invalidation = bookmark_invalidated;
         self.revision += 1;
-        self.undo.push(UndoRecord {
+        Arc::make_mut(&mut self.undo).push(UndoRecord {
             before,
             after: self.source.clone(),
             ignored_before,
@@ -543,11 +545,11 @@ impl TextDocument {
             bookmarks_before,
             bookmarks_after: self.bookmarks.clone(),
         });
-        self.redo.clear();
+        self.redo = Arc::default();
         Ok(())
     }
     pub fn undo(&mut self) -> bool {
-        let Some(r) = self.undo.pop() else {
+        let Some(r) = Arc::make_mut(&mut self.undo).pop() else {
             return false;
         };
         self.source = r.before.clone();
@@ -556,11 +558,11 @@ impl TextDocument {
         self.ignored_range_invalidation = false;
         self.bookmark_invalidation = false;
         self.revision += 1;
-        self.redo.push(r);
+        Arc::make_mut(&mut self.redo).push(r);
         true
     }
     pub fn redo(&mut self) -> bool {
-        let Some(r) = self.redo.pop() else {
+        let Some(r) = Arc::make_mut(&mut self.redo).pop() else {
             return false;
         };
         self.source = r.after.clone();
@@ -569,7 +571,7 @@ impl TextDocument {
         self.ignored_range_invalidation = false;
         self.bookmark_invalidation = false;
         self.revision += 1;
-        self.undo.push(r);
+        Arc::make_mut(&mut self.undo).push(r);
         true
     }
     pub fn save(&mut self, path: &Path) -> anyhow::Result<()> {
@@ -835,7 +837,7 @@ mod tests {
     fn grouped_revision() {
         let mut d = TextDocument {
             source_id: next_text_source_id(),
-            source: "a\nb".into(),
+            source: Arc::new("a\nb".into()),
             revision: 0,
             saved_revision: 0,
             read_only: false,
@@ -844,8 +846,8 @@ mod tests {
             line_ending: LineEnding::Lf,
             trailing_newline: false,
             preserve_source_line_endings: false,
-            undo: vec![],
-            redo: vec![],
+            undo: Arc::default(),
+            redo: Arc::default(),
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
             bookmarks: vec![],

@@ -18,9 +18,18 @@ type SourceStateBeforeFrame = (
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DialogCopyOwner {
+    MouseGestures,
     CalculationPad,
+    ProgrammerInspector,
     Converter,
     DateTimeStudio,
+    ImageCompare,
+    DuplicateFinder,
+    ZipExtractor,
+    FolderSize,
+    FileLock,
+    FileLockLabel,
+    ExplorerTabs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,9 +39,12 @@ enum RootDialogEffect {
         owner: DialogCopyOwner,
         text: String,
     },
+    OpenPath(std::path::PathBuf),
+    RevealFileLockExecutable(super::FileLockRevealRequest),
     SaveConverterPreferences,
     PrepareCalendar {
         instant_utc: chrono::DateTime<chrono::Utc>,
+        presentation: super::utility_host::UtilityPresentation,
     },
 }
 
@@ -1917,7 +1929,7 @@ impl LauncherApp {
         allow_ordinary_tools: bool,
     ) -> bool {
         use crate::gui::jump_mode::ui::{
-            focused_response_layer, notes_dialog_layer_id, visible_top_middle_layer,
+            focused_response_layer, visible_top_middle_layer,
         };
 
         let ordinary_context = allow_ordinary_tools
@@ -1942,16 +1954,16 @@ impl LauncherApp {
                     egui::Id::new("App Editor"),
                 )))
             || (self.show_settings
-                && !ordinary_layer_is_allowed(crate::gui::jump_mode::ui::settings_layer_id()))
+                && self
+                    .settings_window_host
+                    .root_layer()
+                    .is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || (self.file_search_dialog.open
-                && !ordinary_layer_is_allowed(
-                    crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch
-                        .layer_id()
-                        .expect("File Search has a root window layer"),
-                ))
+                && self.file_search_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
+            || self.diff_dialog.host_layer_if_root().is_some_and(|layer| !ordinary_layer_is_allowed(layer))
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
-            || self.snippet_prompt_dialog.is_open()
+            || self.snippet_prompt_has_root_presentation()
             || self.macro_prompt.pending.is_some()
             || self.macro_parameter_prompt.owns_input()
             || self.screen_draw_controller.toolbar_open()
@@ -1972,17 +1984,20 @@ impl LauncherApp {
             || self
                 .note_panels
                 .iter()
-                .any(|panel| panel.query_focus_protected_state_blocks())
+                .any(|panel| {
+                    panel.host_layer_if_root().is_some()
+                        && panel.query_focus_protected_state_blocks()
+                })
         {
             return true;
         }
 
         let passive_ordinary_layer = |layer| {
-            (self.notes_dialog.open && layer == notes_dialog_layer_id())
+            (self.notes_dialog.host_layer_if_root() == Some(layer))
                 || self
                     .note_panels
                     .iter()
-                    .any(|panel| panel.open && panel.show_query_focus_layer() == layer)
+                    .any(|panel| panel.host_layer_if_root() == Some(layer))
                 || (allow_ordinary_tools && ordinary_layer_is_allowed(layer))
         };
         if visible_top_middle_layer(ctx).is_some_and(|layer| !passive_ordinary_layer(layer)) {
@@ -1992,11 +2007,15 @@ impl LauncherApp {
         let focused_id = ctx.memory(|memory| memory.focused());
         let focused_layer = focused_response_layer(ctx);
         let focused_notes_layer = allow_focused_notes
-            && (focused_layer == Some(notes_dialog_layer_id()) && self.notes_dialog.open
+            && (focused_layer.is_some_and(|layer| {
+                self.notes_dialog.host_layer_if_root() == Some(layer)
+            })
                 || self
                     .note_panels
                     .iter()
-                    .any(|panel| panel.owns_query_focus_layer(ctx)));
+                    .any(|panel| {
+                        panel.host_layer_if_root().is_some() && panel.owns_query_focus_layer(ctx)
+                    }));
         let focused_outside_allowed_layer = focused_layer.is_some_and(|layer| {
             Some(layer) != query_layer
                 && !focused_notes_layer
@@ -2036,22 +2055,17 @@ impl LauncherApp {
     }
 
     fn query_focus_ordinary_context(&self) -> Option<super::QueryFocusOrdinaryContext> {
-        use crate::gui::jump_mode::ui::NavigationDialogKind;
         let note_panel_layers = self
             .note_panels
             .iter()
-            .filter(|panel| panel.open)
-            .map(|panel| panel.show_query_focus_layer())
+            .filter_map(|panel| panel.host_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         let ordinary_panel_layers = Self::TRACKED_PANELS
             .into_iter()
             .filter(|panel| self.is_panel_open(*panel))
             .filter_map(|panel| self.query_focus_panel_layer(panel))
-            .chain(
-                (self.show_dashboard_editor && self.dashboard_editor.open)
-                    .then_some(NavigationDialogKind::DashboardEditor)
-                    .and_then(NavigationDialogKind::layer_id),
-            )
+            .chain(self.dashboard_editor.host_layer_if_root())
+            .chain(self.diff_dialog.host_layer_if_root())
             .chain(self.pin_list_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("screenshot-pin-list"),
@@ -2059,7 +2073,7 @@ impl LauncherApp {
             .chain(
                 self.note_panels
                     .iter()
-                    .filter(|panel| panel.open)
+                    .filter(|panel| panel.host_layer_if_root().is_some())
                     .flat_map(|panel| panel.query_focus_ordinary_layers()),
             )
             .chain(
@@ -2073,17 +2087,18 @@ impl LauncherApp {
                 egui::Id::new("Plugin Settings"),
             )))
             .chain(self.calculation_pad_dialog.examples_layer_if_root())
+            .chain(self.diagram_studio_dialog.docked_owner_layer())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
             .into_iter()
-            .any(|panel| self.is_panel_open(panel))
-            || (self.show_dashboard_editor && self.dashboard_editor.open)
+            .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
+            || self.dashboard_editor.host_layer_if_root().is_some()
+            || self.diff_dialog.host_layer_if_root().is_some()
             || self.show_plugins
-            || !self.note_panels.is_empty()
+            || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
         .then_some(super::QueryFocusOrdinaryContext {
-            notes_dialog_open: self.notes_dialog.open,
             note_panel_layers,
             ordinary_panel_layers,
         })
@@ -2091,7 +2106,7 @@ impl LauncherApp {
 
     fn query_focus_panel_layer(&self, panel: super::Panel) -> Option<egui::LayerId> {
         use super::Panel;
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, root_window_layer_id};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
         let middle = |id| Some(egui::LayerId::new(egui::Order::Middle, id));
         match panel {
             Panel::AliasDialog => middle(egui::Id::new(Some("Set Folder Alias"))),
@@ -2101,45 +2116,42 @@ impl LauncherApp {
             Panel::AddBookmarkDialog => middle(egui::Id::new(Some("Add Bookmark"))),
             Panel::HelpOverlay => middle(egui::Id::new(Some("Quick Help"))),
             Panel::HelpWindow => middle(egui::Id::new(Some("Command Help"))),
-            Panel::TimerDialog => self
-                .timer_dialog
-                .jump_mode_window_title()
-                .map(root_window_layer_id),
+            Panel::TimerDialog => self.timer_dialog.root_layer(),
             Panel::ShellCmdDialog => middle(egui::Id::new(Some("Shell Commands"))),
-            Panel::SnippetDialog => NavigationDialogKind::Snippets.layer_id(),
+            Panel::SnippetDialog => self.snippet_window_host.root_layer(),
             Panel::PasteSequenceDialog => {
-                Some(crate::gui::jump_mode::ui::paste_sequence_dialog_layer_id())
+                self.paste_sequence_host.root_layer()
             }
             Panel::HashGeneratorDialog => middle(egui::Id::new("hash_generator_dialog")),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
-            Panel::MkMacroDialog => Some(crate::gui::jump_mode::ui::mkmacro_dialog_layer_id()),
-            Panel::MouseGesturesDialog => NavigationDialogKind::MouseGestures.layer_id(),
-            Panel::MouseGestureSettingsDialog => {
-                NavigationDialogKind::MouseGestureSettings.layer_id()
-            }
-            Panel::MouseSettingsDialog => NavigationDialogKind::MouseSettings.layer_id(),
+            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root(),
+            Panel::MouseGesturesDialog => self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES),
+            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
+            Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
             Panel::ThemeSettingsDialog => middle(egui::Id::new("Theme settings")),
             Panel::HotkeyDirectoryDialog => NavigationDialogKind::HotkeyDirectory.layer_id(),
             Panel::FavDialog => middle(egui::Id::new(Some("Favorites"))),
-            Panel::FileSearchDialog => NavigationDialogKind::FileSearch.layer_id(),
-            Panel::NotesDialog => Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()),
+            Panel::FileSearchDialog => self.file_search_host.root_layer(),
+            Panel::NotesDialog => self.notes_dialog.host_layer_if_root(),
             Panel::NoteGraphDialog => middle(egui::Id::new(Some("Note Graph"))),
             Panel::UnusedAssetsDialog => middle(egui::Id::new(Some("Unused Note Assets"))),
             Panel::ScreenshotEditor => middle(egui::Id::new("Screenshot Editor")),
             Panel::TodoDialog => Some(crate::gui::jump_mode::ui::todo_dialog_layer_id()),
             Panel::TodoViewDialog => middle(egui::Id::new(Some("View Todos"))),
-            Panel::ClipboardDialog => NavigationDialogKind::ClipboardHistory.layer_id(),
-            Panel::ClipboardModifyDialog => middle(egui::Id::new("clipboard_modify_dialog_window")),
-            Panel::JsonUtilityDialog => NavigationDialogKind::JsonUtility.layer_id(),
-            Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
-            Panel::RegexTesterDialog => NavigationDialogKind::RegexTester.layer_id(),
+            Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
+            Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
+            Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer(),
+            Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
+            Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
-            Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
-            Panel::MarkdownStudioDialog => middle(egui::Id::new("markdown-studio-window")),
-            Panel::BatchRenameDialog => NavigationDialogKind::BatchRename.layer_id(),
-            Panel::SearchReplaceDialog => NavigationDialogKind::SearchReplace.layer_id(),
-            Panel::XmlToolkitDialog => NavigationDialogKind::XmlToolkit.layer_id(),
-            Panel::TableUtilityDialog => NavigationDialogKind::TableUtility.layer_id(),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer(),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
+            Panel::BatchRenameDialog => self.batch_rename_host.root_layer(),
+            Panel::SearchReplaceDialog => self.search_replace_host.root_layer(),
+            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.root_layer(),
+            Panel::TableUtilityDialog => self.table_utility_dialog.root_layer(),
             Panel::QrDialog => middle(egui::Id::new(Some("QR Generator"))),
             Panel::ConvertPanel => middle(egui::Id::new("convert-panel-window")),
             Panel::VolumeDialog => middle(egui::Id::new(Some("Volume"))),
@@ -2147,17 +2159,20 @@ impl LauncherApp {
             Panel::CpuListDialog => middle(egui::Id::new(Some("CPU Usage"))),
             Panel::DataRecoveryDialog => middle(egui::Id::new(Some("Data & Recovery"))),
             Panel::ToastLogDialog => middle(egui::Id::new(Some("Toast Log"))),
-            Panel::CalendarPopover => middle(egui::Id::new(Some("Calendar"))),
-            Panel::CalendarEventEditor => middle(egui::Id::new(Some("Calendar Event"))),
-            Panel::CalendarEventDetails => middle(egui::Id::new(Some("Event Details"))),
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.calendar_panel_root_layer(panel)
+            },
             Panel::Editor => middle(egui::Id::new("App Editor")),
-            Panel::Settings => Some(crate::gui::jump_mode::ui::settings_layer_id()),
+            Panel::Settings => self.settings_window_host.root_layer(),
             Panel::Plugins => middle(egui::Id::new("Plugin Settings")),
             Panel::MultiManagerDialog => middle(egui::Id::new("MultiManager")),
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
-            Panel::ImageCompareDialog => NavigationDialogKind::ImageCompare.layer_id(),
-            Panel::DuplicateFinderDialog => NavigationDialogKind::DuplicateFinder.layer_id(),
+            Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer(),
+            Panel::FolderSizeDialog => self.folder_size_dialog.root_layer(),
+            Panel::FileLockDialog => self.file_lock_dialog.root_layer(),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
+            Panel::RecordingDialog => self.recording_dialog.root_layer(),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
             Panel::CompletionDialog | Panel::SnippetPromptDialog | Panel::CropDialog => None,
@@ -2193,8 +2208,7 @@ impl LauncherApp {
                 let is_open_ordinary = ordinary_context.as_ref().is_some_and(|context| {
                     context.ordinary_panel_layers.contains(layer)
                         || context.note_panel_layers.contains(layer)
-                        || (context.notes_dialog_open
-                            && *layer == crate::gui::jump_mode::ui::notes_dialog_layer_id())
+                        || self.notes_dialog.host_layer_if_root() == Some(*layer)
                 });
                 let visible = memory.areas().visible_last_frame(layer) || is_open_ordinary;
                 if !visible {
@@ -2398,6 +2412,7 @@ impl LauncherApp {
                 .root_window_bridge
                 .is_current(root_identity.0, root_identity.1)
             && self.notes_dialog.open
+            && self.notes_dialog.host_layer_if_root() == Some(notes_layer)
             && self.jump_mode_ui.notes_instance() == instance
             && self.jump_mode_ui.frame_navigation_owner() == owner
             && visible_top_middle_layer(ctx) == Some(notes_layer)
@@ -2585,9 +2600,9 @@ impl LauncherApp {
         focused_layer == Some(geometry.layer_id)
             || ordinary_context.as_ref().is_some_and(|context| {
                 focused_layer.is_some_and(|layer| context.ordinary_panel_layers.contains(&layer))
-                    || (context.notes_dialog_open
-                        && focused_layer
-                            == Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()))
+                    || focused_layer.is_some_and(|layer| {
+                        self.notes_dialog.host_layer_if_root() == Some(layer)
+                    })
             })
     }
 
@@ -2785,7 +2800,7 @@ impl LauncherApp {
             .root_identity
             .is_none_or(|(hwnd, generation)| self.root_window_bridge.is_current(hwnd, generation))
             && self.root_window_bridge.is_current(identity.0, identity.1)
-            && (ordinary_context.notes_dialog_open
+            && (self.notes_dialog.host_layer_if_root().is_some()
                 || !ordinary_context.note_panel_layers.is_empty())
     }
 
@@ -3210,8 +3225,8 @@ impl LauncherApp {
         let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
         let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
             query_has_focus,
-            self.file_search_dialog.open,
-            self.any_panel_open(),
+            self.file_search_has_root_presentation(),
+            self.any_root_panel_open(),
         );
         if shortcut_enabled
             && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
@@ -3233,74 +3248,22 @@ impl LauncherApp {
         ctx: &egui::Context,
         mut submit: impl FnMut(&mut Self),
     ) -> bool {
-        if !self.snippet_prompt_dialog.is_open() {
+        if !self.snippet_prompt_has_root_presentation() {
             return false;
         }
 
-        #[derive(Clone, Copy)]
-        enum PromptKey {
-            Escape(egui::Modifiers),
-            CtrlEnter(egui::Modifiers),
-            Tab {
-                modifiers: egui::Modifiers,
-                backwards: bool,
-            },
-        }
-
-        let key = ctx.input(|input| {
-            input.events.iter().find_map(|event| match event {
-                egui::Event::Key {
-                    key: egui::Key::Escape,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => Some(PromptKey::Escape(*modifiers)),
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd => {
-                    Some(PromptKey::CtrlEnter(*modifiers))
-                }
-                egui::Event::Key {
-                    key: egui::Key::Tab,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => Some(PromptKey::Tab {
-                    modifiers: *modifiers,
-                    backwards: modifiers.shift,
-                }),
-                _ => None,
-            })
-        });
-
-        match key {
-            Some(PromptKey::Escape(modifiers)) => {
-                ctx.input_mut(|input| {
-                    input.consume_key(modifiers, egui::Key::Escape);
-                });
+        use super::snippet_prompt_dialog::{SnippetPromptKey, consume_prompt_key};
+        match consume_prompt_key(ctx) {
+            Some(SnippetPromptKey::Escape) => {
                 let _ = self.cancel_snippet_prompt();
             }
-            Some(PromptKey::CtrlEnter(modifiers)) => {
-                ctx.input_mut(|input| {
-                    input.consume_key(modifiers, egui::Key::Enter);
-                });
-                if !self.snippet_prompt_dialog.is_preview_only() {
-                    submit(self);
-                }
+            Some(SnippetPromptKey::Submit) if !self.snippet_prompt_dialog.is_preview_only() => {
+                submit(self);
             }
-            Some(PromptKey::Tab {
-                modifiers,
-                backwards,
-            }) => {
-                ctx.input_mut(|input| {
-                    input.consume_key(modifiers, egui::Key::Tab);
-                });
+            Some(SnippetPromptKey::Tab { backwards }) => {
                 self.snippet_prompt_dialog.queue_tab_focus(ctx, backwards);
             }
-            None => {}
+            _ => {}
         }
 
         // The open prompt owns this complete frame, even if Escape or a
@@ -3423,7 +3386,7 @@ impl LauncherApp {
         }
         let preview_finished = self.clipboard_modify_dialog.preview.tick();
         if preview_finished {
-            ctx.request_repaint();
+            ctx.request_repaint_of(self.clipboard_modify_host.owner_viewport());
         }
         let had_immediate = self.clipboard_modify_immediate.has_pending();
         self.drain_clipboard_modify_immediate();
@@ -3781,7 +3744,50 @@ impl LauncherApp {
         self.root_list_geometry.invalidate_geometry();
     }
 
+    pub(super) fn recording_capture_conflict(&self) -> Option<&'static str> {
+        if self.recording_controller.conflicts_with_capture() {
+            return Some(
+                "Finish, save, or discard the active recording before capturing another screen",
+            );
+        }
+        if self.recording_dialog.has_selector_operation() {
+            return Some(
+                "Finish or cancel recording region selection before capturing another screen",
+            );
+        }
+        None
+    }
+
+    pub(super) fn recording_start_conflict(&self) -> Option<&'static str> {
+        if self.recording_dialog.target_refresh_pending_for_shutdown() {
+            return Some(
+                "Wait for display targets to finish refreshing before starting a recording",
+            );
+        }
+        if self.screenshot_capture.is_busy()
+            || self.screenshot_countdown.is_busy()
+            || self.pending_screenshot_completion.is_some()
+            || self.screenshot_capture_parking.is_some()
+        {
+            return Some("Finish or cancel the active screenshot before starting a recording");
+        }
+        if self.screenshot_capture_conflict().is_some() {
+            return Some("Finish or cancel the active screen capture before starting a recording");
+        }
+        if self
+            .mkmacro_dialog
+            .visual_overlay_controller()
+            .has_pending_selector()
+        {
+            return Some("Finish or cancel the active screen selector before starting a recording");
+        }
+        None
+    }
+
     fn screenshot_capture_conflict(&self) -> Option<&'static str> {
+        if self.recording_capture_conflict().is_some() {
+            return Some("Finish or cancel the active recording before taking a screenshot");
+        }
         if self.pinboard_capture_busy() {
             return Some("Finish or cancel screenshot pin capture before taking a screenshot");
         }
@@ -4256,6 +4262,20 @@ impl LauncherApp {
         if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
             self.pending_screenshot_completion = Some(completion);
         }
+        self.recording_controller.poll();
+        self.poll_recording_targets(ctx);
+        self.poll_recording_region(ctx);
+        if self.recording_controller.has_active_job() {
+            match self.recording_controller.snapshot().session.state() {
+                crate::recording::RecorderState::Countdown { .. } => {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+                crate::recording::RecorderState::Recording { .. } => {
+                    ctx.request_repaint_after(Duration::from_millis(500));
+                }
+                _ => {}
+            }
+        }
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
@@ -4268,6 +4288,14 @@ impl LauncherApp {
         if capture_root_identity {
             self.root_window_bridge.capture_frame(frame);
         }
+        let (hwnd, generation) = self.root_window_bridge.identity();
+        let verified_root = (self.launcher_hwnd == Some(hwnd)
+            && self.root_window_bridge.is_current(hwnd, generation))
+        .then_some(super::utility_window_geometry::RootWindowIdentity { hwnd, generation });
+        self.utility_dialog_size_manager
+            .set_native_root(verified_root);
+        self.utility_dialog_size_manager
+            .drain_native_geometry_observations(ctx);
         self.poll_screenshot_presentation(ctx, Instant::now());
 
         let plugin_search_generation = self.plugins.search_generation();
@@ -4298,7 +4326,12 @@ impl LauncherApp {
 
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
-        self.xml_toolkit_dialog.poll_closed_background(ctx);
+        self.xml_toolkit_dialog.poll_host_background(ctx);
+        self.regex_tester_dialog.poll_host_background(ctx);
+        self.table_utility_dialog.poll_host_background(ctx);
+        self.image_compare_dialog.poll_host_background(ctx);
+        self.duplicate_finder_dialog.poll_host_background(ctx);
+        self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
         self.poll_macro_launcher_query(ctx);
@@ -4315,6 +4348,12 @@ impl LauncherApp {
         }
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
+        if self.paste_sequence_dialog.poll_host_background(ctx) {
+            ctx.request_repaint_of(self.paste_sequence_host.owner_viewport());
+        }
+        if self.json_utility_dialog.poll_host_background(ctx) {
+            ctx.request_repaint_of(self.json_utility_host.owner_viewport());
+        }
         let _ = self.multi_manager.start_pending_automatic_reconnect();
         if self
             .multi_manager
@@ -4408,9 +4447,21 @@ impl LauncherApp {
             self.report_error_message("paste_sequence.physical", error.message());
         }
         if self.sequence_playback.needs_tick() {
-            let mut platform =
-                crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
-            self.sequence_playback.tick(&mut platform, playback_now);
+            #[cfg(test)]
+            let has_test_platform = if let Some(platform) = &mut self.test_sequence_platform {
+                let now = crate::paste_sequence::SequencePlaybackPlatform::now(platform);
+                self.sequence_playback.tick(platform, now);
+                true
+            } else {
+                false
+            };
+            #[cfg(not(test))]
+            let has_test_platform = false;
+            if !has_test_platform {
+                let mut platform =
+                    crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
+                self.sequence_playback.tick(&mut platform, playback_now);
+            }
             if let Err(error) = self.sync_physical_paste_admission() {
                 self.report_error_message("paste_sequence.physical", error.message());
             }
@@ -4451,6 +4502,12 @@ impl LauncherApp {
     }
 
     fn reconcile_root_visibility(&mut self, ctx: &egui::Context) -> (u64, Option<u64>, bool, bool) {
+        if ctx.embed_viewports()
+            && self.recording_controller.has_active_job()
+            && !self.visible_flag.load(Ordering::Acquire)
+        {
+            self.request_launcher_state(Some(true), Some(true));
+        }
         if self.pinboard_capture_owns_root() {
             let (revision, (should_be_visible, invocation_id, focus_intent)) =
                 self.visibility_revision.inspect(|| {
@@ -4688,14 +4745,23 @@ impl LauncherApp {
         // This visible input phase must precede macro/plugin/pending-query work:
         // an already-open snippet prompt owns its keyboard events first.
         let snippet_prompt_owns_input = visible_input_allowed
-            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_has_root_presentation()
             && !self.ocr_surface_visible();
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
         let (visibility_request, visibility_invocation_id, should_be_visible, _) =
             self.reconcile_root_visibility(ctx);
-        self.mouse_gestures_dialog
-            .reconcile_canvas_drag_with_root_lifecycle(ctx, should_be_visible);
+        if !self.mouse_gestures_host.is_popped_out() {
+            let kind = crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures;
+            let owner_has_input = self.jump_mode_ui.dialog_instance(kind).is_some_and(|instance| {
+                self.mouse_gestures_native_owner_current(
+                    ctx,
+                    should_be_visible,
+                    crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance },
+                )
+            });
+            self.mouse_gestures_dialog.reconcile_canvas_drag_with_root_lifecycle(ctx, owner_has_input);
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_revalidate_root_logic(ctx, should_be_visible);
         if !should_be_visible {
@@ -4724,8 +4790,9 @@ impl LauncherApp {
     fn run_hidden_logic_tick(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.root_frame_logic = None;
         self.pending_ui_frame_receipt = None;
-        self.mouse_gestures_dialog
-            .reconcile_canvas_drag_with_root_lifecycle(ctx, false);
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.mouse_gestures_dialog.reconcile_canvas_drag_with_root_lifecycle(ctx, false);
+        }
         self.jump_mode_ui.cancel_all();
         let bootstrap_before_tick = self.viewport_bootstrap_state();
         self.run_runtime_tick(ctx, frame);
@@ -4743,16 +4810,49 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 8] {
+    fn viewport_bootstrap_state(&self) -> [bool; 37] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
+            self.regex_tester_dialog.needs_viewport_bootstrap(),
+            self.timer_dialog.needs_root_ui_when_hidden(),
+            self.calendar_hosts_need_hidden_root_ui(),
+            self.date_time_studio_dialog.needs_root_ui_when_hidden(),
+            self.image_compare_dialog.needs_viewport_bootstrap(),
+            self.duplicate_finder_dialog.needs_viewport_bootstrap(),
+            self.zip_extractor_dialog.needs_viewport_bootstrap(),
+            self.folder_size_dialog.needs_viewport_bootstrap(),
+            self.file_lock_dialog.needs_viewport_bootstrap(),
+            self.recording_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
-            self.calculation_pad_dialog.needs_root_ui_when_hidden(),
+            self.calculation_pad_dialog.needs_root_ui_when_hidden()
+                || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
+                || self.explorer_tabs_host.needs_root_ui_when_hidden(self.explorer_tabs_dialog.open)
+                || self.explorer_tabs_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
+            self.file_lock_dialog.needs_root_ui_when_hidden(),
+            self.recording_dialog
+                .needs_compact_viewport_bootstrap(&self.recording_controller),
+            self.notes_dialog.needs_root_ui_when_hidden(),
+            self.mkmacro_dialog.needs_root_ui_when_hidden(),
+            self.dashboard_editor.needs_root_ui_when_hidden(),
+            self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
+            self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open),
+            self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
+            self.diff_dialog.needs_root_ui_when_hidden(),
+            self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open),
+            self.search_replace_needs_root_ui_when_hidden(),
+            self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open),
+            self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open),
+            self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open),
+            self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open),
+            self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open),
+            self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
+            self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
+            self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
 
@@ -4765,7 +4865,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 8],
+        previously_pending: [bool; 37],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4802,7 +4902,325 @@ impl LauncherApp {
         }
     }
 
-    fn show_regex_tester(&mut self, ctx: &egui::Context, root_visible: bool) {
+    fn date_time_studio_root_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.date_time_studio_dialog.root_layer() else {
+            return false;
+        };
+        if !self.native_ui_host_input_allowed(ctx, root_visible)
+            || visible_top_middle_layer(ctx) != Some(layer)
+        {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return self
+                .date_time_studio_dialog
+                .owned_popup_layer(ctx, layer)
+                .is_some();
+        }
+        focused_response_layer(ctx)
+            .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+    }
+
+    fn show_date_time_studio_host(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let owner = self.date_time_studio_root_owner_current(ctx, root_visible);
+        let allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let shortcut = !jump_escape_preempted && self.jump_mode_ui.active_session().is_none();
+        self.date_time_studio_dialog.show_hosted(
+            ctx,
+            first,
+            self.calendar_editor_open,
+            root_visible,
+            owner,
+            allowed,
+            self.pinned_panels
+                .contains(&super::Panel::DateTimeStudioDialog),
+            shortcut,
+        );
+    }
+
+    fn calendar_hosts_need_hidden_root_ui(&self) -> bool {
+        self.calendar_popover_host
+            .needs_root_ui_when_hidden(self.calendar_popover_open)
+            || self
+                .calendar_details_host
+                .needs_root_ui_when_hidden(self.calendar_details_open)
+            || self
+                .calendar_editor_host
+                .needs_root_ui_when_hidden(self.calendar_editor_open)
+    }
+
+    fn calendar_panel_owns_root_input(&self, ctx: &egui::Context, panel: super::Panel) -> bool {
+        use super::Panel;
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+
+        let Some(layer) = self.calendar_panel_root_layer(panel) else {
+            return false;
+        };
+        if visible_top_middle_layer(ctx) != Some(layer) {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return match panel {
+                Panel::CalendarPopover => self.calendar_popover.owned_popup_layer(ctx, layer),
+                Panel::CalendarEventDetails => {
+                    self.calendar_event_details.owned_popup_layer(ctx, layer)
+                }
+                Panel::CalendarEventEditor => {
+                    self.calendar_event_editor.owned_popup_layer(ctx, layer)
+                }
+                _ => unreachable!(),
+            }
+            .is_some();
+        }
+        focused_response_layer(ctx)
+            .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+    }
+
+    fn calendar_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use super::Panel;
+
+        self.native_ui_host_input_allowed(ctx, root_visible)
+            && [
+                Panel::CalendarPopover,
+                Panel::CalendarEventDetails,
+                Panel::CalendarEventEditor,
+            ]
+            .into_iter()
+            .any(|panel| self.calendar_panel_owns_root_input(ctx, panel))
+    }
+
+    fn show_calendar_hosts(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        jump_escape_preempted: bool,
+    ) {
+        use super::Panel;
+        let allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let root_shortcut = !jump_escape_preempted && self.jump_mode_ui.active_session().is_none();
+
+        if self.calendar_popover_open {
+            let panel = Panel::CalendarPopover;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_popover.host_session_epoch();
+            let runtime = super::CalendarPopover::runtime(self);
+            self.calendar_popover_host.show(
+                ctx,
+                &mut self.calendar_popover,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarPopover::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, &runtime, child, host)
+                },
+            );
+        }
+        if self.calendar_details_open {
+            let panel = Panel::CalendarEventDetails;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_event_details.host_session_epoch();
+            self.calendar_details_host.show(
+                ctx,
+                &mut self.calendar_event_details,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarEventDetails::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, child, host)
+                },
+            );
+        }
+        if self.calendar_editor_open {
+            let panel = Panel::CalendarEventEditor;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_event_editor.host_session_epoch();
+            self.calendar_editor_host.show(
+                ctx,
+                &mut self.calendar_event_editor,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarEventEditor::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, child, host)
+                },
+            );
+        }
+    }
+
+    fn complete_calendar_hosts(&mut self, ctx: &egui::Context) -> bool {
+        use super::Panel;
+        use super::calendar_event_details::CalendarDetailsDispatch;
+        use super::calendar_popover::CalendarPopoverDispatch;
+
+        let calendar_epoch = self.calendar_popover.host_session_epoch();
+        let details_epoch = self.calendar_event_details.host_session_epoch();
+        let editor_epoch = self.calendar_event_editor.host_session_epoch();
+        let calendar = self.calendar_popover_host.complete(
+            ctx,
+            &mut self.calendar_popover,
+            &Self::calendar_host_spec(Panel::CalendarPopover),
+            self.calendar_popover_open,
+            calendar_epoch,
+        );
+        let details = self.calendar_details_host.complete(
+            ctx,
+            &mut self.calendar_event_details,
+            &Self::calendar_host_spec(Panel::CalendarEventDetails),
+            self.calendar_details_open,
+            details_epoch,
+        );
+        let editor = self.calendar_editor_host.complete(
+            ctx,
+            &mut self.calendar_event_editor,
+            &Self::calendar_host_spec(Panel::CalendarEventEditor),
+            self.calendar_editor_open,
+            editor_epoch,
+        );
+        let show_root = calendar.as_ref().is_some_and(|(_, _, show)| *show)
+            || details.as_ref().is_some_and(|(_, _, show)| *show)
+            || editor.as_ref().is_some_and(|(_, _, show)| *show);
+        let path = self.calendar_event_store_path().to_owned();
+        let calendar_dispatch = calendar.and_then(|(actions, presentation, _)| {
+            if actions.host_request.is_some() && !actions.close {
+                return None;
+            }
+            let mut dialog = std::mem::take(&mut self.calendar_popover);
+            let dispatch = dialog.apply_host_actions(actions, self);
+            self.calendar_popover = dialog;
+            if !self.calendar_popover_open {
+                self.force_close_panel(Panel::CalendarPopover);
+            }
+            dispatch.map(|dispatch| (dispatch, presentation))
+        });
+        let details_dispatch = details.and_then(|(actions, presentation, _)| {
+            if actions.host_request.is_some() && !actions.close {
+                return None;
+            }
+            let mut dialog = std::mem::take(&mut self.calendar_event_details);
+            let dispatch = dialog.apply_host_actions(actions, self, &path);
+            self.calendar_event_details = dialog;
+            if !self.calendar_details_open {
+                self.force_close_panel(Panel::CalendarEventDetails);
+            }
+            dispatch.map(|dispatch| (dispatch, presentation))
+        });
+        if let Some((actions, _, _)) = editor
+            && (actions.host_request.is_none() || actions.close)
+        {
+            let mut dialog = std::mem::take(&mut self.calendar_event_editor);
+            dialog.apply_host_actions(actions, self, &path);
+            self.calendar_event_editor = dialog;
+            if !self.calendar_editor_open {
+                self.force_close_panel(Panel::CalendarEventEditor);
+            }
+        }
+
+        if let Some((dispatch, presentation)) = calendar_dispatch {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            match dispatch {
+                CalendarPopoverDispatch::OpenDetails(instance) => {
+                    self.open_calendar_details_from(instance, presentation)
+                }
+                CalendarPopoverDispatch::OpenEditor(event) => {
+                    self.open_calendar_editor_from(event, None, presentation)
+                }
+            }
+        }
+        if let Some((CalendarDetailsDispatch::OpenEditor(event, scope), presentation)) =
+            details_dispatch
+        {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            self.open_calendar_editor_from(Some(event), scope, presentation);
+        }
+        show_root
+    }
+
+    fn show_timer_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.timer_instance();
+        let root_owner_current = self.timer_root_input_owner_current(ctx, root_visible);
+        let scope = match owner {
+            NavigationOwner::Timer { instance } if root_owner_current => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("timer", instance),
+                    crate::gui::jump_mode::TargetGeneration(self.timer_dialog.host_session_epoch()),
+                    "timer-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.timer_dialog.show_hosted(
+            ctx, scope.as_ref(), Some(instance), owner,
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
+            root_owner_current, &self.jump_mode_ui,
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible, first, self.pinned_panels.contains(&super::Panel::TimerDialog),
+        );
+    }
+
+    fn timer_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+
+        let Some(layer) = self.timer_dialog.root_layer() else {
+            return false;
+        };
+        if !self.native_ui_host_input_allowed(ctx, root_visible) {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return self.timer_dialog.owned_sound_popup_layer(ctx, layer).is_some();
+        }
+        visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+    }
+
+    fn show_regex_tester(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let instance = self
@@ -4827,38 +5245,1731 @@ impl LauncherApp {
             ),
             _ => None,
         };
-        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
-        let root_native_owner_current = root_visible
-            && instance.is_some()
-            && self.native_ui_host_input_allowed(ctx, root_visible)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
-                == NavigationDialogKind::RegexTester.layer_id();
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible();
+        let root_native_owner_current = self.regex_tester_root_input_owner_current(ctx, root_visible);
+        let jump_mode_enabled = self.jump_mode_enabled()
+            && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let pinned = self.pinned_panels.contains(&super::Panel::RegexTesterDialog);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_regex_observation() {
-            let observation = self.regex_tester_dialog.show_with_jump_mode_observation(
-                ctx,
-                root_scope.as_ref(),
-                instance,
-                application_input_allowed,
-                root_native_owner_current,
-                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            let observation = self.regex_tester_dialog.show_hosted_with_observation(
+                ctx, root_scope.as_ref(), instance, application_input_allowed,
+                root_native_owner_current, jump_mode_enabled, root_visible, first, pinned,
             );
             self.qa_framebuffer_after_regex_show(
-                ctx,
-                root_visible,
-                self.regex_tester_dialog.open,
-                observation,
+                ctx, root_visible, self.regex_tester_dialog.open, observation,
             );
             return;
         }
-        self.regex_tester_dialog.show_with_jump_mode(
-            ctx,
-            root_scope.as_ref(),
-            instance,
-            application_input_allowed,
-            root_native_owner_current,
-            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+        self.regex_tester_dialog.show_hosted(
+            ctx, root_scope.as_ref(), instance, application_input_allowed,
+            root_native_owner_current, jump_mode_enabled, root_visible, first, pinned,
         );
+    }
+
+    fn regex_tester_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.native_ui_host_input_allowed(ctx, root_visible)
+            && self.regex_tester_dialog.root_layer().is_some_and(|layer| {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            })
+    }
+
+    fn show_calculation_pad(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible || self.calculation_pad_dialog.needs_root_ui_when_hidden() {
+            self.calculation_pad_dialog.show(
+                ctx,
+                first_ui_pass,
+                self.native_ui_application_input_allowed(ctx),
+                self.native_ui_host_input_allowed(ctx, root_visible),
+            );
+        }
+    }
+
+    fn show_explorer_tabs(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer
+        };
+        use super::utility_window_host::HostInput;
+        self.explorer_tabs_dialog.poll_background(ctx);
+        if !self.explorer_tabs_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.explorer_tabs_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self.pinned_panels.contains(&super::Panel::ExplorerTabsDialog);
+        let decision_pending = self.explorer_tabs_dialog.has_pending_decision();
+        let runtime = super::explorer_tabs_dialog::ExplorerTabsRuntime {
+            root: super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.explorer_tabs_host.identity(),
+            pinned,
+        };
+        self.explorer_tabs_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.explorer_tabs_host.show(
+            ctx, &mut self.explorer_tabs_dialog, &runtime, HostInput {
+                first, root_visible, root_input, native_input, root_owner: NavigationOwner::Blocked,
+                parent_owner: owner, root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && !decision_pending, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+            }
+        );
+    }
+
+    fn show_programmer_inspector(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        if !self.programmer_inspector_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.programmer_inspector_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::ProgrammerInspectorDialog);
+        let runtime = super::programmer_inspector_dialog::InspectorRuntime {
+            context: self.calculation_pad_dialog.inspector_context(),
+            root: super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.programmer_inspector_host.identity(),
+            pinned,
+        };
+        self.programmer_inspector_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.programmer_inspector_host.show(
+            ctx,
+            &mut self.programmer_inspector_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+    fn show_markdown_studio(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible || self.markdown_studio_dialog.needs_root_ui_when_hidden() {
+            self.markdown_studio_dialog.show_on_root(
+                ctx,
+                first_ui_pass,
+                self.native_ui_application_input_allowed(ctx),
+                root_visible,
+                self.native_ui_host_input_allowed(ctx, root_visible),
+            );
+        }
+    }
+
+    fn show_quick_notes(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+        root_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
+        if root_visible || self.notes_dialog.needs_root_ui_when_hidden() {
+            let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+            let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+            let template_delete_layer = egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(Some("Delete Template?")),
+            );
+            let root_template_input_allowed = root_visible
+                && self.visible_flag.load(Ordering::Relaxed)
+                && !self.pin_list_open
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && application_input_allowed
+                && ctx.viewport_id() == egui::ViewportId::ROOT
+                && ctx.input(|input| input.focused)
+                && ctx.memory(|memory| {
+                    memory
+                        .top_modal_layer()
+                        .is_none_or(|layer| layer == template_delete_layer)
+                });
+            let owner_instance = self.jump_mode_ui.notes_instance();
+            let jump_mode_enabled = self.jump_mode_enabled()
+                && !self.mouse_gestures_dialog.recorder_canvas_active();
+            let mut notes = std::mem::take(&mut self.notes_dialog);
+            notes.ui_with_host(
+                ctx,
+                self,
+                root_scope,
+                first_ui_pass,
+                application_input_allowed,
+                root_visible,
+                root_input_allowed,
+                root_template_input_allowed,
+                owner_instance,
+                jump_mode_enabled,
+                true,
+            );
+            self.notes_dialog = notes;
+        }
+    }
+
+    pub(crate) fn open_dashboard_editor(&mut self) {
+        let registry = self.dashboard.registry().clone();
+        self.dashboard_editor.open(&self.dashboard_path, &registry);
+        self.show_dashboard_editor = true;
+        if let Some(layer) = self.dashboard_editor.host_layer_if_root() {
+            self.egui_ctx.move_to_top(layer);
+        }
+    }
+
+    fn show_dashboard_editor_host(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible && self.show_dashboard_editor && !self.dashboard_editor.open {
+            self.open_dashboard_editor();
+        }
+        if !self.show_dashboard_editor
+            || (!root_visible && !self.dashboard_editor.needs_root_ui_when_hidden())
+        {
+            return;
+        }
+        let registry = self.dashboard.registry().clone();
+        // Resolve both native and Jump ownership while the live dialog
+        // state is still installed on the app. `mem::take` below gives
+        // callbacks temporary ownership of the UI state; consulting the
+        // app field afterward would inspect a default, closed dialog and
+        // reject every real Dashboard Editor pass.
+        let native_ui_owner = self.dashboard_editor_native_ui_owner_current(ctx, root_visible);
+        let dashboard_owner = if root_visible {
+            self.jump_mode_ui.frame_navigation_owner()
+        } else {
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        };
+        let parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor);
+        let target_generation = self.dashboard_editor.target_generation();
+        let native_confirmation_owner =
+            self.dashboard_editor_confirmation_native_ui_owner_current(ctx, root_visible);
+        let pending_confirmation = self
+            .dashboard_editor
+            .jump_mode_pending_confirmation_identity();
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let jump_mode_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let mut dlg = std::mem::take(&mut self.dashboard_editor);
+        let editor_is_popped_out = dlg.is_popped_out();
+        let plugin_infos = self.plugins.plugin_infos();
+        let plugin_commands = self.plugins.commands();
+        let dashboard_snapshot = self.dashboard_data_cache.snapshot();
+        let dashboard_scope = match dashboard_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
+                instance,
+            } if native_ui_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("dashboard-editor", instance),
+                crate::gui::jump_mode::TargetGeneration(target_generation),
+                "dashboard-editor",
+                ctx.viewport_id(),
+                dashboard_owner,
+                true,
+            ),
+            _ => None,
+        };
+        let confirmation_scope = match (
+            dashboard_owner,
+            native_confirmation_owner,
+            pending_confirmation,
+        ) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                },
+                owner,
+                Some((pending_instance, pending_kind)),
+            ) if owner
+                == (crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                })
+                && pending_instance == confirmation_instance
+                && pending_kind == kind =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog(
+                            "dashboard-editor",
+                            parent_instance,
+                        ),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    kind.surface_kind(),
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let dashboard_visual_order = std::cell::Cell::new(0_u64);
+        let property_identity_store = std::rc::Rc::clone(&dlg.property_identity_store);
+        let native_combo_anchors = std::cell::RefCell::new(if editor_is_popped_out {
+            Vec::new()
+        } else {
+            std::mem::take(&mut dlg.native_combo_anchors)
+        });
+        let settings_ctx = WidgetSettingsContext {
+            plugins: Some(&self.plugins),
+            plugin_infos: Some(&plugin_infos),
+            plugin_commands: Some(&plugin_commands),
+            actions: Some(self.actions.as_slice()),
+            favorites: Some(dashboard_snapshot.favorites.as_ref()),
+            usage: Some(&self.usage),
+            default_location: self.dashboard_default_location.as_deref(),
+            enabled_plugins: self.enabled_plugins.as_ref(),
+            jump_mode_scope: dashboard_scope.as_ref(),
+            jump_mode_visual_order: Some(&dashboard_visual_order),
+            property_identity_store: Some(property_identity_store.as_ref()),
+            native_combo_anchors: Some(&native_combo_anchors),
+            property_slot_token: None,
+            property_mutations_allowed: false,
+        };
+        dlg.show_with_host(
+            ctx,
+            &registry,
+            settings_ctx,
+            self.require_confirm_destructive,
+            parent_instance.unwrap_or_default(),
+            first_ui_pass,
+            root_visible,
+            application_input_allowed,
+            root_input_allowed,
+            native_ui_owner,
+            native_confirmation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            jump_mode_enabled,
+            confirmation_scope.as_ref(),
+        );
+        if dlg.target_generation() != target_generation {
+            native_combo_anchors.borrow_mut().clear();
+        }
+        if !editor_is_popped_out {
+            dlg.native_combo_anchors = native_combo_anchors.into_inner();
+        }
+        if pending_confirmation.is_some() {
+            if let Some(scope) = dashboard_scope.as_ref() {
+                scope.discard_registered_targets();
+            }
+        } else if let Some(scope) = confirmation_scope.as_ref() {
+            scope.discard_registered_targets();
+        }
+        self.show_dashboard_editor = dlg.open;
+        self.dashboard_editor = dlg;
+    }
+
+    fn show_main_settings_host(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_jump_escape_preempted: bool,
+    ) {
+        if !self.show_settings {
+            if self.settings_window_host.needs_root_ui_when_hidden(false)
+                || self.settings_window_host.is_popped_out()
+            {
+                self.settings_window_host.retire(ctx);
+            }
+            return;
+        }
+        if !root_visible && !self.settings_window_host.needs_root_ui_when_hidden(true) {
+            return;
+        }
+        let root_scope = if root_visible {
+            let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            if let crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } = owner {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::Settings { instance },
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "settings",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let instance = self.jump_mode_ui.settings_instance();
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let root_owner = self.settings_native_ui_owner_current(ctx, root_visible);
+        let root_jump_active =
+            self.jump_mode_ui.active_session().is_some() || root_jump_escape_preempted;
+        let application_input =
+            self.native_ui_application_input_allowed(ctx) && !self.ocr_surface_visible();
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let mut host = std::mem::take(&mut self.settings_window_host);
+        host.show(
+            ctx,
+            self,
+            root_scope,
+            instance,
+            first,
+            root_input,
+            root_owner,
+            root_jump_active,
+            application_input,
+            jump_enabled,
+        );
+        self.settings_window_host = host;
+    }
+
+    fn mouse_form_scope(
+        &mut self,
+        ctx: &egui::Context,
+        spec: super::mouse_form_host::MouseFormSpec,
+        root_visible: bool,
+    ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration, ui::NavigationOwner};
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let NavigationOwner::Dialog { kind, instance } = owner else {
+            return None;
+        };
+        if kind != spec.kind || !self.jump_mode_enabled() {
+            return None;
+        }
+        self.jump_mode_ui.scope_for_navigation_owner(
+            SurfaceId::dialog(spec.navigation_key, instance),
+            TargetGeneration(instance),
+            spec.navigation_key,
+            ctx.viewport_id(),
+            owner,
+            false,
+        )
+    }
+
+    fn native_mouse_form_observer(
+        &mut self,
+        ctx: &egui::Context,
+        section: &crate::settings_editor::catalog::SettingsSection,
+        owner: bool,
+        first: bool,
+    ) -> Option<crate::settings_editor::render::SettingsNavigationFrameObserver> {
+        self.prepare_dedicated_settings_navigation(ctx, section)?;
+        self.settings_editor.dedicated_navigation_observer(
+            section,
+            true,
+            owner,
+            egui::Popup::is_any_open(ctx)
+                || ctx.memory(|memory| memory.top_modal_layer().is_some())
+                || crate::gui::jump_mode::ui::visible_top_middle_layer(ctx).is_some(),
+            first,
+        )
+    }
+
+    fn stage_mouse_form_navigation(
+        &mut self,
+        ctx: &egui::Context,
+        render_observer: impl FnOnce(
+            &mut Self,
+        ) -> Option<
+            crate::settings_editor::render::SettingsNavigationFrameObserver,
+        >,
+    ) -> Option<super::mouse_form_host::NavigationObservation> {
+        use crate::settings_editor::render::SettingsNavigationSnapshot;
+        let before = SettingsNavigationSnapshot::capture(&self.settings_editor);
+        let observer = render_observer(self);
+        let after = SettingsNavigationSnapshot::capture(&self.settings_editor);
+        before.clone().restore(&mut self.settings_editor);
+        super::mouse_form_host::NavigationObservation::new(
+            before,
+            after,
+            observer,
+            ctx.input(|input| input.time),
+        )
+    }
+
+    fn show_diff_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        self.diff_dialog.show_hosted(
+            ctx, &self.activity_center, first, root_visible, root_input, native_input,
+        );
+    }
+
+    fn show_batch_rename_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let batch_rename_runtime = self.batch_rename_runtime_snapshot();
+        let batch_rename_owner =
+            if root_visible {
+                self.resolve_jump_mode_navigation_owner(ctx, true)
+            } else {
+                crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            };
+        let batch_rename_scope = match batch_rename_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.batch_rename_dialog.jump_mode_parent_targets_allowed() =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("batch-rename", instance),
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.batch_rename_dialog.jump_mode_target_generation(),
+                    ),
+                    "batch-rename/form",
+                    ctx.viewport_id(),
+                    batch_rename_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let batch_rename_parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename);
+        let batch_rename_confirmation_scope = match (
+            batch_rename_owner,
+            batch_rename_parent_instance,
+            self.batch_rename_dialog
+                .jump_mode_pending_confirmation_identity(),
+        ) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                },
+                Some(current_parent_instance),
+                Some((current_confirmation_instance, current_kind)),
+            ) if self.jump_mode_enabled()
+                && parent_instance == current_parent_instance
+                && confirmation_instance == current_confirmation_instance
+                && kind == current_kind =>
+            {
+                let owner = batch_rename_owner;
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("batch-rename", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    "batch-rename/confirmation",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let batch_rename_native_owner =
+            self.batch_rename_native_ui_owner_current(ctx, root_visible);
+        let batch_rename_confirmation_native_owner = self
+            .batch_rename_confirmation_native_ui_owner_current(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.batch_rename_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.batch_rename_host.show(
+            ctx,
+            &mut self.batch_rename_dialog,
+            &batch_rename_runtime,
+            super::utility_window_host::HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: batch_rename_owner,
+                parent_owner: batch_rename_native_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !self.pinned_panels.contains(&super::Panel::BatchRenameDialog),
+                allow_os_close: true,
+                confirmation_owner: batch_rename_confirmation_native_owner,
+                parent_instance: batch_rename_parent_instance.unwrap_or_default(),
+                root_scopes: (batch_rename_scope.as_ref(), batch_rename_confirmation_scope.as_ref()),
+            },
+        );
+    }
+
+    fn search_replace_needs_root_ui_when_hidden(&self) -> bool {
+        self.search_replace_host.needs_root_ui_when_hidden(self.search_replace_dialog.open)
+            || self.search_replace_dialog.has_ready_host_submission()
+    }
+
+    fn show_search_replace_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let search_replace_owner = if root_visible {
+            self.resolve_jump_mode_navigation_owner(ctx, true)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let (search_replace_scope, search_replace_confirmation_scope) = match search_replace_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
+                instance,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
+            {
+                (
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
+                        crate::gui::jump_mode::TargetGeneration(instance),
+                        "search-replace/form",
+                        ctx.viewport_id(),
+                        search_replace_owner,
+                        false,
+                    ),
+                    None,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+                subject,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_confirmation_identity()
+                    .is_some_and(|identity| {
+                        identity.confirmation_instance == confirmation_instance
+                            && identity.kind == kind
+                            && identity.subject == subject
+                    }) =>
+            {
+                let subject_identity =
+                    egui::Id::new(("search-replace-confirmation-subject", subject)).value();
+                let scope = self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    format!(
+                        "search-replace/confirmation/{}/{subject_identity:016x}",
+                        kind.surface_kind()
+                    ),
+                    ctx.viewport_id(),
+                    search_replace_owner,
+                    false,
+                );
+                (None, scope)
+            }
+            _ => (None, None),
+        };
+
+        let parent_input = self.search_replace_native_ui_owner_current(ctx, root_visible);
+        let parent_instance = self.jump_mode_ui
+            .dialog_instance(NavigationDialogKind::SearchReplace)
+            .unwrap_or_default();
+        let confirmation_owner = self.search_replace_root_confirmation_owner(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.search_replace_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.search_replace_host.show(
+            ctx, &mut self.search_replace_dialog, &self.replace_worker_snapshot,
+            super::utility_window_host::HostInput {
+                first, root_visible, root_input, native_input,
+                root_owner: search_replace_owner,
+                parent_owner: parent_input,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !self.pinned_panels.contains(&super::Panel::SearchReplaceDialog),
+                allow_os_close: true,
+                confirmation_owner, parent_instance,
+                root_scopes: (search_replace_scope.as_ref(), search_replace_confirmation_scope.as_ref()),
+            },
+        );
+    }
+
+    fn show_clipboard_history_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let clipboard_owner = if root_visible {
+            self.resolve_jump_mode_navigation_owner(ctx, true)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let clipboard_native_owner =
+            self.clipboard_history_native_ui_owner_current(ctx, root_visible);
+        let clipboard_scope = match clipboard_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
+                    self.clipboard_dialog.jump_mode_target_generation(),
+                    "clipboard-history",
+                    ctx.viewport_id(),
+                    clipboard_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
+                parent_instance,
+                confirmation_instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
+                .clipboard_dialog
+                .jump_mode_pending_removal_identity()
+                .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
+                .and_then(|(_, entry_token)| {
+                    let generation = self.clipboard_dialog.jump_mode_target_generation();
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::popup(
+                            "clipboard-removal",
+                            confirmation_instance,
+                            crate::gui::jump_mode::SurfaceId::dialog(
+                                "clipboard-history",
+                                parent_instance,
+                            ),
+                        ),
+                        generation,
+                        format!(
+                            "clipboard-removal/{}/{}/{}",
+                            generation.0, confirmation_instance, entry_token
+                        ),
+                        ctx.viewport_id(),
+                        clipboard_owner,
+                        false,
+                    )
+                }),
+            _ => None,
+        };
+
+        let parent_instance = self.jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ClipboardHistory)
+            .unwrap_or_default();
+        let confirmation_owner = if clipboard_native_owner && !egui::Popup::is_any_open(ctx) {
+            self.clipboard_dialog.jump_mode_pending_removal_identity().map_or(
+                NavigationOwner::Blocked,
+                |(confirmation_instance, _)| NavigationOwner::ClipboardRemoval {
+                    parent_instance,
+                    confirmation_instance,
+                },
+            )
+        } else {
+            NavigationOwner::Blocked
+        };
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        if !clipboard_native_owner
+            && let Some(layer) = self.clipboard_history_host.root_layer()
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| response.layer_id == layer)
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let jump_enabled = self.jump_mode_enabled();
+        self.clipboard_history_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let pinned = self.pinned_panels.contains(&super::Panel::ClipboardDialog);
+        let pending = self.clipboard_dialog.jump_mode_pending_removal_identity().is_some();
+        let scopes = if pending { (None, clipboard_scope.as_ref()) }
+            else { (clipboard_scope.as_ref(), None) };
+        self.clipboard_history_host.show(
+            ctx, &mut self.clipboard_dialog, &pinned,
+            super::utility_window_host::HostInput {
+                first, root_visible, root_input, native_input,
+                root_owner: clipboard_owner,
+                parent_owner: clipboard_native_owner && !pending,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned, allow_os_close: !pinned,
+                confirmation_owner, parent_instance, root_scopes: scopes,
+            },
+        );
+    }
+
+    fn show_json_utility_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner, focused_response_layer};
+        use super::utility_window_host::HostInput;
+
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let parent_owner = self.json_utility_native_ui_owner_current(ctx, root_visible);
+        let scope = match owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::JsonUtility, instance } if parent_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "json-utility/form", ctx.viewport_id(), owner, false,
+                )
+            }
+            _ => None,
+        };
+        if !parent_owner
+            && let Some(layer) = self.json_utility_host.root_layer()
+            && focused_response_layer(ctx) == Some(layer)
+            && let Some(id) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.json_utility_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let pinned = self.pinned_panels.contains(&super::Panel::JsonUtilityDialog);
+        self.json_utility_host.show(
+            ctx, &mut self.json_utility_dialog, &pinned,
+            HostInput {
+                first, root_visible, root_input, native_input, root_owner: owner, parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked, parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+    fn show_clipboard_modify_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::{ClipboardModifyHostRuntime, HostInput};
+
+        if !self.clipboard_modify_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.clipboard_modify_host.root_layer();
+        let popup = layer.and_then(|layer| self.clipboard_modify_dialog.owned_popup_layer(ctx, layer));
+        let focused = focused_response_layer(ctx);
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused.is_none_or(|focus| {
+                Some(focus) == layer || Some(focus) == popup || focus.order == egui::Order::Background
+            });
+        if !parent_owner && focused.is_some() && focused == layer
+            && let Some(id) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self.pinned_panels.contains(&super::Panel::ClipboardModifyDialog);
+        let runtime = ClipboardModifyHostRuntime {
+            legacy_window_size: super::clipboard_modify_dialog::clipboard_modify_legacy_window_size(
+                &self.settings_editor.baseline_settings,
+            ),
+            catalog: self.clipboard_modify_runtime.catalog_snapshot(),
+            store: self.clipboard_modify_runtime.store.clone(),
+            pinned,
+            #[cfg(test)]
+            test_service: self.clipboard_modify_test_service.clone(),
+        };
+        self.clipboard_modify_host.show(
+            ctx,
+            &mut self.clipboard_modify_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    fn paste_sequence_owns_root_input(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.paste_sequence_host.root_layer() else {
+            return false;
+        };
+        self.paste_sequence_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background
+            })
+    }
+
+    fn show_paste_sequence_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::utility_window_host::{HostInput, HostedPasteSequenceRuntime, UtilityWindowCompanion};
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        if !self.paste_sequence_dialog.open {
+            if self.paste_sequence_dialog.is_suspended_for_playback() {
+                self.paste_sequence_host.suspend(ctx);
+            }
+            return;
+        }
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = if let NavigationOwner::PasteSequence { instance } = owner {
+            self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("paste-sequence", instance),
+                crate::gui::jump_mode::TargetGeneration(instance),
+                "paste-sequence-dialog",
+                ctx.viewport_id(),
+                owner,
+                false,
+            )
+        } else {
+            None
+        };
+        let companion_active = self.hosted_sequence_prompt_active();
+        let parent_owner = self.paste_sequence_owns_root_input(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, companion_active);
+        let native_input = self.native_ui_application_input_allowed_for_snippet_prompt(ctx, companion_active)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self.pinned_panels.contains(&super::Panel::PasteSequenceDialog);
+        let runtime = HostedPasteSequenceRuntime {
+            dialog: super::paste_sequence_dialog::PasteSequenceHostRuntime::capture(self),
+            pinned,
+        };
+        let jump_enabled = self.jump_mode_enabled();
+        self.paste_sequence_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let close_shortcut = !pinned && !self.paste_sequence_dialog.source_picker_is_open();
+        let companion = companion_active.then_some((
+            &mut self.snippet_prompt_dialog as &mut dyn UtilityWindowCompanion,
+            None,
+        ));
+        self.paste_sequence_host.show_with_companion(
+            ctx,
+            &mut self.paste_sequence_dialog,
+            &runtime,
+            HostInput {
+                first, root_visible, root_input, native_input, root_owner: owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+            companion,
+        );
+    }
+
+    fn show_snippet_editor_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let snippet_navigation_owner = if root_visible {
+            self.resolve_jump_mode_navigation_owner(ctx, true)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let snippet_scope = match snippet_navigation_owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::Snippets,
+                instance,
+            } => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("snippets", instance),
+                self.snippet_dialog.jump_mode_target_generation(),
+                "snippets-dialog",
+                ctx.viewport_id(),
+                snippet_navigation_owner,
+                false,
+            ),
+            NavigationOwner::SnippetRemoval {
+                parent_instance,
+                confirmation_instance,
+            } => self
+                .snippet_dialog
+                .jump_mode_pending_removal_identity()
+                .filter(|(current_confirmation, _)| {
+                    *current_confirmation == confirmation_instance
+                })
+                .and_then(|(_, index)| {
+                    let snapshot_generation = self.snippet_dialog.jump_mode_target_generation();
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::popup(
+                            "snippet-removal",
+                            confirmation_instance,
+                            crate::gui::jump_mode::SurfaceId::dialog(
+                                "snippets",
+                                parent_instance,
+                            ),
+                        ),
+                        snapshot_generation,
+                        format!(
+                            "snippet-removal/{}/{}/{}",
+                            snapshot_generation.0, confirmation_instance, index
+                        ),
+                        ctx.viewport_id(),
+                        snippet_navigation_owner,
+                        false,
+                    )
+                }),
+            _ => None,
+        };
+        let hosted_preview = self.hosted_snippet_preview_active();
+        let preview_scope = if hosted_preview && self.jump_mode_enabled()
+            && let NavigationOwner::SnippetPrompt { generation } = snippet_navigation_owner
+        {
+            self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("snippet-prompt", generation),
+                crate::gui::jump_mode::TargetGeneration(generation),
+                "snippet-prompt", ctx.viewport_id(), snippet_navigation_owner, false,
+            )
+        } else {
+            None
+        };
+        let native_owner = !hosted_preview && self.snippet_native_ui_owner_current(ctx, root_visible);
+        let parent_instance = self.jump_mode_ui.dialog_instance(NavigationDialogKind::Snippets).unwrap_or_default();
+        let confirmation = self.snippet_dialog.jump_mode_pending_removal_identity();
+        let confirmation_owner = if native_owner && !egui::Popup::is_any_open(ctx) {
+            confirmation.map_or(NavigationOwner::Blocked, |(confirmation_instance, _)| {
+                NavigationOwner::SnippetRemoval { parent_instance, confirmation_instance }
+            })
+        } else {
+            NavigationOwner::Blocked
+        };
+        let root_input = self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, hosted_preview);
+        let native_input = self.native_ui_application_input_allowed_for_snippet_prompt(ctx, hosted_preview)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.snippet_window_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let pinned = self.pinned_panels.contains(&super::Panel::SnippetDialog);
+        let root_scopes = if confirmation.is_some() { (None, snippet_scope.as_ref()) }
+            else { (snippet_scope.as_ref(), None) };
+        let companion = hosted_preview.then_some((
+            &mut self.snippet_prompt_dialog as &mut dyn super::utility_window_host::UtilityWindowCompanion,
+            preview_scope,
+        ));
+        self.snippet_window_host.show_with_companion(
+            ctx, &mut self.snippet_dialog, &pinned,
+            super::utility_window_host::HostInput {
+                first, root_visible, root_input, native_input,
+                root_owner: snippet_navigation_owner,
+                parent_owner: native_owner && confirmation.is_none(),
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned, allow_os_close: !pinned,
+                confirmation_owner, parent_instance, root_scopes,
+            },
+            companion,
+        );
+    }
+
+    fn file_search_has_root_presentation(&self) -> bool {
+        self.file_search_dialog.open && self.file_search_host.root_layer().is_some()
+    }
+
+    fn show_file_search_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::{
+            SurfaceId,
+            ui::{NavigationDialogKind, NavigationOwner},
+        };
+        let os_close = self.file_search_host.begin_pass(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+            first,
+        );
+        let owner = if root_visible && self.file_search_has_root_presentation() {
+            self.resolve_jump_mode_navigation_owner(ctx, root_visible)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let kind = NavigationDialogKind::FileSearch;
+        let root_scopes = if let NavigationOwner::Dialog {
+            kind: owner_kind,
+            instance,
+        } = owner
+            && owner_kind == kind
+            && self.jump_mode_enabled()
+        {
+            let surface = SurfaceId::dialog("file-search", instance);
+            (
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface.clone(),
+                    self.file_search_dialog.jump_mode_target_generation(),
+                    "file-search-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface,
+                    self.file_search_dialog
+                        .jump_mode_results_target_generation(instance),
+                    "file-search-results",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+            )
+        } else {
+            (None, None)
+        };
+        let root_owner = self.file_search_native_ui_owner_current(ctx, root_visible);
+        let input = super::file_search_window_host::HostInput {
+            first,
+            root_visible,
+            root_input: self.native_ui_host_input_allowed(ctx, root_visible),
+            root_owner,
+            native_input: self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.pin_list_open
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open(),
+            close_shortcut: !self.pinned_panels.contains(&super::Panel::FileSearchDialog),
+        };
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.file_search_host
+            .configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.file_search_host.show(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+            input,
+            self.jump_mode_ui.dialog_instance(kind).unwrap_or(0),
+            root_scopes,
+            os_close,
+        );
+    }
+
+    fn complete_file_search_host(&mut self, ctx: &egui::Context) {
+        let Some(completion) = self.file_search_host.complete(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+        ) else {
+            return;
+        };
+        let mut show_root = completion.show_root;
+        for command in completion.commands {
+            match command {
+                super::FileSearchUiCommand::OpenFolderSize(path) => {
+                    self.folder_size_dialog
+                        .stage_file_search_prefill(completion.root_pass, path);
+                    show_root = true;
+                }
+                super::FileSearchUiCommand::InspectFileUsers(path) => {
+                    self.file_lock_dialog
+                        .stage_file_search_prefill(completion.root_pass, path);
+                    show_root = true;
+                }
+                super::FileSearchUiCommand::OpenHash(path) => {
+                    self.handle_file_search_ui_command(
+                        super::FileSearchUiCommand::OpenHash(path),
+                        ctx,
+                    );
+                    show_root = true;
+                }
+                command => self.handle_file_search_ui_command(command, ctx),
+            }
+        }
+        if completion.closed {
+            self.panel_states.file_search_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FileSearchDialog);
+            self.save_file_search_ui_preferences_if_dirty(ctx);
+        }
+        if show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    fn show_mouse_gestures_host(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        jump_escape_preempted: bool,
+    ) {
+        use super::mouse_form_host::{
+            FormInput, MOUSE_GESTURES, mouse_gestures_navigation_surface,
+        };
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        if !self.mouse_gestures_dialog.open {
+            if self.mouse_gestures_host.is_popped_out() {
+                self.mouse_gestures_host.retire(ctx, MOUSE_GESTURES);
+            }
+            return;
+        }
+        if !root_visible && !self.mouse_gestures_host.is_popped_out() {
+            return;
+        }
+
+        let root_layer = self.mouse_gestures_host.root_layer(MOUSE_GESTURES);
+        let instance = self.jump_mode_ui.dialog_instance(MOUSE_GESTURES.kind);
+        let owner = self.jump_mode_ui.frame_navigation_owner();
+        let parent = instance.map(|instance| NavigationOwner::Dialog {
+            kind: MOUSE_GESTURES.kind,
+            instance,
+        });
+        let child = instance
+            .and_then(|instance| self.mouse_gestures_dialog.jump_mode_child_owner(instance));
+        let jump_enabled = self.jump_mode_enabled();
+        let canvas_active = self.mouse_gestures_dialog.recorder_canvas_active();
+        let root_scope = if root_visible
+            && root_layer.is_some()
+            && jump_enabled
+            && !canvas_active
+            && (Some(owner) == parent || Some(owner) == child)
+        {
+            instance.and_then(|instance| {
+                let (surface, namespace) = mouse_gestures_navigation_surface(instance, owner);
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface,
+                    self.mouse_gestures_dialog.jump_mode_target_generation(),
+                    namespace,
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            })
+        } else {
+            None
+        };
+        let parent_current = parent.is_some_and(|owner| {
+            self.mouse_gestures_native_owner_current(ctx, root_visible, owner)
+        });
+        let child_current = child
+            .filter(|owner| self.mouse_gestures_native_owner_current(ctx, root_visible, *owner));
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let input = FormInput {
+            first,
+            root_input,
+            root_owner: parent_current,
+            root_jump_active: jump_escape_preempted || self.jump_mode_ui.active_session().is_some(),
+            application_input: self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.pin_list_open
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open(),
+            close_shortcut: child.is_none()
+                && !canvas_active
+                && !self
+                    .pinned_panels
+                    .contains(&super::Panel::MouseGesturesDialog),
+        };
+        let mut host = std::mem::take(&mut self.mouse_gestures_host);
+        let mut draft = std::mem::take(&mut self.mouse_gestures_dialog);
+        host.configure_jump(&self.jump_mode_ui, jump_enabled && !canvas_active);
+        host.show(
+            ctx,
+            MOUSE_GESTURES,
+            instance.unwrap_or(0),
+            &mut draft,
+            input,
+            root_scope.as_ref(),
+            |draft, ui| {
+                let parent_current = if ui.native {
+                    matches!(ui.native_owner, Some(NavigationOwner::Dialog { .. }))
+                } else {
+                    parent_current && ui.owner
+                };
+                let child_current = if ui.native {
+                    ui.native_owner
+                } else {
+                    child_current.filter(|_| ui.input)
+                };
+                draft.ui_with_host(
+                    ui.ctx,
+                    self,
+                    instance.unwrap_or(0),
+                    ui.scope,
+                    parent_current,
+                    matches!(
+                        child_current,
+                        Some(NavigationOwner::MouseGestureBinding { .. })
+                    ),
+                    matches!(
+                        child_current,
+                        Some(NavigationOwner::MouseGestureDelete { .. })
+                    ),
+                    ui.first,
+                    ui.child,
+                    ui.popout,
+                )
+            },
+        );
+        #[cfg(test)]
+        host.record_test_button(|actions| actions.host_button);
+        self.mouse_gestures_dialog = draft;
+        self.mouse_gestures_host = host;
+    }
+
+    fn complete_mouse_gestures_host(&mut self, ctx: &egui::Context) -> Option<String> {
+        use super::mouse_form_host::MOUSE_GESTURES;
+        let mut draft = std::mem::take(&mut self.mouse_gestures_dialog);
+        let open = draft.open;
+        let mut copy = None;
+        if let Some((mut actions, close)) =
+            self.mouse_gestures_host
+                .complete(ctx, MOUSE_GESTURES, &mut draft, open)
+        {
+            if close
+                && !self
+                    .pinned_panels
+                    .contains(&super::Panel::MouseGesturesDialog)
+            {
+                actions = Default::default();
+                actions.request_close();
+            }
+            let request = actions.host_request;
+            let focus_launcher = self
+                .mouse_gestures_host
+                .root_layer(MOUSE_GESTURES)
+                .is_some();
+            copy = draft.complete_host_actions(self, actions, focus_launcher);
+            if !draft.open {
+                self.mouse_gestures_host.retire(ctx, MOUSE_GESTURES);
+                self.panel_states.mouse_gestures_dialog = false;
+                self.panel_stack
+                    .retain(|panel| *panel != super::Panel::MouseGesturesDialog);
+            } else if let Some(popout) = request
+                && !draft.recorder_canvas_active()
+                && self
+                    .mouse_gestures_host
+                    .transition(ctx, MOUSE_GESTURES, popout)
+            {
+                self.request_launcher_visibility(true);
+            }
+        }
+        self.mouse_gestures_dialog = draft;
+        copy
+    }
+
+    fn show_mouse_settings_hosts(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        jump_escape_preempted: bool,
+    ) {
+        use super::mouse_form_host::{FormInput, GESTURE_SETTINGS, MOUSE_SETTINGS};
+        use crate::settings_editor::catalog::SettingsSection;
+
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let root_jump_active =
+            jump_escape_preempted || self.jump_mode_ui.active_session().is_some();
+        let application_input =
+            self.native_ui_application_input_allowed(ctx) && !self.ocr_surface_visible();
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+
+        if !self.mouse_gesture_settings_dialog.open {
+            self.mouse_gesture_settings_host
+                .retire(ctx, GESTURE_SETTINGS);
+        } else if root_visible || self.mouse_gesture_settings_host.is_popped_out() {
+            let section = SettingsSection::MouseGestures;
+            let scope = self.mouse_form_scope(ctx, GESTURE_SETTINGS, root_visible);
+            let instance = self.jump_mode_ui.dialog_instance(GESTURE_SETTINGS.kind);
+            let root_owner = self.mouse_gesture_settings_native_ui_owner_current(ctx, root_visible);
+            let root_picker_owner =
+                self.mouse_gesture_settings_picker_native_ui_owner_current(ctx, root_visible);
+            let root_layer = self
+                .mouse_gesture_settings_host
+                .root_layer(GESTURE_SETTINGS);
+            let picker_open = self.mouse_gesture_settings_dialog.window_picker_is_open();
+            let input = FormInput {
+                first,
+                root_input,
+                root_owner,
+                root_jump_active,
+                application_input,
+                close_shortcut: !picker_open
+                    && (self.mouse_gesture_settings_host.is_popped_out()
+                        || self.mouse_form_root_close_allowed(
+                            ctx,
+                            super::Panel::MouseGestureSettingsDialog,
+                        ))
+                    && !self
+                        .pinned_panels
+                        .contains(&super::Panel::MouseGestureSettingsDialog),
+            };
+            let root_observer = if first && !ctx.will_discard() && root_layer.is_some() {
+                self.stage_mouse_form_navigation(ctx, |app| {
+                    app.dedicated_settings_navigation_observer(
+                        ctx,
+                        root_visible,
+                        &section,
+                        root_owner,
+                        first,
+                    )
+                })
+            } else {
+                None
+            };
+            let mut host = std::mem::take(&mut self.mouse_gesture_settings_host);
+            host.configure_jump(&self.jump_mode_ui, jump_enabled);
+            let mut draft = std::mem::take(&mut self.mouse_gesture_settings_dialog);
+            host.show(
+                ctx,
+                GESTURE_SETTINGS,
+                instance.unwrap_or(0),
+                &mut draft,
+                input,
+                scope.as_ref(),
+                |draft, ui| {
+                    use crate::gui::jump_mode::ui::visible_top_middle_layer;
+                    let picker_owner =
+                        if ui.native {
+                            ui.input && picker_open && visible_top_middle_layer(ui.ctx)
+                        == Some(super::mouse_gesture_settings_dialog::window_picker_layer_id())
+                        } else {
+                            root_picker_owner
+                        };
+                    let owner = ui.owner && !picker_open;
+                    let mut observation = if !ui.first {
+                        None
+                    } else if ui.native {
+                        self.stage_mouse_form_navigation(ui.ctx, |app| {
+                            app.native_mouse_form_observer(ui.ctx, &section, owner, true)
+                        })
+                    } else {
+                        root_observer.clone()
+                    };
+                    let installed = observation
+                        .as_ref()
+                        .and_then(|observation| observation.observer.as_ref())
+                        .map(|observer| observer.install(ui.ctx));
+                    let actions = draft.ui_with_host(
+                        ui.ctx,
+                        self,
+                        ui.scope,
+                        instance,
+                        owner,
+                        picker_owner,
+                        ui.first,
+                        ui.child,
+                        ui.popout,
+                    );
+                    drop(installed);
+                    if let Some(observation) = &mut observation {
+                        observation.current = owner
+                            && !draft.window_picker_is_open()
+                            && visible_top_middle_layer(ui.ctx)
+                                == if ui.native { None } else { root_layer };
+                    }
+                    (actions, observation)
+                },
+            );
+            #[cfg(test)]
+            host.record_test_button(|(actions, _)| actions.host_button);
+            self.mouse_gesture_settings_dialog = draft;
+            self.mouse_gesture_settings_host = host;
+        }
+
+        if !self.mouse_settings_dialog.open {
+            self.mouse_settings_host.retire(ctx, MOUSE_SETTINGS);
+        } else if root_visible || self.mouse_settings_host.is_popped_out() {
+            let section = SettingsSection::Mouse;
+            let scope = self.mouse_form_scope(ctx, MOUSE_SETTINGS, root_visible);
+            let instance = self.jump_mode_ui.dialog_instance(MOUSE_SETTINGS.kind);
+            let root_owner = self.mouse_settings_native_ui_owner_current(ctx, root_visible);
+            let root_layer = self.mouse_settings_host.root_layer(MOUSE_SETTINGS);
+            let input = FormInput {
+                first,
+                root_input,
+                root_owner,
+                root_jump_active,
+                application_input,
+                close_shortcut: (self.mouse_settings_host.is_popped_out()
+                    || self.mouse_form_root_close_allowed(ctx, super::Panel::MouseSettingsDialog))
+                    && !self
+                        .pinned_panels
+                        .contains(&super::Panel::MouseSettingsDialog),
+            };
+            let root_observer = if first && !ctx.will_discard() && root_layer.is_some() {
+                self.stage_mouse_form_navigation(ctx, |app| {
+                    app.dedicated_settings_navigation_observer(
+                        ctx,
+                        root_visible,
+                        &section,
+                        root_owner,
+                        first,
+                    )
+                })
+            } else {
+                None
+            };
+            let mut host = std::mem::take(&mut self.mouse_settings_host);
+            host.configure_jump(&self.jump_mode_ui, jump_enabled);
+            let mut draft = std::mem::take(&mut self.mouse_settings_dialog);
+            host.show(
+                ctx,
+                MOUSE_SETTINGS,
+                instance.unwrap_or(0),
+                &mut draft,
+                input,
+                scope.as_ref(),
+                |draft, ui| {
+                    let mut observation = if !ui.first {
+                        None
+                    } else if ui.native {
+                        self.stage_mouse_form_navigation(ui.ctx, |app| {
+                            app.native_mouse_form_observer(ui.ctx, &section, ui.owner, true)
+                        })
+                    } else {
+                        root_observer.clone()
+                    };
+                    let installed = observation
+                        .as_ref()
+                        .and_then(|observation| observation.observer.as_ref())
+                        .map(|observer| observer.install(ui.ctx));
+                    let actions = draft.ui_with_host(
+                        ui.ctx,
+                        &mut self.coordinate_tool,
+                        ui.scope,
+                        ui.owner,
+                        ui.first,
+                        ui.child,
+                        ui.popout,
+                    );
+                    drop(installed);
+                    if let Some(observation) = &mut observation {
+                        observation.current = ui.owner
+                            && crate::gui::jump_mode::ui::visible_top_middle_layer(ui.ctx)
+                                == if ui.native { None } else { root_layer };
+                    }
+                    (actions, observation)
+                },
+            );
+            #[cfg(test)]
+            host.record_test_button(|(actions, _)| actions.host_button);
+            self.mouse_settings_dialog = draft;
+            self.mouse_settings_host = host;
+        }
+    }
+
+    fn complete_mouse_settings_hosts(&mut self, ctx: &egui::Context) {
+        use super::mouse_form_host::{GESTURE_SETTINGS, MOUSE_SETTINGS};
+        let mut gesture = std::mem::take(&mut self.mouse_gesture_settings_dialog);
+        let gesture_open = gesture.open;
+        if let Some(((mut actions, observation), close)) = self
+            .mouse_gesture_settings_host
+            .complete(ctx, GESTURE_SETTINGS, &mut gesture, gesture_open)
+        {
+            if close {
+                actions = Default::default();
+                actions.request_close();
+            } else if let Some(observation) = observation {
+                observation.finish(&mut self.settings_editor);
+            }
+            let request = actions.host_request;
+            gesture.complete_host_actions(self, actions);
+            if !gesture.open {
+                self.mouse_gesture_settings_host
+                    .retire(ctx, GESTURE_SETTINGS);
+                self.panel_states.mouse_gesture_settings_dialog = false;
+                self.retire_settings_navigation_for_panel(super::Panel::MouseGestureSettingsDialog);
+                self.panel_stack
+                    .retain(|panel| *panel != super::Panel::MouseGestureSettingsDialog);
+            } else if let Some(popout) = request
+                && self
+                    .mouse_gesture_settings_host
+                    .transition(ctx, GESTURE_SETTINGS, popout)
+            {
+                self.request_launcher_visibility(true);
+            }
+        }
+        self.mouse_gesture_settings_dialog = gesture;
+
+        let mouse_open = self.mouse_settings_dialog.open;
+        if let Some(((mut actions, observation), close)) = self.mouse_settings_host.complete(
+            ctx,
+            MOUSE_SETTINGS,
+            &mut self.mouse_settings_dialog,
+            mouse_open,
+        ) {
+            if close {
+                actions = Default::default();
+                actions.request_close();
+            } else if let Some(observation) = observation {
+                observation.finish(&mut self.settings_editor);
+            }
+            let request = actions.host_request;
+            self.mouse_settings_dialog
+                .complete_host_actions(&mut self.coordinate_tool, actions);
+            if !self.mouse_settings_dialog.open {
+                self.mouse_settings_host.retire(ctx, MOUSE_SETTINGS);
+                self.panel_states.mouse_settings_dialog = false;
+                self.retire_settings_navigation_for_panel(super::Panel::MouseSettingsDialog);
+                self.panel_stack
+                    .retain(|panel| *panel != super::Panel::MouseSettingsDialog);
+            } else if let Some(popout) = request
+                && self
+                    .mouse_settings_host
+                    .transition(ctx, MOUSE_SETTINGS, popout)
+            {
+                self.request_launcher_visibility(true);
+            }
+        }
+    }
+
+    fn show_mkmacro_editor(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if !root_visible && !self.mkmacro_dialog.needs_root_ui_when_hidden() {
+            return;
+        }
+        let capture_active = self.coordinate_pick_blocks_other_screen_actions();
+        self.mkmacro_dialog
+            .set_coordinate_capture_active(capture_active);
+        let root_scope = if root_visible {
+            let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            if let crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance } = owner {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("mkmacro", instance),
+                    self.mkmacro_dialog.jump_mode_target_generation(),
+                    "mkmacro-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let jump_mode_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let close_shortcut_allowed = !self.pinned_panels.contains(&super::Panel::MkMacroDialog);
+        self.mkmacro_dialog.show_with_host(
+            ctx,
+            root_scope,
+            first_ui_pass,
+            application_input_allowed,
+            root_visible,
+            root_input_allowed,
+            close_shortcut_allowed,
+            self.jump_mode_ui.mkmacro_instance(),
+            jump_mode_enabled,
+        );
+    }
+
+    fn show_note_panels(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+        mut note_close_frame: Option<&mut super::query_observation::NoteCloseRenderFrame>,
+    ) {
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let note_instances: Vec<_> = self
+            .note_panels
+            .iter()
+            .filter(|panel| root_visible || panel.needs_root_ui_when_hidden())
+            .map(|panel| panel.prompt_identity())
+            .collect();
+        for identity in note_instances {
+            let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
+            let mut panel = self.note_panels.remove(index);
+            let mut discard = None;
+            let observe = panel.host_layer_if_root().is_some() && note_close_frame.is_some();
+            panel.ui_with_host(
+                ctx,
+                self,
+                first_ui_pass,
+                root_visible,
+                application_input_allowed,
+                root_input_allowed,
+                observe.then_some(&mut discard),
+            );
+            if let Some(observed) = note_close_frame.as_deref_mut().filter(|_| observe) {
+                observed.observe_panel(&panel, discard);
+            }
+            if panel.open {
+                self.note_panels
+                    .insert(index.min(self.note_panels.len()), panel);
+            }
+        }
     }
 
     fn show_diagram_studio(
@@ -4875,6 +6986,7 @@ impl LauncherApp {
                 ctx,
                 first_ui_pass,
                 application_input_allowed,
+                root_visible,
                 root_input_allowed,
             );
             self.qa_framebuffer_after_diagram_show(
@@ -4885,23 +6997,25 @@ impl LauncherApp {
             );
             return;
         }
-        self.diagram_studio_dialog.show(
+        self.diagram_studio_dialog.show_on_root(
             ctx,
             first_ui_pass,
             application_input_allowed,
+            root_visible,
             root_input_allowed,
         );
     }
 
-    fn show_xml_toolkit(&mut self, ctx: &egui::Context, root_visible: bool) {
+    fn show_xml_toolkit(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use crate::gui::jump_mode::ui::NavigationDialogKind;
 
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let instance = self
             .jump_mode_ui
             .dialog_instance(NavigationDialogKind::XmlToolkit);
-        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let root_native_owner_current = self.native_ui_host_input_allowed(ctx, root_visible);
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let native_owner = self.xml_toolkit_root_input_owner(ctx, root_visible);
         let scope = if root_native_owner_current && self.jump_mode_enabled() {
             match owner {
                 NavigationOwner::Dialog {
@@ -4935,14 +7049,17 @@ impl LauncherApp {
         } else {
             None
         };
-        self.xml_toolkit_dialog.show_with_jump_mode(
+        self.xml_toolkit_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
-            owner,
-            application_input_allowed,
+            native_owner,
+            application_input_allowed && !self.ocr_surface_visible(),
             root_native_owner_current,
             self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible,
+            first,
+            self.pinned_panels.contains(&super::Panel::XmlToolkitDialog),
         );
     }
 
@@ -4956,17 +7073,18 @@ impl LauncherApp {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::TableUtility,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
+        let instance = self.jump_mode_ui.dialog_instance(NavigationDialogKind::TableUtility);
         let native_owner_current = !owner_transition_pending
             && self.table_utility_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|instance| {
+                native_owner_current
+                    && self.jump_mode_enabled()
+                    && owner == NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::TableUtility,
+                        instance: *instance,
+                    }
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("table-utility", instance),
@@ -4977,14 +7095,18 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.table_utility_dialog.show_with_jump_mode(
+        self.table_utility_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx) && !self.ocr_surface_visible(),
             native_owner_current,
+            &self.jump_mode_ui,
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible,
             first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::TableUtilityDialog),
         );
     }
 
@@ -4994,21 +7116,19 @@ impl LauncherApp {
         root_visible: bool,
         first_ui_pass: bool,
         owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::ImageCompare,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
-        let native_owner_current = !owner_transition_pending
-            && self.image_compare_native_ui_owner_current(ctx, root_visible);
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ImageCompare);
+        let native_owner_current = self.image_compare_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|_| {
+                native_owner_current && !owner_transition_pending && self.jump_mode_enabled()
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance),
@@ -5019,15 +7139,95 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.image_compare_dialog.show_with_jump_mode(
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.image_compare_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
             native_owner_current,
+            &self.jump_mode_ui,
+            jump_enabled,
+            root_visible,
             first_ui_pass,
+            self.pinned_panels
+                .contains(&super::Panel::ImageCompareDialog),
+            !jump_escape_preempted,
         );
+    }
+
+    fn show_zip_host(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
+        let zip_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let zip_scope = match zip_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.zip_extractor_dialog.target_generation(),
+                    ),
+                    "zip-extractor",
+                    ctx.viewport_id(),
+                    zip_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        #[cfg(windows)]
+        {
+            let instance = self.jump_mode_ui.dialog_instance(zip_kind);
+            let root_native_owner = root_visible
+                && self.native_ui_host_input_allowed(ctx, true)
+                && ctx.memory(|m| m.top_modal_layer().is_none())
+                && !egui::Popup::is_any_open(ctx)
+                && self.zip_extractor_dialog.root_layer().is_some_and(|layer| {
+                    crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                        && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(
+                            |focus| focus == layer || focus.order == egui::Order::Background,
+                        )
+                });
+            self.zip_extractor_dialog.show_hosted(
+                ctx,
+                &self.archive_session,
+                zip_scope.as_ref(),
+                instance,
+                zip_owner,
+                self.native_ui_application_input_allowed(ctx)
+                    && !self.ocr_surface_visible()
+                    && !self.confirm_modal.is_open()
+                    && !self.action_sheet.is_open()
+                    && !self.pin_list_open,
+                root_native_owner,
+                &self.jump_mode_ui,
+                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+                root_visible,
+                first,
+                self.pinned_panels
+                    .contains(&super::Panel::ZipExtractorDialog),
+                !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            );
+        }
+        #[cfg(not(windows))]
+        self.zip_extractor_dialog
+            .show_unsupported(ctx, first, zip_scope.as_ref());
     }
 
     fn show_duplicate_finder(
@@ -5036,21 +7236,19 @@ impl LauncherApp {
         root_visible: bool,
         first_ui_pass: bool,
         owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::DuplicateFinder,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
-        let native_owner_current = !owner_transition_pending
-            && self.duplicate_finder_native_ui_owner_current(ctx, root_visible);
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::DuplicateFinder);
+        let native_owner_current = self.duplicate_finder_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|_| {
+                native_owner_current && !owner_transition_pending && self.jump_mode_enabled()
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance),
@@ -5061,14 +7259,139 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.duplicate_finder_dialog.show_with_jump_mode(
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.duplicate_finder_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
             native_owner_current,
+            &self.jump_mode_ui,
+            jump_enabled,
+            root_visible,
             first_ui_pass,
+            self.pinned_panels
+                .contains(&super::Panel::DuplicateFinderDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+        );
+    }
+
+    fn show_folder_size(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        _owner_transition_pending: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.folder_size_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                (top == Some(layer)
+                    || (top.is_none() && self.folder_size_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer || focus.order == egui::Order::Background
+                    })
+            });
+        self.folder_size_dialog.show_hosted(
+            ctx,
+            root_visible,
+            root_owner,
+            input_allowed,
+            first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::FolderSizeDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+        );
+    }
+
+    fn show_recording_setup(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.recording_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                let popup = self.recording_dialog.popup_layer(ctx, layer);
+                (top == Some(layer)
+                    || (top.is_none() && self.recording_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer
+                            || focus.order == egui::Order::Background
+                            || Some(focus) == popup
+                    })
+            });
+        self.recording_dialog.show_hosted(
+            ctx,
+            &catalog,
+            &self.recording_controller,
+            root_visible,
+            root_owner,
+            input_allowed,
+            first,
+            self.pinned_panels.contains(&super::Panel::RecordingDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+        );
+    }
+
+    fn show_file_lock(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        _owner_transition_pending: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.file_lock_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                (top == Some(layer)
+                    || (top.is_none() && self.file_lock_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer || focus.order == egui::Order::Background
+                    })
+            });
+        self.file_lock_dialog.show_hosted(
+            ctx,
+            root_visible,
+            root_owner,
+            input_allowed,
+            first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::FileLockDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
         );
     }
 
@@ -5119,6 +7442,7 @@ impl LauncherApp {
                     MainSetting::Launcher => "hotkeys.launcher",
                     MainSetting::Quit => "hotkeys.quit.value",
                     MainSetting::Help => "hotkeys.help.value",
+                    MainSetting::RecordingStop => "hotkeys.recording_stop.value",
                 };
                 let settings_was_open = self.show_settings;
                 let settings_instance = self.jump_mode_ui.settings_instance();
@@ -5135,6 +7459,7 @@ impl LauncherApp {
             } => {
                 self.paste_sequence_dialog
                     .reveal_saved_sequence_for_hotkey_directory(sequence_id)?;
+                self.paste_sequence_host.request_focus();
             }
             EditDestination::PasteSequence {
                 sequence_id: None,
@@ -5245,6 +7570,7 @@ impl LauncherApp {
                         gesture_index as usize,
                         binding_index as usize,
                     )?;
+                self.mouse_gestures_host.request_focus();
             }
             EditDestination::ScreenDraw(_) => {
                 return Err("Not configurable — no current editor.");
@@ -5311,7 +7637,7 @@ impl LauncherApp {
         );
         self.macro_prompt.pending.is_none()
             && !self.macro_parameter_prompt.owns_input()
-            && (exact_prompt_owner || !self.snippet_prompt_dialog.is_open())
+            && (exact_prompt_owner || !self.snippet_prompt_has_root_presentation())
             && !self
                 .root_frame_logic
                 .as_ref()
@@ -5320,6 +7646,23 @@ impl LauncherApp {
             && !self.screen_draw_controller.toolbar_open()
             && !self.coordinate_tool.capture_pending()
             && !gesture_capture_active
+    }
+
+    pub(super) fn mouse_gestures_root_close_allowed(&self, ctx: &egui::Context) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::MouseGestures;
+        !self.mouse_gestures_dialog.recorder_canvas_active()
+            && !egui::Popup::is_any_open(ctx)
+            && self
+                .jump_mode_ui
+                .dialog_instance(kind)
+                .is_some_and(|instance| {
+                    self.mouse_gestures_native_owner_current(
+                        ctx,
+                        true,
+                        NavigationOwner::Dialog { kind, instance },
+                    )
+                })
     }
 
     fn mouse_gestures_native_owner_current(
@@ -5343,7 +7686,12 @@ impl LauncherApp {
         else {
             return false;
         };
-        let parent_layer = NavigationDialogKind::MouseGestures.layer_id();
+        let Some(parent_layer) = self
+            .mouse_gestures_host
+            .root_layer(super::mouse_form_host::MOUSE_GESTURES)
+        else {
+            return false;
+        };
         match owner {
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::MouseGestures,
@@ -5354,7 +7702,10 @@ impl LauncherApp {
                     .jump_mode_child_owner(parent_instance)
                     .is_none() =>
             {
-                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == parent_layer
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(parent_layer)
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        layer == parent_layer || layer.order != egui::Order::Middle
+                    })
                     && (!egui::Popup::is_any_open(ctx)
                         || self.mouse_gestures_dialog.jump_mode_main_popup_is_open(ctx))
             }
@@ -5372,7 +7723,7 @@ impl LauncherApp {
                     && ctx.memory(|memory| memory.top_modal_layer().is_none())
                     && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
                         layer == child_layer
-                            || parent_layer == Some(layer)
+                            || parent_layer == layer
                             || layer.order != egui::Order::Middle
                     })
                     && (!egui::Popup::is_any_open(ctx)
@@ -5395,7 +7746,7 @@ impl LauncherApp {
                     && ctx.memory(|memory| memory.top_modal_layer().is_none())
                     && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
                         layer == child_layer
-                            || parent_layer == Some(layer)
+                            || parent_layer == layer
                             || layer.order != egui::Order::Middle
                     })
                     && !egui::Popup::is_any_open(ctx)
@@ -5413,7 +7764,7 @@ impl LauncherApp {
             return false;
         };
         let generation = session.generation;
-        self.snippet_prompt_dialog.is_open()
+        self.snippet_prompt_has_root_presentation()
             && self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, true)
             && crate::gui::jump_mode::ui::resolve_snippet_prompt_navigation_owner(ctx, generation)
                 == (crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { generation })
@@ -5428,7 +7779,7 @@ impl LauncherApp {
             return false;
         };
         let generation = session.generation;
-        if !self.snippet_prompt_dialog.is_open()
+        if !self.snippet_prompt_has_root_presentation()
             || !self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, true)
             || egui::Popup::is_any_open(ctx)
         {
@@ -5443,13 +7794,13 @@ impl LauncherApp {
                 .is_none_or(|layer| layer.order != egui::Order::Middle || known_layer(layer))
     }
 
-    fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+    pub(super) fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         if !self.file_search_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return false;
         }
-        let Some(file_search_layer) = NavigationDialogKind::FileSearch.layer_id() else {
+        let Some(file_search_layer) = self.file_search_host.root_layer() else {
             return false;
         };
         if visible_top_middle_layer(ctx) != Some(file_search_layer) {
@@ -5481,56 +7832,82 @@ impl LauncherApp {
         }
     }
 
-    fn search_replace_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
-    ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
-
-        if !self.search_replace_dialog.native_parent_ui_allowed()
-            || !self.native_ui_host_input_allowed(ctx, root_visible)
-            || NavigationDialogKind::SearchReplace
-                .layer_id()
-                .is_none_or(|layer| visible_top_middle_layer(ctx) != Some(layer))
-        {
-            return false;
-        }
-
-        !egui::Popup::is_any_open(ctx)
-            || self
-                .search_replace_dialog
-                .current_owned_native_popup_layer(ctx)
-                .is_some()
+    fn search_replace_owns_root_input(&self, ctx: &egui::Context, visible: bool) -> bool {
+        self.search_replace_native_ui_owner_current(ctx, visible)
+            || self.search_replace_root_confirmation_owner(ctx, visible)
+                != crate::gui::jump_mode::ui::NavigationOwner::Blocked
     }
 
-    fn search_replace_confirmation_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
+    fn search_replace_native_ui_owner_current(
+        &self, ctx: &egui::Context, root_visible: bool,
     ) -> bool {
-        let Some(layer) = self.search_replace_dialog.native_confirmation_layer_id() else {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.search_replace_host.root_layer() else {
             return false;
         };
-        self.search_replace_dialog.open
+        let popup = self.search_replace_dialog.current_owned_native_popup_layer(ctx);
+        self.search_replace_dialog.native_parent_ui_allowed()
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && ctx.memory(|memory| memory.top_modal_layer().is_none())
-            && !egui::Popup::is_any_open(ctx)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup
+            })
+    }
+
+    fn search_replace_root_confirmation_owner(
+        &self, ctx: &egui::Context, root_visible: bool,
+    ) -> crate::gui::jump_mode::ui::NavigationOwner {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, resolve_search_replace_confirmation_owner,
+        };
+        if !self.search_replace_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
+            return NavigationOwner::Blocked;
+        }
+        let Some(parent_layer) = self.search_replace_host.root_layer() else {
+            return NavigationOwner::Blocked;
+        };
+        let Some(parent_instance) = self.jump_mode_ui.dialog_instance(NavigationDialogKind::SearchReplace) else {
+            return NavigationOwner::Blocked;
+        };
+        let Some(identity) = self.search_replace_dialog.jump_mode_confirmation_identity() else {
+            return NavigationOwner::Blocked;
+        };
+        resolve_search_replace_confirmation_owner(
+            ctx, parent_instance, identity.confirmation_instance, identity.kind, identity.subject,
+            parent_layer,
+        )
     }
 
     fn clipboard_history_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
+        &self, ctx: &egui::Context, root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
-
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.clipboard_history_host.root_layer() else {
+            return false;
+        };
+        let popup = self.clipboard_dialog.owned_popup_layer(ctx, layer);
         self.clipboard_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::ClipboardHistory
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup
+            })
+    }
+
+    pub(super) fn mouse_form_root_close_allowed(&self, ctx: &egui::Context, panel: super::Panel) -> bool {
+        use crate::gui::jump_mode::ui::focused_response_layer;
+        let owner = match panel {
+            super::Panel::MouseSettingsDialog => self.mouse_settings_native_ui_owner_current(ctx, true),
+            super::Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_native_ui_owner_current(ctx, true),
+            _ => false,
+        };
+        owner
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx).is_none_or(|focused| {
+                focused.order != egui::Order::Middle || Some(focused) == self.query_focus_panel_layer(panel)
+            })
     }
 
     fn mouse_settings_native_ui_owner_current(
@@ -5538,12 +7915,12 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         self.mouse_settings_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::MouseSettings
-                .layer_id()
+            && self.mouse_settings_host
+                .root_layer(super::mouse_form_host::MOUSE_SETTINGS)
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
@@ -5555,8 +7932,11 @@ impl LauncherApp {
         self.show_settings
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
-                == Some(crate::gui::jump_mode::ui::settings_layer_id())
+            && self.settings_window_host.root_layer().is_some_and(|layer| {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                        .is_none_or(|focus| focus == layer || focus.order != egui::Order::Middle)
+            })
     }
 
     fn dedicated_settings_native_ui_owner_current(
@@ -5592,9 +7972,7 @@ impl LauncherApp {
         root_visible: bool,
         section: &crate::settings_editor::catalog::SettingsSection,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{
-            NavigationDialogKind, settings_layer_id, visible_top_middle_layer,
-        };
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
         use crate::settings_editor::catalog::SettingsSection;
 
         if !self.native_ui_host_input_allowed(ctx, root_visible)
@@ -5609,8 +7987,12 @@ impl LauncherApp {
             SettingsSection::Theme => Some(crate::gui::jump_mode::ui::root_window_layer_id(
                 "Theme settings",
             )),
-            SettingsSection::Mouse => NavigationDialogKind::MouseSettings.layer_id(),
-            SettingsSection::MouseGestures => NavigationDialogKind::MouseGestureSettings.layer_id(),
+            SettingsSection::Mouse => self
+                .mouse_settings_host
+                .root_layer(super::mouse_form_host::MOUSE_SETTINGS),
+            SettingsSection::MouseGestures => self
+                .mouse_gesture_settings_host
+                .root_layer(super::mouse_form_host::GESTURE_SETTINGS),
             SettingsSection::PluginEditor => Some(crate::gui::jump_mode::ui::root_window_layer_id(
                 "Plugin Settings",
             )),
@@ -5621,9 +8003,9 @@ impl LauncherApp {
                 return true;
             }
         };
-        let settings_layer = settings_layer_id();
+        let settings_layer = self.settings_window_host.root_layer();
         visible_top_middle_layer(ctx).is_some_and(|top_layer| {
-            top_layer != settings_layer && Some(top_layer) != destination_layer
+            Some(top_layer) != settings_layer && Some(top_layer) != destination_layer
         })
     }
 
@@ -5635,6 +8017,25 @@ impl LauncherApp {
         owner_current: bool,
         first_ui_pass: bool,
     ) -> Option<crate::settings_editor::render::SettingsNavigationFrameObserver> {
+        self.prepare_dedicated_settings_navigation(ctx, section)?;
+        let owner_open =
+            crate::settings_editor::render::settings_destination_owner_open(self, section);
+        let protected_takeover =
+            self.dedicated_settings_navigation_protected_takeover(ctx, root_visible, section);
+        self.settings_editor.dedicated_navigation_observer(
+            section,
+            owner_open,
+            owner_current,
+            protected_takeover,
+            first_ui_pass,
+        )
+    }
+
+    fn prepare_dedicated_settings_navigation(
+        &mut self,
+        ctx: &egui::Context,
+        section: &crate::settings_editor::catalog::SettingsSection,
+    ) -> Option<()> {
         let now = ctx.input(|input| input.time);
         self.settings_editor
             .expire_settings_navigation_highlight(now);
@@ -5664,17 +8065,7 @@ impl LauncherApp {
             }
             return None;
         }
-        let owner_open =
-            crate::settings_editor::render::settings_destination_owner_open(self, section);
-        let protected_takeover =
-            self.dedicated_settings_navigation_protected_takeover(ctx, root_visible, section);
-        self.settings_editor.dedicated_navigation_observer(
-            section,
-            owner_open,
-            owner_current,
-            protected_takeover,
-            first_ui_pass,
-        )
+        Some(())
     }
 
     fn finish_dedicated_settings_navigation_frame(
@@ -5697,13 +8088,13 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         self.mouse_gesture_settings_dialog.open
             && !self.mouse_gesture_settings_dialog.window_picker_is_open()
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::MouseGestureSettings
-                .layer_id()
+            && self.mouse_gesture_settings_host
+                .root_layer(super::mouse_form_host::GESTURE_SETTINGS)
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
@@ -5712,7 +8103,7 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         self.show_dashboard_editor
             && self.dashboard_editor.open
@@ -5722,8 +8113,9 @@ impl LauncherApp {
                 .is_none()
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
-            && NavigationDialogKind::DashboardEditor
-                .layer_id()
+            && self
+                .dashboard_editor
+                .host_layer_if_root()
                 .is_some_and(|layer| {
                     visible_top_middle_layer(ctx) == Some(layer)
                         && (!egui::Popup::is_any_open(ctx)
@@ -5760,12 +8152,22 @@ impl LauncherApp {
         else {
             return NavigationOwner::Blocked;
         };
+        let Some(parent_layer) = self.dashboard_editor.host_layer_if_root() else {
+            return NavigationOwner::Blocked;
+        };
         resolve_dashboard_editor_confirmation_owner(
             ctx,
+            parent_layer,
             parent_instance,
             confirmation_instance,
             kind,
         )
+    }
+
+    fn batch_rename_owns_root_input(&self, ctx: &egui::Context, visible: bool) -> bool {
+        self.batch_rename_native_ui_owner_current(ctx, visible)
+            || self.batch_rename_confirmation_native_ui_owner_current(ctx, visible)
+                != crate::gui::jump_mode::ui::NavigationOwner::Blocked
     }
 
     fn batch_rename_native_ui_owner_current(
@@ -5773,16 +8175,20 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
+        let Some(layer) = self.batch_rename_host.root_layer() else {
+            return false;
+        };
+        let popup_layer = self.batch_rename_dialog.owned_combo_layer(ctx, layer);
         self.batch_rename_dialog.open
-            && !self
-                .batch_rename_dialog
-                .jump_mode_has_pending_confirmation()
+            && !self.batch_rename_dialog.jump_mode_has_pending_confirmation()
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::BatchRename
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup_layer.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup_layer
+            })
     }
 
     fn batch_rename_confirmation_native_ui_owner_current(
@@ -5791,9 +8197,12 @@ impl LauncherApp {
         root_visible: bool,
     ) -> crate::gui::jump_mode::ui::NavigationOwner {
         use crate::gui::jump_mode::ui::{
-            NavigationDialogKind, NavigationOwner, resolve_batch_rename_confirmation_owner,
+            NavigationDialogKind, NavigationOwner, resolve_batch_rename_confirmation_owner_with_parent,
         };
 
+        let Some(parent_layer) = self.batch_rename_host.root_layer() else {
+            return NavigationOwner::Blocked;
+        };
         if !self.batch_rename_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return NavigationOwner::Blocked;
         }
@@ -5809,7 +8218,9 @@ impl LauncherApp {
         else {
             return NavigationOwner::Blocked;
         };
-        resolve_batch_rename_confirmation_owner(ctx, parent_instance, confirmation_instance, kind)
+        resolve_batch_rename_confirmation_owner_with_parent(
+            ctx, parent_instance, confirmation_instance, kind, Some(parent_layer),
+        )
     }
 
     fn mouse_gesture_settings_picker_native_ui_owner_current(
@@ -5829,15 +8240,52 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
-        let Some(layer) = NavigationDialogKind::JsonUtility.layer_id() else {
+        let Some(layer) = self.json_utility_host.root_layer() else {
             return false;
         };
         self.json_utility_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
             && visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background
+            })
+    }
+
+    fn xml_toolkit_root_input_owner(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> NavigationOwner {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, focused_response_layer, resolve_xml_overwrite_confirmation_owner,
+            visible_top_middle_layer,
+        };
+
+        let kind = NavigationDialogKind::XmlToolkit;
+        let Some((layer, instance)) = self
+            .xml_toolkit_dialog
+            .root_layer()
+            .zip(self.jump_mode_ui.dialog_instance(kind))
+        else {
+            return NavigationOwner::Blocked;
+        };
+        if !self.native_ui_host_input_allowed(ctx, root_visible) || egui::Popup::is_any_open(ctx) {
+            return NavigationOwner::Blocked;
+        }
+        if let Some(confirmation) = self.xml_toolkit_dialog.jump_mode_pending_overwrite_identity() {
+            return resolve_xml_overwrite_confirmation_owner(ctx, instance, confirmation);
+        }
+        if visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+        {
+            NavigationOwner::Dialog { kind, instance }
+        } else {
+            NavigationOwner::Blocked
+        }
     }
 
     fn table_utility_native_ui_owner_current(
@@ -5845,22 +8293,23 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
-        if !self.table_utility_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible)
-        {
+        let Some(layer) = self.table_utility_dialog.root_layer() else {
+            return false;
+        };
+        if !self.table_utility_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return false;
         }
-        let parent_is_current = NavigationDialogKind::TableUtility
-            .layer_id()
-            .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer));
+        if self.table_utility_dialog.has_pending_overwrite() {
+            return self.table_utility_dialog.overwrite_confirmation_layer_is_current(ctx);
+        }
         if egui::Popup::is_any_open(ctx) {
             return self.table_utility_dialog.owned_combo_popup_is_current(ctx);
         }
-        parent_is_current
-            || self
-                .table_utility_dialog
-                .overwrite_confirmation_layer_is_current(ctx)
+        visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focused| focused == layer || focused.order == egui::Order::Background)
     }
 
     fn image_compare_native_ui_owner_current(
@@ -5868,14 +8317,16 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
         self.image_compare_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && NavigationDialogKind::ImageCompare
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && self.image_compare_dialog.root_layer().is_some_and(|layer| {
+                visible_top_middle_layer(ctx) == Some(layer)
+                    && focused_response_layer(ctx)
+                        .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+            })
     }
 
     fn duplicate_finder_native_ui_owner_current(
@@ -5883,24 +8334,35 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
         self.duplicate_finder_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && NavigationDialogKind::DuplicateFinder
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && self
+                .duplicate_finder_dialog
+                .root_layer()
+                .is_some_and(|layer| {
+                    visible_top_middle_layer(ctx) == Some(layer)
+                        && focused_response_layer(ctx).is_none_or(|focus| {
+                            focus == layer || focus.order == egui::Order::Background
+                        })
+                })
     }
 
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
-
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.snippet_window_host.root_layer() else {
+            return false;
+        };
+        let popup = self.snippet_dialog.owned_popup_layer(ctx, layer);
         self.snippet_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::Snippets
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup
+            })
     }
 
     fn jump_mode_navigation_input_allowed(
@@ -5944,9 +8406,10 @@ impl LauncherApp {
     }
 
     fn query_focus_confirmation_owner_pending(&self) -> bool {
-        self.xml_toolkit_dialog
-            .jump_mode_pending_overwrite_identity()
-            .is_some()
+        (self.xml_toolkit_dialog.root_layer().is_some()
+            && self.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_some())
+            || (self.table_utility_dialog.root_layer().is_some()
+                && self.table_utility_dialog.has_pending_overwrite())
             || self
                 .dashboard_editor
                 .jump_mode_pending_confirmation_identity()
@@ -5955,18 +8418,22 @@ impl LauncherApp {
                 .batch_rename_dialog
                 .jump_mode_pending_confirmation_identity()
                 .is_some()
+                && self.batch_rename_host.root_layer().is_some()
             || self
                 .search_replace_dialog
                 .jump_mode_confirmation_identity()
                 .is_some()
+                && self.search_replace_host.root_layer().is_some()
             || self
                 .snippet_dialog
                 .jump_mode_pending_removal_identity()
                 .is_some()
+                && self.snippet_window_host.root_layer().is_some()
             || self
                 .clipboard_dialog
                 .jump_mode_pending_removal_identity()
                 .is_some()
+                && self.clipboard_history_host.root_layer().is_some()
     }
 
     fn query_focus_mouse_session_has_keyboard_authority(
@@ -6017,8 +8484,7 @@ impl LauncherApp {
         };
         ordinary_context.ordinary_panel_layers.contains(&top_layer)
             && !ordinary_context.note_panel_layers.contains(&top_layer)
-            && !(ordinary_context.notes_dialog_open
-                && top_layer == crate::gui::jump_mode::ui::notes_dialog_layer_id())
+            && self.notes_dialog.host_layer_if_root() != Some(top_layer)
             && self.query_focus_mouse_session_has_keyboard_authority(
                 ctx,
                 root_visible,
@@ -6050,6 +8516,8 @@ impl LauncherApp {
                         | super::Panel::TableUtilityDialog
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
+                        | super::Panel::FolderSizeDialog
+                        | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
@@ -6059,7 +8527,15 @@ impl LauncherApp {
                         | super::Panel::RadialEditor
                 )
             })
-            .any(|panel| self.is_panel_open(panel))
+            .any(|panel| {
+                self.is_panel_open(panel)
+                    && (panel != super::Panel::MkMacroDialog
+                        || self.mkmacro_dialog.host_layer_if_root().is_some())
+                    && (panel != super::Panel::ClipboardModifyDialog
+                        || self.clipboard_modify_has_root_presentation())
+                    && (!matches!(panel, super::Panel::CalendarPopover | super::Panel::CalendarEventEditor | super::Panel::CalendarEventDetails)
+                        || self.calendar_panel_root_layer(panel).is_some())
+            })
     }
 
     fn jump_mode_navigation_owner_candidate(
@@ -6089,7 +8565,7 @@ impl LauncherApp {
         let timer_visibility_changed = self.jump_mode_ui.observe_timer_window(timer_window_title);
         let paste_sequence_visibility_changed = self
             .jump_mode_ui
-            .observe_paste_sequence_visibility(self.paste_sequence_dialog.open);
+            .observe_paste_sequence_visibility(self.paste_sequence_dialog.open && self.paste_sequence_host.root_layer().is_some());
         let mkmacro_visibility_changed = self
             .jump_mode_ui
             .observe_mkmacro_visibility(self.mkmacro_dialog.open);
@@ -6105,15 +8581,15 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
-                self.snippet_dialog.open,
+                self.snippet_dialog.open && self.snippet_window_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
-                self.clipboard_dialog.open,
+                self.clipboard_dialog.open && self.clipboard_history_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
-                self.json_utility_dialog.open,
+                self.json_utility_dialog.open && self.json_utility_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
@@ -6157,11 +8633,11 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
-                self.batch_rename_dialog.open,
+                self.batch_rename_dialog.open && self.batch_rename_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
-                self.search_replace_dialog.open,
+                self.search_replace_dialog.open && self.search_replace_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
@@ -6183,7 +8659,7 @@ impl LauncherApp {
             || paste_sequence_visibility_changed
             || mkmacro_visibility_changed
             || owned_dialog_visibility_changed;
-        let prompt_is_open = self.snippet_prompt_dialog.is_open();
+        let prompt_is_open = self.snippet_prompt_has_root_presentation();
         let prompt_native_owner = self.snippet_prompt_native_ui_owner_current(ctx, root_visible);
         let prompt_generation = self
             .snippet_prompt_dialog
@@ -6204,7 +8680,13 @@ impl LauncherApp {
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
                     .show_settings
-                    .then_some(self.jump_mode_ui.settings_instance()),
+                    .then(|| {
+                        self.settings_window_host
+                            .root_layer()
+                            .map(|_| self.jump_mode_ui.settings_instance())
+                    })
+                    .flatten(),
+                settings_layer: self.settings_window_host.root_layer(),
                 notes: self
                     .notes_dialog
                     .open
@@ -6213,41 +8695,74 @@ impl LauncherApp {
                     .todo_dialog
                     .open
                     .then_some(self.jump_mode_ui.todo_instance()),
-                timer: timer_window_title.map(|_| self.jump_mode_ui.timer_instance()),
+                timer: self.timer_dialog.root_layer().map(|_| self.jump_mode_ui.timer_instance()),
                 paste_sequence: self
                     .paste_sequence_dialog
                     .open
-                    .then_some(self.jump_mode_ui.paste_sequence_instance()),
+                    .then(|| self.paste_sequence_host.root_layer()
+                        .map(|layer| (self.jump_mode_ui.paste_sequence_instance(), layer)))
+                    .flatten(),
                 mkmacro: self
                     .mkmacro_dialog
-                    .open
-                    .then_some(self.jump_mode_ui.mkmacro_instance()),
+                    .host_layer_if_root()
+                    .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
+                dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
+                file_search_layer: self.file_search_host.root_layer(),
+                hosted_utility_layers: NavigationDialogKind::ALL.map(|kind| match kind {
+                    NavigationDialogKind::BatchRename => self.batch_rename_host.root_layer(),
+                    NavigationDialogKind::SearchReplace => self.search_replace_host.root_layer(),
+                    NavigationDialogKind::ClipboardHistory => self.clipboard_history_host.root_layer(),
+                    NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
+                    NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
+                    _ => None,
+                }),
+                mouse_form_layers: [
+                    self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
+                    self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
+                    self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES),
+                ],
                 dialogs: NavigationDialogKind::ALL.map(|kind| {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
                         self.regex_tester_dialog.root_navigation_instance(current)
                     } else if kind == NavigationDialogKind::XmlToolkit {
                         self.xml_toolkit_dialog.root_navigation_instance(current)
+                    } else if kind == NavigationDialogKind::TableUtility {
+                        self.table_utility_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ImageCompare {
+                        self.image_compare_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DuplicateFinder {
+                        self.duplicate_finder_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ZipExtractor {
+                        self.zip_extractor_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DashboardEditor {
+                        self.dashboard_editor.host_layer_if_root().and(current)
+                    } else if kind == NavigationDialogKind::FileSearch {
+                        self.file_search_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::BatchRename {
+                        self.batch_rename_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::SearchReplace {
+                        self.search_replace_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ClipboardHistory {
+                        self.clipboard_history_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::JsonUtility {
+                        self.json_utility_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::Snippets {
+                        self.snippet_window_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::MouseSettings {
+                        self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS).and(current)
+                    } else if kind == NavigationDialogKind::MouseGestureSettings {
+                        self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS).and(current)
+                    } else if kind == NavigationDialogKind::MouseGestures {
+                        self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES).and(current)
                     } else {
                         current
                     }
                 }),
             };
-            let xml_overwrite_owner = self
-                .jump_mode_ui
-                .dialog_instance(NavigationDialogKind::XmlToolkit)
-                .zip(
-                    self.xml_toolkit_dialog
-                        .jump_mode_pending_overwrite_identity(),
-                )
-                .map(|(parent_instance, confirmation_instance)| {
-                    crate::gui::jump_mode::ui::resolve_xml_overwrite_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        confirmation_instance,
-                    )
-                })
-                .filter(|owner| *owner != NavigationOwner::Blocked);
+            let xml_owner = self.xml_toolkit_root_input_owner(ctx, root_visible);
+            let xml_overwrite_owner = matches!(xml_owner, NavigationOwner::XmlOverwriteConfirmation { .. })
+                .then_some(xml_owner);
             let (owner, combo_popup) = if let Some(owner) = xml_overwrite_owner {
                 (owner, None)
             } else {
@@ -6298,7 +8813,8 @@ impl LauncherApp {
                     (NavigationOwner::Blocked, combo_popup)
                 }
                 NavigationOwner::Notes { .. }
-                    if self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+                    if self.notes_dialog.host_layer_if_root().is_none()
+                        || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
                         || self.unused_assets_dialog.open =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
@@ -6341,12 +8857,13 @@ impl LauncherApp {
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures)
+            && let Some(parent_layer) = self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES)
             && let Some(child_owner) = self
                 .mouse_gestures_dialog
                 .jump_mode_child_owner(parent_instance)
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, mouse_gesture_binding_layer_id,
+                NavigationOwner, mouse_gesture_binding_layer_id,
                 mouse_gesture_delete_layer_id, visible_top_middle_layer,
             };
 
@@ -6367,7 +8884,6 @@ impl LauncherApp {
                     );
                 }
             };
-            let parent_layer = NavigationDialogKind::MouseGestures.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = self
@@ -6377,10 +8893,11 @@ impl LauncherApp {
                         crate::gui::jump_mode::ui::resolve_mouse_gesture_child_navigation_owner(
                             ctx,
                             child_owner,
+                            parent_layer,
                             combo_popup.as_ref(),
                         );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     // While the child is pending but has not become the visible
                     // owner, keep the parent from receiving its stale hints.
                     candidate = NavigationOwner::Blocked;
@@ -6393,6 +8910,7 @@ impl LauncherApp {
         }
         if !prompt_is_open
             && self.jump_mode_host_input_allowed(ctx, root_visible)
+            && let Some(parent_layer) = self.dashboard_editor.host_layer_if_root()
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor)
@@ -6401,7 +8919,7 @@ impl LauncherApp {
                 .jump_mode_pending_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, dashboard_editor_confirmation_layer_id,
+                NavigationOwner, dashboard_editor_confirmation_layer_id,
                 resolve_dashboard_editor_confirmation_owner, visible_top_middle_layer,
             };
 
@@ -6410,18 +8928,18 @@ impl LauncherApp {
                 confirmation_instance,
                 kind,
             );
-            let parent_layer = NavigationDialogKind::DashboardEditor.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
                     candidate = resolve_dashboard_editor_confirmation_owner(
                         ctx,
+                        parent_layer,
                         parent_instance,
                         confirmation_instance,
                         kind,
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     candidate = NavigationOwner::Blocked;
                     combo_popup = None;
                 }
@@ -6435,29 +8953,26 @@ impl LauncherApp {
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename)
+            && let Some(parent_layer) = self.batch_rename_host.root_layer()
             && let Some((confirmation_instance, kind)) = self
                 .batch_rename_dialog
                 .jump_mode_pending_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, batch_rename_confirmation_layer_id,
-                resolve_batch_rename_confirmation_owner, visible_top_middle_layer,
+                NavigationOwner, batch_rename_confirmation_layer_id,
+                resolve_batch_rename_confirmation_owner_with_parent, visible_top_middle_layer,
             };
 
             let child_layer =
                 batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
-            let parent_layer = NavigationDialogKind::BatchRename.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
-                    candidate = resolve_batch_rename_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
+                    candidate = resolve_batch_rename_confirmation_owner_with_parent(
+                        ctx, parent_instance, confirmation_instance, kind, Some(parent_layer),
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     // A pending child owns the transition immediately; the
                     // parent cannot keep targets live during its first paint.
                     candidate = NavigationOwner::Blocked;
@@ -6473,27 +8988,24 @@ impl LauncherApp {
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
+            && let Some(parent_layer) = self.search_replace_host.root_layer()
             && let Some(identity) = self.search_replace_dialog.jump_mode_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, resolve_search_replace_confirmation_owner,
+                NavigationOwner, resolve_search_replace_confirmation_owner,
                 visible_top_middle_layer,
             };
 
             let child_layer = identity.kind.layer_id();
-            let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
                     candidate = resolve_search_replace_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        identity.confirmation_instance,
-                        identity.kind,
-                        identity.subject,
+                        ctx, parent_instance, identity.confirmation_instance, identity.kind,
+                        identity.subject, parent_layer,
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     // A pending confirmation blocks the parent immediately,
                     // including the frame before the child becomes visible.
                     candidate = NavigationOwner::Blocked;
@@ -6865,6 +9377,7 @@ impl LauncherApp {
             self.query_focus_session = None;
         }
         if first_ui_pass
+            && !self.snippet_prompt_has_host_companion()
             && self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
         {
             // Jump Mode gets the exact prompt's event stream first. In
@@ -6889,12 +9402,43 @@ impl LauncherApp {
             self.show_macro_prompt(&ctx, first_ui_pass);
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
-            self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
+            self.show_recording_compact_controller(&ctx);
+            self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
             // An Immediate Regex Tester owns its own viewport and remains
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
-            self.show_regex_tester(&ctx, false);
+            self.show_regex_tester(&ctx, first_ui_pass, false);
+            self.show_table_utility(&ctx, false, first_ui_pass, false);
+            self.show_timer_host(&ctx, first_ui_pass, false);
+            self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
+            self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
+            self.show_image_compare(&ctx, false, first_ui_pass, false, false);
+            self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
+            self.show_zip_host(&ctx, false, first_ui_pass, false);
+            self.show_folder_size(&ctx, false, first_ui_pass, false, false);
+            self.show_file_lock(&ctx, false, first_ui_pass, false, false);
+            self.show_recording_setup(&ctx, false, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
+            self.show_calculation_pad(&ctx, first_ui_pass, false);
+            self.show_markdown_studio(&ctx, first_ui_pass, false);
+            self.show_quick_notes(&ctx, first_ui_pass, false, None);
+            self.show_note_panels(&ctx, first_ui_pass, false, None);
+            self.show_mkmacro_editor(&ctx, first_ui_pass, false);
+            self.show_dashboard_editor_host(&ctx, first_ui_pass, false);
+            self.show_main_settings_host(&ctx, first_ui_pass, false, false);
+            self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_file_search_host(&ctx, first_ui_pass, false);
+            self.show_diff_host(&ctx, first_ui_pass, false);
+            self.show_batch_rename_host(&ctx, first_ui_pass, false);
+            self.show_search_replace_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_history_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
+            self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_explorer_tabs(&ctx, first_ui_pass, false);
+            self.show_snippet_editor_host(&ctx, first_ui_pass, false);
+            self.show_paste_sequence_host(&ctx, first_ui_pass, false);
+            self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -6985,6 +9529,7 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
         }
         self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+        self.show_recording_compact_controller(&ctx);
         if first_ui_pass {
             self.cancel_screen_draw_startup_on_escape(&ctx);
             crate::performance::record_frame(
@@ -7076,7 +9621,11 @@ impl LauncherApp {
                 );
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Edit Settings").clicked() && first_ui_pass {
-                        self.show_settings = !self.show_settings;
+                        if self.show_settings {
+                            self.settings_window_host.request_close(&ctx);
+                        } else {
+                            self.open_settings_dialog();
+                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {
@@ -7151,7 +9700,7 @@ impl LauncherApp {
         if first_ui_pass
             && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
-            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_has_root_presentation()
         {
             // A prompt opened by an earlier asynchronous or macro action owns
             // the rest of this frame, but the key that opened it must not also
@@ -7202,7 +9751,7 @@ impl LauncherApp {
         if first_ui_pass
             && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
-            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_has_root_presentation()
         {
             snippet_prompt_owns_input = true;
             Self::consume_prompt_opening_frame_keys(&ctx);
@@ -7496,7 +10045,7 @@ impl LauncherApp {
                     && Self::launcher_query_focus_should_be_requested(
                         false,
                         self.focus_query,
-                        self.file_search_dialog.open,
+                        self.file_search_has_root_presentation(),
                     )
                     && !action_sheet_blocks_launcher_input
                     && query_navigation_allowed
@@ -7696,7 +10245,9 @@ impl LauncherApp {
                         .note_panels
                         .iter_mut()
                         .rev()
-                        .find(|panel| panel.owns_keyboard_layer(&ctx))
+                        .find(|panel| {
+                            panel.host_layer_if_root().is_some() && panel.owns_keyboard_layer(&ctx)
+                        })
                     {
                         if find {
                             panel.open_find();
@@ -7712,142 +10263,44 @@ impl LauncherApp {
                     }
                 }
 
-                let table_utility_escape_handled = if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && !owner_transition_pending
-                    && !jump_session_escape_preempted
-                    && self.jump_mode_ui.active_session().is_none()
-                    && self.table_utility_dialog.open
-                    && !egui::Popup::is_any_open(&ctx)
-                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
-                {
-                    let native_owner = self.table_utility_native_ui_owner_current(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                    );
-                    let exact_confirmation_owner = self.native_ui_host_input_allowed(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                    ) && self
-                        .table_utility_dialog
-                        .overwrite_confirmation_layer_is_current(&ctx);
-                    let escaped_confirmation = exact_confirmation_owner
-                        && self
-                            .table_utility_dialog
-                            .cancel_overwrite_confirmation();
-                    let table_layer = crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility
-                        .layer_id();
-                    let exact_table_owner = table_layer.is_some_and(|layer| {
-                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx) == Some(layer)
-                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
-                                .is_none_or(|focused| focused == layer)
-                    });
-                    if escaped_confirmation {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else if exact_table_owner
-                        && native_owner
-                        && self.close_front_dialog()
-                    {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                let paste_picker_escape_handled = if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && !owner_transition_pending
-                    && !jump_session_escape_preempted
-                    && self.jump_mode_ui.active_session().is_none()
-                    && self.paste_sequence_dialog.open
-                    && self.paste_sequence_dialog.source_picker_is_open()
-                    && !egui::Popup::is_any_open(&ctx)
-                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
-                {
-                    let paste_layer = crate::gui::jump_mode::ui::paste_sequence_dialog_layer_id();
-                    let exact_paste_owner =
-                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx)
-                            == Some(paste_layer)
-                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
-                                .is_none_or(|layer| layer == paste_layer);
-                    if exact_paste_owner
-                        && self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
-                        && self
-                            .paste_sequence_dialog
-                            .close_source_picker_for_root_escape()
-                    {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !table_utility_escape_handled
-                    && !paste_picker_escape_handled
-                    && first_ui_pass
+                if first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
-                        self.file_search_dialog.open,
+                        self.file_search_has_root_presentation(),
                         egui::Popup::is_any_open(&ctx),
                     )
+                    && !self.diff_dialog.owns_root_input(&ctx)
+                    && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
+                        == NavigationOwner::Blocked
+                    && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
+                        .diagram_studio_dialog
+                        .docked_owner_owns_root_input(&ctx)
+                    && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self
+                        .markdown_studio_dialog
+                        .owns_root_input(&ctx)
+                    && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.mkmacro_dialog.owns_root_input(&ctx)
+                    && !self.dashboard_editor.owns_root_input(&ctx)
+                    && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -7877,22 +10330,16 @@ impl LauncherApp {
                             !self.settings_editor.settings_search_query.trim().is_empty(),
                         ));
                     }
-                    let search_escape_handled = !owner_transition_pending
+                    let settings_owns_escape = !owner_transition_pending
                         && !jump_session_escape_preempted
                         && self.jump_mode_ui.active_session().is_none()
                         && self.settings_native_ui_owner_current(
                             &ctx,
                             frame_logic.should_be_visible,
-                        )
-                        && self
-                            .settings_editor
-                            .handle_search_escape_before_container_close(
-                                &ctx,
-                                self.jump_mode_ui.settings_instance(),
-                            );
-                    if !search_escape_handled && !jump_session_escape_preempted {
-                        if self.any_panel_open() {
-                            if self.close_front_dialog() {
+                        );
+                    if !settings_owns_escape && !jump_session_escape_preempted {
+                        if self.any_root_panel_open() {
+                            if self.close_front_dialog_from_root_input() {
                                 ctx.input_mut(|i| {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                 });
@@ -7916,14 +10363,40 @@ impl LauncherApp {
                 });
                 if first_ui_pass
                     && close_panel_shortcut_modifiers.is_some()
-                    && self.any_panel_open()
+                    && self.any_root_panel_open()
+                    && !self.diff_dialog.owns_root_input(&ctx)
+                    && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
+                        == NavigationOwner::Blocked
+                    && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
+                        .diagram_studio_dialog
+                        .docked_owner_owns_root_input(&ctx)
+                    && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
-                    && self.close_front_dialog()
+                    && !self
+                        .markdown_studio_dialog
+                        .owns_root_input(&ctx)
+                    && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.mkmacro_dialog.owns_root_input(&ctx)
+                    && !self.dashboard_editor.owns_root_input(&ctx)
+                    && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
+                    && self.close_front_dialog_from_root_input()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
                     ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::W));
@@ -8750,7 +11223,7 @@ impl LauncherApp {
         if first_ui_pass
             && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
-            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_has_root_presentation()
         {
             Self::consume_prompt_opening_frame_keys(&ctx);
             if let Some(logic) = self.root_frame_logic.as_mut() {
@@ -8774,6 +11247,34 @@ impl LauncherApp {
         if ocr_blocks_launcher_input {
             self.enforce_pinned();
             self.update_panel_stack();
+            if self.settings_window_host.is_popped_out() {
+                self.show_main_settings_host(&ctx, first_ui_pass, false, false);
+            }
+            self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_file_search_host(&ctx, first_ui_pass, false);
+            self.show_diff_host(&ctx, first_ui_pass, false);
+            self.show_batch_rename_host(&ctx, first_ui_pass, false);
+            self.show_search_replace_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_history_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
+            self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_explorer_tabs(&ctx, first_ui_pass, false);
+            self.show_snippet_editor_host(&ctx, first_ui_pass, false);
+            self.show_paste_sequence_host(&ctx, first_ui_pass, false);
+            self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
+            self.show_xml_toolkit(&ctx, first_ui_pass, false);
+            self.show_regex_tester(&ctx, first_ui_pass, false);
+            self.show_table_utility(&ctx, false, first_ui_pass, false);
+            self.show_timer_host(&ctx, first_ui_pass, false);
+            self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
+            self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
+            self.show_image_compare(&ctx, false, first_ui_pass, false, false);
+            self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
+            self.show_zip_host(&ctx, false, first_ui_pass, false);
+            self.show_folder_size(&ctx, false, first_ui_pass, false, false);
+            self.show_file_lock(&ctx, false, first_ui_pass, false, false);
+            self.show_recording_setup(&ctx, false, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -8797,60 +11298,12 @@ impl LauncherApp {
             editor.ui(&ctx, self);
             self.editor = editor;
         }
-        let show_settings = self.show_settings;
-        if show_settings {
-            let navigation_owner =
-                self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-            let settings_owner_instance = self
-                .settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
-                .then(|| self.jump_mode_ui.settings_instance());
-            let settings_scope = match navigation_owner {
-                crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } => {
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::Settings { instance },
-                        crate::gui::jump_mode::TargetGeneration(instance),
-                        "settings",
-                        ctx.viewport_id(),
-                        navigation_owner,
-                        false,
-                    )
-                }
-                crate::gui::jump_mode::ui::NavigationOwner::Root
-                | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-            };
-            let mut ed = std::mem::take(&mut self.settings_editor);
-            let jump_mode_active =
-                self.jump_mode_ui.active_session().is_some() || jump_session_escape_preempted;
-            ed.ui(
-                &ctx,
-                self,
-                settings_scope,
-                settings_owner_instance,
-                jump_mode_active,
-                first_ui_pass,
-            );
-            self.settings_editor = ed;
-        }
+        self.show_main_settings_host(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            jump_session_escape_preempted,
+        );
         if self.hotkey_directory_dialog.take_open_request() {
             self.focus_panel(super::Panel::HotkeyDirectoryDialog);
             self.hotkey_directory_dialog.clear_message();
@@ -8967,136 +11420,7 @@ impl LauncherApp {
                 self.report_error_message("radial.designer.preferences", error.to_string());
             }
         }
-        if self.show_dashboard_editor && !self.dashboard_editor.open {
-            let registry = self.dashboard.registry().clone();
-            self.dashboard_editor.open(&self.dashboard_path, &registry);
-        }
-        if self.show_dashboard_editor {
-            let registry = self.dashboard.registry().clone();
-            // Resolve both native and Jump ownership while the live dialog
-            // state is still installed on the app. `mem::take` below gives
-            // callbacks temporary ownership of the UI state; consulting the
-            // app field afterward would inspect a default, closed dialog and
-            // reject every real Dashboard Editor pass.
-            let native_ui_owner =
-                self.dashboard_editor_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-            let dashboard_owner = self.jump_mode_ui.frame_navigation_owner();
-            let parent_instance = self
-                .jump_mode_ui
-                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor);
-            let target_generation = self.dashboard_editor.target_generation();
-            let native_confirmation_owner = self
-                .dashboard_editor_confirmation_native_ui_owner_current(
-                    &ctx,
-                    frame_logic.should_be_visible,
-                );
-            let pending_confirmation = self
-                .dashboard_editor
-                .jump_mode_pending_confirmation_identity();
-            let mut dlg = std::mem::take(&mut self.dashboard_editor);
-            let plugin_infos = self.plugins.plugin_infos();
-            let plugin_commands = self.plugins.commands();
-            let dashboard_snapshot = self.dashboard_data_cache.snapshot();
-            let dashboard_scope = match dashboard_owner {
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
-                    instance,
-                } if native_ui_owner => self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("dashboard-editor", instance),
-                    crate::gui::jump_mode::TargetGeneration(target_generation),
-                    "dashboard-editor",
-                    ctx.viewport_id(),
-                    dashboard_owner,
-                    true,
-                ),
-                _ => None,
-            };
-            let confirmation_scope = match (
-                dashboard_owner,
-                native_confirmation_owner,
-                pending_confirmation,
-            ) {
-                (
-                    crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
-                    },
-                    owner,
-                    Some((pending_instance, pending_kind)),
-                ) if owner
-                    == (crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
-                    })
-                    && pending_instance == confirmation_instance
-                    && pending_kind == kind =>
-                {
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::popup(
-                            kind.surface_kind(),
-                            confirmation_instance,
-                            crate::gui::jump_mode::SurfaceId::dialog(
-                                "dashboard-editor",
-                                parent_instance,
-                            ),
-                        ),
-                        crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                        kind.surface_kind(),
-                        ctx.viewport_id(),
-                        owner,
-                        false,
-                    )
-                }
-                _ => None,
-            };
-            let dashboard_visual_order = std::cell::Cell::new(0_u64);
-            let property_identity_store = std::rc::Rc::clone(&dlg.property_identity_store);
-            let native_combo_anchors =
-                std::cell::RefCell::new(std::mem::take(&mut dlg.native_combo_anchors));
-            let settings_ctx = WidgetSettingsContext {
-                plugins: Some(&self.plugins),
-                plugin_infos: Some(&plugin_infos),
-                plugin_commands: Some(&plugin_commands),
-                actions: Some(self.actions.as_slice()),
-                favorites: Some(dashboard_snapshot.favorites.as_ref()),
-                usage: Some(&self.usage),
-                default_location: self.dashboard_default_location.as_deref(),
-                enabled_plugins: self.enabled_plugins.as_ref(),
-                jump_mode_scope: dashboard_scope.as_ref(),
-                jump_mode_visual_order: Some(&dashboard_visual_order),
-                property_identity_store: Some(property_identity_store.as_ref()),
-                native_combo_anchors: Some(&native_combo_anchors),
-                property_slot_token: None,
-                property_mutations_allowed: false,
-            };
-            let _ = dlg.ui_with_jump_mode(
-                &ctx,
-                &registry,
-                settings_ctx,
-                self.require_confirm_destructive,
-                parent_instance,
-                dashboard_scope.as_ref(),
-                confirmation_scope.as_ref(),
-                native_ui_owner,
-                native_confirmation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked,
-                first_ui_pass,
-            );
-            if dlg.target_generation() != target_generation {
-                native_combo_anchors.borrow_mut().clear();
-            }
-            dlg.native_combo_anchors = native_combo_anchors.into_inner();
-            if pending_confirmation.is_some() {
-                if let Some(scope) = dashboard_scope.as_ref() {
-                    scope.discard_registered_targets();
-                }
-            } else if let Some(scope) = confirmation_scope.as_ref() {
-                scope.discard_registered_targets();
-            }
-            self.show_dashboard_editor = dlg.open;
-            self.dashboard_editor = dlg;
-        }
+        self.show_dashboard_editor_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
 
         let mut mm_dlg = std::mem::take(&mut self.multi_manager_dialog);
         mm_dlg.ui(&ctx, self);
@@ -9122,478 +11446,32 @@ impl LauncherApp {
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(&ctx, self);
         self.help_window = help;
-        let timer_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let timer_scope = match timer_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Timer { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("timer", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "timer-dialog",
-                    ctx.viewport_id(),
-                    timer_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui_with_jump_mode(
-            &ctx,
-            self,
-            timer_scope,
-            first_ui_pass && frame_logic.should_be_visible,
-        );
-        self.timer_dialog = timer_dlg;
+        self.show_timer_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(&ctx);
         self.completion_dialog = comp;
         let mut shell_dlg = std::mem::take(&mut self.shell_cmd_dialog);
         shell_dlg.ui(&ctx, self);
         self.shell_cmd_dialog = shell_dlg;
-        let preview_active =
-            self.snippet_prompt_dialog.is_open() && self.snippet_prompt_dialog.is_preview_only();
-        if !preview_active {
-            let snippet_navigation_owner =
-                self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-            let snippet_scope = match snippet_navigation_owner {
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
-                    instance,
-                } => self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("snippets", instance),
-                    self.snippet_dialog.jump_mode_target_generation(),
-                    "snippets-dialog",
-                    ctx.viewport_id(),
-                    snippet_navigation_owner,
-                    false,
-                ),
-                crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval {
-                    parent_instance,
-                    confirmation_instance,
-                } => self
-                    .snippet_dialog
-                    .jump_mode_pending_removal_identity()
-                    .filter(|(current_confirmation, _)| {
-                        *current_confirmation == confirmation_instance
-                    })
-                    .and_then(|(_, index)| {
-                        let snapshot_generation = self.snippet_dialog.jump_mode_target_generation();
-                        self.jump_mode_ui.scope_for_navigation_owner(
-                            crate::gui::jump_mode::SurfaceId::popup(
-                                "snippet-removal",
-                                confirmation_instance,
-                                crate::gui::jump_mode::SurfaceId::dialog(
-                                    "snippets",
-                                    parent_instance,
-                                ),
-                            ),
-                            snapshot_generation,
-                            format!(
-                                "snippet-removal/{}/{}/{}",
-                                snapshot_generation.0, confirmation_instance, index
-                            ),
-                            ctx.viewport_id(),
-                            snippet_navigation_owner,
-                            false,
-                        )
-                    }),
-                crate::gui::jump_mode::ui::NavigationOwner::Root
-                | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-            };
-            let snippet_native_owner =
-                self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-            if !snippet_native_owner
-                && let Some(focused) = ctx.memory(|memory| memory.focused())
-                && ctx.read_response(focused).is_some_and(|response| {
-                    Some(response.layer_id)
-                        == crate::gui::jump_mode::ui::NavigationDialogKind::Snippets.layer_id()
-                })
-            {
-                ctx.memory_mut(|memory| memory.surrender_focus(focused));
-            }
-            let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
-            let preview_draft = snip_dlg.ui_with_jump_mode(
-                &ctx,
-                self,
-                snippet_scope,
-                snippet_native_owner,
-                first_ui_pass,
-            );
-            self.snippet_dialog = snip_dlg;
-            if first_ui_pass && let Some(draft) = preview_draft {
-                match self.begin_snippet_preview(draft) {
-                    Ok(()) => {
-                        snippet_prompt_owns_input |= self.snippet_prompt_dialog.is_open();
-                        if snippet_prompt_owns_input {
-                            Self::consume_prompt_opening_frame_keys(&ctx);
-                            if let Some(logic) = self.root_frame_logic.as_mut() {
-                                logic.snippet_prompt_owns_input = true;
-                            }
-                        }
-                    }
-                    Err(error) => self.snippet_dialog.report_preview_start_failure(error),
-                }
-            }
-        }
-        let paste_sequence_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let paste_sequence_scope = match paste_sequence_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("paste-sequence", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "paste-sequence-dialog",
-                    ctx.viewport_id(),
-                    paste_sequence_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
-        paste_sequence_dlg.ui_with_jump_mode(&ctx, self, paste_sequence_scope);
-        self.paste_sequence_dialog = paste_sequence_dlg;
+        self.show_snippet_editor_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_paste_sequence_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(&ctx, self);
         self.macro_dialog = macro_dlg;
-        self.mkmacro_dialog
-            .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
-        self.mkmacro_dialog.sync_external();
-        let mkmacro_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let mkmacro_scope = match mkmacro_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("mkmacro", instance),
-                    self.mkmacro_dialog.jump_mode_target_generation(),
-                    "mkmacro-dialog",
-                    ctx.viewport_id(),
-                    mkmacro_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        self.mkmacro_dialog
-            .ui_with_jump_mode_synced(&ctx, mkmacro_scope);
-        if first_ui_pass
-            && let Some(preferences) = self
-                .mkmacro_dialog
-                .take_macro_properties_preferences_for_persist()
-        {
-            let settings_path = self.settings_path.clone();
-            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
-                settings.mkmacro_properties = preferences;
-                Ok(())
-            }) {
-                self.report_ui_error(crate::gui::UiErrorEvent::new(
-                    "mkmacro.properties.preferences",
-                    error,
-                ));
-            }
-        }
-        while first_ui_pass && let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: notice.into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-
-                        style: Default::default(),
-                    },
-                );
-            }
-        }
+        self.show_mkmacro_editor(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.crop_dialog.show(&ctx);
-        let mouse_gesture_parent_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures);
-        let mouse_gesture_owner = self.jump_mode_ui.frame_navigation_owner();
-        let mouse_gesture_scope = match (mouse_gesture_parent_instance, mouse_gesture_owner) {
-            (
-                Some(instance),
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
-                    instance: owner_instance,
-                },
-            ) if instance == owner_instance && self.jump_mode_enabled() => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", instance),
-                    self.mouse_gestures_dialog.jump_mode_target_generation(),
-                    "mouse-gestures/form",
-                    ctx.viewport_id(),
-                    mouse_gesture_owner,
-                    false,
-                )
-            }
-            (
-                Some(parent_instance),
-                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding {
-                    parent_instance: owner_parent,
-                    binding_instance,
-                },
-            ) if parent_instance == owner_parent && self.jump_mode_enabled() => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        "mouse-gesture-binding",
-                        binding_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", parent_instance),
-                    ),
-                    self.mouse_gestures_dialog.jump_mode_target_generation(),
-                    "mouse-gestures/binding",
-                    ctx.viewport_id(),
-                    mouse_gesture_owner,
-                    false,
-                )
-            }
-            (
-                Some(parent_instance),
-                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete {
-                    parent_instance: owner_parent,
-                    confirmation_instance,
-                },
-            ) if parent_instance == owner_parent && self.jump_mode_enabled() => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        "mouse-gesture-delete",
-                        confirmation_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", parent_instance),
-                    ),
-                    self.mouse_gestures_dialog.jump_mode_target_generation(),
-                    "mouse-gestures/delete",
-                    ctx.viewport_id(),
-                    mouse_gesture_owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let mouse_gesture_native_parent_owner = mouse_gesture_parent_instance
-            .map(|instance| {
-                self.mouse_gestures_native_owner_current(
-                    &ctx,
-                    frame_logic.should_be_visible,
-                    crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                        kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
-                        instance,
-                    },
-                )
-            })
-            .unwrap_or(false);
-        let mouse_gesture_child_owner = mouse_gesture_parent_instance
-            .and_then(|instance| self.mouse_gestures_dialog.jump_mode_child_owner(instance));
-        let mouse_gesture_native_binding_owner = mouse_gesture_child_owner.is_some_and(|owner| {
-            matches!(
-                owner,
-                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            ) && self.mouse_gestures_native_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-                owner,
-            )
-        });
-        let mouse_gesture_native_delete_owner = mouse_gesture_child_owner.is_some_and(|owner| {
-            matches!(
-                owner,
-                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            ) && self.mouse_gestures_native_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-                owner,
-            )
-        });
-        let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
-        mg_dlg.ui_with_jump_mode(
+        self.show_mouse_gestures_host(
             &ctx,
-            self,
-            mouse_gesture_parent_instance.unwrap_or(0),
-            mouse_gesture_scope.as_ref(),
-            mouse_gesture_native_parent_owner,
-            mouse_gesture_native_binding_owner,
-            mouse_gesture_native_delete_owner,
             first_ui_pass,
-        );
-        self.mouse_gestures_dialog = mg_dlg;
-        let mouse_gesture_settings_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let mouse_gesture_settings_scope = match mouse_gesture_settings_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings,
-                instance,
-            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
-                crate::gui::jump_mode::SurfaceId::dialog("mouse-gesture-settings", instance),
-                crate::gui::jump_mode::TargetGeneration(instance),
-                "mouse-gesture-settings/form",
-                ctx.viewport_id(),
-                mouse_gesture_settings_owner,
-                false,
-            ),
-            _ => None,
-        };
-        let mouse_gesture_settings_native_owner = self
-            .mouse_gesture_settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let mouse_gesture_settings_picker_native_owner = self
-            .mouse_gesture_settings_picker_native_ui_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-            );
-        let mouse_gesture_settings_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings);
-        let mouse_gesture_settings_section =
-            crate::settings_editor::catalog::SettingsSection::MouseGestures;
-        let mouse_gesture_settings_navigation = self.dedicated_settings_navigation_observer(
-            &ctx,
             frame_logic.should_be_visible,
-            &mouse_gesture_settings_section,
-            mouse_gesture_settings_native_owner,
-            first_ui_pass,
+            jump_session_escape_preempted,
         );
-        let _mouse_gesture_settings_navigation_scope = mouse_gesture_settings_navigation
-            .as_ref()
-            .map(|observer| observer.install(&ctx));
-        let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
-        mg_settings_dlg.ui_with_jump_mode(
+        self.show_mouse_settings_hosts(
             &ctx,
-            self,
-            mouse_gesture_settings_scope.as_ref(),
-            mouse_gesture_settings_instance,
-            mouse_gesture_settings_native_owner,
-            mouse_gesture_settings_picker_native_owner,
             first_ui_pass,
-        );
-        self.mouse_gesture_settings_dialog = mg_settings_dlg;
-        drop(_mouse_gesture_settings_navigation_scope);
-        if let Some(observer) = mouse_gesture_settings_navigation.as_ref() {
-            let owner_current = self.dedicated_settings_native_ui_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-                &mouse_gesture_settings_section,
-            );
-            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
-        }
-        let mouse_settings_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let mouse_settings_scope = match mouse_settings_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
-                instance,
-            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
-                crate::gui::jump_mode::SurfaceId::dialog("mouse-settings", instance),
-                crate::gui::jump_mode::TargetGeneration(instance),
-                "mouse-settings/form",
-                ctx.viewport_id(),
-                mouse_settings_owner,
-                false,
-            ),
-            _ => None,
-        };
-        let mouse_settings_native_owner =
-            self.mouse_settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let mouse_settings_section = crate::settings_editor::catalog::SettingsSection::Mouse;
-        let mouse_settings_navigation = self.dedicated_settings_navigation_observer(
-            &ctx,
             frame_logic.should_be_visible,
-            &mouse_settings_section,
-            mouse_settings_native_owner,
-            first_ui_pass,
+            jump_session_escape_preempted,
         );
-        let _mouse_settings_navigation_scope = mouse_settings_navigation
-            .as_ref()
-            .map(|observer| observer.install(&ctx));
-        let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
-        mouse_settings_dlg.ui_with_jump_mode(
-            &ctx,
-            &mut self.coordinate_tool,
-            mouse_settings_scope.as_ref(),
-            mouse_settings_native_owner,
-            first_ui_pass,
-        );
-        self.mouse_settings_dialog = mouse_settings_dlg;
-        drop(_mouse_settings_navigation_scope);
-        if let Some(observer) = mouse_settings_navigation.as_ref() {
-            let owner_current = self.dedicated_settings_native_ui_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-                &mouse_settings_section,
-            );
-            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
-        }
         if self.theme_settings_dialog_open {
             let theme_settings_section = crate::settings_editor::catalog::SettingsSection::Theme;
             let theme_settings_native_owner = self.dedicated_settings_native_ui_owner_current(
@@ -9632,254 +11510,16 @@ impl LauncherApp {
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
-        let file_search_was_open = self.file_search_dialog.open;
-        let file_search_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let (file_search_scope, file_search_results_scope) = match file_search_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
-                instance,
-            } if self.jump_mode_enabled() => {
-                let surface = crate::gui::jump_mode::SurfaceId::dialog("file-search", instance);
-                (
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        surface.clone(),
-                        self.file_search_dialog.jump_mode_target_generation(),
-                        "file-search-dialog",
-                        ctx.viewport_id(),
-                        file_search_owner,
-                        false,
-                    ),
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        surface,
-                        self.file_search_dialog
-                            .jump_mode_results_target_generation(instance),
-                        "file-search-results",
-                        ctx.viewport_id(),
-                        file_search_owner,
-                        false,
-                    ),
-                )
-            }
-            _ => (None, None),
-        };
-        let file_search_is_current_owner =
-            self.file_search_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let file_search_commands = self.file_search_dialog.ui_with_jump_mode_scope(
-            &ctx,
-            &mut self.file_search_coordinator,
-            file_search_scope,
-            file_search_results_scope,
-            first_ui_pass,
-            file_search_is_current_owner,
-        );
-        if first_ui_pass && file_search_is_current_owner {
-            for command in file_search_commands {
-                self.handle_file_search_ui_command(command);
-            }
-        }
-        if first_ui_pass && file_search_was_open && !self.file_search_dialog.open {
-            self.save_file_search_ui_preferences_if_dirty();
-        }
-        self.file_search_dialog
-            .preview_dialog
-            .ui(&ctx, &self.file_search_dialog.settings);
-        let batch_rename_runtime = self.batch_rename_runtime_snapshot();
-        let batch_rename_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let batch_rename_scope = match batch_rename_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
-                instance,
-            } if self.jump_mode_enabled()
-                && self.batch_rename_dialog.jump_mode_parent_targets_allowed() =>
-            {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("batch-rename", instance),
-                    crate::gui::jump_mode::TargetGeneration(
-                        self.batch_rename_dialog.jump_mode_target_generation(),
-                    ),
-                    "batch-rename/form",
-                    ctx.viewport_id(),
-                    batch_rename_owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let batch_rename_parent_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename);
-        let batch_rename_confirmation_scope = match (
-            batch_rename_owner,
-            batch_rename_parent_instance,
-            self.batch_rename_dialog
-                .jump_mode_pending_confirmation_identity(),
-        ) {
-            (
-                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
-                    parent_instance,
-                    confirmation_instance,
-                    kind,
-                },
-                Some(current_parent_instance),
-                Some((current_confirmation_instance, current_kind)),
-            ) if self.jump_mode_enabled()
-                && parent_instance == current_parent_instance
-                && confirmation_instance == current_confirmation_instance
-                && kind == current_kind =>
-            {
-                let owner = batch_rename_owner;
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        kind.surface_kind(),
-                        confirmation_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("batch-rename", parent_instance),
-                    ),
-                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                    "batch-rename/confirmation",
-                    ctx.viewport_id(),
-                    owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let batch_rename_native_owner =
-            self.batch_rename_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let batch_rename_confirmation_native_owner = self
-            .batch_rename_confirmation_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        if !batch_rename_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let batch_rename_commands = self.batch_rename_dialog.ui_with_jump_mode(
-            &ctx,
-            batch_rename_scope.as_ref(),
-            batch_rename_confirmation_scope.as_ref(),
-            batch_rename_owner,
-            batch_rename_native_owner,
-            batch_rename_confirmation_native_owner,
-            first_ui_pass,
-            batch_rename_parent_instance,
-            &batch_rename_runtime,
-        );
-        if first_ui_pass {
-            for command in batch_rename_commands {
-                self.handle_batch_rename_ui_command(command);
-            }
-        }
-        // Batch Rename may have changed the visible foreground earlier this pass,
-        // so Search & Replace must resolve its owner immediately before drawing.
-        let search_replace_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let (search_replace_scope, search_replace_confirmation_scope) = match search_replace_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
-                instance,
-            } if self.jump_mode_enabled()
-                && self
-                    .search_replace_dialog
-                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
-            {
-                (
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
-                        crate::gui::jump_mode::TargetGeneration(instance),
-                        "search-replace/form",
-                        ctx.viewport_id(),
-                        search_replace_owner,
-                        false,
-                    ),
-                    None,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
-                parent_instance,
-                confirmation_instance,
-                kind,
-                subject,
-            } if self.jump_mode_enabled()
-                && self
-                    .search_replace_dialog
-                    .jump_mode_confirmation_identity()
-                    .is_some_and(|identity| {
-                        identity.confirmation_instance == confirmation_instance
-                            && identity.kind == kind
-                            && identity.subject == subject
-                    }) =>
-            {
-                let subject_identity =
-                    egui::Id::new(("search-replace-confirmation-subject", subject)).value();
-                let scope = self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        kind.surface_kind(),
-                        confirmation_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", parent_instance),
-                    ),
-                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                    format!(
-                        "search-replace/confirmation/{}/{subject_identity:016x}",
-                        kind.surface_kind()
-                    ),
-                    ctx.viewport_id(),
-                    search_replace_owner,
-                    false,
-                );
-                (None, scope)
-            }
-            _ => (None, None),
-        };
-        let search_replace_native_owner =
-            self.search_replace_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let search_replace_confirmation_native_owner = self
-            .search_replace_confirmation_native_ui_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-            );
-        if !search_replace_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let search_replace_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
-            .unwrap_or_default();
-        let search_replace_commands = self.search_replace_dialog.ui_with_jump_mode(
-            &ctx,
-            search_replace_scope.as_ref(),
-            search_replace_confirmation_scope.as_ref(),
-            search_replace_native_owner,
-            first_ui_pass,
-            search_replace_confirmation_native_owner,
-            search_replace_instance,
-            &self.replace_worker_snapshot,
-        );
-        if first_ui_pass
-            && (search_replace_native_owner || search_replace_confirmation_native_owner)
-        {
-            for command in search_replace_commands {
-                self.handle_search_replace_ui_command(command);
-            }
-        }
-        if first_ui_pass {
-            self.submit_ready_search_replace_confirmation();
-        }
-        self.diff_dialog.ui(&ctx, &self.activity_center);
+        self.show_file_search_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_batch_rename_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_search_replace_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_diff_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let notes_scope = match notes_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } => {
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { instance }
+                if self.notes_dialog.host_layer_if_root().is_some() =>
+            {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("notes", instance),
                     self.notes_dialog.jump_mode_target_generation(),
@@ -9889,6 +11529,7 @@ impl LauncherApp {
                     false,
                 )
             }
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { .. } => None,
             crate::gui::jump_mode::ui::NavigationOwner::Root
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
@@ -9908,9 +11549,12 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
-        let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
-        notes_dlg.ui_with_jump_mode(&ctx, self, notes_scope);
-        self.notes_dialog = notes_dlg;
+        self.show_quick_notes(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            notes_scope,
+        );
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
         let dashboard_snapshot = self.dashboard_data_cache.snapshot();
         graph_dlg.ui(
@@ -9927,23 +11571,12 @@ impl LauncherApp {
             .radial_query_observation
             .has_note_close_request()
             .then(|| super::query_observation::NoteCloseRenderFrame::new(&ctx));
-        let mut i = 0;
-        while i < self.note_panels.len() {
-            let mut panel = self.note_panels.remove(i);
-            let mut discard = None;
-            panel.ui_with_note_close_observation(
-                &ctx,
-                self,
-                note_close_frame.as_ref().map(|_| &mut discard),
-            );
-            if let Some(observed) = &mut note_close_frame {
-                observed.observe_panel(&panel, discard);
-            }
-            if panel.open {
-                self.note_panels.insert(i, panel);
-                i += 1;
-            }
-        }
+        self.show_note_panels(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            note_close_frame.as_mut(),
+        );
         let mut i = 0;
         while i < self.image_panels.len() {
             let mut panel = self.image_panels.remove(i);
@@ -10000,188 +11633,13 @@ impl LauncherApp {
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
         todo_view.ui(&ctx, self);
         self.todo_view_dialog = todo_view;
-        self.clipboard_dialog.observe_clipboard_version();
-        let clipboard_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let clipboard_native_owner =
-            self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let clipboard_scope = match clipboard_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
-                instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
-                    self.clipboard_dialog.jump_mode_target_generation(),
-                    "clipboard-history",
-                    ctx.viewport_id(),
-                    clipboard_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
-                parent_instance,
-                confirmation_instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
-                .clipboard_dialog
-                .jump_mode_pending_removal_identity()
-                .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
-                .and_then(|(_, entry_token)| {
-                    let generation = self.clipboard_dialog.jump_mode_target_generation();
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::popup(
-                            "clipboard-removal",
-                            confirmation_instance,
-                            crate::gui::jump_mode::SurfaceId::dialog(
-                                "clipboard-history",
-                                parent_instance,
-                            ),
-                        ),
-                        generation,
-                        format!(
-                            "clipboard-removal/{}/{}/{}",
-                            generation.0, confirmation_instance, entry_token
-                        ),
-                        ctx.viewport_id(),
-                        clipboard_owner,
-                        false,
-                    )
-                }),
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        if !clipboard_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
-        cb_dlg.ui_with_jump_mode(
-            &ctx,
-            self,
-            clipboard_scope.as_ref(),
-            clipboard_native_owner,
-            first_ui_pass,
-        );
-        self.clipboard_dialog = cb_dlg;
-        if self.clipboard_modify_dialog.open {
-            let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
-            let legacy_window_size =
-                crate::gui::clipboard_modify_dialog::clipboard_modify_legacy_window_size(
-                    &self.settings_editor.baseline_settings,
-                );
-            cm_dlg.ui(
-                &ctx,
-                legacy_window_size,
-                &crate::clipboard_modify::runtime::clipboard_service(),
-                self.clipboard_modify_runtime.catalog_snapshot(),
-                Some(&self.clipboard_modify_runtime.store),
-            );
-            self.clipboard_modify_dialog = cm_dlg;
-        }
-        let json_utility_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let json_utility_native_owner =
-            self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let (json_utility_instance, json_utility_scope) = match json_utility_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
-                instance,
-            } if json_utility_native_owner => {
-                let scope = self
-                    .jump_mode_enabled()
-                    .then(|| {
-                        self.jump_mode_ui.scope_for_navigation_owner(
-                            crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
-                            crate::gui::jump_mode::TargetGeneration(instance),
-                            "json-utility/form",
-                            ctx.viewport_id(),
-                            json_utility_owner,
-                            false,
-                        )
-                    })
-                    .flatten();
-                (Some(instance), scope)
-            }
-            _ => (None, None),
-        };
-        if !json_utility_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        self.json_utility_dialog.show_with_jump_mode(
-            &ctx,
-            json_utility_scope.as_ref(),
-            json_utility_instance,
-            json_utility_native_owner,
-            first_ui_pass,
-        );
-        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
-        let zip_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let zip_scope = match zip_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
-                instance,
-            } if self.jump_mode_enabled()
-                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
-            {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "zip-extractor",
-                    ctx.viewport_id(),
-                    zip_owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let zip_was_open = self.zip_extractor_dialog.open;
-        #[cfg(windows)]
-        self.zip_extractor_dialog.show(
-            &ctx,
-            &mut self.archive_session,
-            first_ui_pass,
-            zip_scope.as_ref(),
-        );
-        #[cfg(not(windows))]
-        self.zip_extractor_dialog
-            .show_unsupported(&ctx, first_ui_pass, zip_scope.as_ref());
-        if zip_was_open && !self.zip_extractor_dialog.open {
-            self.panel_states.zip_extractor_dialog = false;
-            self.panel_stack
-                .retain(|panel| *panel != super::Panel::ZipExtractorDialog);
-        }
+        self.show_clipboard_history_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_clipboard_modify_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_json_utility_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_zip_host(&ctx, frame_logic.should_be_visible, first_ui_pass, jump_session_escape_preempted);
         self.hash_generator_dialog.show(&ctx);
-        self.show_regex_tester(&ctx, frame_logic.should_be_visible);
-        self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
+        self.show_regex_tester(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_table_utility(
             &ctx,
             frame_logic.should_be_visible,
@@ -10193,13 +11651,30 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
         self.show_duplicate_finder(
             &ctx,
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
+        self.show_folder_size(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+            jump_session_escape_preempted,
+        );
+        self.show_file_lock(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+            jump_session_escape_preempted,
+        );
+        self.show_recording_setup(&ctx, frame_logic.should_be_visible, first_ui_pass, jump_session_escape_preempted);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         for action in self.activity_dialog.show(
             &ctx,
@@ -10212,6 +11687,8 @@ impl LauncherApp {
             self.force_close_panel(super::Panel::ActivityDialog);
             let panel = match owner {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
+                crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
+                crate::activity::ActivityOwner::Recording => Some(super::Panel::RecordingDialog),
                 crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
                 crate::activity::ActivityOwner::DuplicateFinder => {
                     Some(super::Panel::DuplicateFinderDialog)
@@ -10225,6 +11702,7 @@ impl LauncherApp {
                 crate::activity::ActivityOwner::Macro => Some(super::Panel::MkMacroDialog),
                 crate::activity::ActivityOwner::FolderCompare => {
                     self.diff_dialog.open = true;
+                    self.diff_dialog.request_host_focus();
                     ctx.request_repaint();
                     None
                 }
@@ -10270,20 +11748,13 @@ impl LauncherApp {
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let application_input_allowed = self.native_ui_application_input_allowed(&ctx);
-        let root_input_allowed =
-            self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
-        self.calculation_pad_dialog.show(
-            &ctx,
-            first_ui_pass,
-            application_input_allowed,
-            root_input_allowed,
+        self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_date_time_studio_host(
+            &ctx, first_ui_pass, frame_logic.should_be_visible, jump_session_escape_preempted,
         );
-        self.markdown_studio_dialog.show(&ctx, first_ui_pass);
-        let calendar_editor_open = self.calendar_editor_open;
-        let _ = self
-            .date_time_studio_dialog
-            .show(&ctx, first_ui_pass, calendar_editor_open);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         let _ = conv_panel.ui(&ctx, first_ui_pass);
         self.convert_panel = conv_panel;
@@ -10360,15 +11831,9 @@ impl LauncherApp {
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(&ctx, self);
         self.toast_log_dialog = toast_dlg;
-        let mut calendar_popover = std::mem::take(&mut self.calendar_popover);
-        calendar_popover.ui(&ctx, self);
-        self.calendar_popover = calendar_popover;
-        let mut calendar_editor = std::mem::take(&mut self.calendar_event_editor);
-        calendar_editor.ui(&ctx, self);
-        self.calendar_event_editor = calendar_editor;
-        let mut calendar_details = std::mem::take(&mut self.calendar_event_details);
-        calendar_details.ui(&ctx, self);
-        self.calendar_event_details = calendar_details;
+        self.show_calendar_hosts(
+            &ctx, first_ui_pass, frame_logic.should_be_visible, jump_session_escape_preempted,
+        );
         let confirmation_result = self.confirm_modal.ui(&ctx);
         if first_ui_pass {
             match confirmation_result {
@@ -10418,22 +11883,24 @@ impl LauncherApp {
                 })
             })
             .flatten();
-        let snippet_prompt_action = self.snippet_prompt_dialog.show_with_jump_mode(
-            &ctx,
-            prompt_scope,
-            prompt_native_owner,
-            first_ui_pass,
-            prompt_initial_focus_owner,
-        );
-        if first_ui_pass && prompt_native_owner {
-            match snippet_prompt_action {
-                Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
-                    let _ = self.submit_snippet_prompt();
+        if !self.snippet_prompt_has_host_companion() {
+            let snippet_prompt_action = self.snippet_prompt_dialog.show_with_jump_mode(
+                &ctx,
+                prompt_scope,
+                prompt_native_owner,
+                first_ui_pass,
+                prompt_initial_focus_owner,
+            );
+            if first_ui_pass && prompt_native_owner {
+                match snippet_prompt_action {
+                    Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
+                        let _ = self.submit_snippet_prompt();
+                    }
+                    Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
+                        let _ = self.cancel_snippet_prompt();
+                    }
+                    None => {}
                 }
-                Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
-                    let _ = self.cancel_snippet_prompt();
-                }
-                None => {}
             }
         }
         if first_ui_pass {
@@ -10541,9 +12008,9 @@ impl LauncherApp {
             && self.coordinate_capture_parking.is_none()
             && self.screen_draw_launcher_parking.is_none()
             && !self.action_sheet.is_open()
-            && !self.snippet_prompt_dialog.is_open()
+            && !self.snippet_prompt_has_root_presentation()
             && !self.confirm_modal.is_open()
-            && !self.file_search_dialog.open
+            && !self.file_search_has_root_presentation()
             && !self.any_panel_open()
             && !self.should_show_dashboard(self.query.as_str());
         let frame_eligible = painted_root_surface
@@ -10676,9 +12143,9 @@ impl LauncherApp {
                 && self.coordinate_capture_parking.is_none()
                 && self.screen_draw_launcher_parking.is_none()
                 && !self.action_sheet.is_open()
-                && !self.snippet_prompt_dialog.is_open()
+                && !self.snippet_prompt_has_root_presentation()
                 && !self.confirm_modal.is_open()
-                && !self.file_search_dialog.open
+                && !self.file_search_has_root_presentation()
                 && !self.any_panel_open()
                 && !self.should_show_dashboard(self.query.as_str());
             let query_matches = self.query == query;
@@ -10721,17 +12188,65 @@ pub(crate) fn persist_launcher_close_preferences(
 
 impl LauncherApp {
     fn complete_markdown_diagram_handoff(&mut self, ctx: &egui::Context) {
-        let note_open_effects = self
+        let note_instances: Vec<_> = self
             .note_panels
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(index, panel)| {
-                panel
-                    .on_ui_frame_complete(ctx)
-                    .map(|effect| (index, effect))
-            })
-            .collect::<Vec<_>>();
-        for (panel_index, note_effect) in note_open_effects {
+            .iter()
+            .map(|panel| panel.prompt_identity())
+            .collect();
+        let mut note_open_effects = Vec::new();
+        let mut note_open_requests = Vec::new();
+        let mut image_open_requests = Vec::new();
+        let mut note_links = Vec::new();
+        let mut show_root = false;
+        for identity in note_instances {
+            let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
+            let mut panel = self.note_panels.remove(index);
+            let completion = panel.on_host_frame_complete(ctx, self);
+            show_root |= completion.show_root;
+            note_open_requests.extend(completion.open_note_slugs);
+            image_open_requests.extend(completion.open_image_paths);
+            note_links.extend(completion.links);
+            if !completion.closed && panel.open {
+                self.note_panels
+                    .insert(index.min(self.note_panels.len()), panel);
+                if let Some(effect) = completion.effect {
+                    note_open_effects.push((completion.panel_identity, effect));
+                }
+            }
+        }
+        self.panel_states.note_panel = !self.note_panels.is_empty();
+        if self.note_panels.is_empty() {
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::NotePanel);
+        }
+        for slug in note_open_requests {
+            show_root |= self.open_note_panel_from_link(&slug);
+        }
+        for path in image_open_requests {
+            let previous_count = self.image_panels.len();
+            self.open_image_panel(&path);
+            show_root |= self.image_panels.len() > previous_count;
+        }
+        for link in note_links {
+            show_root |= super::note_panel::dispatch_note_link(ctx, self, link);
+        }
+        if show_root {
+            self.request_launcher_visibility(true);
+        }
+        for (identity, note_effect) in note_open_effects {
+            let Some(panel_index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
             match note_effect {
                 super::note_panel::NotePanelEffect::InsertCustomTable(request) => {
                     let result = self
@@ -10885,13 +12400,242 @@ impl LauncherApp {
     }
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        let mut host = std::mem::take(&mut self.settings_window_host);
+        host.complete(ctx, self);
+        self.settings_window_host = host;
         let mut effects = Vec::new();
-        if let Some(completion) = self.dashboard_editor.on_ui_frame_complete(
-            ctx,
-            self.dashboard.registry(),
-            &self.dashboard_path,
-        ) {
+        if let Some(text) = self.complete_mouse_gestures_host(ctx) {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::MouseGestures,
+                text,
+            });
+        }
+        self.complete_mouse_settings_hosts(ctx);
+        self.complete_file_search_host(ctx);
+        if self.complete_calendar_hosts(ctx) {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        let (regex_closed, regex_docked) = self.regex_tester_dialog.on_ui_frame_complete(ctx);
+        if regex_closed {
+            self.panel_states.regex_tester_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::RegexTesterDialog);
+        }
+        if regex_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        let mut timer = std::mem::take(&mut self.timer_dialog);
+        let timer_outcome = timer.on_ui_frame_complete(ctx);
+        let timer_show_root = timer_outcome.show_root;
+        let timer_closed = timer.apply_host_effects(ctx, timer_outcome, self);
+        self.timer_dialog = timer;
+        if timer_closed {
+            self.panel_states.timer_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::TimerDialog);
+        }
+        if timer_show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        let (table_closed, table_docked) = self.table_utility_dialog.on_ui_frame_complete(ctx);
+        if table_closed {
+            self.panel_states.table_utility_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::TableUtilityDialog);
+        }
+        if table_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        let (xml_closed, xml_docked) = self.xml_toolkit_dialog.on_ui_frame_complete(ctx);
+        if xml_closed {
+            self.panel_states.xml_toolkit_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::XmlToolkitDialog);
+        }
+        if xml_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if let Some(completion) = self.batch_rename_host.complete(ctx, &mut self.batch_rename_dialog) {
+            for command in completion.commands {
+                self.handle_batch_rename_ui_command(command);
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.search_replace_host.complete(ctx, &mut self.search_replace_dialog) {
+            for command in completion.commands {
+                self.handle_search_replace_ui_command(command);
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        // A ready result can arrive with ROOT hidden. Accepted Close or Cancel
+        // has already revoked its authority before this submission boundary.
+        if !self.search_replace_host.has_deferred_close() {
+            self.submit_ready_search_replace_confirmation();
+        }
+        if let Some(completion) = self.clipboard_history_host.complete(ctx, &mut self.clipboard_dialog) {
+            use super::utility_window_host::ClipboardHostCommand;
+            for command in completion.commands {
+                match command {
+                    ClipboardHostCommand::Closed => self.close_clipboard_history_session(),
+                    ClipboardHostCommand::Apply(actions) => {
+                        let mut dialog = std::mem::take(&mut self.clipboard_dialog);
+                        let generation = dialog.jump_mode_target_generation();
+                        dialog.apply_host_effects(
+                            actions,
+                            self,
+                            completion.owner_viewport == egui::ViewportId::ROOT,
+                        );
+                        if dialog.jump_mode_target_generation() != generation {
+                            ctx.request_repaint_of(completion.owner_viewport);
+                        }
+                        self.clipboard_dialog = dialog;
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.json_utility_host.complete(ctx, &mut self.json_utility_dialog) {
+            use super::utility_window_host::JsonUtilityHostCommand;
+            for command in completion.commands {
+                match command {
+                    JsonUtilityHostCommand::Closed => self.close_json_utility_session(),
+                    JsonUtilityHostCommand::Apply(actions) => {
+                        #[cfg(test)]
+                        if let Some(clipboard) = &self.json_utility_test_clipboard {
+                            self.json_utility_dialog.complete_host_actions_with_clipboard(ctx, actions, clipboard.as_ref());
+                        } else {
+                            self.json_utility_dialog.complete_host_actions(ctx, actions);
+                        }
+                        #[cfg(not(test))]
+                        self.json_utility_dialog.complete_host_actions(ctx, actions);
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.clipboard_modify_host.complete(ctx, &mut self.clipboard_modify_dialog) {
+            use super::utility_window_host::ClipboardModifyHostCommand;
+            for command in completion.commands {
+                match command {
+                    ClipboardModifyHostCommand::Closed => self.close_clipboard_modify_session(),
+                    ClipboardModifyHostCommand::Apply(actions) => {
+                        let catalog = self.clipboard_modify_runtime.catalog_snapshot();
+                        let store = Some(&self.clipboard_modify_runtime.store);
+                        #[cfg(test)]
+                        let closed = if let Some(service) = &self.clipboard_modify_test_service {
+                            self.clipboard_modify_dialog.complete_host_actions(actions, service, catalog, store)
+                        } else {
+                            self.clipboard_modify_dialog.complete_host_actions(
+                                actions, &crate::clipboard_modify::runtime::clipboard_service(), catalog, store,
+                            )
+                        };
+                        #[cfg(not(test))]
+                        let closed = self.clipboard_modify_dialog.complete_host_actions(
+                            actions, &crate::clipboard_modify::runtime::clipboard_service(), catalog, store,
+                        );
+                        if closed {
+                            self.close_clipboard_modify_session();
+                        }
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.snippet_window_host.complete(ctx, &mut self.snippet_dialog) {
+            use super::utility_window_host::SnippetHostCommand;
+            for command in completion.commands {
+                match command {
+                    SnippetHostCommand::Closed => self.close_snippet_editor_session(),
+                    SnippetHostCommand::Apply(actions) => {
+                        let mut dialog = std::mem::take(&mut self.snippet_dialog);
+                        let generation = dialog.jump_mode_target_generation();
+                        let preview = dialog.apply_host_effects(
+                            actions, self, completion.owner_viewport == egui::ViewportId::ROOT,
+                        );
+                        let changed = dialog.jump_mode_target_generation() != generation;
+                        self.snippet_dialog = dialog;
+                        if let Some(draft) = preview {
+                            if let Err(error) = self.begin_snippet_preview(draft) {
+                                self.snippet_dialog.report_preview_start_failure(error);
+                            }
+                            ctx.request_repaint_of(completion.owner_viewport);
+                        } else if changed {
+                            ctx.request_repaint_of(completion.owner_viewport);
+                        }
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.paste_sequence_host.complete(ctx, &mut self.paste_sequence_dialog) {
+            use super::utility_window_host::PasteSequenceHostCommand;
+            for command in completion.commands {
+                match command {
+                    PasteSequenceHostCommand::Closed => self.close_paste_sequence_dialog(),
+                    PasteSequenceHostCommand::Apply(actions) => {
+                        let prompt_was_open = self.snippet_prompt_dialog.is_open();
+                        let mut dialog = std::mem::take(&mut self.paste_sequence_dialog);
+                        dialog.complete_host_actions(ctx, self, actions);
+                        self.paste_sequence_dialog = dialog;
+                        if !prompt_was_open
+                            && self.snippet_prompt_dialog.is_sequence_preflight()
+                            && self.paste_sequence_host.is_popped_out()
+                            && self.paste_sequence_dialog.open
+                        {
+                            self.sequence_prompt_editor_session = Some(self.paste_sequence_dialog.host_session_epoch());
+                        }
+                        if self.paste_sequence_dialog.is_suspended_for_playback() {
+                            self.paste_sequence_host.suspend(ctx);
+                        } else if !self.paste_sequence_dialog.open {
+                            self.close_paste_sequence_dialog();
+                        }
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        let prompt_editor = if self.hosted_snippet_preview_active() {
+            Some(self.snippet_dialog.host_session_epoch())
+        } else if self.hosted_sequence_prompt_active() {
+            Some(self.paste_sequence_dialog.host_session_epoch())
+        } else {
+            None
+        };
+        match self.snippet_prompt_dialog.complete_hosted_prompt(ctx, prompt_editor) {
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
+                let _ = self.cancel_snippet_prompt();
+            }
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
+                let _ = self.submit_snippet_prompt();
+            }
+            None => {}
+        }
+        if self.diff_dialog.on_host_frame_complete(ctx) {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if self.show_dashboard_editor || self.dashboard_editor.needs_root_ui_when_hidden() {
+            let completion = self.dashboard_editor.on_host_frame_complete(
+                ctx,
+                self.dashboard.registry(),
+                &self.dashboard_path,
+            );
             self.show_dashboard_editor = completion.editor_open;
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
             if completion.dashboard_saved {
                 self.dashboard.reload();
                 if self.enable_toasts {
@@ -10919,20 +12663,146 @@ impl LauncherApp {
                         text,
                     });
                 }
+                super::CalculationPadDialogEffect::OpenInspector => {
+                    self.focus_panel(super::Panel::ProgrammerInspectorDialog);
+                    effects.push(RootDialogEffect::ShowRoot);
+                }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
             }
         }
-        match self.date_time_studio_dialog.on_ui_frame_complete(ctx) {
-            Some(super::DateTimeStudioEffect::CopyText(text)) => {
+        let current_inspector_context = self.calculation_pad_dialog.inspector_context();
+        if let Some(completion) = self.programmer_inspector_host.complete(ctx, &mut self.programmer_inspector_dialog) {
+            use super::utility_window_host::ProgrammerInspectorHostCommand;
+            for command in completion.commands {
+                match command {
+                    ProgrammerInspectorHostCommand::Closed => {
+                        if completion.owner_viewport != egui::ViewportId::ROOT {
+                            ctx.with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                                plugin.armed.remove(&completion.owner_viewport);
+                                plugin.captured.retain(|(receipt, _)| receipt.owner.viewport_id != completion.owner_viewport);
+                            });
+                        }
+                        self.programmer_inspector_dialog.finish_close();
+                        self.panel_stack.retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
+                    }
+                    ProgrammerInspectorHostCommand::Apply(actions) => {
+                        let source_context = std::sync::Arc::clone(&actions.context);
+                        let (copy, insert, preferences) = self.programmer_inspector_dialog.commit(actions, &current_inspector_context);
+                        if let Some(text) = copy { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }); }
+                        if let Some(request) = insert { self.calculation_pad_dialog.apply_inspector_insert(ctx, &source_context, request); }
+                        if let Some(preferences) = preferences { self.request_programmer_inspector_preference_save(ctx, preferences); }
+                    }
+                }
+            }
+            if completion.show_root { effects.push(RootDialogEffect::ShowRoot); }
+        }
+        self.programmer_inspector_dialog.publish(self.calculation_pad_dialog.inspector_context());
+        let mut explorer_tabs_closed = false;
+        if let Some(completion) = self.explorer_tabs_host.complete(ctx, &mut self.explorer_tabs_dialog) {
+            use super::explorer_tabs_dialog::ExplorerTabsHostCommand;
+            for command in completion.commands {
+                match command {
+                    ExplorerTabsHostCommand::Closed => {
+                        explorer_tabs_closed = true;
+                        if completion.owner_viewport != egui::ViewportId::ROOT {
+                            ctx.with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                                plugin.armed.remove(&completion.owner_viewport);
+                                plugin.captured.retain(|(receipt, _)|
+                                    receipt.owner.viewport_id != completion.owner_viewport
+                                );
+                            });
+                        }
+                        self.explorer_tabs_dialog.finish_close();
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::ExplorerTabsDialog);
+                        self.panel_states.explorer_tabs_dialog = false;
+                    }
+                    ExplorerTabsHostCommand::Apply(actions) => {
+                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(actions);
+                        for text in copies {
+                            effects.push(RootDialogEffect::CopyText {
+                                owner: DialogCopyOwner::ExplorerTabs, text
+                            });
+                        }
+                        if changed_store {
+                            self.update_command_cache();
+                            self.search();
+                        }
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if self.explorer_tabs_dialog.complete_external(
+            ctx, self.explorer_tabs_host.identity(), explorer_tabs_closed
+        ) {
+            self.panel_states.explorer_tabs_dialog = true;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ExplorerTabsDialog);
+            self.panel_stack.push(super::Panel::ExplorerTabsDialog);
+            self.request_explorer_tabs_focus();
+            ctx.request_repaint();
+        }
+        #[cfg(windows)] {
+            let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
+            for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
+            if zip.show_root { effects.push(RootDialogEffect::ShowRoot); }
+            if zip.closed { self.panel_states.zip_extractor_dialog = false; self.panel_stack.retain(|panel| *panel != super::Panel::ZipExtractorDialog); }
+        }
+        let finder = self.duplicate_finder_dialog.on_hosted_frame_complete(ctx);
+        for text in finder.copies {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::DuplicateFinder,
+                text,
+            });
+        }
+        if finder.show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if finder.closed {
+            self.panel_states.duplicate_finder_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::DuplicateFinderDialog);
+        }
+        let comparison = self.image_compare_dialog.on_hosted_frame_complete(ctx);
+        for text in comparison.copies {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::ImageCompare,
+                text,
+            });
+        }
+        if comparison.show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if comparison.closed {
+            self.panel_states.image_compare_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::ImageCompareDialog);
+        }
+        let studio = self.date_time_studio_dialog.on_hosted_frame_complete(ctx);
+        if studio.show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        for text in studio.copies {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::DateTimeStudio,
+                text,
+            });
+        }
+        match studio.effect {
+            Some((super::DateTimeStudioEffect::CopyText(text), _)) => {
                 effects.push(RootDialogEffect::CopyText {
                     owner: DialogCopyOwner::DateTimeStudio,
                     text,
                 });
             }
-            Some(super::DateTimeStudioEffect::PrepareCalendar { instant_utc }) => {
-                effects.push(RootDialogEffect::PrepareCalendar { instant_utc });
+            Some((super::DateTimeStudioEffect::PrepareCalendar { instant_utc }, presentation)) => {
+                effects.push(RootDialogEffect::PrepareCalendar {
+                    instant_utc,
+                    presentation,
+                });
             }
             None => {}
         }
@@ -10949,12 +12819,60 @@ impl LauncherApp {
             None => {}
         }
 
+        for folder_effect in self.folder_size_dialog.on_ui_frame_complete(ctx) {
+            match folder_effect {
+                super::FolderSizeDialogEffect::CopyPath(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FolderSize,
+                        text,
+                    });
+                }
+                super::FolderSizeDialogEffect::OpenPath(path) => {
+                    effects.push(RootDialogEffect::OpenPath(path));
+                }
+                super::FolderSizeDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
+                super::FolderSizeDialogEffect::FocusPanel => {
+                    self.focus_panel(super::Panel::FolderSizeDialog);
+                    if let Some(layer) =
+                        self.query_focus_panel_layer(super::Panel::FolderSizeDialog)
+                    {
+                        ctx.move_to_top(layer);
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
+            }
+        }
+
+        for file_lock_effect in self.file_lock_dialog.on_ui_frame_complete(ctx) {
+            match file_lock_effect {
+                super::FileLockDialogEffect::CopySnapshot(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FileLock,
+                        text,
+                    });
+                }
+                super::FileLockDialogEffect::CopyLabel(text) => effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::FileLockLabel, text }),
+                super::FileLockDialogEffect::RevealExecutable(request) => {
+                    effects.push(RootDialogEffect::RevealFileLockExecutable(request));
+                }
+                super::FileLockDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
+                super::FileLockDialogEffect::FocusPanel => {
+                    self.focus_panel(super::Panel::FileLockDialog);
+                    if let Some(layer) = self.query_focus_panel_layer(super::Panel::FileLockDialog)
+                    {
+                        ctx.move_to_top(layer);
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
+            }
+        }
+
         if !self.calculation_pad_dialog.open {
             self.panel_states.calculation_pad_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::CalculationPadDialog);
         }
-        if !self.date_time_studio_dialog.open {
+        if studio.closed || !self.date_time_studio_dialog.open {
             self.panel_states.date_time_studio_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DateTimeStudioDialog);
@@ -10964,7 +12882,96 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::ConvertPanel);
         }
+        if !self.folder_size_dialog.open {
+            self.panel_states.folder_size_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FolderSizeDialog);
+        }
+        if !self.file_lock_dialog.open {
+            self.panel_states.file_lock_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FileLockDialog);
+        }
         effects
+    }
+
+    fn complete_mkmacro_dialog(&mut self, ctx: &egui::Context) {
+        let completion = self.mkmacro_dialog.on_host_frame_complete(ctx);
+        if completion.closed {
+            self.panel_states.mkmacro_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MkMacroDialog);
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+        if let Some(preferences) = completion.persisted_preferences {
+            let settings_path = self.settings_path.clone();
+            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
+                settings.mkmacro_properties = preferences;
+                Ok(())
+            }) {
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    "mkmacro.properties.preferences",
+                    error,
+                ));
+            }
+        }
+        if self.enable_toasts {
+            for notice in completion.notices {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: notice.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                        style: Default::default(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn complete_quick_notes_dialog(&mut self, ctx: &egui::Context) {
+        let mut notes = std::mem::take(&mut self.notes_dialog);
+        let completion = notes.on_ui_frame_complete(ctx, self);
+        self.notes_dialog = notes;
+        if completion.closed {
+            self.panel_states.notes_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::NotesDialog);
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+        for slug in completion.open_note_panels {
+            self.open_note_panel(&slug, None);
+        }
+        if completion.open_unused_assets {
+            self.unused_assets_dialog.open();
+            self.focus_panel(super::Panel::UnusedAssetsDialog);
+            self.request_launcher_visibility(true);
+        }
+        for text in completion.clipboard_texts {
+            if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                self.report_error_message(
+                    "ui operation",
+                    format!("Failed to copy note text: {error}"),
+                );
+            }
+        }
+        for path in completion.external_open_paths {
+            if let Err(error) = open::that(&path) {
+                self.report_error_message(
+                    "ui operation",
+                    format!("Failed to open note externally: {error}"),
+                );
+            }
+        }
+        for action in completion.activations {
+            self.activate_action(action, None, ActivationSource::Click);
+        }
     }
 
     fn dispatch_root_dialog_effects(
@@ -10999,20 +13006,84 @@ impl LauncherApp {
                     let result = crate::actions::clipboard::set_text(&text)
                         .map_err(|error| error.to_string());
                     match owner {
+                        DialogCopyOwner::MouseGestures => {
+                            if let Err(error) = result {
+                                self.report_error_message("mouse_gestures.copy", error);
+                            }
+                        }
                         DialogCopyOwner::CalculationPad => {
                             self.calculation_pad_dialog.copy_completed(result)
+                        }
+                        DialogCopyOwner::ProgrammerInspector => {
+                            if let Err(error) = result { self.report_error_message("programmer_inspector.copy", error); }
                         }
                         DialogCopyOwner::Converter => self.convert_panel.copy_completed(result),
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::ImageCompare => {
+                            if let Err(error) = result {
+                                self.report_error_message("image_compare.copy", error);
+                            }
+                        }
+                        DialogCopyOwner::ZipExtractor => { if let Err(error) = result { self.report_error_message("zip.copy", error); } }
+                        DialogCopyOwner::DuplicateFinder => {
+                            if let Err(error) = result {
+                                self.report_error_message("duplicate_finder.copy", error);
+                            }
+                        }
+                        DialogCopyOwner::FolderSize => {
+                            self.folder_size_dialog.copy_completed(result)
+                        }
+                        DialogCopyOwner::FileLock => self.file_lock_dialog.copy_completed(result),
+                        DialogCopyOwner::FileLockLabel => self.file_lock_dialog.label_copy_completed(result),
+                        DialogCopyOwner::ExplorerTabs => {
+                            if let Err(error) = result {
+                                self.report_error_message("explorer_tabs.copy", error);
+                            }
+                        }
                     }
+                }
+                RootDialogEffect::OpenPath(path) => {
+                    #[cfg(test)]
+                    let result = {
+                        let _ = path;
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::file_search::actions::resolve_explorer_action(&path)
+                        .and_then(crate::file_search::actions::execute_explorer_action)
+                        .map_err(|error| format!("Could not open the selected path: {error:#}"));
+                    self.folder_size_dialog.path_action_completed(result);
+                }
+                RootDialogEffect::RevealFileLockExecutable(request) => {
+                    let path = match self
+                        .file_lock_dialog
+                        .take_reveal_path_for_dispatch(&request)
+                    {
+                        Ok(Some(path)) => path,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            self.file_lock_dialog.reveal_completed(Err(error));
+                            continue;
+                        }
+                    };
+                    #[cfg(test)]
+                    let result = {
+                        let _ = path;
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::file_search::actions::reveal_path(&path)
+                        .map_err(|error| format!("{error:#}"));
+                    self.file_lock_dialog.reveal_completed(result);
                 }
                 RootDialogEffect::SaveConverterPreferences => {
                     self.convert_panel.save_preferences();
                 }
-                RootDialogEffect::PrepareCalendar { instant_utc } => {
-                    let result = self.prepare_calendar_event_at(instant_utc);
+                RootDialogEffect::PrepareCalendar { instant_utc, presentation } => {
+                    let result = self.prepare_calendar_event_from(instant_utc, presentation);
+                    _ctx.request_repaint_of(egui::ViewportId::ROOT);
                     self.date_time_studio_dialog
                         .calendar_prepare_completed(result);
                 }
@@ -11042,7 +13113,9 @@ impl LauncherApp {
         }
         let overlay = self.mkmacro_dialog.visual_overlay.poll_app_exit(requested);
         if self.sequence_exit_requested || overlay.is_some() {
-            let ready = overlay.unwrap_or(true);
+            let ready = overlay.unwrap_or(true)
+                && self.recording_controller.shutdown_ready()
+                && !self.recording_dialog.target_refresh_pending_for_shutdown();
             ctx.send_viewport_cmd(if ready {
                 egui::ViewportCommand::Close
             } else {
@@ -11051,6 +13124,9 @@ impl LauncherApp {
             if !ready {
                 ctx.request_repaint_after(std::time::Duration::from_millis(10));
             }
+        }
+        if requested {
+            self.recording_controller.request_shutdown();
         }
     }
 }
@@ -11074,6 +13150,31 @@ impl eframe::App for LauncherApp {
         self.needs_viewport_bootstrap()
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
+            || self.notes_dialog.needs_root_ui_when_hidden()
+            || self.markdown_studio_dialog.needs_root_ui_when_hidden()
+            || self.folder_size_dialog.needs_root_ui_when_hidden()
+            || self.file_lock_dialog.needs_root_ui_when_hidden()
+            || self.recording_dialog.needs_setup_root_ui_when_hidden()
+            || self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open)
+            || self.search_replace_needs_root_ui_when_hidden()
+            || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
+            || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
+            || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
+            || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
+            || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
+            || self.regex_tester_dialog.needs_root_ui_when_hidden()
+            || self.table_utility_dialog.needs_root_ui_when_hidden()
+            || self.timer_dialog.needs_root_ui_when_hidden()
+            || self.calendar_hosts_need_hidden_root_ui()
+            || self.date_time_studio_dialog.needs_root_ui_when_hidden()
+            || self.image_compare_dialog.needs_root_ui_when_hidden()
+            || self.duplicate_finder_dialog.needs_root_ui_when_hidden()
+            || self.zip_extractor_dialog.needs_root_ui_when_hidden()
+            || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
+            || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
+            || self
+                .recording_dialog
+                .needs_root_ui_when_hidden(&self.recording_controller)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11086,8 +13187,20 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        if self
+            .diagram_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(_ctx);
+        if self
+            .markdown_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         if markdown_closed {
             self.panel_states.markdown_studio_dialog = false;
             self.panel_stack
@@ -11105,14 +13218,17 @@ impl eframe::App for LauncherApp {
             _ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         self.complete_markdown_diagram_handoff(_ctx);
-        self.regex_tester_dialog.on_ui_frame_complete(_ctx);
+        self.complete_quick_notes_dialog(_ctx);
+        self.complete_mkmacro_dialog(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
+        self.complete_recording_dialog(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.recording_controller.request_shutdown();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);
@@ -11125,6 +13241,8 @@ impl eframe::App for LauncherApp {
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
+        self.folder_size_dialog.shutdown();
+        self.file_lock_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
             self.report_error_message(
                 "brightness.shutdown",
@@ -11185,6 +13303,10 @@ impl eframe::App for LauncherApp {
         if let Err(error) = self.calculation_pad_dialog.shutdown_recovery() {
             self.report_error_message("calculation_pad.recovery.shutdown", error.to_string());
         }
+        self.utility_dialog_size_manager
+            .drain_native_geometry_observations(&self.egui_ctx);
+        self.utility_dialog_size_manager
+            .shutdown_native_geometry_observers();
         self.prepare_settings_save_shutdown();
         if let Some(mut client) = self.target_repair_client.take() {
             client.shutdown();
@@ -11286,8 +13408,20 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        if self
+            .diagram_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(ctx);
+        if self
+            .markdown_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         if markdown_closed {
             self.panel_states.markdown_studio_dialog = false;
             self.panel_stack
@@ -11306,9 +13440,11 @@ impl LauncherApp {
             }
         }
         self.complete_markdown_diagram_handoff(ctx);
-        self.regex_tester_dialog.on_ui_frame_complete(ctx);
+        self.complete_quick_notes_dialog(ctx);
+        self.complete_mkmacro_dialog(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
+        self.complete_recording_dialog(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -11359,8 +13495,10 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
     static IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS: std::cell::RefCell<Option<(egui::ViewportId, Vec<egui::Event>)>> = const { std::cell::RefCell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
+    pub(super) static IMMEDIATE_VIEWPORT_TEST_DISCARD: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_SIZE: std::cell::Cell<Option<(egui::ViewportId, egui::Vec2)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
+    static IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -11458,10 +13596,26 @@ pub(super) fn with_immediate_viewport_renderer<R>(
                 assert_eq!(ui.ctx().viewport_id(), viewport_id);
                 assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
                 (viewport.viewport_ui_cb)(ui);
+                IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| {
+                    if request.get() == Some(viewport_id) {
+                        request.set(None);
+                        ui.ctx()
+                            .request_discard("forced child replay for Settings host test");
+                    }
+                });
                 IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| {
                     *focused.borrow_mut() =
                         Some((viewport_id, ui.ctx().memory(|memory| memory.focused())));
                 });
+            });
+            IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| {
+                if target.get() == Some(viewport_id) {
+                    assert!(
+                        !output.platform_output.commands.iter()
+                            .any(|command| matches!(command, egui::OutputCommand::CopyText(_))),
+                        "hosted clipboard output must be staged before the native platform sees it",
+                    );
+                }
             });
             output.drop_without_applying_deltas();
             assert_eq!(ctx.viewport_id(), parent_id);
@@ -12184,6 +14338,79 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExitCaptureBackend {
+        drop_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    struct ExitCaptureSource {
+        generation: u64,
+        canvas: crate::recording::CanvasSize,
+        sent_frame: bool,
+        drop_gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    }
+
+    impl crate::recording::RecordingBackend for ExitCaptureBackend {
+        fn create_source(
+            &self,
+            request: &crate::recording::RecordingRequest,
+            generation: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(ExitCaptureSource {
+                generation,
+                canvas: request.canvas(),
+                sent_frame: false,
+                drop_gate: self.drop_gate.lock().unwrap().take(),
+            }))
+        }
+    }
+
+    impl crate::recording::CaptureSource for ExitCaptureSource {
+        fn poll(
+            &mut self,
+            max_wait: Duration,
+            stop: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            if !self.sent_frame {
+                self.sent_frame = true;
+                return crate::recording::CapturePoll::Frame {
+                    generation: self.generation,
+                    frame: crate::recording::RgbaFrame::new(
+                        self.canvas,
+                        vec![255; self.canvas.rgba_bytes()],
+                    )
+                    .unwrap(),
+                };
+            }
+            if stop.stop_requested() || stop.is_cancelled() {
+                return crate::recording::CapturePoll::Ended(
+                    crate::recording::RecordingEndReason::UserStopped,
+                );
+            }
+            thread::sleep(max_wait.min(Duration::from_millis(5)));
+            crate::recording::CapturePoll::Pending
+        }
+    }
+
+    impl Drop for ExitCaptureSource {
+        fn drop(&mut self) {
+            if let Some((dropped, release)) = self.drop_gate.take() {
+                let _ = dropped.send(());
+                let _ = release.recv_timeout(Duration::from_secs(8));
+            }
+        }
+    }
+
+    struct ReleaseExitCaptureOnDrop(Option<mpsc::Sender<()>>);
+
+    impl Drop for ReleaseExitCaptureOnDrop {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
     #[test]
     fn paste_to_advance_close_guard_has_no_clipboard_restore_job() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -12202,6 +14429,116 @@ mod tests {
         );
         output.textures_delta.clear();
     }
+
+    #[test]
+    fn recording_ui_exit_waits_for_capture_and_writer_retirement() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _release_on_drop = ReleaseExitCaptureOnDrop(Some(release_tx.clone()));
+        app.recording_controller = crate::recording::RecordingController::new(
+            Arc::new(ExitCaptureBackend {
+                drop_gate: Mutex::new(Some((dropped_tx, release_rx))),
+            }),
+            || {},
+        );
+        let bounds = crate::mkmacro::ScreenRect::new(-32, 18, 32, 24);
+        let target = crate::recording::CaptureTarget::window(100, 200, 300, bounds).unwrap();
+        let options = crate::recording::RecordingOptions::new(
+            crate::recording::RecordingFormat::Gif,
+            crate::recording::FrameRate::new(12).unwrap(),
+            Duration::from_secs(120),
+            false,
+        )
+        .unwrap();
+        let request = crate::recording::RecordingRequest::new(target, bounds, options).unwrap();
+        app.recording_controller
+            .prepare(
+                request,
+                workspace.root().join("exit-guard.gif"),
+                &app.activity_center,
+            )
+            .unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = app.recording_controller.snapshot();
+            if matches!(
+                snapshot.preparation,
+                Some(crate::recording::RecordingWriterPreparation::Ready)
+            ) {
+                assert!(matches!(
+                    snapshot.session.state(),
+                    crate::recording::RecorderState::Selecting
+                ));
+                app.recording_controller.poll();
+                break;
+            }
+            assert!(Instant::now() < ready_deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let recording_deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            let snapshot = app.recording_controller.snapshot();
+            if matches!(
+                snapshot.session.state(),
+                crate::recording::RecorderState::Recording { .. }
+            ) && snapshot.session.frames_written() > 0
+            {
+                break;
+            }
+            app.recording_controller.poll();
+            assert!(Instant::now() < recording_deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let close_frame = |app: &mut LauncherApp| {
+            let mut viewports = ctx.input(|input| input.raw.viewports.clone());
+            viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    viewports,
+                    ..Default::default()
+                },
+                |_| app.guard_overlay_app_exit(&ctx),
+            );
+            let commands = output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone();
+            output.drop_without_applying_deltas();
+            commands
+        };
+
+        let commands = close_frame(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        dropped_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("application shutdown cancelled capture and reached source retirement");
+        app.recording_controller.poll();
+        assert!(!app.recording_controller.shutdown_ready());
+
+        release_tx.send(()).unwrap();
+        let shutdown_deadline = Instant::now() + Duration::from_secs(6);
+        while !app.recording_controller.shutdown_ready() {
+            app.recording_controller.poll();
+            assert!(Instant::now() < shutdown_deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let commands = close_frame(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+    }
+
     use crate::{
         gui::numpad_navigation::{
             LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalDigitKeyState,
@@ -14580,6 +16917,729 @@ mod tests {
         let _ = LauncherApp::take_test_root_dialog_effects(ctx);
     }
 
+    fn click_folder_size_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        name: &str,
+        discard_release: bool,
+    ) {
+        let (rect, clip) = app
+            .folder_size_dialog
+            .test_action_rect(name)
+            .unwrap_or_else(|| panic!("Folder Size action {name:?} was rendered"));
+        let visible_rect = rect.intersect(clip);
+        assert!(
+            visible_rect.is_positive() && rect.contains(visible_rect.center()),
+            "Folder Size action {name:?} is clipped: action={rect:?}, clip={clip:?}"
+        );
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, false),
+            discard_release,
+        )
+        .drop_without_applying_deltas();
+    }
+
+    fn open_folder_size_through_plugin(app: &mut LauncherApp) {
+        let action = crate::plugins::folder_size::FolderSizePlugin
+            .search("foldersize")
+            .into_iter()
+            .next()
+            .expect("exact Folder Size plugin query returns one action");
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .expect("Folder Size plugin action parses");
+        app.dispatch_command_invocation(invocation);
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FolderSizeDialog),
+            "the typed host focuses the docked Folder Size panel"
+        );
+    }
+
+    fn open_file_lock_through_plugin(app: &mut LauncherApp, path: Option<&std::path::Path>) {
+        let mut action = crate::plugins::file_lock::FileLockPlugin
+            .search("filelock")
+            .into_iter()
+            .next()
+            .expect("exact File Lock plugin query returns one action");
+        action.args = path.map(|path| path.to_string_lossy().into_owned());
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .expect("File Lock plugin action parses");
+        app.dispatch_command_invocation(invocation);
+    }
+
+    fn wait_for_current_file_lock_inspection(ctx: &egui::Context, app: &mut LauncherApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app
+            .file_lock_dialog
+            .session_view_for_test()
+            .inspection_is_current()
+            && app.file_lock_dialog.session_view_for_test().status()
+                != crate::file_lock::FileLockSessionStatus::Failed
+            && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+    }
+
+    fn click_file_lock_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        name: &str,
+        discard_release: bool,
+    ) {
+        let (rect, clip) = app
+            .file_lock_dialog
+            .test_action_rect(name)
+            .unwrap_or_else(|| panic!("File Lock action {name:?} was rendered"));
+        let visible_rect = rect.intersect(clip);
+        assert!(
+            visible_rect.is_positive() && visible_rect.contains(rect.center()),
+            "File Lock action {name:?} is clipped: action={rect:?}, clip={clip:?}"
+        );
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, false),
+            discard_release,
+        )
+        .drop_without_applying_deltas();
+    }
+
+    fn expose_file_lock_context_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        workspace_root: &std::path::Path,
+        file_path: &std::path::Path,
+    ) -> egui::Rect {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(ctx, app);
+        prepare_actual_file_search_dialog(ctx, app, workspace_root);
+        std::fs::write(file_path, b"read-only file-user fixture")
+            .expect("the File Search result is a real isolated file");
+        seed_actual_file_search_file_result(
+            app,
+            crate::file_search::model::SearchId(947),
+            file_path,
+        );
+        for _ in 0..2 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Filename result")
+            .expect("the file result has a visible File Search response");
+        let result_rect = result.clipped_rect();
+        assert!(result_rect.is_positive());
+        click_file_search_at(
+            ctx,
+            app,
+            result_rect.center(),
+            egui::PointerButton::Secondary,
+        );
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(ctx));
+        assert!(app.file_search_native_ui_owner_current(ctx, true));
+
+        app.file_search_dialog
+            .test_native_popup_control_rect(PopupControl::InspectFileUsers)
+            .expect("a regular file row has the real Inspect file users menu item")
+    }
+
+    #[test]
+    fn file_lock_ui_typed_open_inspect_copy_reveal_and_identity_invalidation() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_a = workspace.root().join("λ report.txt");
+        let file_b = workspace.root().join("other report.txt");
+        let file_c = workspace.root().join("failed inspection.txt");
+        std::fs::write(&file_a, b"fixture A").expect("create isolated file A");
+        std::fs::write(&file_b, b"fixture B").expect("create isolated file B");
+        std::fs::write(&file_c, b"fixture C").expect("create isolated file C");
+        let executable = workspace.root().join("reported process.exe");
+        std::fs::write(&executable, b"test-only reveal target")
+            .expect("create isolated executable-shaped file");
+
+        let inspection_executable = executable.clone();
+        let empty_path = file_b.clone();
+        let failed_path = file_c.clone();
+        let session = crate::file_lock::FileLockSession::with_test_job(
+            move |path| {
+                if path == failed_path {
+                    return Err(crate::file_lock::FileLockInspectionFailure {
+                        error: crate::file_lock::FileLockInspectionError::StartSessionFailed(172),
+                        cleanup_error: None,
+                    });
+                }
+                let processes = if path == empty_path {
+                    Vec::new()
+                } else {
+                    vec![crate::file_lock::FileLockProcess {
+                        process_id: 4242,
+                        creation_filetime: 133_000_000_000_000_000,
+                        application_name: "Synthetic process".into(),
+                        service_name: String::new(),
+                        executable_path: Some(inspection_executable.clone()),
+                    }]
+                };
+                Ok(crate::file_lock::FileLockInspection {
+                    path,
+                    identity: crate::file_operations::NativeFileIdentity::from_parts(1, [9; 16]),
+                    inspected_at: std::time::SystemTime::now(),
+                    processes,
+                })
+            },
+            || {},
+        );
+        app.file_lock_dialog.set_session_for_test(session);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, Some(&file_a));
+        assert!(
+            app.file_lock_dialog.needs_root_ui_when_hidden(),
+            "typed Open is retained until the root accepts its pass"
+        );
+        assert!(!app.file_lock_dialog.open);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(app.file_lock_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FileLockDialog),
+            "typed Open focuses the docked inspector"
+        );
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_a.as_path())
+        );
+        let unopened = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(unopened.generation(), 0);
+        assert_eq!(
+            unopened.status(),
+            crate::file_lock::FileLockSessionStatus::Idle,
+            "opening with a path does not start inspection"
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        let inspected = app.file_lock_dialog.session_view_for_test();
+        assert!(
+            inspected.inspection_is_current(),
+            "the accepted Inspect publishes the current fake result: {:?}",
+            inspected.status()
+        );
+        assert_eq!(
+            inspected.inspection().unwrap().path,
+            file_a,
+            "the worker receives the exact selected path"
+        );
+        assert!(
+            app.file_lock_dialog.has_current_inspection_for_test(),
+            "rows are available only while the submitted token matches"
+        );
+        assert!(
+            !super::super::file_lock_dialog::process_details_unavailable_for_test(
+                &inspected.inspection().unwrap().processes[0]
+            ),
+            "an empty service name is normal when the executable and application are present"
+        );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "refresh", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 2);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        click_file_lock_action(&ctx, &mut app, "copy_snapshot", false);
+        let copied = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            copied.as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FileLock,
+                text,
+            }] if text.contains("λ report.txt") && text.contains("Synthetic process")
+        ));
+        assert_eq!(
+            app.file_lock_dialog.notice_for_test(),
+            Some("Inspection snapshot copied.")
+        );
+
+        click_file_lock_action(&ctx, &mut app, "process_row", false);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        app.file_lock_dialog
+            .set_reveal_result_for_test(Ok(executable.clone()));
+        click_file_lock_action(&ctx, &mut app, "reveal", false);
+        let reveal_effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            reveal_effects.as_slice(),
+            [RootDialogEffect::RevealFileLockExecutable(request)]
+                if request.process_id == 4242
+                    && request.creation_filetime == 133_000_000_000_000_000
+                    && request.executable_path == executable
+        ));
+        assert_eq!(
+            app.file_lock_dialog.notice_for_test(),
+            Some("Requested executable reveal.")
+        );
+
+        app.file_lock_dialog.stage_prefill(&ctx, file_b.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_b.as_path())
+        );
+        assert!(!app.file_lock_dialog.has_current_inspection_for_test());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        let empty = app.file_lock_dialog.session_view_for_test();
+        assert!(empty.inspection_is_current());
+        assert!(empty.inspection().unwrap().reports_no_processes());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "copy_snapshot", false);
+        let empty_copy = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            empty_copy.as_slice(),
+            [RootDialogEffect::CopyText { text, .. }]
+                if text.contains("No processes reported.")
+        ));
+        app.file_lock_dialog.stage_prefill(&ctx, file_a.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_a.as_path())
+        );
+        assert!(
+            !app.file_lock_dialog.has_current_inspection_for_test(),
+            "returning to A does not resurrect A's prior generation"
+        );
+
+        app.file_lock_dialog.stage_prefill(&ctx, file_c.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.file_lock_dialog.session_view_for_test().status()
+            != crate::file_lock::FileLockSessionStatus::Failed
+            && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+        let failed = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(
+            failed.status(),
+            crate::file_lock::FileLockSessionStatus::Failed
+        );
+        assert_eq!(
+            failed.inspection_error().unwrap().error,
+            crate::file_lock::FileLockInspectionError::StartSessionFailed(172)
+        );
+        assert!(!app.file_lock_dialog.has_current_inspection_for_test());
+
+        app.file_lock_dialog.request_close(&ctx);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(!app.file_lock_dialog.open);
+        open_file_lock_through_plugin(&mut app, Some(&file_a));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(app.file_lock_dialog.open);
+        assert!(
+            !app.file_lock_dialog.has_current_inspection_for_test(),
+            "reopening never treats a completed older session as submitted"
+        );
+
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_file_search_prefill_requires_a_retained_result_menu_action() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_path = workspace.root().join("menu file.txt");
+        let action_rect =
+            expose_file_lock_context_action(&ctx, &mut app, workspace.root(), &file_path);
+
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.file_lock_dialog.open);
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_path.as_path())
+        );
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().status(),
+            crate::file_lock::FileLockSessionStatus::Idle,
+            "File Search prefill focuses the tool without inspecting"
+        );
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_discarded_file_search_prefill_does_not_open_inspector() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_path = workspace.root().join("discarded menu file.txt");
+        let action_rect =
+            expose_file_lock_context_action(&ctx, &mut app, workspace.root(), &file_path);
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+        assert!(
+            !app.file_lock_dialog.open,
+            "a discarded File Search menu pass does not open the inspector"
+        );
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_choose_file_is_retained_and_discarded_without_inspection() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("chosen report.txt");
+        std::fs::write(&path, b"picker target").expect("create isolated picker file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, None);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        app.file_lock_dialog
+            .set_file_choice_for_test(Some(path.clone()));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        click_file_lock_action(&ctx, &mut app, "choose_file", false);
+        assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 1);
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(path.as_path())
+        );
+        let chosen = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(chosen.generation(), 0);
+        assert_eq!(
+            chosen.status(),
+            crate::file_lock::FileLockSessionStatus::Idle
+        );
+
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_discarded_choose_file_does_not_inspect() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("discarded picker file.txt");
+        std::fs::write(&path, b"discarded picker target")
+            .expect("create isolated discarded picker file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, None);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        app.file_lock_dialog.set_file_choice_for_test(Some(path));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "choose_file", true);
+        assert_eq!(
+            app.file_lock_dialog.file_picker_calls_for_test(),
+            0,
+            "a discarded Choose pass never opens the native picker"
+        );
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_close_can_supersede_a_staged_open_before_inspection() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("cancelled open.txt");
+        std::fs::write(&path, b"cancelled open target")
+            .expect("create isolated close-before-open file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, Some(&path));
+        assert!(app.file_lock_dialog.needs_root_ui_when_hidden());
+        app.file_lock_dialog.request_close(&ctx);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(!app.file_lock_dialog.open);
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        assert!(!app.file_lock_dialog.needs_root_ui_when_hidden());
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_scan() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(scan_root.path().join("payload.bin"), b"verified bytes")
+            .expect("small disposable scan input");
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_folder_size_through_plugin(&mut app);
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        let idle = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(idle.generation(), 0, "opening the panel does not scan");
+        assert_eq!(
+            idle.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+        assert!(!idle.is_busy());
+
+        click_folder_size_action(&ctx, &mut app, "choose_folder", false);
+        assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 1);
+        assert_eq!(
+            app.folder_size_dialog
+                .selected_root_for_test()
+                .map(|root| root.as_path()),
+            Some(scan_root.path())
+        );
+        let chosen_but_unscanned = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(chosen_but_unscanned.generation(), 0);
+        assert_eq!(
+            chosen_but_unscanned.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_folder_size_action(&ctx, &mut app, "scan", false);
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            1,
+            "only the accepted Scan action starts a session generation"
+        );
+
+        app.folder_size_dialog.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.folder_size_dialog.session_view_for_test().is_busy() && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+        assert!(
+            !app.folder_size_dialog.session_view_for_test().is_busy(),
+            "the small accepted scan settles after shutdown cancellation"
+        );
+        drop(app);
+        drop(scan_root);
+        drop(workspace);
+    }
+
+    #[test]
+    fn folder_size_dialog_discarded_choose_does_not_invoke_picker() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_folder_size_through_plugin(&mut app);
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        click_folder_size_action(&ctx, &mut app, "choose_folder", true);
+        assert_eq!(
+            app.folder_size_dialog.folder_picker_calls_for_test(),
+            0,
+            "a discarded Choose pass has no picker authority"
+        );
+        assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        drop(app);
+        drop(scan_root);
+        drop(workspace);
+    }
+
+    fn expose_folder_size_context_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        workspace_root: &std::path::Path,
+        directory: &std::path::Path,
+    ) -> egui::Rect {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(ctx, app);
+        prepare_actual_file_search_dialog(ctx, app, workspace_root);
+        std::fs::create_dir_all(directory).expect("directory result is isolated");
+        seed_actual_file_search_directory_result(
+            app,
+            crate::file_search::model::SearchId(931),
+            directory,
+        );
+        for _ in 0..2 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Filename result")
+            .expect("the directory result has a visible File Search response");
+        let result_rect = result.clipped_rect();
+        assert!(result_rect.is_positive());
+        click_file_search_at(
+            ctx,
+            app,
+            result_rect.center(),
+            egui::PointerButton::Secondary,
+        );
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(ctx));
+        assert!(app.file_search_native_ui_owner_current(ctx, true));
+
+        app.file_search_dialog
+            .test_native_popup_control_rect(PopupControl::AnalyzeFolderSize)
+            .expect("the directory menu has the real Analyze folder size item")
+    }
+
+    #[test]
+    fn file_search_folder_size_retained_prefill_focuses_without_scanning() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let directory = workspace.root().join("folder-size-target");
+        let action_rect =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &directory);
+
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+        );
+
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FolderSizeDialog),
+            "accepted File Search prefill focuses the existing typed panel"
+        );
+        assert_eq!(
+            app.folder_size_dialog
+                .selected_root_for_test()
+                .map(|root| root.as_path()),
+            Some(directory.as_path())
+        );
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), 0);
+        assert_eq!(
+            view.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle,
+            "prefill never starts a scan"
+        );
+        assert!(!view.is_busy());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_search_folder_size_discarded_prefill_is_ignored() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let directory = workspace.root().join("discarded-folder-size-target");
+        let action_rect =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &directory);
+
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+
+        assert!(!app.folder_size_dialog.open);
+        assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), 0);
+        assert_eq!(
+            view.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+        assert!(!view.is_busy());
+        drop(app);
+        drop(workspace);
+    }
+
     fn tool_dialog_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
         vec![
             egui::Event::PointerMoved(rect.center()),
@@ -14616,6 +17676,100 @@ mod tests {
         input.events = events;
         app.run_root_frame_for_test(ctx, input, discard_after_render)
             .0
+    }
+
+    #[test]
+    fn quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.notes_dialog.test_set_edit_draft("Unsaved Quick Notes draft");
+        let original_draft = app.notes_dialog.test_edit_draft().to_owned();
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                .drop_without_applying_deltas();
+        }
+
+        let (was_popout, original_generation) = app.notes_dialog.test_host_identity();
+        assert!(!was_popout);
+        let (_, root_button, root_clip, root_enabled) = app.notes_dialog.test_host_button();
+        assert!(root_enabled, "the docked host button is enabled");
+        assert!(root_clip.contains_rect(root_button));
+        assert_eq!(
+            ctx.layer_id_at(root_button.center()),
+            Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()),
+            "the host control is a real button on the existing Quick Notes window"
+        );
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(root_button, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(root_button, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.notes_dialog.test_host_identity(),
+            (false, original_generation),
+            "a discarded Pop Out intent leaves the accepted host unchanged"
+        );
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                .drop_without_applying_deltas();
+        }
+        let (_, root_button, root_clip, root_enabled) = app.notes_dialog.test_host_button();
+        assert!(root_enabled);
+        assert!(root_clip.contains_rect(root_button));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(root_button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        let (is_popout, popout_generation) = app.notes_dialog.test_host_identity();
+        assert!(is_popout, "the accepted visible click pops Notes out");
+        assert!(popout_generation > original_generation);
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+        assert!(app.notes_dialog.test_is_editing());
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+            .drop_without_applying_deltas();
+        let (_, child_button, child_clip, child_enabled) = app.notes_dialog.test_host_button();
+        assert!(child_enabled, "the accepted child owns the visible Dock control");
+        assert!(child_clip.contains_rect(child_button));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events(
+                tool_dialog_pointer_events(child_button, pressed),
+                || {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas()
+                },
+            );
+        }
+
+        let (is_popout, docked_generation) = app.notes_dialog.test_host_identity();
+        assert!(!is_popout, "the accepted child click docks Notes");
+        assert!(docked_generation > popout_generation);
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+        assert!(app.notes_dialog.test_is_editing());
+        assert!(
+            app.visible_flag.load(Ordering::SeqCst),
+            "Dock restores the launcher root"
+        );
+        drop(_workspace);
     }
 
     fn run_note_panel_key(
@@ -14912,6 +18066,5824 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn detached_calendar_retains_occurrence_and_saves_and_deletes_only_on_accepted_passes() {
+        use super::super::Panel;
+        use crate::plugins::calendar::{
+            CALENDAR_DATA, CalendarEvent, RecurrenceEnd, RecurrenceFrequency, RecurrenceRule,
+            calendar_test_guard, load_events, restore_calendar_test_data,
+        };
+
+        struct RestoreCalendar(Vec<CalendarEvent>);
+        impl Drop for RestoreCalendar {
+            fn drop(&mut self) {
+                restore_calendar_test_data(std::mem::take(&mut self.0));
+            }
+        }
+
+        let _gui = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _calendar = calendar_test_guard();
+        let _restore = RestoreCalendar(CALENDAR_DATA.read().unwrap().clone());
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 5)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let occurrence = start + chrono::Duration::days(1);
+        let event = CalendarEvent {
+            id: "calendar-host-series".into(),
+            title: "Recurring calendar fixture".into(),
+            start,
+            end: None,
+            duration_minutes: Some(30),
+            all_day: false,
+            notes: None,
+            recurrence: Some(RecurrenceRule {
+                frequency: RecurrenceFrequency::Daily,
+                interval: 1,
+                weekly_days: Vec::new(),
+                nth_weekday: None,
+                end: RecurrenceEnd::Never,
+                custom_unit: None,
+            }),
+            reminders: Vec::new(),
+            tags: Vec::new(),
+            category: None,
+            created_at: start,
+            updated_at: None,
+            entity_refs: Vec::new(),
+        };
+        restore_calendar_test_data(vec![event.clone()]);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("retained-calendar-events.json");
+        crate::common::persistence::save_json_atomic(&path, &vec![event]).unwrap();
+        app.calendar_events_path_override = Some(path.to_str().unwrap().to_owned());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_calendar_popover(Some(occurrence.date()));
+        let calendar = LauncherApp::calendar_host_spec(Panel::CalendarPopover).viewport;
+        let details = LauncherApp::calendar_host_spec(Panel::CalendarEventDetails).viewport;
+        let editor = LauncherApp::calendar_host_spec(Panel::CalendarEventEditor).viewport;
+
+        let frame = |app: &mut LauncherApp, viewport, events, discard_root| {
+            let prior = super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE
+                .with(|focus| focus.replace(Some((viewport, viewport != egui::ViewportId::ROOT))));
+            if viewport == egui::ViewportId::ROOT {
+                run_tool_dialog_frame(&ctx, app, events, discard_root)
+                    .drop_without_applying_deltas();
+            } else {
+                super::with_immediate_viewport_test_events_for(viewport, events, || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), discard_root)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE.with(|focus| focus.set(prior));
+        };
+        let active = |control: Option<(egui::Rect, egui::Rect, bool)>| {
+            let (rect, clip, enabled) = control.expect("a Calendar control was rendered");
+            assert!(
+                enabled && clip.contains(rect.center()),
+                "rect={rect:?} clip={clip:?} enabled={enabled}"
+            );
+            rect
+        };
+        let click = |app: &mut LauncherApp, viewport, rect| {
+            for pressed in [true, false] {
+                frame(
+                    app,
+                    viewport,
+                    tool_dialog_pointer_events(rect, pressed),
+                    false,
+                );
+            }
+        };
+        for _ in 0..4 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_out = active(app.calendar_popover_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_out);
+        for _ in 0..3 {
+            frame(&mut app, calendar, Vec::new(), false);
+        }
+        frame(
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        frame(&mut app, calendar, Vec::new(), false);
+        let agenda = active(app.calendar_popover_host.test_controls()[1]);
+        click(&mut app, calendar, agenda);
+        assert!(app.calendar_details_open);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventDetails)
+                .is_none()
+        );
+        let captured = app.calendar_event_details.test_instance().unwrap().clone();
+        assert_eq!(captured.start, occurrence);
+        frame(
+            &mut app,
+            calendar,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+        );
+        assert_eq!(app.calendar_selected_date, occurrence.date().succ_opt());
+        assert!(app.calendar_selected_event.is_none());
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .instance_id,
+            captured.instance_id
+        );
+
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        frame(
+            &mut app,
+            details,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.calendar_editor_open);
+        assert!(app.calendar_selected_event.is_none());
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .instance_id,
+            captured.instance_id
+        );
+        let dock_details = active(app.calendar_details_host.test_controls()[0]);
+        click(&mut app, details, dock_details);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventDetails)
+                .is_some()
+        );
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarPopover)
+                .is_none()
+        );
+        for _ in 0..3 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_details = active(app.calendar_details_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_details);
+        frame(
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        app.calendar_event_details.edit_scope =
+            super::super::calendar_event_details::RecurrenceScope::This;
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        let edit = active(app.calendar_details_host.test_controls()[1]);
+        click(&mut app, details, edit);
+        assert!(!app.calendar_details_open);
+        assert!(app.calendar_editor_open);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventEditor)
+                .is_none()
+        );
+        assert_eq!(
+            app.calendar_event_editor.test_start_date(),
+            occurrence.date().to_string()
+        );
+        for _ in 0..4 {
+            frame(&mut app, editor, Vec::new(), false);
+        }
+        let title = active(app.calendar_editor_host.test_controls()[2]);
+        click(&mut app, editor, title);
+        frame(
+            &mut app,
+            editor,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("Updated occurrence".into()),
+            ],
+            false,
+        );
+        assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+        let dock_editor = active(app.calendar_editor_host.test_controls()[0]);
+        click(&mut app, editor, dock_editor);
+        for _ in 0..4 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_editor = active(app.calendar_editor_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_editor);
+        assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+
+        let before = std::fs::read(&path).unwrap();
+        for discard_child in [false, true] {
+            for _ in 0..4 {
+                frame(&mut app, editor, Vec::new(), false);
+            }
+            let save = active(app.calendar_editor_host.test_controls()[1]);
+            frame(
+                &mut app,
+                editor,
+                tool_dialog_pointer_events(save, true),
+                false,
+            );
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(editor)));
+            }
+            frame(
+                &mut app,
+                editor,
+                tool_dialog_pointer_events(save, false),
+                !discard_child,
+            );
+            assert!(app.calendar_editor_open);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+        }
+        frame(&mut app, editor, Vec::new(), false);
+        let save = active(app.calendar_editor_host.test_controls()[1]);
+        click(&mut app, editor, save);
+        assert!(!app.calendar_editor_open);
+        let persisted = load_events(path.to_str().unwrap()).unwrap();
+        let edited = persisted
+            .iter()
+            .find(|event| event.title == "Updated occurrence")
+            .unwrap();
+        assert_eq!(edited.start, occurrence);
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|event| event.title == "Updated occurrence")
+                .count(),
+            1
+        );
+
+        app.open_calendar_popover(Some(occurrence.date()));
+        for _ in 0..4 {
+            frame(&mut app, calendar, Vec::new(), false);
+        }
+        let agenda = active(app.calendar_popover_host.test_controls()[1]);
+        click(&mut app, calendar, agenda);
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .source_event_id,
+            edited.id
+        );
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        let before_delete = std::fs::read(&path).unwrap();
+        let delete = active(app.calendar_details_host.test_controls()[2]);
+        frame(
+            &mut app,
+            details,
+            tool_dialog_pointer_events(delete, true),
+            false,
+        );
+        frame(
+            &mut app,
+            details,
+            tool_dialog_pointer_events(delete, false),
+            true,
+        );
+        assert!(app.calendar_details_open);
+        assert_eq!(std::fs::read(&path).unwrap(), before_delete);
+        frame(&mut app, details, Vec::new(), false);
+        let delete = active(app.calendar_details_host.test_controls()[2]);
+        click(&mut app, details, delete);
+        assert!(!app.calendar_details_open);
+        assert!(
+            load_events(path.to_str().unwrap())
+                .unwrap()
+                .iter()
+                .all(|event| event.id != edited.id)
+        );
+        frame(&mut app, calendar, Vec::new(), false);
+        let dock = active(app.calendar_popover_host.test_controls()[0]);
+        click(&mut app, calendar, dock);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarPopover)
+                .is_some()
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+    }
+
+    fn run_host_viewport_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        events: Vec<egui::Event>,
+        discard_root: bool,
+        discard_child: bool,
+    ) {
+        struct FocusGuard(Option<(egui::ViewportId, bool)>);
+        impl Drop for FocusGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE.with(|focus| focus.set(self.0));
+            }
+        }
+        let root = viewport == egui::ViewportId::ROOT;
+        let _focus = FocusGuard(
+            super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE
+                .with(|focus| focus.replace(Some((viewport, !root)))),
+        );
+        if discard_child {
+            super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        }
+        let mut input = actual_query_input(root);
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 900.0),
+        ));
+        if root {
+            input.events = events;
+            app.run_root_frame_for_test(ctx, input, discard_root)
+                .0
+                .drop_without_applying_deltas();
+        } else {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(ctx, input, discard_root)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+    }
+
+    fn inspector_visible_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut last = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            let (rect, clip, enabled) = if name == "host-presentation" {
+                app.programmer_inspector_host
+                    .test_button
+                    .expect("Inspector host control rendered")
+            } else {
+                app.programmer_inspector_dialog
+                    .test_control(name)
+                    .expect("Inspector control rendered")
+            };
+            last = Some((rect, clip, enabled, super::super::jump_mode::ui::visible_top_middle_layer(ctx), super::super::jump_mode::ui::focused_response_layer(ctx)));
+            if enabled && clip.contains_rect(rect) {
+                return rect;
+            }
+            if !enabled && clip.contains_rect(rect) {
+                continue;
+            }
+            let direction = if rect.center().y > clip.center().y {
+                -140.0
+            } else {
+                140.0
+            };
+            let wheel_position = egui::pos2(
+                clip.center().x,
+                if direction < 0.0 {
+                    clip.bottom() - 4.0
+                } else {
+                    clip.top() + 4.0
+                },
+            );
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                vec![
+                    egui::Event::PointerMoved(wheel_position),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, direction),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                false,
+            );
+        }
+        panic!("Inspector control {name} did not become visible: {last:?}");
+    }
+
+    #[test]
+    fn explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts() {
+        use crate::explorer_tabs::{FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        struct Release(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let (lock, cv) = &*self.0;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut store = FolderListStore::open(&root).unwrap();
+        let id = store
+            .create(
+                "Fixture",
+                vec![
+                    FolderPath::parse(r"C:\One").unwrap(),
+                    FolderPath::parse(r"C:\Two").unwrap(),
+                ],
+            )
+            .unwrap();
+        let other = store
+            .create("Other", vec![FolderPath::parse(r"C:\Other").unwrap()])
+            .unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let _release = Release(gate.clone());
+        app.explorer_tabs_dialog.test_use_held_backend(gate);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let pad = app
+            .calculation_pad_dialog
+            .test_editor_rect()
+            .expect("Pad editor rendered");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                tool_dialog_pointer_events(pad, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            super::super::jump_mode::ui::focused_response_layer(&ctx),
+            app.calculation_pad_dialog.host_layer_if_root()
+        );
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        let root_view = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(
+            enabled && clip.contains_rect(name),
+            "name={name:?} clip={clip:?} enabled={enabled} top={:?} focus={:?} host={:?}",
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx),
+            super::super::jump_mode::ui::focused_response_layer(&ctx),
+            app.explorer_tabs_host.root_layer()
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("Created".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("relative".into())],
+            false,
+            false,
+        );
+        let (invalid_save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(invalid_save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(invalid_save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_dialog.test_notice().is_some());
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec!["relative".to_owned()]
+        );
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .all(|list| list.name() != "Created")
+        );
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text(r"C:\Created".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-1").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text(r"C:\Created".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            tool_dialog_pointer_events(save, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            tool_dialog_pointer_events(save, false),
+            true,
+            false,
+        );
+        assert!(
+            !FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.name() == "Created")
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.name() == "Created"
+                    && list.folders().len() == 2
+                    && list
+                        .folders()
+                        .iter()
+                        .all(|folder| folder.as_str() == r"C:\Created"))
+        );
+        assert!(
+            app.command_cache
+                .iter()
+                .any(|action| action.label.contains("Created")
+                    && action.action.starts_with("explorertabs:run:"))
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (list_down, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-down-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(list_down));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(list_down, pressed),
+                false,
+                false,
+            );
+        }
+        let reordered = FolderListStore::open(&root).unwrap();
+        assert_eq!(reordered.lists()[0].id(), other);
+        assert_eq!(reordered.lists()[1].id(), id);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let first_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-0")
+            .unwrap();
+        let second_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-1")
+            .unwrap();
+        let (down, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control("folder-down-0")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(down));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(down, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(second_id)
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-1"),
+            Some(first_id)
+        );
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        let before_edit = app.explorer_tabs_dialog.test_folders();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("x".into())],
+            false,
+            false,
+        );
+        assert_ne!(app.explorer_tabs_dialog.test_folders(), before_edit);
+        let (other_row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", other.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(other_row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(other_row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert!(app.explorer_tabs_dialog.has_pending_decision());
+        let dirty_before_escape = app.explorer_tabs_dialog.test_folders();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.has_pending_decision());
+        assert!(app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.test_folders(), dirty_before_escape);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (other_row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", other.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(other_row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(other_row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (discard, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control("decision-discard")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(discard));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(discard, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        assert_ne!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(first_id)
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec![r"C:\Other".to_string()]
+        );
+        let (row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let docked_folder_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-0")
+            .unwrap();
+        let (host, clip, enabled) = app.explorer_tabs_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(host));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_host.is_popped_out());
+        app.request_launcher_visibility(false);
+        let native = super::super::explorer_tabs_dialog::ExplorerTabsWindowHost::test_viewport(
+            app.explorer_tabs_dialog.epoch(),
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(docked_folder_id)
+        );
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            let (run, clip, enabled) = app.explorer_tabs_dialog.test_control("run").unwrap();
+            assert!(enabled && clip.contains_rect(run));
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let (run, clip, enabled) = app.explorer_tabs_dialog.test_control("run").unwrap();
+        assert!(enabled && clip.contains_rect(run));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, pressed),
+                false,
+                false,
+            );
+        }
+        let job = app
+            .explorer_tabs_dialog
+            .current_job_id()
+            .expect("accepted run starts one worker");
+        assert!(job > 0);
+        app.explorer_tabs_dialog
+            .cancel_current(Some(job.wrapping_add(1)));
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (cancel, clip, enabled) = app.explorer_tabs_dialog.test_control("cancel-run").unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(cancel, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(cancel, false),
+            false,
+            true,
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        let snapshot = app
+            .explorer_tabs_dialog
+            .test_run_snapshot()
+            .expect("owned run snapshot");
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (dock, clip, enabled) = app.explorer_tabs_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.explorer_tabs_host.is_popped_out());
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(enabled && clip.contains_rect(name));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("Renamed".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.id() == id && list.name() == "Renamed")
+        );
+        assert!(app.command_cache.iter().any(|action| action.action
+            == format!("explorertabs:run:{}", id.get())
+            && action.label.contains("Renamed")));
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (delete, clip, enabled) = app.explorer_tabs_dialog.test_control("delete").unwrap();
+        assert!(enabled && clip.contains_rect(delete));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(delete, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .all(|list| list.id() != id)
+        );
+        assert!(
+            app.command_cache
+                .iter()
+                .all(|action| action.action != format!("explorertabs:run:{}", id.get()))
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::W, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert!(app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(app.explorer_tabs_dialog.test_run_snapshot(), Some(snapshot));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        let (cancel, clip, enabled) = app.explorer_tabs_dialog.test_control("cancel-run").unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(cancel, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_dialog.job.test_cancelled());
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        let action = Action {
+            label: "Run saved list".into(),
+            desc: String::new(),
+            action: format!("explorertabs:run:{}", id.get()),
+            args: None,
+        };
+        let mut dispatched = false;
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, ui| {
+            if !dispatched {
+                app.activate_action(
+                    action.clone(),
+                    None,
+                    crate::commands::ActivationSource::Hotkey,
+                );
+                dispatched = true;
+            }
+            app.render_root_ui(ui);
+        })
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(
+            app.explorer_tabs_dialog.test_notice(),
+            Some("An Explorer Tabs run is already active or stopping")
+        );
+    }
+
+    #[test]
+    fn explorer_tabs_plugin_and_hotkey_dispatch_use_one_retained_saved_run() {
+        use crate::explorer_tabs::{FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        struct Release(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let (lock, cv) = &*self.0;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut store = FolderListStore::open(&root).unwrap();
+        let id = store
+            .create(
+                "Hotkey fixture",
+                vec![FolderPath::parse(r"C:\Current").unwrap()],
+            )
+            .unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let _release = Release(gate.clone());
+        app.explorer_tabs_dialog.test_use_held_backend(gate);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let action = app
+            .plugins
+            .search_snapshot(None, None)
+            .search("explorertabs")
+            .actions
+            .into_iter()
+            .find(|action| action.action == format!("explorertabs:run:{}", id.get()))
+            .expect("configured plugin exposes saved ID");
+        app.update_command_cache();
+        assert!(
+            app.command_cache
+                .iter()
+                .any(|candidate| candidate.action == action.action)
+        );
+        let _catalog = app.universal_action_catalog_snapshot();
+        assert!(
+            app.resolve_exact_command_action(&action.action, None, "")
+                .is_ok()
+        );
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+        let invoke = |app: &mut LauncherApp, discard| {
+            let mut dispatched = false;
+            app.run_root_frame_for_test_with(&ctx, actual_query_input(true), discard, |app, ui| {
+                if !dispatched {
+                    app.activate_action(
+                        action.clone(),
+                        None,
+                        crate::commands::ActivationSource::Hotkey,
+                    );
+                    dispatched = true;
+                }
+                app.render_root_ui(ui);
+            })
+            .0
+            .drop_without_applying_deltas();
+        };
+        invoke(&mut app, true);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+        invoke(&mut app, false);
+        let job = app
+            .explorer_tabs_dialog
+            .current_job_id()
+            .expect("accepted typed hotkey action starts saved run");
+        app.focus_panel(super::super::Panel::HashGeneratorDialog);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::super::Panel::HashGeneratorDialog)
+        );
+        invoke(&mut app, false);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::super::Panel::ExplorerTabsDialog)
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::W, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.open);
+        assert!(app.hash_generator_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+    }
+
+    #[test]
+    fn explorer_tabs_failed_save_keeps_draft_disk_and_action_cache() {
+        use crate::explorer_tabs::{FOLDER_LIST_FILE_NAME, FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        app.update_command_cache();
+        let before_cache = app.command_cache.clone();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut external = FolderListStore::open(&root).unwrap();
+        external
+            .create("External", vec![FolderPath::parse(r"C:\External").unwrap()])
+            .unwrap();
+        let disk_before = std::fs::read(root.path().join(FOLDER_LIST_FILE_NAME)).unwrap();
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        let viewport = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(enabled && clip.contains_rect(name));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            vec![egui::Event::Text("Unsaved".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            vec![egui::Event::Text(r"C:\Unsaved".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.explorer_tabs_dialog.test_name(), "Unsaved");
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec![r"C:\Unsaved".to_string()]
+        );
+        assert!(app.explorer_tabs_dialog.test_notice().is_some());
+        assert_eq!(
+            std::fs::read(root.path().join(FOLDER_LIST_FILE_NAME)).unwrap(),
+            disk_before
+        );
+        assert_eq!(app.command_cache, before_cache);
+    }
+
+    #[test]
+    fn programmer_inspector_real_pad_selection_and_retained_bit_insert() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "u64(9007199254740993)\n# α";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app
+            .calculation_pad_dialog
+            .test_editor_rect()
+            .expect("real Pad editor");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        let (inspect, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspect_button(0)
+            .expect("integer result has an Inspect bits control");
+        assert!(enabled && clip.contains_rect(inspect));
+        let context_before = app.calculation_pad_dialog.inspector_context();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(inspect, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(inspect, false),
+            true,
+            false,
+        );
+        assert!(!app.programmer_inspector_dialog.open);
+        assert_eq!(
+            app.calculation_pad_dialog.inspector_context(),
+            context_before
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-63")
+            .expect("numbered bit control");
+        assert!(enabled && clip.contains_rect(bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            (1_u128 << 63) | 9_007_199_254_740_993
+        );
+        let (host, clip, enabled) = app
+            .programmer_inspector_host
+            .test_button
+            .expect("real Pop Out");
+        assert!(enabled && clip.contains_rect(host));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(host, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(host, false),
+            true,
+            false,
+        );
+        assert!(!app.programmer_inspector_host.is_popped_out());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (host, clip, enabled) = app
+            .programmer_inspector_host
+            .test_button
+            .expect("Pop Out retry");
+        assert!(enabled && clip.contains_rect(host));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_host.is_popped_out());
+        app.request_launcher_visibility(false);
+        let native =
+            super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                app.programmer_inspector_dialog.epoch(),
+            );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (next_bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-62")
+            .expect("native bit control");
+        assert!(enabled && clip.contains_rect(next_bit));
+        let before = app.programmer_inspector_dialog.test_value();
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(app.programmer_inspector_dialog.test_value(), before);
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let (next_bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-62")
+            .expect("native retry control");
+        assert!(enabled && clip.contains_rect(next_bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_clicked_bit(),
+            Some(62),
+            "native retry response must register the real click"
+        );
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            (1_u128 << 63) | (1_u128 << 62) | 9_007_199_254_740_993
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        let (copy, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("copy-Decimal")
+            .expect("native decimal Copy");
+        assert!(enabled && clip.contains_rect(copy));
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, false),
+                discard_root,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let copy = inspector_visible_control(&ctx, &mut app, native, "copy-Decimal");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "13844065254536904705")
+        );
+        let dock = inspector_visible_control(&ctx, &mut app, native, "host-presentation");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (insert, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .expect("Insert control");
+        assert!(
+            enabled && clip.contains_rect(insert),
+            "Insert enabled={enabled}, rect={insert:?}, clip={clip:?}, context={:?}",
+            app.calculation_pad_dialog.inspector_context()
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(insert, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(insert, false),
+            true,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (insert, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(insert));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(insert, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("u64(13844065254536904705)")
+        );
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn programmer_inspector_stale_work_refresh_and_reopen_reject_old_caret() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let root = egui::ViewportId::ROOT;
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("u8(1)");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        for name in ["signed", "checked-cast"] {
+            let (control, clip, enabled) =
+                app.programmer_inspector_dialog.test_control(name).unwrap();
+            assert!(enabled && clip.contains_rect(control));
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(control, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_value()
+                .mode()
+                .type_name(),
+            "i8"
+        );
+        let (bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-7")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            129
+        );
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        let before_discard = app.calculation_pad_dialog.inspector_context();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("u8(3)".into()),
+            ],
+            true,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(1)"));
+        assert_eq!(
+            app.calculation_pad_dialog.inspector_context(),
+            before_discard
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::Text("u8(4)".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(4)"));
+        app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            129
+        );
+        let (_, _, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .unwrap();
+        assert!(!enabled, "stale adopted source cannot be inserted");
+        let copy = inspector_visible_control(&ctx, &mut app, root, "copy-Decimal");
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "-127")
+        );
+        let refresh = inspector_visible_control(&ctx, &mut app, root, "refresh");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(refresh, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            4
+        );
+        let value_label = inspector_visible_control(&ctx, &mut app, root, "value-Decimal");
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let start = egui::pos2(value_label.left() + 1.0, value_label.center().y);
+        let end = egui::pos2(value_label.right() - 1.0, value_label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discarded in [true, false] {
+            let output = run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                vec![egui::Event::Copy],
+                discarded,
+                egui::vec2(1100.0, 900.0),
+            );
+            assert!(
+                !output
+                    .platform_output
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::OutputCommand::CopyText(_)))
+            );
+            output.drop_without_applying_deltas();
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        for (name, text) in [
+            ("label-start", "0"),
+            ("label-end", "1"),
+            ("label-text", "flag"),
+        ] {
+            let control = inspector_visible_control(&ctx, &mut app, root, name);
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(control, pressed),
+                    false,
+                    false,
+                );
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                vec![egui::Event::Text(text.into())],
+                false,
+                false,
+            );
+        }
+        let add_label = inspector_visible_control(&ctx, &mut app, root, "add-label");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(add_label, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_annotation_count(), 1);
+        let prefix = inspector_visible_control(&ctx, &mut app, root, "prefix");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(prefix, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(4)"));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.programmer_inspector_dialog.open);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (reopen, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspector_reopen()
+            .expect("Pad reopen entry");
+        assert!(enabled && clip.contains_rect(reopen));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(reopen, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_annotation_count(), 1);
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        app.calculation_pad_dialog
+            .test_apply_save_as("inspector collision");
+        let document = app
+            .calculation_pad_dialog
+            .test_current_document_id()
+            .unwrap();
+        app.calculation_pad_dialog.test_open_document(document);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        let before = app.calculation_pad_dialog.inspector_context();
+        assert!(before.caret.is_some());
+        app.calculation_pad_dialog.test_open_document(document);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let after = app.calculation_pad_dialog.inspector_context();
+        assert!(
+            after.caret.is_none(),
+            "same saved document reopened at revision zero must retire the old caret"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::F12, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .caret
+                .is_none(),
+            "an unrelated key must not rebind the old widget cursor"
+        );
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .caret
+                .is_some(),
+            "a genuine editor click captures the new incarnation"
+        );
+    }
+    #[test]
+    fn programmer_inspector_comparison_and_preferences_use_retained_host_receipts() {
+        use crate::calculation_pad::ComparisonRelation;
+        use crate::hotkey::reconfiguration::{
+            AppliedHotkeyReconfiguration, HotkeyRuntimeGeneration, HotkeyRuntimeMessage,
+            PreparedHotkeyReconfiguration,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.settings_editor
+            .baseline_settings
+            .save(&app.settings_path)
+            .unwrap();
+        let (wake, _wake_rx) = std::sync::mpsc::channel();
+        let owner = crate::hotkey::reconfiguration::install_main_runtime(wake)
+            .expect("isolated main runtime");
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let root = egui::ViewportId::ROOT;
+        let source = "x = u64(8)\nx + 1";
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspect_button(1)
+            .expect("selected integer result");
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let bit = inspector_visible_control(&ctx, &mut app, root, "bit-63");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        let working = app.programmer_inspector_dialog.test_value();
+        let select = inspector_visible_control(&ctx, &mut app, root, "select-Left");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(select, pressed),
+                false,
+                false,
+            );
+        }
+        let right = inspector_visible_control(&ctx, &mut app, root, "comparison-Right");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(right, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::Text("r1 + 4".into())],
+            false,
+            false,
+        );
+        let compare = inspector_visible_control(&ctx, &mut app, root, "compare");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(compare, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(compare, false),
+            true,
+            false,
+        );
+        assert!(app.programmer_inspector_dialog.test_comparison().is_none());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let compare = inspector_visible_control(&ctx, &mut app, root, "compare");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(compare, pressed),
+                false,
+                false,
+            );
+        }
+        let result = app
+            .programmer_inspector_dialog
+            .test_comparison()
+            .expect("accepted comparison");
+        assert_eq!(result.left.formatted(), "9");
+        assert_eq!(result.right.formatted(), "12");
+        assert!(matches!(
+            result.relation,
+            ComparisonRelation::ExactInteger {
+                difference: 3,
+                negative_difference: true,
+                ..
+            }
+        ));
+        let result_identity = result as *const _;
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_comparison().unwrap() as *const _,
+            result_identity,
+            "idle frames reuse the frozen comparison"
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), working);
+        let host = inspector_visible_control(&ctx, &mut app, root, "host-presentation");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        app.request_launcher_visibility(false);
+        let native =
+            super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                app.programmer_inspector_dialog.epoch(),
+            );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let right = inspector_visible_control(&ctx, &mut app, native, "comparison-Right");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(right, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("r1 + 5".into()),
+            ],
+            false,
+            false,
+        );
+        let compare = inspector_visible_control(&ctx, &mut app, native, "compare");
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(
+                app.programmer_inspector_dialog
+                    .test_comparison()
+                    .unwrap()
+                    .right
+                    .formatted(),
+                "12"
+            );
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let compare = inspector_visible_control(&ctx, &mut app, native, "compare");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_comparison()
+                .unwrap()
+                .right
+                .formatted(),
+            "13"
+        );
+        let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, false),
+                discard_root,
+                discard_child,
+            );
+            assert!(!app.programmer_inspector_dialog.test_format_options().prefix);
+            assert_eq!(
+                app.programmer_inspector_dialog.test_preference_requests(),
+                0
+            );
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(
+            app.programmer_inspector_dialog.test_preference_requests(),
+            1
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.settings_save_pending() {
+            if let Some(message) = owner.try_recv().unwrap() {
+                match message {
+                    HotkeyRuntimeMessage::Prepare(request) => {
+                        let prepared = PreparedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: HotkeyRuntimeGeneration(1),
+                            shared_invocation: false,
+                        };
+                        request.complete(Ok(prepared)).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Apply(request) => {
+                        let applied = AppliedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: request.generation(),
+                        };
+                        request.complete_applied(applied).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Cancel(_) => {
+                        panic!("accepted preference save unexpectedly cancelled")
+                    }
+                }
+            }
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preference save completed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            app.settings_editor
+                .baseline_settings
+                .programmer_inspector
+                .prefix,
+            "preference ack missing: status={:?}; queue={:?}; pending={}",
+            app.programmer_inspector_dialog.test_preference_error(),
+            app.pending_programmer_inspector_preference,
+            app.settings_save_pending()
+        );
+        assert!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .programmer_inspector
+                .prefix,
+            "accepted acknowledgement persisted the preference"
+        );
+        let copy = inspector_visible_control(&ctx, &mut app, native, "comparison-copy-Left");
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "9")
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), working);
+    }
+    fn reveal_studio_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..128 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            let (id, rect, clip) = app
+                .date_time_studio_dialog
+                .test_focusable_control(name)
+                .unwrap_or_else(|| panic!("Studio control {name} was rendered"));
+            let focused = app.date_time_studio_dialog.test_owner_focus() == Some(id);
+            if clip.contains_rect(rect) && (name == "host-presentation" || focused) {
+                if previous == Some((rect, clip)) {
+                    if name == "host-presentation" {
+                        assert!(app.date_time_studio_dialog.test_host_button().unwrap().2);
+                    }
+                    return rect;
+                }
+                previous = Some((rect, clip));
+            } else {
+                previous = None;
+            }
+            if !focused && name != "host-presentation" {
+                for event in [
+                    key_press(egui::Key::Tab, egui::Modifiers::NONE),
+                    key_release(egui::Key::Tab, egui::Modifiers::NONE),
+                ] {
+                    run_host_viewport_frame(ctx, app, viewport, vec![event], false, false);
+                }
+            }
+        }
+        panic!("Studio control {name} must become focused and fully visible");
+    }
+
+    fn click_studio_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = reveal_studio_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn date_time_studio_host_moves_preserve_draft_reference_selection_and_popup_ownership() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_date_time_studio_dialog(&mut app);
+        let reference = chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+        app.date_time_studio_dialog
+            .test_set_anchor_and_reference("now".into(), reference);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DateTimeStudioDialog::viewport();
+
+        click_studio_host_control(&ctx, &mut app, root, "mode_AddSubtract");
+        click_studio_host_control(&ctx, &mut app, root, "offset_anchor");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("2026-11-07 10:15".into()),
+            ],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("2026-11-07 10:15", Some(reference))
+        );
+        app.date_time_studio_dialog
+            .test_set_schedule_preview("2026-11-02", "09:00", "UTC");
+        click_studio_host_control(&ctx, &mut app, root, "schedule_count");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("3".into()),
+            ],
+            false,
+            false,
+        );
+        click_studio_host_control(&ctx, &mut app, root, "schedule_row_1");
+        assert_eq!(
+            app.date_time_studio_dialog.test_selected_schedule_index(),
+            Some(1)
+        );
+        click_studio_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.date_time_studio_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (primary, _, _) = app
+            .date_time_studio_dialog
+            .test_focusable_control("schedule_first_date_input")
+            .unwrap();
+        assert_eq!(
+            app.date_time_studio_dialog.test_owner_focus(),
+            Some(primary)
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_selected_schedule_index(),
+            Some(1)
+        );
+        let query = app.query.clone();
+        click_studio_host_control(&ctx, &mut app, native, "schedule_cadence");
+        assert!(app.date_time_studio_dialog.test_owner_popup_open());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.date_time_studio_dialog.test_owner_popup_open());
+        assert!(app.date_time_studio_dialog.open);
+        assert_eq!(app.query, query);
+        click_studio_host_control(&ctx, &mut app, native, "host-presentation");
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.date_time_studio_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_selected_schedule_index(),
+            Some(1)
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("2026-11-07 10:15", Some(reference))
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.date_time_studio_dialog.open);
+        DialogCommandHost::open_date_time_studio_dialog(&mut app);
+        assert!(!app.close_front_dialog_from_root_input());
+        assert!(app.date_time_studio_dialog.open);
+        assert_eq!(
+            app.date_time_studio_dialog.test_selected_schedule_index(),
+            Some(1)
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("2026-11-07 10:15", Some(reference))
+        );
+    }
+
+    #[test]
+    fn detached_date_time_copy_and_prepare_require_retained_passes_and_open_detached_editor() {
+        use super::super::Panel;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_date_time_studio_dialog(&mut app);
+        app.date_time_studio_dialog
+            .test_set_schedule_preview("2026-11-02", "09:00", "UTC");
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DateTimeStudioDialog::viewport();
+        click_studio_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for control in ["schedule_copy", "schedule_prepare_calendar"] {
+            for discard_child in [false, true] {
+                let rect = reveal_studio_host_control(&ctx, &mut app, native, control);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, true),
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, false),
+                    !discard_child,
+                    discard_child,
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+                assert!(!app.calendar_editor_open);
+                assert!(app.date_time_studio_dialog.open);
+            }
+            click_studio_host_control(&ctx, &mut app, native, control);
+            let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+            if control == "schedule_copy" {
+                assert!(matches!(effects.as_slice(), [RootDialogEffect::CopyText {
+                    owner: DialogCopyOwner::DateTimeStudio, text,
+                }] if text.contains("2026-11-02") && text.contains("09:00")));
+            } else {
+                let expected = chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap()
+                    .and_utc();
+                assert!(
+                    matches!(effects.as_slice(), [RootDialogEffect::PrepareCalendar {
+                    instant_utc, presentation: super::super::utility_host::UtilityPresentation::Popout,
+                }] if *instant_utc == expected)
+                );
+                let local = super::super::date_time_studio_dialog::machine_local_datetime(expected)
+                    .unwrap();
+                assert_eq!(
+                    app.calendar_event_editor.test_start_date(),
+                    local.date().to_string()
+                );
+                assert!(app.calendar_editor_open);
+                assert!(
+                    app.calendar_panel_root_layer(Panel::CalendarEventEditor)
+                        .is_none()
+                );
+                assert!(!app.visible_flag.load(Ordering::Relaxed));
+            }
+        }
+        let original = app.calendar_event_editor.test_start_date().to_owned();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert!(
+            app.date_time_studio_dialog
+                .test_focusable_control("schedule_prepare_calendar")
+                .is_none()
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        assert_eq!(app.calendar_event_editor.test_start_date(), original);
+    }
+
+    #[cfg(windows)]
+    fn zip_host_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        label: &str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..12 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            let jump = if viewport == egui::ViewportId::ROOT {
+                &app.jump_mode_ui
+            } else {
+                app.zip_extractor_dialog.test_native_jump()
+            };
+            if let Some(target) = jump
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|t| t.metadata().label() == label && t.enabled() && t.eligible())
+            {
+                let rect = target.clipped_rect();
+                if rect.is_positive() && previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("ZIP control {label:?} must have an enabled visible target");
+    }
+    #[cfg(windows)]
+    fn click_zip_host_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        label: &str,
+    ) {
+        let rect = zip_host_target(ctx, app, viewport, label);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        use std::io::Write as _;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let archive = workspace.root().join("host-fixture.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file(
+            "only.txt",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(b"retained ZIP fixture").unwrap();
+        zip.finish().unwrap();
+        let destination = workspace.root().join("zip-host-output");
+        std::fs::create_dir(&destination).unwrap();
+        DialogCommandHost::open_zip_extractor_dialog(&mut app).unwrap();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ZipExtractorDialog::viewport();
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(archive));
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(destination.clone()));
+        for discard_child in [false, true] {
+            let rect = zip_host_target(&ctx, &mut app, root, "Choose ZIP archive");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, false),
+                true,
+                discard_child,
+            );
+            assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 2);
+        }
+        click_zip_host_target(&ctx, &mut app, root, "Choose ZIP archive");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().catalog.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "archive inspection must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_zip_host_target(&ctx, &mut app, root, "Choose destination folder");
+        click_zip_host_target(&ctx, &mut app, root, "Select archive entry only.txt");
+        click_zip_host_target(&ctx, &mut app, root, "Preview selected entries");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().preview.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let initial_token = app.archive_session.snapshot().preview.unwrap().token;
+        assert!(std::fs::read_dir(&destination).unwrap().next().is_none());
+        click_zip_host_target(&ctx, &mut app, root, "Pop Out");
+        assert_eq!(
+            app.zip_extractor_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.archive_session.snapshot().preview.unwrap().token,
+            initial_token
+        );
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(destination.clone()));
+        for discard_child in [false, true] {
+            let rect = zip_host_target(&ctx, &mut app, native, "Choose destination folder");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 1);
+            assert_eq!(
+                app.archive_session.snapshot().preview.unwrap().token,
+                initial_token
+            );
+        }
+        click_zip_host_target(&ctx, &mut app, native, "Choose destination folder");
+        assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 0);
+        assert_eq!(
+            app.archive_session.snapshot().preview.unwrap().token,
+            initial_token
+        );
+        click_zip_host_target(&ctx, &mut app, native, "Filter archive entries");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Text("only".into())],
+            false,
+            false,
+        );
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }] if text == "only")
+        );
+        let selection = zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        for discard_child in [false, true] {
+            let before = app.archive_session.snapshot().selection_revision;
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(selection, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(selection, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.archive_session.snapshot().selection_revision, before);
+        }
+        click_zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        assert!(app.archive_session.snapshot().preview.is_none());
+        click_zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        click_zip_host_target(&ctx, &mut app, native, "Preview selected entries");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().preview.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement preview must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let token = app.archive_session.snapshot().preview.unwrap().token;
+        assert_ne!(token, initial_token);
+        click_zip_host_target(&ctx, &mut app, native, "Confirm preview and destination");
+        for discard_child in [false, true] {
+            let rect = zip_host_target(
+                &ctx,
+                &mut app,
+                native,
+                "Confirm and extract selected entries",
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(std::fs::read_dir(&destination).unwrap().next().is_none());
+            assert_eq!(app.archive_session.snapshot().preview.unwrap().token, token);
+        }
+        click_zip_host_target(
+            &ctx,
+            &mut app,
+            native,
+            "Confirm and extract selected entries",
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !destination.join("only.txt").exists() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted confirmation must publish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            std::fs::read(destination.join("only.txt")).unwrap(),
+            b"retained ZIP fixture"
+        );
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 1);
+        click_zip_host_target(&ctx, &mut app, native, "Dock");
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.zip_extractor_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        click_zip_host_target(&ctx, &mut app, root, "Close ZIP Extractor");
+        assert!(!app.zip_extractor_dialog.open);
+    }
+
+    fn duplicate_finder_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..12 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((_, rect, _, true)) = app.duplicate_finder_dialog.test_response(name)
+                && rect.is_positive()
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Duplicate Finder control {name} must have an enabled visible rectangle");
+    }
+    fn click_duplicate_finder_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) {
+        let rect = duplicate_finder_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[derive(Default)]
+    struct DuplicateActionRecorder(std::sync::Mutex<Vec<String>>);
+    impl super::super::duplicate_finder_dialog::DuplicateFinderActions for DuplicateActionRecorder {
+        fn revalidate(
+            &self,
+            proof: &super::super::duplicate_finder_dialog::CandidateProof,
+        ) -> Result<(), String> {
+            use super::super::duplicate_finder_dialog::DuplicateFinderActions;
+            super::super::duplicate_finder_dialog::SystemDuplicateFinderActions.revalidate(proof)
+        }
+        fn open(&self, _: &std::path::Path) -> Result<(), String> {
+            self.0.lock().unwrap().push("open".into());
+            Ok(())
+        }
+        fn reveal(&self, _: &std::path::Path) -> Result<(), String> {
+            self.0.lock().unwrap().push("reveal".into());
+            Ok(())
+        }
+        fn copy_paths(&self, _: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push("copy".into());
+            Ok(())
+        }
+    }
+    struct DuplicateGateGuard(std::sync::Arc<crate::duplicate_finder::FirstReadCheckpointGate>);
+    impl Drop for DuplicateGateGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    #[test]
+    fn dff_host_gated_scan_survives_moves_cancel_drain_restart_and_close() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = workspace.root().join("duplicate-finder-gated");
+        std::fs::create_dir(&scan_root).unwrap();
+        std::fs::write(scan_root.join("a.txt"), b"same fixture data").unwrap();
+        std::fs::write(scan_root.join("b.txt"), b"same fixture data").unwrap();
+        let gate = std::sync::Arc::new(crate::duplicate_finder::FirstReadCheckpointGate::new());
+        let _release = DuplicateGateGuard(std::sync::Arc::clone(&gate));
+        app.duplicate_finder_dialog =
+            super::super::DuplicateFinderDialogState::new_with_first_read_checkpoint(
+                &ctx,
+                std::sync::Arc::clone(&gate),
+            );
+        app.duplicate_finder_dialog
+            .attach_activity_center(app.activity_center.clone());
+        let receipts = std::sync::Arc::new(DuplicateActionRecorder::default());
+        app.duplicate_finder_dialog
+            .set_action_sink_for_fixture(receipts.clone());
+        app.duplicate_finder_dialog
+            .add_fixture_root(scan_root.clone())
+            .unwrap();
+        DialogCommandHost::open_duplicate_finder_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DuplicateFinderDialogState::viewport();
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "start");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.reached() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real Start must reach the first content read; state={:?}, status={:?}",
+                app.duplicate_finder_dialog.test_host_snapshot(),
+                app.duplicate_finder_dialog.test_status()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let before = app.duplicate_finder_dialog.test_host_snapshot();
+        assert!(before.3);
+        assert_eq!(before.5, vec![scan_root.clone()]);
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.duplicate_finder_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let moved = app.duplicate_finder_dialog.test_host_snapshot();
+        assert_eq!(
+            (moved.0, moved.2, moved.3, &moved.5),
+            (before.0, before.2, before.3, &before.5)
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "cancel");
+        let cancelled = app.duplicate_finder_dialog.test_host_snapshot();
+        assert!(cancelled.3);
+        assert!(
+            !app.duplicate_finder_dialog
+                .test_response("start")
+                .unwrap()
+                .3
+        );
+        gate.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.duplicate_finder_dialog.test_host_snapshot().3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled worker must drain"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "start");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let state = app.duplicate_finder_dialog.test_host_snapshot();
+            if !state.3 && state.2 > cancelled.2 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "restart must finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = app.duplicate_finder_dialog.test_snapshot();
+        assert!(!result.verified_duplicate_groups.is_empty());
+        for discard_child in [false, true] {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let (rect, enabled) = app
+                .duplicate_finder_dialog
+                .test_result_response("open")
+                .expect("real verified Open response");
+            assert!(enabled && rect.is_positive());
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(receipts.0.lock().unwrap().is_empty());
+        }
+        run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        let (rect, enabled) = app
+            .duplicate_finder_dialog
+            .test_result_response("open")
+            .unwrap();
+        assert!(enabled);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(*receipts.0.lock().unwrap(), vec!["open"]);
+        let group = &result.verified_duplicate_groups[0];
+        let member = &group.known_files[0];
+        let changed_path = &result.size_groups[group.size_group_index].known_files
+            [member.known_file_index]
+            .aliases[member.alias_index]
+            .path;
+        std::fs::write(changed_path, b"changed since verified scan").unwrap();
+        run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        let (rect, enabled) = app
+            .duplicate_finder_dialog
+            .test_result_response("open")
+            .unwrap();
+        assert!(
+            enabled && rect.is_positive(),
+            "changed-file Open remains reachable"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            *receipts.0.lock().unwrap(),
+            vec!["open"],
+            "changed verified file must be refused"
+        );
+        assert!(
+            app.duplicate_finder_dialog
+                .test_status()
+                .is_some_and(
+                    |status| status.starts_with("The scanned file is no longer current:")
+                        || status.starts_with("The scanned file changed before the action:")
+                ),
+            "a real proof refusal must replace the prior successful Open status"
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.duplicate_finder_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(std::sync::Arc::ptr_eq(
+            &result,
+            &app.duplicate_finder_dialog.test_snapshot()
+        ));
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "close");
+        assert!(!app.duplicate_finder_dialog.open);
+    }
+
+    #[test]
+    fn dff_detached_folder_and_close_reject_discarded_root_and_child_passes() {
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_duplicate_finder_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DuplicateFinderDialogState::viewport();
+        let selected = workspace.root().join("selected-duplicate-root");
+        std::fs::create_dir(&selected).unwrap();
+        app.duplicate_finder_dialog
+            .queue_folder_pick_for_test(Some(selected.clone()));
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        for discard_child in [false, true] {
+            let rect = duplicate_finder_host_control(&ctx, &mut app, native, "pick-root");
+            let before = app.duplicate_finder_dialog.test_host_snapshot();
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.duplicate_finder_dialog.test_host_snapshot(), before);
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "pick-root");
+        let accepted = app.duplicate_finder_dialog.test_host_snapshot();
+        assert_eq!(accepted.5, vec![selected]);
+        assert_eq!(accepted.7, 0);
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "root-editor");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Text("copy-root-draft".into())],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.duplicate_finder_dialog.test_host_snapshot().6,
+            "copy-root-draft"
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::DuplicateFinder, text }] if text == "copy-root-draft")
+        );
+        for discard_child in [false, true] {
+            let rect = duplicate_finder_host_control(&ctx, &mut app, native, "close");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.duplicate_finder_dialog.open);
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "close");
+        assert!(!app.duplicate_finder_dialog.open);
+    }
+
+    fn recording_setup_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut prior = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip, true)) = app.recording_dialog.test_control(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+            {
+                if prior == Some(rect) {
+                    return rect;
+                }
+                prior = Some(rect);
+            } else {
+                prior = None;
+            }
+        }
+        panic!("Recorder control {name:?} must be visible and enabled")
+    }
+    fn click_recording_setup_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = recording_setup_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    struct RecordingFixtureBackend;
+    struct RecordingFixtureSource;
+    struct RecordingFramesBackend;
+    struct RecordingFramesSource {
+        generation: u64,
+        canvas: crate::recording::CanvasSize,
+        sent: bool,
+    }
+    impl crate::recording::RecordingBackend for RecordingFramesBackend {
+        fn create_source(
+            &self,
+            request: &crate::recording::RecordingRequest,
+            generation: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(RecordingFramesSource {
+                generation,
+                canvas: request.canvas(),
+                sent: false,
+            }))
+        }
+    }
+    impl crate::recording::CaptureSource for RecordingFramesSource {
+        fn poll(
+            &mut self,
+            max_wait: std::time::Duration,
+            stop: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            if !self.sent {
+                self.sent = true;
+                return crate::recording::CapturePoll::Frame {
+                    generation: self.generation,
+                    frame: crate::recording::RgbaFrame::new(
+                        self.canvas,
+                        vec![255; self.canvas.rgba_bytes()],
+                    )
+                    .unwrap(),
+                };
+            }
+            if stop.stop_requested() {
+                return crate::recording::CapturePoll::Ended(
+                    crate::recording::RecordingEndReason::UserStopped,
+                );
+            }
+            std::thread::sleep(max_wait.min(std::time::Duration::from_millis(5)));
+            crate::recording::CapturePoll::Pending
+        }
+    }
+
+    impl crate::recording::RecordingBackend for RecordingFixtureBackend {
+        fn create_source(
+            &self,
+            _: &crate::recording::RecordingRequest,
+            _: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(RecordingFixtureSource))
+        }
+    }
+    impl crate::recording::CaptureSource for RecordingFixtureSource {
+        fn poll(
+            &mut self,
+            _: std::time::Duration,
+            _: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            crate::recording::CapturePoll::Ended(crate::recording::RecordingEndReason::TargetLost)
+        }
+    }
+    #[test]
+    fn recorder_setup_hosts_preserve_real_controls_popup_and_stale_region() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.recording_dialog.test_install_display();
+        app.open_recording_setup();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::recording_dialog::RecordingDialogState::viewport();
+        click_recording_setup_control(&ctx, &mut app, root, "format");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.recording_dialog.open,
+            "ROOT popup Escape must not close setup"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        click_recording_setup_control(&ctx, &mut app, root, "format");
+        click_recording_setup_control(&ctx, &mut app, root, "format-mp4");
+        assert_eq!(
+            app.recording_dialog.test_selection().2,
+            crate::recording::RecordingFormat::Mp4
+        );
+        click_recording_setup_control(&ctx, &mut app, root, "fps");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        let _ = app.recording_dialog.take_test_copies();
+        let mut input = actual_query_input(true);
+        input.events = vec![egui::Event::Copy];
+        let output = app.run_root_frame_for_test(&ctx, input, true).0;
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::OutputCommand::CopyText(_))),
+            "discarded numeric copy must not reach ROOT platform output"
+        );
+        output.drop_without_applying_deltas();
+        assert!(app.recording_dialog.take_test_copies().is_empty());
+        run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Copy], false, false);
+        assert_eq!(
+            app.recording_dialog.take_test_copies(),
+            vec!["30".to_owned()]
+        );
+        let before = app.recording_dialog.test_selection();
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.recording_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.recording_dialog.test_selection(), before);
+        click_recording_setup_control(&ctx, &mut app, native, "cursor");
+        assert_ne!(app.recording_dialog.test_selection().6, before.6);
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = recording_setup_control(&ctx, &mut app, native, "preview-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = app.recording_dialog.take_test_copies();
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.recording_dialog.take_test_copies().is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        let label_copies = app.recording_dialog.take_test_copies();
+        assert!(matches!(label_copies.as_slice(), [text] if !text.is_empty()));
+        app.recording_dialog
+            .selector_terminal(before.1, Ok(crate::mkmacro::ScreenRect::new(1, 1, 10, 10)));
+        assert_eq!(app.recording_dialog.test_selection().7, before.7);
+        click_recording_setup_control(&ctx, &mut app, native, "format");
+        click_recording_setup_control(&ctx, &mut app, native, "format-gif");
+        assert_eq!(
+            app.recording_dialog.test_selection().2,
+            crate::recording::RecordingFormat::Gif
+        );
+        click_recording_setup_control(&ctx, &mut app, native, "format");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.recording_dialog.open,
+            "popup Escape must not close setup"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let selection = app.recording_dialog.test_selection();
+        click_recording_setup_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.recording_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.recording_dialog.test_selection(), selection);
+        assert!(!app.recording_controller.has_active_job());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.recording_dialog.open);
+    }
+    #[test]
+    fn recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission() {
+        use crate::plugin::Plugin;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let (pin, pin_generation, pin_frames) =
+            super::super::pinboard::tests::install_fake_live_pin(&mut app.pinboard_capture);
+        let update_pin = |app: &LauncherApp, sequence: u64| {
+            let (processed, done) = std::sync::mpsc::sync_channel(1);
+            pin_frames
+                .send(crate::pinboard::live::test_support::FakeFrame {
+                    generation: pin_generation,
+                    sequence,
+                    content_size: (4, 4),
+                    image: image::RgbaImage::from_pixel(
+                        4,
+                        4,
+                        image::Rgba([sequence as u8, 2, 3, 255]),
+                    ),
+                    processed,
+                })
+                .unwrap();
+            done.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("live pin frame processed");
+            assert_eq!(
+                app.pinboard_capture
+                    .pinboard()
+                    .get(pin)
+                    .unwrap()
+                    .live_frame()
+                    .unwrap()
+                    .sequence,
+                sequence
+            );
+        };
+        update_pin(&app, 2);
+        let wake_ctx = ctx.clone();
+        app.recording_controller = crate::recording::RecordingController::new(
+            std::sync::Arc::new(RecordingFramesBackend),
+            move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
+        );
+        app.recording_dialog.test_install_display();
+        let action = crate::plugins::recording::RecordingPlugin
+            .search("record")
+            .into_iter()
+            .find(|action| action.action == "record:open")
+            .unwrap();
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .unwrap();
+        app.dispatch_command_invocation(invocation);
+        assert!(app.recording_dialog.open);
+        assert!(!app.recording_controller.has_active_job());
+        let root = egui::ViewportId::ROOT;
+        let destination = workspace.root().join("joined-recording.gif");
+        app.recording_dialog
+            .queue_save_choice_for_test(Some(destination.clone()));
+        let start = recording_setup_control(&ctx, &mut app, root, "start");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(start, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(start, false),
+            true,
+            false,
+        );
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+        assert!(!app.recording_controller.has_active_job());
+        app.crop_screenshot_operation = Some(901);
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+        assert!(!app.recording_controller.has_active_job());
+        assert!(!destination.exists());
+        app.crop_screenshot_operation = None;
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 1);
+        update_pin(&app, 3);
+        let request = app
+            .recording_dialog
+            .test_last_request()
+            .cloned()
+            .expect("accepted frozen request");
+        assert_eq!(
+            request.options().format(),
+            crate::recording::RecordingFormat::Gif
+        );
+        let generation = app
+            .recording_controller
+            .snapshot()
+            .active_generation
+            .expect("active recording");
+        crate::gui::send_event(crate::gui::WatchEvent::RecordingStopGeneration(
+            generation.wrapping_add(1),
+        ));
+        app.process_watch_events();
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.recording_controller.snapshot().session.frames_written() == 0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!destination.exists());
+        assert!(app.recording_capture_conflict().is_some());
+        assert!(app.screenshot_capture_conflict().is_some());
+        app.begin_crop_screenshot();
+        assert!(app.crop_screenshot_operation.is_none());
+        assert!(app.begin_pinboard_live_capture().is_err());
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        assert_eq!(app.recording_dialog.test_last_request(), Some(&request));
+        assert!(!destination.exists());
+        update_pin(&app, 4);
+        let setup_native = super::super::recording_dialog::RecordingDialogState::viewport();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            setup_native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.recording_dialog.open);
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        app.request_launcher_visibility(false);
+        let compact = super::super::recording_dialog::RecordingDialogState::test_compact_viewport();
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+        }
+        let (stop, clip) = app
+            .recording_dialog
+            .test_compact_stop_rect()
+            .expect("actual compact Stop");
+        assert!(stop.is_positive() && clip.contains_rect(stop));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            compact,
+            tool_dialog_pointer_events(stop, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            compact,
+            tool_dialog_pointer_events(stop, false),
+            false,
+            true,
+        );
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+        }
+        let (stop, clip) = app
+            .recording_dialog
+            .test_compact_stop_rect()
+            .expect("compact Stop retry");
+        assert!(stop.is_positive() && clip.contains_rect(stop));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                compact,
+                tool_dialog_pointer_events(stop, pressed),
+                false,
+                false,
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.recording_controller.has_active_job() {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+            if destination.exists() {
+                let snapshot = app.recording_controller.snapshot();
+                assert!(!snapshot.session.worker_busy());
+                assert!(snapshot.session.finalization_claimed() || matches!(snapshot.session.state(), crate::recording::RecorderState::Completed(_)));
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(
+            app.recording_controller.snapshot().result,
+            Some(crate::recording::RecordingControllerOutcome::Saved(_))
+        ));
+        let image = image::open(&destination).expect("saved GIF decodes");
+        assert_eq!((image.width(), image.height()), (64, 48));
+        assert!(image.to_rgba8().pixels().any(|pixel| pixel.0[0] != 0));
+        assert!(app.recording_capture_conflict().is_none());
+        assert!(app.screenshot_capture_conflict().is_none());
+        update_pin(&app, 5);
+    }
+
+    #[test]
+    fn recorder_setup_start_discards_never_open_chooser_and_accepts_once() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.recording_controller = crate::recording::RecordingController::new(
+            std::sync::Arc::new(RecordingFixtureBackend),
+            || {},
+        );
+        app.recording_dialog.test_install_display();
+        app.open_recording_setup();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::recording_dialog::RecordingDialogState::viewport();
+        app.recording_dialog.queue_save_choice_for_test(None);
+        for discard_child in [false, true] {
+            let rect = recording_setup_control(&ctx, &mut app, root, "start");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, false),
+                true,
+                discard_child,
+            );
+            assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+            assert!(!app.recording_controller.has_active_job());
+        }
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 1);
+        assert!(!app.recording_controller.has_active_job());
+        for kind in [1, 2] {
+            app.recording_dialog.queue_save_choice_for_test(Some(
+                workspace.root().join(format!("stale-{kind}.gif")),
+            ));
+            app.recording_dialog.test_invalidate_next_chooser(kind);
+            click_recording_setup_control(&ctx, &mut app, root, "start");
+            assert!(
+                !app.recording_controller.has_active_job(),
+                "changed setup lifetime or host rejects the chooser return"
+            );
+            assert!(!workspace.root().join(format!("stale-{kind}.gif")).exists());
+        }
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 3);
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.recording_dialog
+            .queue_save_choice_for_test(Some(workspace.root().join("accepted-host.gif")));
+        for discard_child in [false, true] {
+            let rect = recording_setup_control(&ctx, &mut app, native, "start");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.recording_dialog.chooser_calls_for_test(), 3);
+            assert!(!app.recording_controller.has_active_job());
+        }
+        click_recording_setup_control(&ctx, &mut app, native, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 4);
+        let frozen = app
+            .recording_dialog
+            .test_last_request()
+            .expect("accepted frozen request");
+        assert_eq!(
+            frozen.options().format(),
+            crate::recording::RecordingFormat::Gif
+        );
+        assert!(app.recording_controller.has_active_job());
+        if let Some(generation) = app.recording_controller.snapshot().active_generation {
+            let _ = app.recording_controller.discard(generation);
+        }
+        app.recording_controller.request_shutdown();
+    }
+
+    fn file_lock_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut prior = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip)) = app.file_lock_dialog.test_action_rect(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+            {
+                if prior == Some(rect) {
+                    return rect;
+                }
+                prior = Some(rect);
+            } else {
+                prior = None;
+            }
+        }
+        panic!("File Lock control {name:?} must be visible");
+    }
+    fn click_file_lock_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = file_lock_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    struct FileLockTestGate(std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>);
+    impl Drop for FileLockTestGate {
+        fn drop(&mut self) {
+            let (lock, wake) = &*self.0;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+    }
+    #[test]
+    fn file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("same-file.txt");
+        let exe = workspace.root().join("synthetic-process.exe");
+        std::fs::write(&file, b"fixture").unwrap();
+        std::fs::write(&exe, b"fixture").unwrap();
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new((false, false)),
+            std::sync::Condvar::new(),
+        ));
+        let _release = FileLockTestGate(gate.clone());
+        let worker_gate = gate.clone();
+        let worker_exe = exe.clone();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = calls.clone();
+        let wake_ctx = ctx.clone();
+        app.file_lock_dialog.set_session_for_test(
+            crate::file_lock::FileLockSession::with_test_job(
+                move |path| {
+                    let first = worker_calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    if first {
+                        let (lock, wake) = &*worker_gate;
+                        let mut state = lock.lock().unwrap();
+                        state.0 = true;
+                        wake.notify_all();
+                        while !state.1 {
+                            state = wake.wait(state).unwrap();
+                        }
+                    }
+                    Ok(crate::file_lock::FileLockInspection {
+                        path,
+                        identity: crate::file_operations::NativeFileIdentity::from_parts(
+                            1, [9; 16],
+                        ),
+                        inspected_at: std::time::SystemTime::now(),
+                        processes: if first {
+                            vec![crate::file_lock::FileLockProcess {
+                                process_id: 4242,
+                                creation_filetime: 133_000_000_000_000_000,
+                                application_name: "Synthetic process".into(),
+                                service_name: String::new(),
+                                executable_path: Some(worker_exe.clone()),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
+                    })
+                },
+                move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
+            ),
+        );
+        open_file_lock_through_plugin(&mut app, Some(&file));
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        click_file_lock_host_control(&ctx, &mut app, root, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.0.lock().unwrap().0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let generation = app.file_lock_dialog.session_view_for_test().generation();
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        {
+            let (lock, wake) = &*gate;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        let selected = app.file_lock_dialog.test_selected_process();
+        assert_eq!(selected, Some((generation, 4242, 133_000_000_000_000_000)));
+        app.file_lock_dialog.set_reveal_result_for_test(Ok(exe));
+        app.file_lock_dialog.test_hold_ready_dispatch(true);
+        click_file_lock_host_control(&ctx, &mut app, native, "reveal");
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let refresh = file_lock_host_control(&ctx, &mut app, native, "refresh");
+        assert!(app.file_lock_dialog.test_refresh_enabled());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(refresh, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(refresh, false),
+            false,
+            true,
+        );
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert_eq!(app.file_lock_dialog.test_selected_process(), selected);
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        click_file_lock_host_control(&ctx, &mut app, native, "refresh");
+        let next = app.file_lock_dialog.session_view_for_test().generation();
+        assert!(next > generation);
+        assert!(app.file_lock_dialog.test_selected_process().is_none());
+        assert!(!app.file_lock_dialog.test_reveal_ready());
+        app.file_lock_dialog.test_hold_ready_dispatch(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let view = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(view.generation(), next);
+        assert_eq!(view.inspection().unwrap().path, file);
+        assert!(view.inspection().unwrap().processes.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx)
+                .iter()
+                .all(|effect| !matches!(
+                    effect,
+                    RootDialogEffect::RevealFileLockExecutable(_)
+                        | RootDialogEffect::CopyText {
+                            owner: DialogCopyOwner::FileLock,
+                            ..
+                        }
+                ))
+        );
+        click_file_lock_host_control(&ctx, &mut app, native, "copy_snapshot");
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::FileLock, text }] if text.contains("No processes reported."))
+        );
+    }
+
+    #[test]
+    fn file_lock_host_preserves_held_inspection_selection_and_reveal() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("host-locked.txt");
+        let exe = workspace.root().join("host-process.exe");
+        std::fs::write(&file, b"inspect").unwrap();
+        std::fs::write(&exe, b"fixture executable").unwrap();
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new((false, false)),
+            std::sync::Condvar::new(),
+        ));
+        let _release = FileLockTestGate(gate.clone());
+        let worker_gate = gate.clone();
+        let worker_exe = exe.clone();
+        let wake_ctx = ctx.clone();
+        let session = crate::file_lock::FileLockSession::with_test_job(
+            move |path| {
+                let (lock, wake) = &*worker_gate;
+                let mut state = lock.lock().unwrap();
+                state.0 = true;
+                wake.notify_all();
+                while !state.1 {
+                    state = wake.wait(state).unwrap();
+                }
+                Ok(crate::file_lock::FileLockInspection {
+                    path,
+                    identity: crate::file_operations::NativeFileIdentity::from_parts(1, [9; 16]),
+                    inspected_at: std::time::SystemTime::now(),
+                    processes: vec![crate::file_lock::FileLockProcess {
+                        process_id: 4242,
+                        creation_filetime: 133_000_000_000_000_000,
+                        application_name: "Synthetic process".into(),
+                        service_name: String::new(),
+                        executable_path: Some(worker_exe.clone()),
+                    }],
+                })
+            },
+            move || wake_ctx.request_repaint(),
+        );
+        app.file_lock_dialog.set_session_for_test(session);
+        open_file_lock_through_plugin(&mut app, Some(&file));
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        click_file_lock_host_control(&ctx, &mut app, root, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.0.lock().unwrap().0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let generation = app.file_lock_dialog.session_view_for_test().generation();
+        assert!(app.file_lock_dialog.session_view_for_test().is_busy());
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.file_lock_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        {
+            let (lock, wake) = &*gate;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        let selected = app.file_lock_dialog.test_selected_process();
+        assert_eq!(selected, Some((generation, 4242, 133_000_000_000_000_000)));
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        click_file_lock_host_control(&ctx, &mut app, native, "copy_snapshot");
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FileLock,
+                ..
+            }]
+        ));
+        app.file_lock_dialog
+            .set_reveal_result_for_test(Ok(exe.clone()));
+        app.file_lock_dialog.test_hold_ready_dispatch(true);
+        click_file_lock_host_control(&ctx, &mut app, native, "reveal");
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        let dock = file_lock_host_control(&ctx, &mut app, native, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(dock, true),
+            false,
+            false,
+        );
+        app.file_lock_dialog.test_hold_ready_dispatch(false);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(dock, false),
+            false,
+            false,
+        );
+        assert_eq!(
+            app.file_lock_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        let transition_effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(
+            transition_effects
+                .iter()
+                .any(|effect| matches!(effect, RootDialogEffect::ShowRoot))
+        );
+        assert!(
+            !transition_effects
+                .iter()
+                .any(|effect| matches!(effect, RootDialogEffect::RevealFileLockExecutable(_)))
+        );
+        assert_eq!(app.file_lock_dialog.test_selected_process(), selected);
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), true, false);
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::RevealFileLockExecutable(request)] if request.process_id==4242 && request.executable_path==exe)
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.file_lock_dialog.open);
+    }
+    #[test]
+    fn file_lock_native_discarded_picker_inspect_copy_reveal_and_close_are_inert() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("native-pick.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        let exe = workspace.root().join("native-process.exe");
+        std::fs::write(&exe, b"fixture executable").unwrap();
+        let job_exe = exe.clone();
+        let wake_ctx = ctx.clone();
+        app.file_lock_dialog.set_session_for_test(
+            crate::file_lock::FileLockSession::with_test_job(
+                move |path| {
+                    Ok(crate::file_lock::FileLockInspection {
+                        path,
+                        identity: crate::file_operations::NativeFileIdentity::from_parts(
+                            1, [9; 16],
+                        ),
+                        inspected_at: std::time::SystemTime::now(),
+                        processes: vec![crate::file_lock::FileLockProcess {
+                            process_id: 4242,
+                            creation_filetime: 133_000_000_000_000_000,
+                            application_name: "Synthetic process".into(),
+                            service_name: String::new(),
+                            executable_path: Some(job_exe.clone()),
+                        }],
+                    })
+                },
+                move || wake_ctx.request_repaint(),
+            ),
+        );
+        open_file_lock_through_plugin(&mut app, None);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.file_lock_dialog
+            .set_file_choice_for_test(Some(file.clone()));
+        for discard_child in [false, true] {
+            let rect = file_lock_host_control(&ctx, &mut app, native, "choose_file");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 0);
+            assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "choose_file");
+        assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 1);
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        for discard_child in [false, true] {
+            let rect = file_lock_host_control(&ctx, &mut app, native, "inspect");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        app.file_lock_dialog.set_reveal_result_for_test(Ok(exe));
+        for name in ["copy_snapshot", "reveal"] {
+            for discard_child in [false, true] {
+                let rect = file_lock_host_control(&ctx, &mut app, native, name);
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, true),
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, false),
+                    !discard_child,
+                    discard_child,
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            }
+            click_file_lock_host_control(&ctx, &mut app, native, name);
+            let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+            assert!(match name {
+                "copy_snapshot" => matches!(
+                    effects.as_slice(),
+                    [RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FileLock,
+                        ..
+                    }]
+                ),
+                _ => matches!(
+                    effects.as_slice(),
+                    [RootDialogEffect::RevealFileLockExecutable(_)]
+                ),
+            });
+        }
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.file_lock_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.file_lock_dialog.open);
+    }
+
+    fn folder_size_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip)) = app.folder_size_dialog.test_action_rect(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+                && (!matches!(name, "scan" | "refresh" | "cancel" | "host-presentation")
+                    || app.folder_size_dialog.test_action_enabled(name) == Some(true))
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Folder Size control {name:?} must be visible");
+    }
+    fn click_folder_size_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = folder_size_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[test]
+    fn folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let scan_root = workspace.root().join("held-folder-size");
+        let wake_ctx = ctx.clone();
+        let (session, control) =
+            crate::folder_size::FolderSizeSession::with_held_test_scan(move || {
+                wake_ctx.request_repaint_of(egui::ViewportId::ROOT)
+            });
+        app.folder_size_dialog.set_session_for_test(session);
+        let action =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &scan_root);
+        std::fs::write(scan_root.join("data.txt"), b"held scan data").unwrap();
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+        assert!(!app.folder_size_dialog.open);
+        let action =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &scan_root);
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        assert!(control.started().is_empty());
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.progress().is_empty()
+            || !app
+                .folder_size_dialog
+                .session_view_for_test()
+                .progress()
+                .is_some_and(|progress| progress.total_logical_bytes() > 0)
+        {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "held scan must publish progress: started={:?}, emitted={:?}, status={:?}, error={:?}, bytes={:?}, selected={:?}, held={:?}",
+                control.started(),
+                control.progress(),
+                app.folder_size_dialog.session_view_for_test().status(),
+                app.folder_size_dialog.session_view_for_test().error(),
+                app.folder_size_dialog
+                    .session_view_for_test()
+                    .progress()
+                    .map(|p| p.total_logical_bytes()),
+                app.folder_size_dialog
+                    .selected_root_for_test()
+                    .map(|root| root.as_path().to_path_buf()),
+                control.diagnostic()
+            );
+            std::thread::yield_now();
+        }
+        let generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert_eq!(generation, 1);
+        assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        let hide = Action {
+            label: "Hide launcher".into(),
+            desc: String::new(),
+            action: "launcher:hide".into(),
+            args: None,
+        };
+        let invocation =
+            crate::commands::parse_command(hide, None, crate::commands::ActivationSource::Enter)
+                .unwrap();
+        app.dispatch_command_invocation(invocation);
+        assert!(app.file_search_dialog.open);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        for name in ["refresh", "cancel"] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, name);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                false,
+                true,
+            );
+            assert_eq!(
+                app.folder_size_dialog.session_view_for_test().generation(),
+                generation
+            );
+            assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "cancel");
+        let cancelled = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(cancelled > generation);
+        let frozen = app
+            .folder_size_dialog
+            .session_view_for_test()
+            .progress()
+            .map(|p| p.total_logical_bytes());
+        assert!(frozen.is_some_and(|bytes| bytes > 0));
+        control.request_late();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !control.late_emitted() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(control.late_total().is_some());
+        assert_ne!(control.late_total(), frozen);
+        assert_eq!(
+            app.folder_size_dialog
+                .session_view_for_test()
+                .progress()
+                .map(|p| p.total_logical_bytes()),
+            frozen
+        );
+        click_folder_size_host_control(&ctx, &mut app, native, "refresh");
+        let refreshed = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(refreshed > cancelled);
+        assert_eq!(control.started(), vec![generation]);
+        click_folder_size_host_control(&ctx, &mut app, native, "cancel");
+        let final_generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(final_generation > refreshed);
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+        control.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled scan must retire"
+            );
+            std::thread::yield_now();
+        }
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), final_generation);
+        assert!(view.result().is_none());
+        assert_eq!(control.maximum_active(), 1);
+        assert_eq!(control.started(), vec![generation]);
+        assert!(!app.folder_size_dialog.open);
+        assert!(app.folder_size_dialog.test_navigation_state().1.is_none());
+        assert!(app.folder_size_dialog.test_navigation_state().2.is_none());
+    }
+
+    #[test]
+    fn folder_size_host_preserves_scan_and_drill_through_hidden_root() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::create_dir(scan_root.path().join("nested")).unwrap();
+        std::fs::write(
+            scan_root.path().join("nested").join("data.txt"),
+            b"measured folder",
+        )
+        .unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        assert!(!app.folder_size_dialog.test_navigation_state().0);
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert_eq!(generation, 1);
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.folder_size_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native hidden owner must poll scan"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = app
+            .folder_size_dialog
+            .session_view_for_test()
+            .result()
+            .cloned()
+            .expect("scan result");
+        let row = folder_size_host_control(&ctx, &mut app, native, "row/nested");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(row, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        let navigation = app.folder_size_dialog.test_navigation_state();
+        assert!(navigation.1.is_some());
+        assert!(navigation.2.is_some());
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.folder_size_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &result,
+            app.folder_size_dialog
+                .session_view_for_test()
+                .result()
+                .unwrap()
+        ));
+        assert_eq!(app.folder_size_dialog.test_navigation_state(), navigation);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+    }
+    #[test]
+    fn folder_size_native_owner_rejects_discarded_choose_scan_copy_and_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(scan_root.path().join("data.txt"), b"folder size").unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "choose_folder");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 0);
+            assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "choose_folder");
+        assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 1);
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "scan");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(
+                app.folder_size_dialog.session_view_for_test().generation(),
+                0
+            );
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "scan");
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            1
+        );
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "copy");
+            let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "copy");
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FolderSize,
+                ..
+            }]
+        ));
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.folder_size_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+    }
+
+    #[test]
+    fn folder_size_native_label_copy_waits_for_both_viewport_receipts() {
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = folder_size_host_control(&ctx, &mut app, native, "root-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner:DialogCopyOwner::FolderSize,text }] if !text.is_empty())
+        );
+    }
+
+    #[test]
+    fn file_lock_native_label_copy_waits_for_both_viewport_receipts() {
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let path = _workspace.root().join("label-selection-file.txt");
+        std::fs::write(&path, b"label selection").unwrap();
+        open_file_lock_through_plugin(&mut app, Some(&path));
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = file_lock_host_control(&ctx, &mut app, native, "selected-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner:DialogCopyOwner::FileLockLabel,text }] if !text.is_empty())
+        );
+    }
+
+    fn image_compare_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..8 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((_, rect, true)) = app.image_compare_dialog.response_for_test(name)
+                && rect.is_positive()
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Image Compare control {name} must be enabled with a visible interaction rectangle");
+    }
+
+    fn click_image_compare_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) {
+        let rect = image_compare_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn imgdiff_host_moves_retain_inflight_pair_worker_and_camera_with_root_hidden() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        let path = workspace.root().join("host-image-a.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        app.image_compare_dialog
+            .queue_file_pick_for_test(Some(path));
+        app.image_compare_dialog
+            .queue_clipboard_image_for_test(8, 8, [40, 10, 80, 255].repeat(64));
+        let hold = app.image_compare_dialog.hold_next_presentation_for_test();
+        click_image_compare_host_control(&ctx, &mut app, root, "open-a");
+        click_image_compare_host_control(&ctx, &mut app, root, "paste-b");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !hold.entered() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "presentation job reached its test hold"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_image_compare_host_control(&ctx, &mut app, root, "view/wipe-b-end");
+        click_image_compare_host_control(&ctx, &mut app, root, "view/zoom");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let canvas = image_compare_host_control(&ctx, &mut app, root, "canvas");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(canvas, true),
+            false,
+            false,
+        );
+        let dragged = canvas.center() + egui::vec2(25.0, 17.0);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerMoved(dragged)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerButton {
+                pos: dragged,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let before = app.image_compare_dialog.test_host_snapshot();
+        assert_eq!(before.3, 1.0);
+        assert!(before.4 > 1.0);
+        assert_ne!(before.5, egui::Vec2::ZERO);
+        let ids = app.image_compare_dialog.test_input_ids();
+        assert!(ids.iter().all(Option::is_some));
+        let pending = app.image_compare_dialog.test_presentation_keys();
+        assert!(pending.0.is_some() && pending.1.is_none());
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.eligible() && target.metadata().label() == "Pop Out")
+        );
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.image_compare_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        assert_eq!(app.image_compare_dialog.test_input_ids(), ids);
+        assert_eq!(app.image_compare_dialog.test_presentation_keys(), pending);
+        hold.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let pair = app.image_compare_dialog.test_presentation_keys();
+            if pair.0.is_some() && pair.0 == pair.1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native owner collected the held result"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        let query = app.query.clone();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+            false,
+            false,
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .is_some()
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .unwrap()
+                .hint_map()
+                .assignments()
+                .iter()
+                .any(|assignment| assignment.target().label() == "Dock")
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .is_none()
+        );
+        assert!(app.image_compare_dialog.open);
+        assert_eq!(app.query, query);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        click_image_compare_host_control(&ctx, &mut app, native, "host-presentation");
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.image_compare_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        assert!(!app.close_front_dialog_from_root_input());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.image_compare_dialog.open);
+    }
+
+    #[test]
+    fn imgdiff_detached_source_actions_and_close_reject_discarded_root_and_child_passes() {
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        let path = workspace.root().join("accepted-image-a.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        app.image_compare_dialog
+            .queue_file_pick_for_test(Some(path));
+        app.image_compare_dialog
+            .queue_clipboard_image_for_test(8, 8, [40, 10, 80, 255].repeat(64));
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for (name, side) in [("open-a", 0), ("paste-b", 1)] {
+            for discard_child in [false, true] {
+                let rect = image_compare_host_control(&ctx, &mut app, native, name);
+                let before = app.image_compare_dialog.test_host_snapshot();
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, true),
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, false),
+                    !discard_child,
+                    discard_child,
+                );
+                let after = app.image_compare_dialog.test_host_snapshot();
+                assert_eq!(after.0, before.0);
+                assert_eq!(after.1, before.1);
+                assert_eq!((after.6, after.7), (before.6, before.7));
+                assert!(app.image_compare_dialog.test_input_ids()[side].is_none());
+            }
+            click_image_compare_host_control(&ctx, &mut app, native, name);
+            assert_eq!(app.image_compare_dialog.test_host_snapshot().1[side], 1);
+        }
+        let snapshot = app.image_compare_dialog.test_host_snapshot();
+        assert_eq!((snapshot.6, snapshot.7), (0, 0));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let pair = app.image_compare_dialog.test_presentation_keys();
+            if pair.0.is_some() && pair.0 == pair.1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted pair was presented"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.image_compare_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+            assert!(app.image_compare_dialog.open);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.image_compare_dialog.open);
+        let retired = app.image_compare_dialog.smoke_retirement_observation();
+        assert_eq!(retired["session_closed"], true);
+        assert!(retired["retired_uploads"].as_u64().unwrap() > 0);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(
+            app.image_compare_dialog.smoke_retirement_observation()["retired_uploads"]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "logical egui frames cannot acknowledge actual GPU paints"
+        );
+    }
+
+    #[test]
+    fn imgdiff_numeric_copy_waits_for_root_and_native_owner_retention() {
+        use crate::commands::DialogCommandHost;
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let mut found_editor = false;
+        for _ in 0..64 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let (id, rect, enabled) = app
+                .image_compare_dialog
+                .response_for_test("view/zoom")
+                .unwrap();
+            if enabled
+                && rect.is_positive()
+                && app.image_compare_dialog.test_focused_control() == Some(id)
+                && egui::TextEdit::load_state(&ctx, id).is_some()
+            {
+                found_editor = true;
+                break;
+            }
+            for event in [
+                key_press(egui::Key::Tab, egui::Modifiers::NONE),
+                key_release(egui::Key::Tab, egui::Modifiers::NONE),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+        }
+        assert!(
+            found_editor,
+            "Tab reached the real numeric TextEdit inside the Zoom slider"
+        );
+        let before = app.image_compare_dialog.test_host_snapshot();
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(effects.as_slice(), [RootDialogEffect::CopyText {
+            owner: DialogCopyOwner::ImageCompare, text,
+        }] if text.trim().parse::<f32>().ok() == Some(before.4)));
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+    }
+
     #[test]
     fn retained_root_date_prepare_waits_for_acceptance_and_rechecks_calendar_owner() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -15106,6 +24078,122 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::PrepareCalendar { .. }]
         ));
+    }
+
+    #[test]
+    fn root_close_skips_detached_markdown_and_closes_underlying_dialog() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.focus_panel(super::super::Panel::QrDialog);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        app.markdown_studio_dialog.test_pop_out();
+
+        assert!(app.close_front_dialog());
+
+        assert!(!app.qr_dialog.open);
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::MarkdownStudioDialog));
+    }
+
+    #[test]
+    fn root_escape_closes_the_underlying_dialog_and_keeps_detached_mkmacro_live() {
+        use super::super::Panel;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(Panel::QrDialog);
+        app.update_panel_stack();
+        app.focus_panel(Panel::MkMacroDialog);
+        app.update_panel_stack();
+        app.mkmacro_dialog.test_pop_out();
+        assert_eq!(app.panel_stack.last(), Some(&Panel::MkMacroDialog));
+
+        let press_escape = || egui::RawInput {
+            events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(&ctx, press_escape(), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.qr_dialog.open);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.mkmacro_dialog.open);
+
+        app.run_root_frame_for_test(&ctx, press_escape(), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let output = app
+            .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0;
+        assert!(
+            output
+                .viewport_output
+                .contains_key(&app.mkmacro_dialog.test_viewport_id())
+        );
+        assert!(app.mkmacro_dialog.open);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn root_close_leaves_detached_note_open_and_closes_the_docked_peer() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = false;
+        let make_note = |slug: &str| {
+            super::super::note_panel::NotePanel::from_note(crate::plugins::note::Note {
+                title: "Same title".into(),
+                path: std::path::PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: slug.into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            })
+        };
+        app.focus_panel(super::super::Panel::QrDialog);
+        app.update_panel_stack();
+        app.push_note_panel(make_note("root-note"));
+        let mut detached = make_note("detached-note");
+        detached.test_pop_out();
+        let detached_identity = detached.prompt_identity();
+        app.push_note_panel(detached);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::NotePanel));
+
+        assert!(app.close_front_dialog());
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
+        assert!(app.qr_dialog.open);
+
+        assert!(app.close_front_dialog());
+        assert!(!app.qr_dialog.open);
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
+        assert!(app.any_panel_open());
+        assert!(!app.any_root_panel_open());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
     }
 
     #[test]
@@ -16774,6 +25862,264 @@ mod tests {
         app.xml_toolkit_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+
+
+    #[test]
+    fn regex_tester_host_moves_retain_revision_and_copy_only_after_accepted_child_input() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.regex_tester_dialog =
+            crate::gui::regex_tester_dialog::RegexTesterDialogState::with_clipboard(clipboard.clone());
+        app.regex_tester_dialog.session.draft.test_text = "one fish two fish".into();
+        app.regex_tester_dialog.test_select_clipboard_section();
+        app.focus_panel(super::super::Panel::RegexTesterDialog);
+        let viewport = egui::ViewportId::from_hash_of("regex_tester_viewport");
+        let child = |app: &mut LauncherApp, events, discard_root| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard_root)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let host_button = |app: &LauncherApp| {
+            let (rect, clip, enabled) = app.regex_tester_dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        let before = app.regex_tester_dialog.session.revision();
+        for _ in 0..4 {
+            child(&mut app, Vec::new(), false);
+        }
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.regex_tester_dialog.root_layer().is_some());
+        assert_eq!(app.regex_tester_dialog.session.revision(), before);
+
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let pattern = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Regular expression")
+            .expect("the docked pattern editor is registered")
+            .clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pattern, pressed));
+        }
+        let pattern = r"\b\w+ fish";
+        root(&mut app, vec![egui::Event::Text(pattern.into())]);
+        let edited = app.regex_tester_dialog.session.revision();
+        assert_eq!(edited, before + 1);
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, pattern);
+
+        let pop_out = host_button(&app);
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+        }
+        assert!(app.regex_tester_dialog.root_layer().is_none());
+        for _ in 0..3 {
+            child(&mut app, Vec::new(), false);
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.regex_tester_dialog.needs_root_ui_when_hidden());
+        assert_eq!(app.regex_tester_dialog.session.revision(), edited);
+        assert_eq!(app.regex_tester_dialog.session.draft.test_text, "one fish two fish");
+
+        let copy_button = |app: &LauncherApp| {
+            app.regex_tester_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Copy pattern")
+                .expect("the detached clipboard action is registered")
+                .clipped_rect()
+        };
+        for discard_child in [false, true] {
+            for _ in 0..3 {
+                child(&mut app, Vec::new(), false);
+            }
+            let copy = copy_button(&app);
+            child(&mut app, tool_dialog_pointer_events(copy, true), false);
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            child(&mut app, tool_dialog_pointer_events(copy, false), !discard_child);
+            assert!(clipboard.writes().is_empty());
+        }
+        child(&mut app, Vec::new(), false);
+        let copy = copy_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(clipboard.writes(), [pattern]);
+
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.regex_tester_dialog.root_layer().is_some());
+        assert_eq!(app.regex_tester_dialog.session.revision(), edited);
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, pattern);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.regex_tester_dialog.open);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn xml_toolkit_host_moves_keep_the_session_and_discarded_replace_keeps_the_file() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::XmlToolkitDialog);
+        let epoch = app.xml_toolkit_dialog.host_session_epoch();
+        let viewport = egui::ViewportId::from_hash_of("xml_toolkit_viewport");
+        let native_frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let host_button = |app: &LauncherApp| {
+            let (rect, clip, enabled) = app.xml_toolkit_dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for _ in 0..4 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_none());
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.xml_toolkit_dialog.root_layer().is_some());
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let source_target = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "XML source text")
+            .expect("the docked source editor is visible")
+            .clipped_rect();
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx, &mut app, tool_dialog_pointer_events(source_target, pressed), false,
+            ).drop_without_applying_deltas();
+        }
+        let source = "<root>\u{03bb}</root>";
+        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(source.into())], false)
+            .drop_without_applying_deltas();
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        let pop_out = host_button(&app);
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_none());
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        ).0.drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.xml_toolkit_dialog.needs_root_ui_when_hidden());
+
+        let path = workspace.root().join("xml-retained-overwrite.xml");
+        std::fs::write(&path, b"initial bytes").unwrap();
+        app.xml_toolkit_dialog.test_request_overwrite_confirmation(57, path.clone(), source);
+        let frozen = app.xml_toolkit_dialog.test_pending_overwrite_signature().unwrap();
+        for _ in 0..4 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        let replace_button = |app: &LauncherApp| {
+            app.xml_toolkit_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Replace existing XML file")
+                .expect("the detached confirmation owns the Replace control")
+                .clipped_rect()
+        };
+        let replace = replace_button(&app);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, true), false);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, false), true);
+        assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
+        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen.clone()));
+
+        native_frame(&mut app, Vec::new(), false);
+        let replace = replace_button(&app);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, true), false);
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        native_frame(&mut app, tool_dialog_pointer_events(replace, false), false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
+        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen));
+
+        native_frame(&mut app, Vec::new(), false);
+        let replace = replace_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(replace, pressed), false);
+        }
+        assert!(app.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_none());
+        let start = std::time::Instant::now();
+        while std::fs::read(&path).unwrap() != source.as_bytes() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "XML write did not finish");
+            native_frame(&mut app, Vec::new(), false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_some());
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(
+            &ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false,
+        ).drop_without_applying_deltas();
+        assert!(!app.xml_toolkit_dialog.open);
+        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+
+        app.focus_panel(super::super::Panel::XmlToolkitDialog);
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        super::with_immediate_viewport_test_close_request(viewport, || {
+            super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            native_frame(&mut app, Vec::new(), false);
+        });
+        assert!(app.xml_toolkit_dialog.open, "discarded native close is deferred");
+        native_frame(&mut app, Vec::new(), false);
+        assert!(!app.xml_toolkit_dialog.open, "the next retained owner closes");
     }
 
     #[cfg(windows)]
@@ -32525,6 +41871,231 @@ mod tests {
             .drop_without_applying_deltas();
     }
 
+
+    #[test]
+    fn table_utility_moves_the_same_held_file_page_and_selection_between_hosts() {
+        use crate::gui::table_utility_dialog::TableUtilityDialogState;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let source_path = workspace.root().join("table-host-pages.csv");
+        let mut csv = String::from("name,value\n");
+        for row in 0..135 {
+            use std::fmt::Write as _;
+            writeln!(&mut csv, "row-{row},{row}").unwrap();
+        }
+        std::fs::write(&source_path, csv).unwrap();
+        app.focus_panel(super::super::Panel::TableUtilityDialog);
+        app.table_utility_dialog.test_set_open_path(source_path);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(900.0, 760.0))
+                .drop_without_applying_deltas();
+        };
+        let host_button = |dialog: &TableUtilityDialogState| {
+            let (rect, clip, enabled) = dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let open_large = app.table_utility_dialog.test_page_controls().0
+            .expect("Open Large File is visible and enabled");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(open_large, pressed));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let first = loop {
+            root(&mut app, Vec::new());
+            let snapshot = app.table_utility_dialog.test_host_snapshot();
+            if snapshot.file_page.is_some() && !snapshot.file_page_pending {
+                break snapshot;
+            }
+            assert!(std::time::Instant::now() < deadline, "initial table page did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let backing = first.accepted_source.as_ref().unwrap().file_source().unwrap().clone();
+        let row = app.table_utility_dialog.test_page_controls().2
+            .expect("a visible row can be deselected");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(row, pressed));
+        }
+        let selected = app.table_utility_dialog.test_host_snapshot();
+        assert_eq!(
+            selected.file_row_selection.as_ref().unwrap().selected_count() + 1,
+            backing.row_count(),
+        );
+
+        let before = app.table_utility_dialog.test_host_job_counts();
+        let gate = app.table_utility_dialog.test_hold_next_file_page();
+        let next = app.table_utility_dialog.test_page_controls().1
+            .expect("Next page is visible and enabled");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(next, pressed));
+        }
+        assert!(gate.wait_until_entered(std::time::Duration::from_secs(5)));
+        let pending = app.table_utility_dialog.test_host_snapshot();
+        assert!(pending.file_page_pending);
+
+        let pop_out = host_button(&app.table_utility_dialog);
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+        let viewport = egui::ViewportId::from_hash_of("table_utility_viewport");
+        let native = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            native(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.table_utility_dialog.needs_root_ui_when_hidden());
+        assert!(app.table_utility_dialog.test_host_snapshot().file_page_pending);
+        gate.release();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let completed = loop {
+            native(&mut app, Vec::new());
+            let snapshot = app.table_utility_dialog.test_host_snapshot();
+            if !snapshot.file_page_pending
+                && snapshot.file_page.as_ref().is_some_and(|page| page.start_row() == 64)
+            {
+                break snapshot;
+            }
+            assert!(std::time::Instant::now() < deadline, "detached page did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let retained_source = completed.accepted_source.as_ref().unwrap().file_source().unwrap();
+        assert!(Arc::ptr_eq(&backing, retained_source));
+        assert_eq!(completed.lifetime, pending.lifetime);
+        assert_eq!(completed.source_revision, pending.source_revision);
+        assert_eq!(completed.view_revision, pending.view_revision);
+        assert_eq!(completed.selection_revision, selected.selection_revision);
+        let jobs = app.table_utility_dialog.test_host_job_counts();
+        assert_eq!(jobs.page_submitted, before.page_submitted + 1);
+        assert_eq!(jobs.page_executed, before.page_executed + 1);
+
+        let dock = host_button(&app.table_utility_dialog);
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.table_utility_dialog.root_layer().is_some());
+        assert_eq!(app.table_utility_dialog.test_host_snapshot().lifetime, pending.lifetime);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.table_utility_dialog.open);
+    }
+
+
+    #[test]
+    fn table_utility_native_replace_rejects_discarded_passes_and_writes_the_captured_export() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::TableUtilityDialog);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (pop_out, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(pop_out));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+
+        let viewport = egui::ViewportId::from_hash_of("table_utility_viewport");
+        let native = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        let delimiter = app.table_utility_dialog.test_delimiter_rects()[0].unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(delimiter, pressed), false);
+        }
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let tab = app.table_utility_dialog.test_delimiter_rects()[1]
+            .expect("the current native popup admits its TSV option");
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(tab, pressed), false);
+        }
+        assert_eq!(
+            app.table_utility_dialog.test_host_snapshot().parse_options.delimiter,
+            crate::table_utility::DelimiterChoice::Explicit(crate::table_utility::TableDelimiter::Tab),
+        );
+
+        let target = workspace.root().join("table-retained-export.json");
+        std::fs::write(&target, b"old contents").unwrap();
+        app.table_utility_dialog.test_prepare_overwrite_confirmation(&ctx, target.clone()).unwrap();
+        let receipt = app.table_utility_dialog.test_overwrite_identity().unwrap();
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.table_utility_dialog.root_layer().is_some());
+        assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (pop_out, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(pop_out));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+        assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        for discard_child in [false, true] {
+            let replace = app.table_utility_dialog.test_native_replace_rect()
+                .expect("the detached Replace control is enabled");
+            native(&mut app, tool_dialog_pointer_events(replace, true), false);
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            native(&mut app, tool_dialog_pointer_events(replace, false), !discard_child);
+            assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+            assert_eq!(std::fs::read(&target).unwrap(), b"old contents");
+            for _ in 0..3 {
+                native(&mut app, Vec::new(), false);
+            }
+        }
+        let replace = app.table_utility_dialog.test_native_replace_rect().unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(replace, pressed), false);
+        }
+        assert!(app.table_utility_dialog.test_overwrite_identity().is_none());
+        assert_eq!(std::fs::read(&target).unwrap(), br#"[["alpha"]]"#);
+    }
+
     #[test]
     fn table_dialog_jump_focus_does_not_paste_and_escape_closes_after_jump_cancel() {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
@@ -34195,6 +43766,34 @@ mod tests {
         assert_eq!(rows.len(), 2, "both actual gesture rows are visible");
         let second_row = rows.pop().unwrap();
 
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let discarded_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(second_row.id())
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let (output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            mouse_settings_input(vec![
+                egui::Event::Text(discarded_hint),
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            ]),
+            true,
+        );
+        output.drop_without_applying_deltas();
+        assert!(passes >= 2);
+        assert_eq!(
+            app.mouse_gestures_dialog.test_selected_gesture_label(),
+            Some("Alpha")
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+        release_mouse_settings_enter(&ctx, &mut app);
+
         start_mouse_gesture_jump_mode(&ctx, &mut app);
         let hint = app
             .jump_mode_ui
@@ -34229,6 +43828,154 @@ mod tests {
             "Select has no persistence effects"
         );
         assert!(app.jump_mode_ui.active_session().is_none());
+    }
+
+    #[test]
+    fn mouse_gestures_detached_child_confirmation_and_dock_keep_the_same_editor() {
+        use super::super::mouse_form_host::MOUSE_GESTURES;
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![
+                mouse_gesture_fixture("Alpha", "R"),
+                mouse_gesture_fixture("Beta", "L"),
+            ],
+        );
+        let initial = gesture_fixture_bytes();
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(MOUSE_GESTURES.kind)
+            .unwrap();
+        let (popout, clip, enabled) = app.mouse_gestures_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_mouse_settings_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.mouse_gestures_host.is_popped_out());
+        let viewport = app.mouse_gestures_host.test_viewport_id(MOUSE_GESTURES);
+
+        let mut hide = actual_query_input(true);
+        hide.events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_size(viewport, egui::vec2(960.0, 740.0), || {
+                super::with_immediate_viewport_test_events_for(viewport, events, || {
+                    let output = app
+                        .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0;
+                    assert!(
+                        output.viewport_output.contains_key(&viewport)
+                            || !app.mouse_gestures_host.is_popped_out()
+                    );
+                    output.drop_without_applying_deltas();
+                });
+            });
+        };
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(
+            app.mouse_gestures_dialog.test_selected_gesture_label(),
+            Some("Alpha")
+        );
+        let delete = app.mouse_gestures_host.test_target_rect("Delete gesture");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(delete, pressed));
+        }
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(matches!(
+            app.mouse_gestures_dialog.jump_mode_child_owner(instance),
+            Some(NavigationOwner::MouseGestureDelete { .. })
+        ));
+        assert_eq!(gesture_fixture_bytes(), initial);
+        let confirm = app.mouse_gestures_host.test_target_rect("Confirm");
+        frame(&mut app, tool_dialog_pointer_events(confirm, true));
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        frame(&mut app, tool_dialog_pointer_events(confirm, false));
+        assert_eq!(gesture_fixture_bytes(), initial);
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_child_owner(instance)
+                .is_some()
+        );
+
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let confirm = app.mouse_gestures_host.test_target_rect("Confirm");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(confirm, pressed));
+        }
+        let persisted: crate::mouse_gestures::db::GestureDb =
+            serde_json::from_slice(&gesture_fixture_bytes()).unwrap();
+        assert_eq!(persisted.gestures.len(), 1);
+        assert_eq!(persisted.gestures[0].label, "Beta");
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_child_owner(instance)
+                .is_none()
+        );
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let (canvas, recorder_enabled) = app
+            .mouse_gestures_dialog
+            .test_canvas_rect()
+            .expect("the native recorder rendered");
+        assert!(
+            recorder_enabled && canvas.width() >= 220.0 && canvas.height() >= 28.0,
+            "visible recorder canvas {canvas:?}"
+        );
+        let at = |offset| {
+            egui::Rect::from_center_size(
+                egui::pos2(canvas.left() + offset, canvas.center().y),
+                egui::vec2(2.0, 2.0),
+            )
+        };
+        frame(&mut app, tool_dialog_pointer_events(at(20.0), true));
+        frame(&mut app, vec![egui::Event::PointerMoved(at(75.0).center())]);
+        assert!(app.mouse_gestures_dialog.recorder_canvas_active());
+        frame(
+            &mut app,
+            vec![egui::Event::PointerMoved(at(180.0).center())],
+        );
+        assert!(app.mouse_gestures_dialog.recorder_canvas_active());
+        assert!(!app.mouse_gestures_host.test_button().2);
+        frame(&mut app, tool_dialog_pointer_events(at(180.0), false));
+        assert!(!app.mouse_gestures_dialog.recorder_canvas_active());
+        let recorded: crate::mouse_gestures::db::GestureDb =
+            serde_json::from_slice(&gesture_fixture_bytes()).unwrap();
+        assert!(recorded.gestures[0].tokens.starts_with('R'));
+        assert!(recorded.gestures[0].stroke.len() >= 2);
+        frame(&mut app, Vec::new());
+        let (dock, clip, enabled) = app.mouse_gestures_host.test_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.mouse_gestures_dialog.open && !app.mouse_gestures_host.is_popped_out());
+        assert_eq!(
+            app.mouse_gestures_dialog.test_selected_gesture_label(),
+            Some("Beta")
+        );
+        assert_eq!(
+            app.jump_mode_ui.dialog_instance(MOUSE_GESTURES.kind),
+            Some(instance)
+        );
     }
 
     #[test]
@@ -34350,6 +44097,593 @@ mod tests {
         }
     }
 
+    #[test]
+    fn paste_sequences_detached_run_and_next_preserve_the_same_playback() {
+        use crate::paste_sequence::{
+            PlaybackMode, SequenceDraft, SequencePlaybackStatus, SequenceStore, SequenceTarget,
+            Step,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.enabled_plugins = None;
+        app.settings_editor.baseline_settings.paste_sequence.keep_dialog_visible_during_playback = true;
+        let target = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91, process_id: 92, thread_id: 93, title: None,
+            },
+            std::process::id(),
+        ).unwrap();
+        app.test_sequence_platform = Some(super::super::command_host::tests::AppPastePlatform::new(target));
+        app.test_sequence_context_capture_forbidden = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let path = workspace.root().join(crate::paste_sequence::PASTE_SEQUENCES_FILE);
+        let store = SequenceStore::new(&path);
+        let mut snapshot = store.load().unwrap();
+        let mut draft = SequenceDraft::new(
+            "Host test",
+            vec![Step::LiteralText { text: "first λ".into() }, Step::LiteralText { text: "second 猫".into() }],
+        );
+        draft.mode = PlaybackMode::ManualAdvance;
+        let id = snapshot.upsert(draft).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        app.paste_sequence_dialog.use_test_data_sources(path);
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let row = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Host test  ·  2 steps")
+            .expect("saved sequence row is visible").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(row, pressed));
+        }
+        assert_eq!(app.paste_sequence_dialog.test_selected_id(), Some(id));
+        let steps = app.paste_sequence_dialog.test_draft_steps().to_vec();
+        let session = app.paste_sequence_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.paste_sequence_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.paste_sequence_host.root_layer().is_none());
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::PasteSequenceWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let run = app.paste_sequence_host.test_native_target("Run").expect("detached Run");
+        detached(&mut app, tool_dialog_pointer_events(run, true), false);
+        detached(&mut app, tool_dialog_pointer_events(run, false), true);
+        assert!(app.sequence_playback.started_run().is_none());
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 0);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let run = app.paste_sequence_host.test_native_target("Run").expect("retained Run");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(run, pressed), false);
+        }
+        let first = app.sequence_playback.started_run().expect("the retained Run starts playback");
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::AwaitAdvance);
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 1);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.paste_sequence_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.sequence_playback.started_run(), Some(first));
+        assert_eq!(app.paste_sequence_dialog.host_session_epoch(), session);
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), steps.as_slice());
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        app.test_sequence_platform.as_mut().unwrap().advance(Duration::from_secs(1));
+        let next = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Next")
+            .expect("docked Next").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(next, pressed));
+        }
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 2);
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::Completed);
+        app.test_sequence_platform.as_mut().unwrap().advance(Duration::from_secs(1));
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        let run = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Run")
+            .expect("docked Run").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(run, pressed));
+        }
+        let second = app.sequence_playback.started_run().expect("explicit second Run");
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 3);
+        assert_eq!(app.test_sequence_context_capture_calls, 0);
+        app.cancel_sequence_playback();
+    }
+
+    #[test]
+    fn detached_sequence_preflight_retains_prompt_and_autostart_on_editor_close() {
+        use crate::paste_sequence::{SequenceDraft, SequencePlaybackStatus, Step};
+        use crate::gui::snippet_prompt_dialog::SnippetPromptError;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.paste_sequence_dialog.use_test_data_sources(
+            workspace.root().join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let session = app.paste_sequence_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.paste_sequence_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false)
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let mut first = prompted_test_entry();
+        first.fields[0].default_value = "Ada".into();
+        let mut second = first.clone();
+        second.alias = "follow-up".into();
+        let draft = SequenceDraft::new(
+            "Two prompts",
+            [&first, &second].into_iter().map(|entry| Step::SnippetRef { alias: entry.alias.clone() }).collect(),
+        );
+        app.begin_paste_sequence_draft_preflight_with_context(
+            draft, &[first.clone(), second], &[], safe_sequence_invocation_context(),
+        ).unwrap();
+        app.sequence_prompt_editor_session = Some(session);
+        app.paste_sequence_dialog.set_autostart_when_ready(true);
+        assert!(app.hosted_sequence_prompt_active());
+        assert!(!app.snippet_prompt_has_root_presentation());
+        assert_eq!(app.begin_snippet_preview(first), Err(SnippetPromptError::SequencePreflightActive));
+
+        let viewport = crate::gui::utility_window_host::PasteSequenceWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let generation = app.snippet_prompt_dialog.session().unwrap().generation;
+        assert!(app.paste_sequence_host.test_native_target("Prepare snippet sequence").is_none());
+        detached(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)], true);
+        assert_eq!(app.snippet_prompt_dialog.session().unwrap().generation, generation);
+        detached(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::CTRL)], false);
+        for _ in 0..2 {
+            detached(&mut app, Vec::new(), false);
+        }
+        detached(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)], false);
+        let next = app.snippet_prompt_dialog.session().unwrap();
+        assert_ne!(next.generation, generation);
+        assert_eq!(next.alias, "follow-up");
+        assert!(app.hosted_sequence_prompt_active());
+        super::with_immediate_viewport_test_close_request(viewport, || {
+            detached(&mut app, Vec::new(), false);
+        });
+        assert!(!app.paste_sequence_dialog.open);
+        assert!(app.snippet_prompt_has_root_presentation());
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::Preparing);
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        let busy = crate::commands::DialogCommandHost::run_paste_sequence(
+            &mut app,
+            crate::paste_sequence::SequenceId::from_raw(1).unwrap(),
+            crate::commands::ActivationSource::Click,
+        ).unwrap_err();
+        assert!(busy.contains("SequenceAlreadyActive"));
+        assert!(app.paste_sequence_dialog.take_autostart_when_ready());
+        let _ = app.cancel_snippet_prompt();
+    }
+
+    #[test]
+    fn json_utility_detached_search_and_copy_retain_the_same_document() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(FakeClipboardBackend::default());
+        app.json_utility_test_clipboard = Some(clipboard.clone());
+        app.json_utility_dialog.test_open_with_source("", false);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let editor = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "JSON source")
+            .expect("visible JSON source").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(editor, pressed));
+        }
+        let text = r#"{"nested":{"value":"β"},"other":"β","untouched":"λ"}"#;
+        root(&mut app, vec![egui::Event::Text(text.into())]);
+        assert_eq!(app.json_utility_dialog.test_source(), text);
+        let generation = app.json_utility_dialog.test_source_generation();
+        let session = app.json_utility_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.json_utility_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.json_utility_host.root_layer().is_none());
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::JsonUtilityWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.json_utility_dialog.test_source_generation(), generation);
+        let tree = app.json_utility_host.test_native_target("Tree view").expect("Tree view");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(tree, pressed), false);
+        }
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let search = app.json_utility_host.test_native_target("Tree search query").expect("Tree search");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(search, pressed), false);
+        }
+        detached(&mut app, vec![egui::Event::Text("β".into())], false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let next = loop {
+            detached(&mut app, Vec::new(), false);
+            if let Some(rect) = app.json_utility_host.test_native_target("Next search match") {
+                break rect;
+            }
+            assert!(std::time::Instant::now() < deadline, "detached search did not complete");
+            std::thread::yield_now();
+        };
+        let first_selected = app.json_utility_dialog.test_selected_node_index()
+            .expect("search selects its first match");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(next, pressed), false);
+        }
+        let selected = app.json_utility_dialog.test_selected_node_index().expect("selected search result");
+        assert_ne!(selected, first_selected, "Next selects a different match");
+        detached(&mut app, Vec::new(), false);
+        let copy = app.json_utility_host.test_native_target("Copy selected JSON pointer").expect("Copy Pointer");
+        detached(&mut app, tool_dialog_pointer_events(copy, true), false);
+        detached(&mut app, tool_dialog_pointer_events(copy, false), true);
+        assert!(clipboard.writes().is_empty());
+        for _ in 0..2 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.json_utility_host.test_native_target("Copy selected JSON pointer").expect("retained Copy Pointer");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(clipboard.writes(), ["/other"]);
+        let (dock, clip, enabled) = app.json_utility_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.json_utility_dialog.host_session_epoch(), session);
+        assert_eq!(app.json_utility_dialog.test_source_generation(), generation);
+        assert_eq!(app.json_utility_dialog.test_selected_node_index(), Some(selected));
+        assert_eq!(app.json_utility_dialog.test_source(), text);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.json_utility_dialog.open);
+        assert_eq!(clipboard.writes(), ["/other"]);
+    }
+
+    #[test]
+    fn clipboard_modify_detached_preview_and_apply_require_retained_passes() {
+        use crate::clipboard_modify::{
+            clipboard::{ClipboardService, fake::FakeClipboardBackend},
+            coordinator::{PreviewCoordinator, PreviewState},
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("clip λ")));
+        app.clipboard_modify_test_service = Some(clipboard.clone());
+        app.open_clipboard_modify_dialog();
+        app.clipboard_modify_dialog.preview = PreviewCoordinator::new(Duration::from_secs(3600));
+
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let clickable = |button: Option<(egui::Rect, egui::Rect, bool)>, label| {
+            let (rect, clip, enabled) = button.unwrap_or_else(|| panic!("{label} did not render"));
+            assert!(enabled && clip.contains_rect(rect), "{label} at {rect:?} clipped by {clip:?} or disabled");
+            rect
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let add = clickable(app.clipboard_modify_dialog.test_host_buttons().0, "Add Stage");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(add, pressed));
+        }
+        let PreviewState::PendingDebounce { id } = *app.clipboard_modify_dialog.preview.state()
+        else {
+            panic!("Add Stage did not schedule a preview");
+        };
+        let stage = app.clipboard_modify_dialog.stages[0].id;
+        let session = app.clipboard_modify_dialog.host_session_epoch();
+        let popout = clickable(app.clipboard_modify_host.test_button, "Pop Out");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(!app.clipboard_modify_has_root_presentation());
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(matches!(app.clipboard_modify_dialog.preview.state(), PreviewState::PendingDebounce { id: current } if *current == id));
+
+        let viewport = crate::gui::utility_window_host::ClipboardModifyWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        app.clipboard_modify_dialog.preview.force_start_pending();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !app.clipboard_modify_dialog.can_apply() {
+            assert!(std::time::Instant::now() < deadline, "detached preview did not complete");
+            detached(&mut app, Vec::new(), false);
+            std::thread::yield_now();
+        }
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert!(matches!(app.clipboard_modify_dialog.preview.state(), PreviewState::Completed { id: current, .. } if *current == id));
+        assert_eq!(app.clipboard_modify_dialog.stages[0].id, stage);
+        let apply = clickable(app.clipboard_modify_dialog.test_host_buttons().1, "Apply");
+        detached(&mut app, tool_dialog_pointer_events(apply, true), false);
+        detached(&mut app, tool_dialog_pointer_events(apply, false), true);
+        assert!(clipboard.backend().writes().is_empty());
+        for _ in 0..2 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let apply = clickable(app.clipboard_modify_dialog.test_host_buttons().1, "Apply");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(apply, pressed), false);
+        }
+        assert_eq!(clipboard.backend().writes(), ["CLIP Λ"]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let dock = clickable(app.clipboard_modify_host.test_button, "Dock");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.clipboard_modify_has_root_presentation());
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.clipboard_modify_dialog.host_session_epoch(), session);
+        assert_eq!(app.clipboard_modify_dialog.source, "clip λ");
+        assert_eq!(app.clipboard_modify_dialog.stages[0].id, stage);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.clipboard_modify_dialog.open);
+        assert!(app.clipboard_modify_dialog.source.is_empty());
+        assert_eq!(clipboard.backend().writes(), ["CLIP Λ"]);
+    }
+
+    #[test]
+    fn clipboard_history_detached_save_and_copy_require_retained_passes() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let original = "clipboard fixture λ";
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[original]);
+        let fake =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.clipboard_dialog.set_test_clipboard_backend(fake.clone());
+        let root_frame = |app: &mut LauncherApp, events, discard| {
+            run_tool_dialog_frame(&ctx, app, events, discard).drop_without_applying_deltas();
+        };
+        let edit = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Edit clipboard entry").unwrap().rect();
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(edit, pressed), false);
+        }
+        assert!(app.clipboard_dialog.test_is_editing());
+        root_frame(&mut app, Vec::new(), false);
+        let widget = app.clipboard_dialog.test_edit_text_widget_id().unwrap();
+        let mut state = egui::text_edit::TextEditState::load(&ctx, widget).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(original.chars().count()),
+        )));
+        state.store(&ctx, widget);
+        ctx.memory_mut(|memory| memory.request_focus(widget));
+        root_frame(&mut app, vec![egui::Event::Text(" edited".into())], false);
+        let draft = app.clipboard_dialog.test_text().to_owned();
+        assert_eq!(draft, format!("{original} edited"));
+        let session = app.clipboard_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.clipboard_history_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(popout, pressed), false);
+        }
+        assert!(app.clipboard_history_host.root_layer().is_none());
+        root_frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::ClipboardHistoryWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| {
+                    target.set(Some(viewport));
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                        .0.drop_without_applying_deltas();
+                    target.set(None);
+                });
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        let text = app.clipboard_history_host.test_native_target("Clipboard text").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(text, pressed), false);
+        }
+        detached(
+            &mut app,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+        );
+        detached(&mut app, vec![egui::Event::Copy], false);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        detached(&mut app, vec![egui::Event::Cut], true);
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let history = crate::plugins::clipboard::CLIPBOARD_FILE;
+        let original_bytes = std::fs::read(history).unwrap();
+        let save = app.clipboard_history_host.test_native_target("Save clipboard entry").unwrap();
+        detached(&mut app, tool_dialog_pointer_events(save, true), false);
+        detached(&mut app, tool_dialog_pointer_events(save, false), true);
+        assert_eq!(std::fs::read(history).unwrap(), original_bytes);
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        assert!(app.clipboard_dialog.test_is_editing());
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let save = app.clipboard_history_host.test_native_target("Save clipboard entry").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(save, pressed), false);
+        }
+        assert!(!app.clipboard_dialog.test_is_editing());
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            crate::plugins::clipboard::load_history(history).unwrap().front(),
+            Some(&draft),
+        );
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.clipboard_history_host.test_native_target("Copy clipboard entry").unwrap();
+        detached(&mut app, tool_dialog_pointer_events(copy, true), false);
+        detached(&mut app, tool_dialog_pointer_events(copy, false), true);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.clipboard_history_host.test_native_target("Copy clipboard entry").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(fake.writes(), [draft.clone(), draft]);
+        let anchor = app.clipboard_history_host.test_native_target("Clipboard entry").unwrap().center();
+        for pressed in [true, false] {
+            detached(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(anchor),
+                    egui::Event::PointerButton {
+                        pos: anchor,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+            );
+        }
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let (remove, enabled) = app.clipboard_dialog.test_menu_remove_button.expect("row context menu");
+        assert!(enabled);
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(remove, pressed), false);
+        }
+        let removal = app.clipboard_dialog.jump_mode_pending_removal_identity().unwrap();
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert!(
+            app.clipboard_history_host
+                .test_native_target("Confirm clipboard entry removal").is_some()
+        );
+        assert!(app.clipboard_history_host.test_native_target("Copy clipboard entry").is_none());
+        let (dock, clip, enabled) = app.clipboard_history_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.clipboard_history_host.root_layer().is_some());
+        assert_eq!(app.clipboard_dialog.host_session_epoch(), session);
+        assert_eq!(app.clipboard_dialog.jump_mode_pending_removal_identity(), Some(removal));
+        for _ in 0..3 {
+            root_frame(&mut app, Vec::new(), false);
+        }
+        let cancel = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Cancel clipboard entry removal")
+            .unwrap().rect();
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(cancel, pressed), false);
+        }
+        assert!(app.clipboard_dialog.jump_mode_pending_removal_identity().is_none());
+        assert_eq!(crate::plugins::clipboard::load_history(history).unwrap().len(), 1);
+    }
+
     fn clipboard_target_ids(
         app: &LauncherApp,
         label: &str,
@@ -34448,6 +44782,208 @@ mod tests {
         state.store(ctx);
     }
 
+    #[test]
+    fn diff_moves_the_same_busy_folder_workspace_and_polls_while_root_is_hidden() {
+        use crate::diff::model::DiffView;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let (left, right, dialog, cancelled, complete) = crate::gui::DiffDialogState::test_running_host_operation();
+        app.diff_dialog = dialog;
+        app.diff_dialog.open = true;
+        let workspace = app.diff_dialog.workspace.workspace_id;
+        let view = app.diff_dialog.workspace.current_view.id;
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (generation, busy, feedback) = app.diff_dialog.test_active_host_operation();
+        assert!(busy && feedback.is_none());
+        let (popout, clip, enabled) = app.diff_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.diff_dialog.host_layer_if_root().is_none());
+        let viewport = app.diff_dialog.test_host_viewport();
+        let mut hide = actual_query_input(true);
+        hide.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false).0.drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
+                assert!(output.viewport_output.contains_key(&viewport) || app.diff_dialog.host_layer_if_root().is_some());
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.diff_dialog.test_active_host_operation(), (generation, true, None));
+        let DiffView::FolderCompare(state) = &app.diff_dialog.workspace.current_view.view else {
+            panic!("the detached view must still be the same folder comparison");
+        };
+        assert_eq!(state.left_root, left.path());
+        assert_eq!(state.right_root, right.path());
+        assert_eq!(state.primary_selection.as_deref(), Some(std::path::Path::new("item.txt")));
+        assert!(!cancelled.load(Ordering::Relaxed));
+        complete();
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let (_, busy, feedback) = app.diff_dialog.test_active_host_operation();
+        assert!(!busy);
+        assert_eq!(feedback, Some(1));
+
+        let (dock, clip, enabled) = app.diff_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.diff_dialog.host_layer_if_root().is_some());
+        assert_eq!(app.diff_dialog.workspace.workspace_id, workspace);
+        assert_eq!(app.diff_dialog.workspace.current_view.id, view);
+    }
+
+    #[test]
+    fn file_search_moves_the_same_running_search_and_edits_while_root_is_hidden() {
+        use crate::file_search::coordinator::{
+            CancellationToken, SearchCoordinator, SearchEventSender, SearchExecutor,
+        };
+        use crate::file_search::model::{
+            SearchBackend, SearchEvent, SearchId, SearchRequest, SearchStatus,
+        };
+
+        struct HeldSearch {
+            begun: std::sync::mpsc::Sender<SearchId>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl SearchExecutor for HeldSearch {
+            fn execute(
+                &self,
+                id: SearchId,
+                _: SearchRequest,
+                cancellation: CancellationToken,
+                events: SearchEventSender,
+            ) {
+                let _ = events.send(SearchEvent::Started {
+                    id,
+                    backend: SearchBackend::WalkDir,
+                });
+                let _ = self.begun.send(id);
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(8));
+                let _ = events.send(if cancellation.is_cancelled() {
+                    SearchEvent::Cancelled { id }
+                } else {
+                    SearchEvent::Completed { id }
+                });
+            }
+        }
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        let (begun, observe) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        app.file_search_coordinator =
+            SearchCoordinator::with_executor(std::sync::Arc::new(HeldSearch {
+                begun,
+                release: std::sync::Mutex::new(wait),
+            }));
+        app.file_search_dialog.search_text = "fixture".to_owned();
+        let id = app
+            .file_search_dialog
+            .start_search(&mut app.file_search_coordinator)
+            .unwrap();
+        assert_eq!(
+            observe
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            id
+        );
+        app.file_search_dialog.update_ui_preferences(|preferences| {
+            preferences.filename_sort =
+                crate::file_search::settings::FileSearchFilenameSort::FilenameDescending;
+        });
+        run_dialog_frame(&ctx, &mut app);
+        let (popout, clip, enabled) = app.file_search_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.file_search_host.is_popped_out());
+        let viewport = app.file_search_host.test_viewport();
+        let mut hide = actual_query_input(true);
+        hide.events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app
+                    .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0;
+                assert!(
+                    output.viewport_output.contains_key(&viewport)
+                        || !app.file_search_host.is_popped_out()
+                );
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            child_frame(&mut app, Vec::new());
+        }
+        let filter = app.file_search_host.test_target("Filter current results");
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(filter, pressed));
+        }
+        child_frame(&mut app, vec![egui::Event::Text("during run".into())]);
+        assert_eq!(app.file_search_dialog.refinement_text, "during run");
+        assert_eq!(app.file_search_dialog.search_text, "fixture");
+        assert_eq!(app.file_search_dialog.active_search_id, Some(id));
+        assert_eq!(app.file_search_dialog.current_status, SearchStatus::Running);
+        assert_eq!(app.file_search_coordinator.diagnostics().started, 1);
+        let (dock, clip, enabled) = app.file_search_host.test_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.file_search_dialog.open && !app.file_search_host.is_popped_out());
+        assert_eq!(app.file_search_dialog.active_search_id, Some(id));
+        assert_eq!(app.file_search_coordinator.diagnostics().started, 1);
+        assert_eq!(app.file_search_coordinator.active_search_id(), Some(id));
+        assert!(matches!(
+            observe.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+    }
+
     fn prepare_actual_file_search_dialog(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -34488,6 +45024,16 @@ mod tests {
         position: egui::Pos2,
         button: egui::PointerButton,
     ) {
+        click_file_search_at_with_discard(ctx, app, position, button, false);
+    }
+
+    fn click_file_search_at_with_discard(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        position: egui::Pos2,
+        button: egui::PointerButton,
+        discard_release: bool,
+    ) {
         for pressed in [true, false] {
             let mut events = if pressed {
                 vec![egui::Event::PointerMoved(position)]
@@ -34506,7 +45052,7 @@ mod tests {
                     events,
                     ..actual_query_input(true)
                 },
-                false,
+                !pressed && discard_release,
             )
             .0
             .drop_without_applying_deltas();
@@ -34569,6 +45115,161 @@ mod tests {
         }
     }
 
+    #[test]
+    fn snippets_detached_preview_returns_to_the_same_unsaved_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let path = workspace.root().join(crate::plugins::snippets::SNIPPETS_FILE);
+        let path = path.to_string_lossy();
+        let field = crate::plugins::snippets::SnippetFieldDefinition::new("name");
+        let entry = snippet_fixture_entry("detached preview", "Stored λ {{name}}", true, true, vec![field], &["fixture"]);
+        crate::plugins::snippets::save_snippets(&path, std::slice::from_ref(&entry)).unwrap();
+        let original = std::fs::read(path.as_ref()).unwrap();
+        prepare_actual_snippet_dialog(&ctx, &mut app, &path);
+        let edit = snippet_target_ids(&app, "Edit snippet")[0].clone();
+        click_snippet_target(&ctx, &mut app, &edit);
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let reveal = snippet_target_ids(&app, "Reveal snippet contents")[0].clone();
+        let root_frame = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let reveal_rect = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.id() == &reveal)
+            .unwrap()
+            .clipped_rect();
+        let previous_offset = snippet_contents_scroll_offset(&ctx, &app);
+        root_frame(&mut app, tool_dialog_pointer_events(reveal_rect, true));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(reveal_rect, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_body_revealed());
+        assert_eq!(snippet_contents_scroll_offset(&ctx, &app), previous_offset);
+        root_frame(&mut app, Vec::new());
+        click_snippet_target(&ctx, &mut app, &reveal);
+        root_frame(&mut app, Vec::new());
+        let body = app.snippet_dialog.test_body_editor_widget_id().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(body));
+        place_snippet_body_cursor_at_end(&ctx, &app);
+        root_frame(&mut app, vec![egui::Event::Text(" — draft 猫".into())]);
+        let draft = app.snippet_dialog.test_text().to_owned();
+        assert!(draft.ends_with(" — draft 猫"));
+        assert!(app.snippet_dialog.test_body_revealed());
+        let session = app.snippet_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.snippet_window_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.snippet_window_host.root_layer().is_none());
+        root_frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::SnippetWindowHost::test_viewport(session);
+        let native = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| {
+                    target.set(Some(viewport));
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                        .0.drop_without_applying_deltas();
+                    target.set(None);
+                });
+            });
+        };
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let reveal_footer = |app: &mut LauncherApp| {
+            let id = app.snippet_dialog.test_contents_scroll_id().unwrap();
+            let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+            state.offset.y = 10_000.0;
+            state.store(&ctx, id);
+            for _ in 0..3 {
+                native(app, Vec::new(), false);
+            }
+        };
+        reveal_footer(&mut app);
+        let preview = app.snippet_window_host.test_native_target("Test snippet preview").unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(preview, pressed), false);
+        }
+        assert!(app.snippet_prompt_dialog.is_preview_only());
+        assert!(!app.snippet_prompt_has_root_presentation());
+        let generation = app.snippet_prompt_dialog.session().unwrap().generation;
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        assert!(app.snippet_window_host.test_native_target("Save snippet").is_none());
+        assert!(app.snippet_window_host.test_native_target("Copy snippet").is_none());
+        let outside = egui::pos2(2.0, 2.0);
+        assert!(!app.snippet_prompt_dialog.last_layout.as_ref().unwrap().window_rect.contains(outside));
+        for pressed in [true, false] {
+            native(
+                &mut app,
+                tool_dialog_pointer_events(egui::Rect::from_center_size(outside, egui::Vec2::splat(1.0)), pressed),
+                false,
+            );
+        }
+        native(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)], false);
+        assert_eq!(app.snippet_prompt_dialog.session().unwrap().generation, generation);
+        let back = app.snippet_window_host.test_native_target("Return to snippet editor").unwrap();
+        native(&mut app, tool_dialog_pointer_events(back, true), false);
+        native(&mut app, tool_dialog_pointer_events(back, false), true);
+        assert_eq!(app.snippet_prompt_dialog.session().unwrap().generation, generation);
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let back = app.snippet_window_host.test_native_target("Return to snippet editor").unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(back, pressed), false);
+        }
+        assert!(!app.snippet_prompt_dialog.is_open());
+        assert_eq!(app.snippet_dialog.test_text(), draft);
+        assert!(app.snippet_dialog.test_body_revealed());
+        assert_eq!(std::fs::read(path.as_ref()).unwrap(), original);
+        reveal_footer(&mut app);
+        let save = app.snippet_window_host.test_native_target("Save snippet").unwrap();
+        native(&mut app, tool_dialog_pointer_events(save, true), false);
+        native(&mut app, tool_dialog_pointer_events(save, false), true);
+        assert_eq!(std::fs::read(path.as_ref()).unwrap(), original);
+        assert_eq!(app.snippet_dialog.test_text(), draft);
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let save = app.snippet_window_host.test_native_target("Save snippet").unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(save, pressed), false);
+        }
+        assert_eq!(crate::plugins::snippets::load_snippets(&path).unwrap()[0].text, draft);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.snippet_window_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.snippet_dialog.host_session_epoch(), session);
+    }
+
     fn start_actual_snippet_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
         app.run_root_frame_for_test(
             ctx,
@@ -34583,7 +45284,15 @@ mod tests {
         )
         .0
         .drop_without_applying_deltas();
-        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(
+            app.jump_mode_ui.active_session().is_some(),
+            "Snippets Jump Mode failed to start (owner={:?}, focused={:?}, top={:?}, native_owner={}, targets={})",
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::focused_response_layer(ctx),
+            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+            app.snippet_native_ui_owner_current(ctx, true),
+            app.jump_mode_ui.retained_registry().targets().len(),
+        );
         let instance = app
             .jump_mode_ui
             .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::Snippets)
@@ -34719,6 +45428,11 @@ mod tests {
                 .0
                 .drop_without_applying_deltas();
         }
+    }
+
+    fn snippet_contents_scroll_offset(ctx: &egui::Context, app: &LauncherApp) -> f32 {
+        let scroll_id = app.snippet_dialog.test_contents_scroll_id().unwrap();
+        egui::scroll_area::State::load(ctx, scroll_id).unwrap().offset.y
     }
 
     fn snippet_hint_for_target(
@@ -35560,16 +46274,14 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(app.jump_mode_ui.active_session().is_none());
 
-        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
         let reveal = snippet_target_ids(&app, "Reveal snippet contents")
             .into_iter()
             .next()
-            .expect("the actual Reveal response is visible at the bottom of the editor");
+            .expect("the actual Reveal response is visible beside the privacy settings");
         click_snippet_target(&ctx, &mut app, &reveal);
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-            .0
-            .drop_without_applying_deltas();
         assert!(app.snippet_dialog.test_body_revealed());
+        let body_offset = snippet_contents_scroll_offset(&ctx, &app);
+        set_snippet_contents_scroll_offset(&ctx, &mut app, body_offset);
         start_actual_snippet_jump_mode(&ctx, &mut app);
         let body_target = snippet_target_ids(&app, "Snippet text")[0].clone();
         let body_hint = snippet_hint_for_target(&app, &body_target);
@@ -35687,7 +46399,7 @@ mod tests {
         )
         .0
         .drop_without_applying_deltas();
-        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 0.0);
         let reveal = snippet_target_ids(&app, "Reveal snippet contents")[0].clone();
         click_snippet_target(&ctx, &mut app, &reveal);
         app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
@@ -35954,11 +46666,16 @@ mod tests {
         .drop_without_applying_deltas();
         assert_eq!(app.snippet_dialog.test_edit_index(), Some(0));
 
+        // The editor's new generation publishes its targets after the old
+        // browse focus and retained registry have retired.
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0.drop_without_applying_deltas();
+        }
         let reveal = snippet_target_ids(&app, "Reveal snippet contents")[0].clone();
         click_snippet_target(&ctx, &mut app, &reveal);
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-            .0
-            .drop_without_applying_deltas();
+        let body_offset = snippet_contents_scroll_offset(&ctx, &app);
+        set_snippet_contents_scroll_offset(&ctx, &mut app, body_offset);
         start_actual_snippet_jump_mode(&ctx, &mut app);
         let body = snippet_target_ids(&app, "Snippet text")[0].clone();
         let body_hint = snippet_hint_for_target(&app, &body);
@@ -35991,9 +46708,10 @@ mod tests {
         set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
         let preview = snippet_target_ids(&app, "Test snippet preview")[0].clone();
         click_snippet_target(&ctx, &mut app, &preview);
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
-            .0
-            .drop_without_applying_deltas();
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0.drop_without_applying_deltas();
+        }
         assert!(app.snippet_prompt_dialog.is_open());
         assert!(app.snippet_prompt_dialog.is_preview_only());
         assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
@@ -36238,15 +46956,19 @@ mod tests {
             .next()
             .expect("the actual reveal button is registered");
         click_snippet_target(&ctx, &mut app, &reveal_target);
+        let body_offset = snippet_contents_scroll_offset(&ctx, &app);
         app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
         let body_targets = snippet_target_ids(&app, "Snippet text");
         assert!(
             !body_targets.is_empty(),
-            "body target absent after reveal (editing={}, body_revealed={}, labels={:?})",
+            "body target absent after reveal (editing={}, body_revealed={}, owner={:?}, focused={:?}, native_owner={}, labels={:?})",
             app.snippet_dialog.test_is_editing(),
             app.snippet_dialog.test_body_revealed(),
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+            app.snippet_native_ui_owner_current(&ctx, true),
             app.jump_mode_ui
                 .retained_registry()
                 .targets()
@@ -36273,7 +46995,7 @@ mod tests {
             }
         }
 
-        set_snippet_contents_scroll_offset(&ctx, &mut app, 0.0);
+        set_snippet_contents_scroll_offset(&ctx, &mut app, body_offset);
         let body_target = snippet_target_ids(&app, "Snippet text")
             .into_iter()
             .next()
@@ -36929,6 +47651,82 @@ mod tests {
                 }),
             });
         }
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn seed_actual_file_search_file_result(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        path: &std::path::Path,
+    ) {
+        use crate::file_search::model::{
+            FileKind, FilenameRank, FilenameResult, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Filename;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: SearchResult::Filename(FilenameResult {
+                path: path.to_path_buf(),
+                file_name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                parent_directory: path.parent().map(std::path::Path::to_path_buf),
+                kind: FileKind::File,
+                size: Some(28),
+                modified: None,
+                rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
+            }),
+        });
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn seed_actual_file_search_directory_result(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        path: &std::path::Path,
+    ) {
+        use crate::file_search::model::{
+            FileKind, FilenameRank, FilenameResult, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Filename;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: SearchResult::Filename(FilenameResult {
+                path: path.to_path_buf(),
+                file_name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                parent_directory: path.parent().map(std::path::Path::to_path_buf),
+                kind: FileKind::Directory,
+                size: None,
+                modified: None,
+                rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
+            }),
+        });
         state.apply_event(SearchEvent::Completed { id: search_id });
     }
 
@@ -38022,6 +48820,8 @@ mod tests {
             app.render_root_ui(ui);
             passes += 1;
         });
+        let effects = app.complete_retained_tool_dialogs(ctx);
+        app.dispatch_root_dialog_effects(ctx, effects);
         app.finish_ui_frame_receipt();
         app.complete_jump_mode_frame(ctx);
         assert!(passes > 0, "the embedded root fixture renders a pass");
@@ -38268,6 +49068,104 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn timer_and_alarm_authoring_keep_their_drafts_across_actual_host_moves() {
+        use crate::commands::DialogCommandHost;
+        use crate::gui::timer_dialog::TimerDialog;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.set_jump_mode_enabled(true);
+        let viewport = egui::ViewportId::from_hash_of("timer_authoring_viewport");
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let child = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let button = |timer: &TimerDialog| {
+            let (rect, clip, enabled) = timer.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for alarm in [false, true] {
+            if alarm {
+                DialogCommandHost::open_alarm_dialog(&mut app);
+            } else {
+                DialogCommandHost::open_timer_dialog(&mut app);
+            }
+            let epoch = app.timer_dialog.host_session_epoch();
+            let title = if alarm { "Set Alarm" } else { "Create Timer" };
+            assert_eq!(app.timer_dialog.jump_mode_window_title(), Some(title));
+            for _ in 0..4 {
+                root(&mut app, Vec::new());
+            }
+            if !alarm {
+                let duration = app.jump_mode_ui.retained_registry().targets().iter()
+                    .find(|target| target.metadata().label() == "Duration")
+                    .expect("docked Duration editor").clipped_rect();
+                for pressed in [true, false] {
+                    root(&mut app, tool_dialog_pointer_events(duration, pressed));
+                }
+                root(&mut app, vec![egui::Event::Text("17s".into())]);
+                assert_eq!(app.timer_dialog.test_duration(), "17s");
+            }
+            let pop_out = button(&app.timer_dialog);
+            for pressed in [true, false] {
+                root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+            }
+            assert!(app.timer_dialog.root_layer().is_none());
+            for _ in 0..3 {
+                child(&mut app, Vec::new());
+            }
+            root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+            assert!(!app.visible_flag.load(Ordering::Relaxed));
+            assert!(app.timer_dialog.needs_root_ui_when_hidden());
+            for _ in 0..3 {
+                child(&mut app, Vec::new());
+            }
+            let name = app.timer_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Name")
+                .expect("detached Name editor").clipped_rect();
+            for pressed in [true, false] {
+                child(&mut app, tool_dialog_pointer_events(name, pressed));
+            }
+            child(&mut app, vec![egui::Event::Text(title.into())]);
+            assert_eq!(app.timer_dialog.test_label(), title);
+
+            let dock = button(&app.timer_dialog);
+            for pressed in [true, false] {
+                child(&mut app, tool_dialog_pointer_events(dock, pressed));
+            }
+            assert!(app.visible_flag.load(Ordering::Relaxed));
+            assert!(app.timer_dialog.root_layer().is_some());
+            assert_eq!(app.timer_dialog.host_session_epoch(), epoch);
+            assert_eq!(app.timer_dialog.jump_mode_window_title(), Some(title));
+            assert_eq!(app.timer_dialog.test_label(), title);
+            if !alarm {
+                assert_eq!(app.timer_dialog.test_duration(), "17s");
+            }
+            for _ in 0..3 {
+                root(&mut app, Vec::new());
+            }
+            let cancel = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "Cancel")
+                .expect("docked Cancel button").clipped_rect();
+            for pressed in [true, false] {
+                root(&mut app, tool_dialog_pointer_events(cancel, pressed));
+            }
+            assert!(!app.timer_dialog.open);
+        }
+    }
+
     #[test]
     fn jump_mode_timer_dialog_cancel_focuses_then_uses_the_existing_button() {
         use crate::gui::jump_mode::ui::NavigationOwner;
@@ -38348,33 +49246,33 @@ mod tests {
         drop(workspace);
     }
 
-    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn timer_jump_escape_cancels_first() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.timer_dialog.open_timer();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(!egui::Popup::is_any_open(&ctx));
+        tap_root_key(&ctx, &mut app, egui::Key::Escape);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.timer_dialog.open);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        drop(app);
+        drop(workspace);
+    }
+
     #[test]
     fn timer_popup_escape_closes_popup_before_parent_and_jump_escape_cancels_first() {
         use crate::gui::jump_mode::ui::NavigationOwner;
-
-        {
-            let ctx = egui::Context::default();
-            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
-            app.set_jump_mode_enabled(true);
-            app.enable_toasts = true;
-            app.show_error_toasts = true;
-            prepare_actual_query_frame(&ctx, &mut app);
-            app.timer_dialog.open_timer();
-            for _ in 0..3 {
-                run_dialog_frame(&ctx, &mut app);
-            }
-
-            start_actual_root_jump_mode(&ctx, &mut app);
-            assert!(app.jump_mode_ui.active_session().is_some());
-            assert!(!egui::Popup::is_any_open(&ctx));
-            tap_root_key(&ctx, &mut app, egui::Key::Escape);
-            assert!(app.jump_mode_ui.active_session().is_none());
-            assert!(app.timer_dialog.open);
-            assert!(!egui::Popup::is_any_open(&ctx));
-            drop(app);
-            drop(workspace);
-        }
 
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
@@ -38416,14 +49314,14 @@ mod tests {
         press_dialog_hint_with_enter(&ctx, &mut app, &option_hint);
         release_dialog_hint_enter(&ctx, &mut app);
         tap_root_key(&ctx, &mut app, egui::Key::Enter);
-        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+        assert_eq!(app.timer_dialog.test_sound_index(), 1);
         assert!(egui::Popup::is_any_open(&ctx));
         assert!(app.jump_mode_ui.active_session().is_none());
 
         tap_root_key(&ctx, &mut app, egui::Key::Escape);
         assert!(!egui::Popup::is_any_open(&ctx));
         assert!(app.timer_dialog.open);
-        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+        assert_eq!(app.timer_dialog.test_sound_index(), 1);
 
         tap_root_key(&ctx, &mut app, egui::Key::Escape);
         assert!(!app.timer_dialog.open);
@@ -38706,26 +49604,29 @@ mod tests {
         assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
         assert!(app.paste_sequence_dialog.source_picker_is_open());
         release_dialog_hint_enter(&ctx, &mut app);
-        app.run_root_frame_for_test(
-            &ctx,
-            egui::RawInput {
-                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
-                ..actual_query_input(true)
-            },
-            false,
-        )
-        .0
-        .drop_without_applying_deltas();
-        app.run_root_frame_for_test(
-            &ctx,
-            egui::RawInput {
-                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
-                ..actual_query_input(true)
-            },
-            false,
-        )
-        .0
-        .drop_without_applying_deltas();
+        for event in [
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+        ] {
+            let (output, _) = app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput { events: vec![event], ..actual_query_input(true) },
+                false,
+            );
+            if !app.paste_sequence_dialog.source_picker_is_open() {
+                fn paints_picker_text(shape: &egui::epaint::Shape) -> bool {
+                    match shape {
+                        egui::epaint::Shape::Text(text) => {
+                            matches!(text.galley.text(), "safe picker payload" | "Insert selected")
+                        }
+                        egui::epaint::Shape::Vec(shapes) => shapes.iter().any(paints_picker_text),
+                        _ => false,
+                    }
+                }
+                assert!(!output.shapes.iter().any(|shape| paints_picker_text(&shape.shape)));
+            }
+            output.drop_without_applying_deltas();
+        }
         assert_eq!(
             app.paste_sequence_dialog.test_draft_steps(),
             &[crate::paste_sequence::Step::SnippetRef {
@@ -41635,11 +52536,16 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
+                    mouse_form_layers: [None; 3],
+                    file_search_layer: None,
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
@@ -41695,17 +52601,11 @@ mod tests {
         output.0.drop_without_applying_deltas();
     }
 
-    fn prepare_batch_rename_generated_fixture(
+    fn prepare_batch_rename_generated_fixture_in(
         ctx: &egui::Context,
-    ) -> (
-        crate::performance::workloads::IsolatedWorkspace,
-        LauncherApp,
-        std::path::PathBuf,
-        tempfile::TempDir,
-    ) {
-        let repository_root =
-            std::env::current_dir().expect("read repository root before isolation");
-        let (workspace, mut app) = root_list_test_app(ctx, Vec::new());
+        app: &mut LauncherApp,
+        repository_root: &std::path::Path,
+    ) -> (std::path::PathBuf, tempfile::TempDir) {
         let scan_parent = repository_root.join("target/productivity_expansion");
         std::fs::create_dir_all(&scan_parent).expect("create repository-local scan fixture parent");
         let root_guard = tempfile::Builder::new()
@@ -41718,7 +52618,7 @@ mod tests {
 
         app.set_jump_mode_enabled(true);
         app.batch_rename_dialog.open = true;
-        prepare_actual_query_frame(ctx, &mut app);
+        prepare_actual_query_frame(ctx, app);
         app.handle_batch_rename_ui_command(crate::gui::BatchRenameUiCommand::SelectRoot(
             root.clone(),
         ));
@@ -41747,9 +52647,149 @@ mod tests {
             app.batch_rename_dialog.test_scan_diagnostic()
         );
         for _ in 0..2 {
-            batch_rename_test_frame(ctx, &mut app, Vec::new());
+            batch_rename_test_frame(ctx, app, Vec::new());
         }
-        (workspace, app, root, root_guard)
+        (root, root_guard)
+    }
+
+    #[test]
+    fn batch_rename_real_host_buttons_retain_the_same_verified_preview() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let repository_root = std::env::current_dir().unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, _files) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
+        let entry = app
+            .batch_rename_dialog
+            .test_prepare_ready_apply_preview()
+            .expect("verified selected preview");
+        let session = app.batch_rename_dialog.jump_mode_target_generation();
+        let screen = egui::vec2(1440.0, 1100.0);
+        let root_frame = |app: &mut LauncherApp, events, discard| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, discard, screen)
+                .drop_without_applying_deltas();
+        };
+        root_frame(&mut app, Vec::new(), false);
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(button));
+        assert_eq!(ctx.layer_id_at(button.center()), app.batch_rename_host.root_layer());
+        root_frame(&mut app, tool_dialog_pointer_events(button, true), false);
+        root_frame(&mut app, tool_dialog_pointer_events(button, false), true);
+        assert!(app.batch_rename_host.root_layer().is_some());
+        root_frame(&mut app, Vec::new(), false);
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("fresh Pop Out");
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(button, pressed), false);
+        }
+        assert!(app.batch_rename_host.root_layer().is_none());
+        root_frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let viewport = crate::gui::utility_window_host::BatchRenameWindowHost::test_viewport(session);
+        let detached_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
+                assert!(
+                    output.viewport_output.contains_key(&viewport)
+                        || app.batch_rename_host.root_layer().is_some()
+                );
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            detached_frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.batch_rename_dialog.jump_mode_target_generation(), session);
+        assert!(app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            detached_frame(&mut app, tool_dialog_pointer_events(button, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.batch_rename_host.root_layer().is_some());
+        assert_eq!(app.batch_rename_dialog.jump_mode_target_generation(), session);
+        assert!(app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        assert!(root.join("alpha.txt").is_file() && root.join("beta.txt").is_file());
+    }
+
+    #[test]
+    fn batch_rename_detached_confirmation_requires_a_retained_owner_pass() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let repository_root = std::env::current_dir().unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, _files) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
+        let entry = app.batch_rename_dialog.test_prepare_ready_apply_preview().unwrap();
+        let session = app.batch_rename_dialog.jump_mode_target_generation();
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        let (button, clip, enabled) = app.batch_rename_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            batch_rename_test_frame(&ctx, &mut app, tool_dialog_pointer_events(button, pressed));
+        }
+        assert!(app.batch_rename_host.root_layer().is_none());
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::BatchRenameWindowHost::test_viewport(session);
+        let frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        app.batch_rename_dialog.test_reveal_apply_target();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let apply = app.batch_rename_host
+            .test_native_target("Apply selected renames")
+            .expect("visible native Apply");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(apply, pressed), false);
+        }
+        let confirmation = app.batch_rename_dialog.jump_mode_pending_confirmation_identity()
+            .expect("the native Apply opens its own confirmation");
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.batch_rename_host.test_native_target("Confirm batch rename")
+            .expect("visible exact native confirmation");
+        frame(&mut app, tool_dialog_pointer_events(confirm, true), false);
+        frame(&mut app, tool_dialog_pointer_events(confirm, false), true);
+        assert_eq!(app.batch_rename_dialog.jump_mode_pending_confirmation_identity(), Some(confirmation));
+        assert!(app.batch_rename_runtime_snapshot().receipts.is_empty());
+        assert!(root.join("alpha.txt").is_file() && root.join("beta.txt").is_file());
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let cancel = app.batch_rename_host.test_native_target("Cancel batch rename")
+            .expect("native confirmation still owns Cancel");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(cancel, pressed), false);
+        }
+        assert!(app.batch_rename_dialog.jump_mode_pending_confirmation_identity().is_none());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        assert!(app.batch_rename_runtime_snapshot().receipts.is_empty());
     }
 
     fn batch_rename_target_by_label(
@@ -41826,7 +52866,10 @@ mod tests {
         use crate::gui::jump_mode::TargetKind;
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let original_bytes = ["alpha.txt", "beta.txt"]
             .into_iter()
             .map(|name| std::fs::read(root.join(name)).unwrap())
@@ -41939,7 +52982,10 @@ mod tests {
         use crate::gui::jump_mode::TargetKind;
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let original_bytes = ["alpha.txt", "beta.txt"]
             .into_iter()
             .map(|name| std::fs::read(root.join(name)).unwrap())
@@ -42047,7 +53093,10 @@ mod tests {
         use crate::gui::jump_mode::{SurfaceId, ui::NavigationOwner};
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         ctx.global_style_mut(|style| {
             style.scroll_animation = egui::style::ScrollAnimation::none();
         });
@@ -42563,6 +53612,116 @@ mod tests {
             false,
         );
         output.0.drop_without_applying_deltas();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn search_replace_detached_confirmation_applies_once_after_retention() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let parent = std::env::current_dir().unwrap().join("target/productivity_expansion");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::tempdir_in(parent).unwrap();
+        let source = fixture.path().join("fixture.txt");
+        std::fs::write(&source, b"before needle after\n").unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(crate::gui::Panel::SearchReplaceDialog);
+        app.handle_search_replace_ui_command(crate::gui::SearchReplaceUiCommand::SelectRoot(
+            fixture.path().to_owned(),
+        ));
+        app.search_replace_dialog.test_seed_replacement("needle", "updated");
+        app.handle_search_replace_ui_command(crate::gui::SearchReplaceUiCommand::Search);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let counts = loop {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+            if let Some(counts) = app.search_replace_dialog.test_result_counts() {
+                break counts;
+            }
+            assert!(Instant::now() < deadline, "fixture search must finish");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!((counts.1, counts.2), (1, 1));
+        app.search_replace_dialog.test_approve_first_match();
+        let session = app.search_replace_dialog.host_session_epoch();
+        for _ in 0..3 {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+        }
+        let (popout, clip, enabled) = app.search_replace_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        assert_eq!(ctx.layer_id_at(popout.center()), app.search_replace_host.root_layer());
+        for pressed in [true, false] {
+            search_replace_test_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.search_replace_host.root_layer().is_none());
+        search_replace_test_frame(
+            &ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::SearchReplaceWindowHost::test_viewport(session);
+        let frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let review = loop {
+            frame(&mut app, Vec::new(), false);
+            if let Some(rect) = app.search_replace_host.test_native_target("Review Apply") {
+                break rect;
+            }
+            assert!(Instant::now() < deadline, "native reviewed candidate must be reachable");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(app.search_replace_dialog.test_result_counts(), Some(counts));
+        assert_eq!(app.search_replace_dialog.test_approved_match_count(), 1);
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(review, pressed), false);
+        }
+        let identity = app.search_replace_dialog.jump_mode_confirmation_identity().unwrap();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.search_replace_host.test_native_target("Confirm and Apply").unwrap();
+        frame(&mut app, tool_dialog_pointer_events(confirm, true), false);
+        frame(&mut app, tool_dialog_pointer_events(confirm, false), true);
+        assert_eq!(app.search_replace_dialog.jump_mode_confirmation_identity(), Some(identity));
+        assert!(!app.search_replace_dialog.test_apply_confirmation_pending());
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 0);
+        assert_eq!(std::fs::read(&source).unwrap(), b"before needle after\n");
+
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.search_replace_host.test_native_target("Confirm and Apply").unwrap();
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(confirm, pressed), false);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.search_replace_dialog.test_receipt_count() == 0 {
+            frame(&mut app, Vec::new(), false);
+            assert!(Instant::now() < deadline, "accepted hidden apply must publish its receipt");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), b"before updated after\n");
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 1);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.search_replace_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.search_replace_host.root_layer().is_some());
+        assert_eq!(app.search_replace_dialog.host_session_epoch(), session);
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 1);
     }
 
     fn start_search_replace_hints(ctx: &egui::Context, app: &mut LauncherApp) {
@@ -43411,11 +54570,16 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
+                    mouse_form_layers: [None; 3],
+                    file_search_layer: None,
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -43493,6 +54657,21 @@ mod tests {
         .drop_without_applying_deltas();
         assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
         assert!(!app.settings_editor.settings_search_match_ids.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            true,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.show_settings);
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
+        release_escape(&mut app);
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
 
         app.run_root_frame_for_test(
             &ctx,
@@ -45960,11 +57139,16 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
+                    mouse_form_layers: [None; 3],
+                    file_search_layer: None,
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -47356,8 +58540,9 @@ mod tests {
 
     #[test]
     fn note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         prepare_actual_query_frame(&ctx, &mut app);
 
         let make_panel = |slug: &str| {
@@ -47680,6 +58865,11 @@ mod tests {
         LauncherApp,
     ) {
         let (workspace, mut app) = root_list_test_app(ctx, two_results());
+        configure_launcher_show_focus_test_app(&mut app, query);
+        (workspace, app)
+    }
+
+    fn configure_launcher_show_focus_test_app(app: &mut LauncherApp, query: &str) {
         app.query = query.to_owned();
         app.last_search_query = app.query.clone();
         app.last_results_valid = true;
@@ -47688,8 +58878,7 @@ mod tests {
         app.last_visible = false;
         app.focus_query = false;
         app.move_cursor_end = false;
-        install_owned_root_for_test(&mut app);
-        (workspace, app)
+        install_owned_root_for_test(app);
     }
 
     fn launcher_show_owner_input(focused: bool, size: egui::Vec2) -> egui::RawInput {
@@ -49068,7 +60257,8 @@ mod tests {
         let screen_size = egui::vec2(1600.0, 1200.0);
         for jump_mode in [false, true] {
             let ctx = egui::Context::default();
-            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "mouse query");
+            let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+            configure_launcher_show_focus_test_app(&mut app, "mouse query");
             app.set_jump_mode_enabled(jump_mode);
             app.notes_dialog
                 .test_set_edit_draft("unsaved Quick Notes draft");
@@ -49272,7 +60462,8 @@ mod tests {
         let screen_size = egui::vec2(1600.0, 1200.0);
         for jump_mode in [false, true] {
             let ctx = egui::Context::default();
-            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "hint query");
+            let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+            configure_launcher_show_focus_test_app(&mut app, "hint query");
             app.set_jump_mode_enabled(jump_mode);
             app.notes_dialog
                 .test_set_edit_draft("unsaved Quick Notes hint draft");
@@ -54850,6 +66041,338 @@ mod tests {
         );
         drop(app);
         drop(workspace);
+    }
+
+    fn assert_mouse_form_round_trip(gesture: bool) {
+        use crate::gui::mouse_form_host::{GESTURE_SETTINGS, MOUSE_SETTINGS};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.set_jump_mode_enabled(true);
+        if gesture {
+            initialize_mouse_gesture_settings_store(&app);
+            app.open_mouse_gesture_settings_dialog();
+        } else {
+            app.open_mouse_settings_dialog();
+        }
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let preferences = app.coordinate_tool.preferences().clone();
+        let mut gesture_settings = app.mouse_gesture_settings_dialog.test_settings().clone();
+        let previous_runtime = gesture_settings.clone();
+        if gesture {
+            let enable = app.mouse_gesture_settings_dialog.test_enable_checkbox_response().unwrap().rect;
+            for pressed in [true, false] {
+                run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(enable, pressed), false)
+                    .drop_without_applying_deltas();
+            }
+            assert_ne!(app.mouse_gesture_settings_dialog.test_settings(), &gesture_settings);
+            assert!(app.mouse_gesture_settings_dialog.test_dirty());
+            gesture_settings = app.mouse_gesture_settings_dialog.test_settings().clone();
+        }
+        let button = |app: &LauncherApp| {
+            if gesture {
+                app.mouse_gesture_settings_host.test_button()
+            } else {
+                app.mouse_settings_host.test_button()
+            }
+        };
+        let popped_out = |app: &LauncherApp| {
+            if gesture {
+                app.mouse_gesture_settings_host.is_popped_out()
+            } else {
+                app.mouse_settings_host.is_popped_out()
+            }
+        };
+        let (popout, clip, enabled) = button(&app);
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false,
+            ).drop_without_applying_deltas();
+        }
+        assert!(popped_out(&app));
+        let viewport = if gesture {
+            app.mouse_gesture_settings_host.test_viewport_id(GESTURE_SETTINGS)
+        } else {
+            app.mouse_settings_host.test_viewport_id(MOUSE_SETTINGS)
+        };
+        let mut hide = actual_query_input(true);
+        hide.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false).0.drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
+            assert!(output.viewport_output.contains_key(&viewport));
+            output.drop_without_applying_deltas();
+        }
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        if !gesture {
+            let combo = app.mouse_settings_host.test_target_rect("Click effect style");
+            for pressed in [true, false] {
+                child_frame(&mut app, tool_dialog_pointer_events(combo, pressed));
+            }
+            child_frame(&mut app, Vec::new());
+            let option = app.mouse_settings_host.test_target_rect("Flash");
+            for pressed in [true, false] {
+                child_frame(&mut app, tool_dialog_pointer_events(option, pressed));
+            }
+            assert_eq!(app.mouse_settings_dialog.test_draft().click.style, crate::coordinate_tool::ClickEffectStyle::Flash);
+            assert_eq!(app.coordinate_tool.preferences(), &preferences);
+            super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            child_frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+            assert!(app.mouse_settings_dialog.open);
+            child_frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        }
+        let (dock, clip, enabled) = button(&app);
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0.drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(!popped_out(&app));
+        if gesture {
+            assert!(app.mouse_gesture_settings_dialog.open);
+            assert_eq!(&gesture_settings, app.mouse_gesture_settings_dialog.test_settings());
+            assert!(app.mouse_gesture_settings_dialog.test_dirty());
+            app.mouse_gesture_settings_dialog.test_seed_picker();
+            for _ in 0..3 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+            let mut input = actual_query_input(true);
+            input.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+            app.run_root_frame_for_test(&ctx, input, false).0.drop_without_applying_deltas();
+            assert!(app.mouse_gesture_settings_dialog.open && app.mouse_gesture_settings_dialog.window_picker_is_open());
+            crate::plugins::mouse_gestures::apply_runtime_settings(previous_runtime);
+        } else {
+            assert!(app.mouse_settings_dialog.open);
+            assert_eq!(app.mouse_settings_dialog.test_draft().click.style, crate::coordinate_tool::ClickEffectStyle::Flash);
+            assert_eq!(app.coordinate_tool.preferences(), &preferences);
+        }
+    }
+
+    #[test]
+    fn mouse_settings_popout_stays_live_when_root_hides_and_docks_back() {
+        assert_mouse_form_round_trip(false);
+    }
+
+    #[test]
+    fn gesture_settings_popout_stays_live_when_root_hides_and_docks_back() {
+        assert_mouse_form_round_trip(true);
+    }
+
+    #[test]
+    fn main_settings_popout_preserves_draft_with_launcher_hidden_and_docks_back() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_settings_dialog();
+        let original = app
+            .settings_editor
+            .paste_sequence
+            .keep_dialog_visible_during_playback;
+        app.settings_editor
+            .paste_sequence
+            .keep_dialog_visible_during_playback = !original;
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (popout, clip, enabled) = app.settings_window_host.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.settings_window_host.is_popped_out());
+        let viewport = app.settings_window_host.test_viewport_id();
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0;
+            assert!(output.viewport_output.contains_key(&viewport));
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.show_settings);
+        assert_eq!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback,
+            !original
+        );
+        let (_, query) = app
+            .settings_editor
+            .test_search_query_response
+            .expect("detached Settings search");
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(query, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![egui::Event::Text("fuzzy".into())],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy");
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert!(super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.get().is_none()));
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy");
+        assert!(app.show_settings);
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        child_frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        let (_, query) = app.settings_editor.test_search_query_response.expect("detached Settings search after replay");
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(query, pressed));
+        }
+        child_frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.show_settings, "accepted Escape dismisses search before close");
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        child_frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        let (dock, clip, enabled) = app.settings_window_host.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.show_settings && !app.settings_window_host.is_popped_out());
+        assert_eq!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback,
+            !original
+        );
+    }
+
+    #[test]
+    fn dashboard_editor_detached_launcher_route_renders_hidden_and_docks_back() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let dashboard_path = workspace.root().join("dashboard.json");
+        let dashboard = crate::dashboard::config::DashboardConfig::default();
+        std::fs::write(&dashboard_path, serde_json::to_vec(&dashboard).unwrap()).unwrap();
+        app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_dashboard_editor();
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (_, popout, clip, enabled) = app.dashboard_editor.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        let viewport = app.dashboard_editor.test_viewport_id();
+        assert!(app.dashboard_editor.host_layer_if_root().is_none());
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0;
+            assert!(output.viewport_output.contains_key(&viewport));
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.show_dashboard_editor && app.dashboard_editor.open);
+
+        let (_, dock, clip, enabled) = app.dashboard_editor.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.dashboard_editor.host_layer_if_root().is_some());
+        assert!(app.show_dashboard_editor && app.dashboard_editor.open);
     }
 
     #[test]

@@ -1,0 +1,1654 @@
+# Desktop Productivity Completion and Acceptance Recovery
+
+## R01/M0-A — baseline
+
+The sole checkout is G:/Repos/rust/Multi_Launcher. The clean incoming branch was feat/silent-screen-recorder at 05153ac1af7cdd015f72c1d95dd4a8bcfed0d043, whose only change after M17-B was adding the recovery Goal and Kickstart. The exact authorized source snapshot is 1852f264dae69056f79bc0c3b593c70331fa620f. The upstream reflog, original push log and current original receipt agree that this was the pushed M17-B tip. The origin is multiplex55/Multi_Launcher. The index was empty and there was no ongoing Git operation. R01 was created directly from that snapshot.
+
+Development host reports Windows build 19045. Rust 1.99.1 and Nextest 0.9.135 are present. Original M17 verification reported 444 distinct affected cases passing across the first run and one exact correction, with no full N1–N12 observations. This is inherited evidence only. Exact original case names and results are in ignored target/desktop-productivity-expansion/m17-accepted-test-names.txt and m17-focused-run.log. Narrow original native results remain distinct from the full gates below.
+
+All four preserved-source archives match the SHA-256 checksums in the [original stop reports](../desktop-productivity-expansion/stalls). The C01 archive is a failed candidate and does not apply cleanly to M17-B. Recover relevant parts against current accepted source.
+
+| Category | Recovery checkpoints | State at baseline |
+| --- | --- | --- |
+| R01 | M0-A, M1-A Diagram click paths, M1-B shared geometry and focus | M0-A |
+| R02 | M2-A document/macro, M2-B settings/mouse, M2-C file/clipboard/developer/time, M2-D references and new utilities | Pending |
+| R03 | M3-A bit model, M3-B inspector/Copy/Insert, M3-C comparison/reference | Pending |
+| R04 | M4-A groups/swimlanes, M4-B starters, M4-C PNG/SVG, M4-D grouped draw.io | Pending |
+| R05 | M5-A safe Explorer operation, M5-B list editor/launch, M5-C utility/recorder integration | Pending |
+| R06 | M6-A focused verification, M6-B manual packet, M6-C final receipt | Pending |
+
+R01 starts with the original two exact failing test names. Their bodies were in the inactive archived patch. The initial attempt will distinguish unavailable cases from behavioral failures. Reconstruct the fixture and necessary production wiring, diagnose the click at the enabled/visible retained-pass boundary, then check ordinary Dock return and retained session identity. Use independent review and the focused correction budget in the recovery Goal. Full native checks are deferred to the final packet.
+
+## Inherited category and original 50-ID status
+### Category results
+
+| Category | Retained implementation and review | Mandatory gaps |
+| --- | --- | --- |
+| C01 — Utility hosts | Reference Calculation Pad session/accepted-pass wiring and shared geometry storage; 12 + 22 focused, reviewed | M1-B.2 archived after 52/54 and two unresolved docked Diagram clicks. Remaining ordinary hosts, focus/return/picker/geometry wiring, M2–M4, IDs 13–23; partial 24–26; N1–N4 |
+| C02 — Calculation | Exact integers, legacy scalar source, unit algebra and executable 30-example catalog; 18/46/69/3 checkpoint tests, reviewed; M17 scalar/minute overlap fixture passed | Separate inspector/bitfields/copy/insert/comparison, IDs 5–6, 8, 11; partial 12; N5 |
+| C03 — Diagram | Legacy Mermaid and bounded visual authority; basic transforms, snapping, anchors, assets/presets, recents/copy; reviewed ungrouped draw.io and internal rich PNG/SVG encoder; M17 direct/pending late Save As collision fixture passed | Archived group/container/swimlane, visual starter and rich Studio PNG/SVG publication increments; grouped conversion/interchange, independent reader, common hosts, N6/N7. Partial selected groups traced in ID audit |
+| C04 — Explorer tabs | Ordered operation and guarded read-only Windows observations, saved-list store; 21 + 9 focused, reviewed | Windows 10 build 19045 lacks supported tab observation. No verified mutation, editor/launcher/progress/cancel/typed route or common host; ID 61 partial and N8 unverified |
+| C05 — Folder sizes | Read-only, bounded logical per-entry metrics, docked controls, File Search handoff and exact Activity; 15/10/9 focused and disposable-tree/hard-link native evidence, reviewed | Shared detach/return/focus/geometry, ID 88 partial and full N9 unverified |
+| C06 — File locks | Read-only Restart Manager and exact process identity, docked controls, safe File Search prefill; 15/14 focused including exact held/released owned helper native evidence, reviewed | Shared detach/return/focus/geometry, ID 89 partial and full N10 unverified |
+| C07 — Recorder | Exact recorder session and WGC source; independently decoded owned-window GIF and video-only H.264 MP4; docked setup/retained compact controls, actual shortcut/admission and lifecycle tests, verified repeated active discard and exact resource cleanup; configured review | Full N11/N12: actual launcher hidden-root stop, global chord and pointer/still capture/live Pinboard coexistence, monitor/DPI; ordinary setup common host remains docked |
+
+Primary owners: existing launcher/utility host state; calculation_pad exact scalar/programmer/quantity boundary; diagram document/persistence/visual projection and draw.io; explorer_tabs read-only operation and store; folder_size/file_lock adapters and their docked GUI actions; recording session/controller/encoders and existing hotkey runtime.
+
+### Selected requirements
+
+Scope is 50 IDs from Goal E.4. Native N1–N12 remain separate from automated checks and isolated adapter/artifact evidence.
+
+| Category / IDs | Retained implementation and prior evidence | Incomplete or unverified |
+| --- | --- | --- |
+| C01: 13, 14, 15 | Existing owners traced; no new M2 source | Notes/each editor, Markdown Studio, MkMacro common host migration and native N2 |
+| C01: 16, 17, 18 | Existing owners traced; no new M3 source | Main/Dashboard and Mouse/Gesture Settings/common host, native N3 |
+| C01: 19, 20, 21, 22, 23 | Each existing utility owner traced; no new M4 source | All named file, clipboard, developer, time and file/image migrations; N4 |
+| C01: 24, 25, 26 | M1-A accepted reference lifecycle and shared provenance, 12/12; M1-B.1 geometry model and persistence, 22/22 | M1-B.2 52/54 with two unresolved docked Diagram click paths, full increment archived/inactive; shared wiring, geometry/focus/return, parentage, N1 |
+| C02: 1, 2, 3, 4, 7, 10 | M5-A/B exact integer model, grammar, operations and scalar compatibility 18/18 and 46/46 | Native N5 complete end-to-end path unavailable |
+| C02: 5, 6, 8, 11 | None | M6 separate inspector, working-copy bitfields, labels/copy, revision-fenced insert/undo, comparison absent due C01 dependency |
+| C02: 9 | Unit algebra M7-A all69 distinct; M17 verified legacy scalar minimum and signed operands coexist with minutes and dimension diagnostics | No claim of broad native workflow |
+| C02: 12 | M7-B retained reference and executable 30-example catalog; three exact tests | Missing M6 tools and corresponding interactive/reference completion |
+| C03: 27, 28, 34, 35 | M8 retained dual authoring, legacy v1/v2 and rich bounded v3, styles/layers/projected editor and viewer, 38/38/16 distinct; M17 verified late-collision-safe native Save As | N6/N7, common host transitions |
+| C03: 29, 30, 31, 32, 33, 36, 37, 39, 40, 41 | M9 retained transforms, snapping, navigation/minimap, anchored connectors, local embedded raster/presets (19/11/20/18 distinct) | Group/container/swimlane membership and descendant transform M9-B.2 inactive at 15/16; grouped conversion and interchange unavailable; full N7 |
+| C03: 38, 42, 43, 45, 46 | M10 retained Mermaid assistance, ungrouped visual-copy, exact duplicate, recents, internal visual PNG/SVG encoder (11/17/7 distinct) | Visual template UI 14/15 and Studio visual PNG/SVG controls/publication 15/16 inactive; native N6/N7 and grouped conversion |
+| C03: 44 | M11 bounded uncompressed single-page ungrouped draw.io, reviewable isolated import/native copy and current committed scene export, no clobber; 9/8/6 across adapter/Studio/docs | Grouped interchange depends on M9-B.2; compressed optional not attempted; independent external reader unavailable |
+| C04: 61 | Ordered operation, guarded read-only Explorer Shell observations and saved-list store, 21/9 distinct | Windows 10 lacks supported Explorer tabs; no positive tab/path attribution, native mutation, editor, launcher route, progress/cancel or ordinary host; N8 |
+| C05: 88 | Bounded metadata-only scan, docked UI, sorted rows/File Search and exact activity, 15/10/9 distinct; disposable Windows tree accounting | Shared detach/return unavailable, full N9 unverified |
+| C06: 89 | Read-only Restart Manager, exact process identity and docked actions, 15/14 distinct incl exact owned held-file adapter | Shared detach/return unavailable, full N10 unverified |
+| C07: 119 | M15 bounded WGC and silent GIF/H.264 MP4; M16 typed discovery, exact setup/controller, user result, capture interlocks and optional Stop; 15 + 15 launcher/shortcut focused cases, owned-window GIF and MP4 independently decoded and repeated active discard/retirement proven | Full N11/N12 (interactive launcher, actual global chord/pointer/still capture/live Pinboard, monitor/DPI); ordinary setup common detach/return absent under C.2 |
+
+Optional: 128-bit arithmetic and compressed draw.io import were not claimed or counted against required behavior. Audio is outside scope.
+
+
+## Original 38 milestone inventory
+
+See the inherited category results above for baseline disposition. The [original ledger](../desktop-productivity-expansion/EXECUTION.md) retains checkpoint-specific evidence. These entries are the original milestone inventory and do not imply recovery acceptance.
+
+| Milestone | Original scope |
+| --- | --- |
+| M0-B | Bounded baseline and host inventory |
+| M1-A | Reusable single-session host lifecycle |
+| M1-B | Geometry, focus and host controls |
+| M2-A | Notes and Markdown hosting |
+| M2-B | MkMacro editor hosting |
+| M3-A | Main Settings and Dashboard Settings hosting |
+| M3-B | Mouse Settings and Gesture hosting |
+| M4-A | File workflow dialogs |
+| M4-B | Clipboard workflow dialogs |
+| M4-C | Developer utility dialogs |
+| M4-D | Time and image/file utility dialogs; host coverage closure |
+| M5-A | Exact integer domain and checked operations |
+| M5-B | Grammar, references and compatibility |
+| M6-A | Separate programmer result inspector |
+| M6-B | Side-by-side calculation comparison |
+| M7-A | Dimensional arithmetic |
+| M7-B | Examples, reference and calculator acceptance |
+| M8-A | Authoring modes and backward-compatible document format |
+| M8-B | Rich scene objects, styles and layers |
+| M9-A | Direct manipulation and navigation |
+| M9-B | Connectors, containers and reusable assets |
+| M10-A | Mermaid assistance, templates, conversion and library |
+| M10-B | Current-scene exports and viewer parity |
+| M11-A | Bounded draw.io XML interchange |
+| M11-B | Diagram usability acceptance and documentation |
+| M12-A | Targeted Explorer tab operation |
+| M12-B | Saved folder lists and command integration |
+| M13-A | Bounded progressive scan and accounting |
+| M13-B | Folder-size interface and launcher actions |
+| M14-A | Restart Manager inspection boundary |
+| M14-B | File lock inspector UI and actions |
+| M15-A | Recording target and bounded capture lifecycle |
+| M15-B | Streaming animated GIF output |
+| M15-C | Video-only MP4 output |
+| M16-A | Recorder controls and command integration |
+| M16-B | Recording interoperability and cleanup acceptance |
+| M17-A | Scoped cumulative verification and final review |
+| M17-B | Final delivery, status and next-tip handoff |
+
+### Common host acceptance audit
+
+Scope: Goal C.2. Existing owners and routes are listed in the baseline inventory in [original execution ledger](../desktop-productivity-expansion/EXECUTION.md). M1-B.1 verified the shared geometry storage and recovery behavior in isolation; it did not wire native geometry and Dock/Pop Out controls into each surface. Baseline behavior and focused domain tests are not counted as common-host migration evidence.
+
+| Surface | Implementation | Host state test | Native status |
+| --- | --- | --- | --- |
+| Quick Notes | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Each note editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Markdown Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| MkMacro | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Main Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Dashboard Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Gestures | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Gesture Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| File Search | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Diff | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Batch Rename | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Search & Replace | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard History | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Snippets | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard Modify | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Paste Sequences | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| JSON | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| XML | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Regex | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Table | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Timer/alarm authoring | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar root | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event details | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Date & Time Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Image Compare | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Duplicate Finder | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| ZIP Extractor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calculation Pad | Reference migration retains the existing dock/pop-out session via M1-A; shared geometry/focus integration from B.2 is inactive | M1-A accepted-pass, identity, dirty/history and pending decision coverage; full B.2 wiring unverified | Unverified N1 |
+| Diagram Studio | Existing native editor; shares M1-A pass provenance; B.2 docked click paths, ordinary detachment and picker parentage unaccepted | M1-A exact provenance passed; B.2 failures retained in stop report, inactive | Unverified N6/N7 |
+| Diagram viewer | Existing separate native/embedded view of the same owner; M1-A pass provenance only | M1-A close/reopen generation and embedded fallback passed; no common Dock/Pop Out wiring | Unverified N6/N7 |
+| Programmer inspector | M6 owner/UI absent | Unrun; no implementation | Unverified N5 |
+| Explorer saved-list editor/launcher | Ordered operation and saved-list store only; editor/launcher absent | Domain tests passed; no UI host state | Unverified N8 |
+| Folder Size Analyzer | Docked owner/actions delivered; common detach/return absent | Docked generation/picker/selection/cancellation state tested; no migration test | Unverified full N9; narrower disposable Windows tree metadata passed |
+| File Lock Inspector | Docked owner/actions delivered; common detach/return absent | Docked generation/prefill/action safety tested; no migration test | Unverified full N10; narrower held-file adapter with owned PID/creation time passed |
+| Silent recorder setup / compact controller | Docked setup and dedicated retained compact controller, including hidden root, live Stop/Discard, and retained output result; ordinary setup detach/return absent | Exact hidden and stale Watch/retained Stop, reciprocal capture guards, and exit wait for exact retirement passed; optional shortcut both routing modes tested | Full N11/N12 unverified; owned HWND WGC→GIF and WGC→MP4 independently decoded, repeated active discard and exact owned cleanup passed |
+
+File Search is still docked; retained folder-size and file-lock prefill/reveal interactions are separate, covered workflows. A recorder rectangle selector is a specialized overlay excluded from ordinary Dock/Pop Out under C.2.
+
+## Original native gates
+
+All gates below are NOT_RUN as full end-to-end flows at the recovery baseline. The recovery brief authorizes delivering safe implementation before final user verification. The original narrower observations are recorded in the category and host matrices.
+
+| Gate | Required observation |
+| --- | --- |
+| N1 — Reference host | Dirty Calculation Pad → pop out → hide launcher → edit/undo/copy → dock → cancel close. Same source/history remains, focus/Jump Mode belongs to the correct surface. |
+| N2 — Document and macro hosts | Notes and Markdown editable detached sessions; MkMacro harmless fixture retaining selection and exactly-once execution. Owned child prompts are reachable. |
+| N3 — Settings/mouse hosts | Main and Dashboard Settings save/cancel, Mouse/Gesture settings edit/record/cancel; no draft auto-commit or residual input suppression. |
+| N4 — Remaining utility families | Representative file workflow, clipboard workflow including second sequence run, structured editor/table, timer/calendar and image/ZIP inspection. Every requested surface still needs an automated wiring check even when native evidence is sampled by family. |
+| N5 — Programmer tools | Large exact result and shifted mask → independent inspector → bit toggle → copy chosen format → explicit insert/undo → comparison. Ordinary scalar pad remains text-first. |
+| N6 — Mermaid legacy | Existing `.mld`, supported source editing, invalid/stale preview, viewer and current export; exact source/dirty decisions survive. |
+| N7 — Rich diagram | Add shapes/text/image, connect, resize/rotate, multi-select/align, use container/layer, undo, save/reopen, PNG/SVG export and supported draw.io interchange. |
+| N8 — Explorer tabs | Five ordered test folders in one identified new window with another Explorer window already open. Verify paths, tab order and unrelated window preservation; cancel/foreground-loss test stops safely. |
+| N9 — Folder sizes | Known temporary tree → progressive sorted results → cancel → refresh → detach/dock; totals and incomplete status match expected accounting. |
+| N10 — File users | Hold a disposable file in a known helper → inspect → release → refresh. Confirm identity and truthful empty/failed presentation. |
+| N11 — Recording | Record moving controlled content to GIF and MP4; hide root and stop; independently inspect/play artifacts, duration/dimensions and absence of audio. Include non-primary/DPI geometry where available. |
+| N12 — Cleanup | Cancel selection/countdown/recording, close target, repeat start/stop, exit task app; normal mouse/hotkeys/still screenshot/live Pinboard remain usable. Inspect only task-owned resources/processes. |
+
+## R01/M0-A delivery receipt
+
+Baseline commit b430934723e4838cfaf35419b9bf2d762148b8e2 has exactly one parent, 1852f264dae69056f79bc0c3b593c70331fa620f. The normal upstream push succeeded. The commit contains only the two recovery ledger files.
+
+## R01/M1-A — Diagram host click recovery in progress
+
+Scope is the Diagram Studio owner and its existing read-only Viewer, original IDs 24–26 and C01/M1-B.2. The first product increment changes src/gui/diagram_studio.rs and the associated LauncherApp completion and input routing in src/gui/render.rs. Retain the current initial native presentation and keep document identity separate from host identity. Stage host changes in the existing retained pass. Gate Studio movement while a viewport-bound picker, import or dirty decision owns the surface. Use one shared render path per body and keep native/embedded fallback routes. M1-B will wire native geometry and picker ownership.
+
+- Baseline exact Nextest list exited 0 with zero matching names because both historical tests were archived. No runtime result at baseline.
+- Initial reconstructed list exited 0 with two exact matches. Initial run exited 100 with 0/2. Both fixtures reached Dock, then hit egui's root Background layer instead of the newly mounted Diagram Studio window. This happens before the tested click dispatch. The first window pass is an invisible egui sizing pass, which requests another frame before pointer input can target the window. The correction renders the next visible pass and requires a visible enabled response, full clipping containment and the expected hit layer before actual pointer press and release.
+- Independent review also identified a nested Context lock, launcher/Diagram keyboard ownership leakage, dropped docked viewer focus, root title-bar gating, and admission of viewport-bound work between draw and completion. Corrections are in the second focused candidate. No full native or user acceptance evidence.
+- Logs are under ignored target/desktop-productivity-completion-recovery. Exact initial filter was test(/::diagram_owner_dock_and_pop_out_keep_the_same_document_generation$/) | test(/::focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner$/). Both list and run used --locked --offline -p multi_launcher --lib --cargo-profile fast-dev, with --no-fail-fast on run.
+
+### R01/M1-A acceptance
+
+- The first correction list initially exited 101 because two pre-existing direct renderer fixtures needed the new keyboard authorization argument. It executed no tests. The corrected exact list matched 3 and all 3 passed on the first runtime correction.
+- Review recheck found docked Viewer ownership could be lost when focus moved to another control on its layer, and egui's collapsible window could omit the body callback needed for Close. The final candidate tracks live docked focus by layer and keeps the host expanded. The Viewer test also exercises a click away and a real Pop Out click with unchanged generation and camera.
+- Final list and run each exited 0. The list matched exactly 13 and the run passed 13/13, with 7411 skipped. Final filter: test(/::(diagram_owner_dock_and_pop_out_keep_the_same_document_generation|focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner|diagram_visual_host_discards_unretained_dock_click|diagram_studio_visual_canvas_escape_cancels_owned_gesture_before_close|diagram_studio_root_discard_does_not_publish_child_focus_intent|diagram_studio_embedded_fallback_uses_parent_surface_without_claiming_child_identity|diagram_studio_same_frame_source_edit_survives_ctrl_w_close|diagram_studio_os_viewport_close_requests_cancel_until_dirty_decision|studio_usability_diagram_viewer_uses_a_distinct_callback_and_independent_camera|studio_usability_diagram_viewer_discard_close_and_reopen_are_generation_scoped|studio_usability_diagram_viewer_owner_dirty_decisions_keep_or_retire_viewer|studio_usability_diagram_viewer_bootstraps_when_root_input_is_hidden|studio_usability_diagram_viewer_embedded_fallback_keeps_root_host_identity)$/). Same flags as above. Run SHA-256: F5B09A124CC6997A1BB30F4FE5F4C34CF0A243FB692D23C93BE8FDB2A54232F7.
+- Production cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev exited 0. Check SHA-256: 8AA684C93A789853759B5F6EC8EC4089E8878EB5668793416FA146E60CFE97EA. Warnings are outside the changed paths, including existing table and vendored dependency warnings. Scoped Rust formatting and git diff --check passed. Independent review findings were addressed. Scope is Diagram Studio, Viewer and Launcher routing.
+- M1-A automated host interaction is verified. Real native N6/N7 remain unverified. M1-B still owns geometry, host-qualified native pickers and the rest of the focus/presentation contract.
+
+## R01/M1-B — shared geometry and focus in progress
+
+R01/M1-A source and reporting commit 9057106f13492004bc25a57e8900d916d27aa290 was pushed, upstream verified equal, before M1-B source work. M1-B covers original C01/M1-B and IDs 24–26 for the reference hosts only.
+
+The shared utility size manager owns acknowledged geometry writes and per-viewport gesture observations. Native HWND attachment matches current root process and UI thread, unique window title and retained physical viewport bounds, and installs a property token checked at use. Diagram pickers use the accepted owner identity and report an unavailable parent instead of opening under another window. Native position is issued first, then a retained destination sample is used for size. Bounded fallback clamps to the actual monitor dimensions. Detached Pad and Diagram surfaces have hidden-root rendering routes, and docked Diagram content is skipped while hidden. Taskbar interaction for reset/fallback and mixed-DPI end-to-end behavior still need real native validation.
+
+- First production check was compile-only, exit 101. Six picker functions borrowed path references before acquiring the parent-bound picker. Acquire the picker first.
+- Initial exact Nextest list matched 13. Initial run exited 100, 12/13 passed. The reset-then-move fixture used a 2.0 child sample for physical geometry recorded at 1.0. The correction models consistent viewport scale and a retained placement before resize.
+- Independent review also identified command-order DPI risk, missing monitor clamp on reset, and exhausted attachment retries after transient readiness failure. The second candidate stages native move/resize across retained samples, clamps reset, and renews bounded attempts on material retained geometry change. Read-only review recheck reported no remaining blocking findings in those corrections.
+- The correction had two compile-only failures from partial formatter application and one missing qualification. The rendering callback ranges were reconstructed from accepted M1-A with the intended M1-B changes and parsed successfully. No tests ran in the failed lists.
+
+- Final exact list matched 14. Final run exited 0, 14/14 passed, 7424 skipped. Both used --locked --offline -p multi_launcher --lib --cargo-profile fast-dev with the following exact filter: test(/::(native_restore_placement_waits_for_a_new_destination_scale_sample|utility_restore_uses_current_child_scale_for_cross_monitor_commands|move_across_dpi_keeps_preferred_physical_size_and_updates_position_scale|coalesced_resize_then_clamped_move_keeps_explicit_size_and_latest_position|same_tool_viewports_keep_latest_position_and_latest_explicit_size|retired_and_stale_generation_observations_are_discarded|retiring_one_viewport_keeps_same_tool_peer_registration_live|utility_size_integration_native_geometry_reset_is_not_reapplied_by_later_ack|utility_size_integration_reset_then_move_before_ack_reopens_at_factory_size|explicit_examples_and_dock_requests_emit_show_root_only_after_host_acceptance|native_popout_child_discard_and_os_close_keep_the_edited_session|diagram_hidden_root_skips_docked_owner_but_keeps_native_viewer|diagram_owner_dock_and_pop_out_keep_the_same_document_generation|focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner)$/). Run also used --no-fail-fast. Run SHA-256: 138B18FF81EC5C38F0D0FEAEA701D72D01A86F62B6AA54B5F1019FE311294D85.
+
+- Production cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev exited 0. Check SHA-256: DAD6653AFC68B046D7A7428EE12E4C61CDA712D3D75448F3D9A3AA58132EC3B4. Scoped Rust formatting, parser checks and git diff --check passed. Existing table and dependency warnings remain.
+- Review complete for R01. The full Windows flows remain unverified. No successful real picker, mixed-DPI or end-to-end native result was inferred from compiled bindings or harness tests.
+
+| Reference surface | Implemented host behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Calculation Pad | Retained Pad session, shared labels and docked size, native geometry, hidden-root route | Accepted ShowRoot, discarded child, dirty close, and shared geometry tests | IMPLEMENTED_USER_VALIDATION_PENDING (N1) |
+| Diagram Studio | Same document and revision across Dock/Pop Out, root/native input separation, retained native geometry and owner-qualified pickers | Both historical interaction names recovered; production picker branch compiled; hidden-root and retained-pass coverage | IMPLEMENTED_USER_VALIDATION_PENDING (host subset of N6/N7) |
+| Diagram Viewer | Same owner and independent camera, Dock/Pop Out, focused layer, native geometry | Real harness click, focus, return and camera checks; native and embedded fallback coverage | IMPLEMENTED_USER_VALIDATION_PENDING (host subset of N6/N7) |
+
+R01 closes after this checkpoint and its normal push attempt. R02 starts from the actual committed R01 tip. Remaining shared behavior for individual utility surfaces is tracked under R02 and later categories. The exact committed tip and push are recorded in the ignored receipt.
+
+## R02/M0-A — named utility host migrations
+
+R02 starts from the clean, pushed R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820. The branch is feat/productivity-host-migrations. The existing source snapshot includes the verified Diagram click paths, shared reference geometry and focus routing, and accepted-host picker binding. R01's final tip and upstream were identical at transition. No new worktree or intermediate merge was used.
+
+- M2-A starts with Markdown Studio, the smallest document consumer, then Quick Notes and independent note editors, then MkMacro. Reuse retained pass and presentation identity with one live owner per logical instance. Preserve source-before-intent ordering, focus and Unicode selection, note history and prompts, and exactly-once macro execution.
+- M2-B follows for Main, Dashboard, Mouse, Gestures and Gesture Settings. Preserve drafts and recording ownership. M2-C follows in small file, clipboard, developer and time/image slices. M2-D closes reference and new utility host wiring. Surface-level requirements are in the baseline matrix above.
+- Host moves are presentation changes. Each surface retains its own document/worker owner and explicit close or save decisions. Test state and actual visible actions per host and keep native evidence separate.
+
+### R02 baseline and exact brief restoration
+
+R02/M0-A 9fb5099a6cc1d4d8f9bf384be0afa038e97a9a42 has direct parent b8c3f259cbd55d483fb1346b262026ed42d5d820 and was pushed. At the user's request, the two recovery briefs absent from R02 were restored in docs-only commit 2db5aae61e35026e73b3da34c2c32d94508c12d1 and pushed. Both committed Git blobs match 05153ac1af7cdd015f72c1d95dd4a8bcfed0d043 exactly. Markdown source work stayed unstaged and separate.
+
+### R02/M2-A.1 — Markdown Studio in verification
+
+Markdown Studio retains one document across root and native hosts, with stable body and TextEdit IDs. It stages edits and intents behind both the originating and root pass, applies source before intents, and reuses the accepted HWND capability for owner-qualified pickers. A detached Studio has its own input and focus route. The launcher close route skips that child when it selects an underlying root dialog. Idle retained child frames drive native geometry and focus.
+
+Initial Nextest list matched 13, and 13/13 passed. The selected set includes new actual host clicks and root close routing, plus existing document, Unicode selection, dirty close, export and Diagram handoff tests. Independent review identified a final root ownership gap and nested egui lock; both were corrected. The final focused run and Windows production check are pending.
+
+After root ownership correction, 12/13 passed. The strengthened focused Unicode fixture exposed egui collapsing the cursor on the host toolbar press while the TextEdit still held focus. Keep the logical source range on outside pointer activation and let actual edits or selection drags rebase it. The production check exposed one export picker borrow-order error. Acquiring the owner-qualified picker before borrowing the filename corrected it. The exact Unicode correction subset then passed 3/3 and production check exited 0. The new launcher close fixture initially used a shared app-data root and generated a default clipboard-modifier config; the generated file was preserved under ignored evidence and the fixture now uses the isolated app workspace. A final focused subset rechecks that isolation and the simultaneous edit guard.
+
+Final exact list matched 4 and the affected rerun passed 4/4, 7436 skipped. The unaffected initial cases retained their prior pass evidence. The commands used --locked --offline -p multi_launcher --lib --cargo-profile fast-dev and exact filter test(/::(markdown_studio_visible_host_buttons_pop_out_and_dock_the_same_document|root_close_skips_detached_markdown_and_closes_underlying_dialog|markdown_studio_keeps_logical_unicode_selection_when_toolbar_takes_focus|markdown_studio_format_toolbar_preserves_selected_unicode_source_range)$/), plus --no-fail-fast for run. Run SHA-256: C822692002B9C7603F1D7624733A6516064C71C8A03DE26CA6A6A1E280B39C88. Final production cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev exited 0, SHA-256: 141D1B65591BC0A58ECA33ACEADAA2FEA9F7990126F2757849627C6548548588. Scoped Rust formatting and git diff --check passed. Independent review cleared both final root shortcut findings. Picker ownership compiled and native GUI validation remains pending.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Markdown Studio | One dirty document, selection and undo history across Dock and Pop Out, retained host effects, root/child focus and owned native pickers | Real harness pointer clicks, isolated launcher close routing, dirty close, Unicode, save, export and Diagram handoff regression checks | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+M2-A proceeds next through Quick Notes, independent note editors, and MkMacro in the same R02 branch.
+
+### R02/M2-A.2a — Quick Notes in progress
+
+Source starts at pushed Markdown checkpoint 6f611c95c960ebb3d03fcc100339dfdde47b2c5d. This slice covers Quick Notes only, within original ID13/C01 M2-A. Independent note editors are the following slice. Keep the Notes draft and template owner, use one retained body in docked or Immediate presentation, preserve the root-only query bridge and native child Jump Mode, and deliver exact retained save, close and open effects after the owner is restored to LauncherApp. Test real visible moves, discard, hidden-root input and existing draft/row popup routing.
+
+The initial working review found template owner input and persistence, fallback window duplication, capture/activation ordering, and discarded draft mutations needing corrections. Candidate is unaccepted while these are being addressed. No Quick Notes tests or production check have run on the candidate.
+
+The two initial list attempts failed at compile time, first from an extra borrowed Jump Mode scope and stale bootstrap array length, then from captured draw closure borrows. Neither executed tests. The corrected list matched exactly six. Initial runtime passed 5/6, including the actual Pop Out/Dock/discard case, row popup ownership and draft/save cases. The query-hint regression failed on clicking back from the launcher query and typing into the Notes draft. The docked and embedded body had inherited a keyboard-focus eligibility gate, making the previous frame's pointer hit disabled. The correction keeps the body eligible for egui hit testing while retaining separate keyboard and Jump Mode ownership gates. The exact query case and the two affected click/popup cases are in the correction run.
+
+The initial run filter was test(/::(quick_notes_popup_owner_stays_with_identity_offscreen_then_closes_on_removal|quick_notes_publishes_a_successful_edit_after_the_editor_closes|notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft|quick_notes_long_edit_keeps_footer_reachable_without_mutating_draft|quick_notes_defers_drafts_and_keeps_last_good_candidate_until_recovery|quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent)$/). The correction list matched three, and the run passed 3/3, including exact query return, actual host buttons/discard, and popup ownership. Correction filter: test(/::(notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft|quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent|quick_notes_popup_owner_stays_with_identity_offscreen_then_closes_on_removal)$/). Both used cargo nextest with --locked --offline -p multi_launcher --lib --cargo-profile fast-dev, plus --no-fail-fast for run. Correction run SHA-256: 6BBBB35F07C175DEE04D263E3C44AFE071E657CC0F74B515A0A9C58E03A3293F. Production cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev exited 0. Check SHA-256: 4D53C22106896675ECD9261CF1B1CF72D778132268227BB9A1D1F6AA341CE7D2. Rustfmt parser checks and diff whitespace checks passed. Whole-file formatting was omitted to avoid unrelated churn. Independent review cleared the corrected host and input paths.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Quick Notes | Single draft across Dock/Pop Out; retained save, template and external intents; owner-specific keyboard and Jump Mode; launcher query return; hidden-root host route | Real host buttons with discard, draft/save, popup and query-return checks. Initial 5/6 and exact correction 3/3 | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+Next is M2-A.2b independent note editors on the same R02 branch, followed by MkMacro.
+
+### R02/M2-A.2b — Independent note editors
+
+Source starts at pushed Quick Notes checkpoint aff2d8fab2112ee0f50140850d82aa4fe71ad2a4. This slice covers independent note editors within original ID13/C01 M2-A. Each editor retains its draft, undo history, child prompts and logical identity across Dock and Pop Out. Root shortcuts select an eligible docked note or underlying dialog. The detached editor owns its Find and close shortcuts, stays live with the launcher hidden, and uses the accepted host for attachments and export. Note and image links, saves, and existing Diagram handoffs use the originating editor's retained pass. Launcher note links raise the resolved docked editor, including alias and new draft targets.
+
+The first list attempt exposed compile errors and executed zero tests. After correction, the list matched 10. The initial run passed 9/10. The new launcher test failed because its fixture had opened the underlying QR dialog without publishing its panel stack state. The fixture now initializes the order before inserting notes. The six-case rerun passed 6/6 and the production check exited 0. Initial and rerun SHA-256 values are 328B8B8027322123FB3844D8FA4FBDB150CEE82B569C258BBEA57121EADAC2FA and 31D3EB8EA569D59B304E0BB3083DB1996541E72B773ECE040703689FE9BD36BD. A test-generated default clipboard modifiers file was preserved under ignored evidence.
+
+Independent review cleared the host identity, dirty draft rollback, prompt focus, and root and detached close boundaries. It also found that embedded Attach/Export needed the verified root owner, link activation needed to use the resolved target, and native Find needed to handle Ctrl+F and Escape before editor close. The re-review cleared all three corrections.
+
+For the final run, `$f = (Get-Content target/desktop-productivity-completion-recovery/r02-m2-a2b-final-filter.txt -Raw).Trim()`. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 14. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 14/14, with 7430 skipped. Run SHA-256: 5E9ADD441D0C57DB79493B028A4D7756E6B1905AAB156E8BBB2307CF1F67FF92. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. Check SHA-256: D7C7A8480BF8F22309890A2971FC53B9FC161C00ECEE0682C01FFA24B92473B0. Rustfmt parsed the three touched Rust files and `git diff --check` passed. Source scope is `src/gui/mod.rs`, `src/gui/note_panel.rs`, and `src/gui/render.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Independent note editor | Distinct live editor per logical instance, visible Dock and Pop Out, dirty draft and undo state, owner-qualified prompts and pickers, independent input and hidden-root operation | Actual harness host buttons and child Find keys, root close with same-title peers, rejected edit rollback, resolved note links, save/conflict, export, and Diagram history checks | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+Next is M2-A.3 MkMacro Editor on the same R02 branch.
+
+### R02/M2-A.3 — MkMacro Editor
+
+Source starts at pushed independent note editor checkpoint 7862c746d95f2e3630c8f5a2ac61ad53c1fadfc2. This slice covers the MkMacro authoring host within original IDs 13–15/C01 M2-B. The editor retains its document, selection, children and Review while changing presentation. Playback, recorder, overlay, and independent runtime and parameter prompt owners keep their existing lifetimes. Save, Run, recorder controls, and native picker requests go through accepted host completion. Dock raises the launcher, while a detached editor can run with the launcher hidden.
+
+The first Nextest list failed to compile on a close decision type and the nested egui window response. It executed zero tests. Log SHA-256 D15DF33EE4B4C293D44DB2DC9BE135208BDD9761EDAF446F7A24D7A2093B35C8. After those corrections and review fixes for native Jump Mode and detached activation, the exact list matched eight and the run passed 8/8, with 7439 skipped. This included real Pop Out, discarded and accepted Run, Dock, root close isolation, native navigation binding, and independent runtime prompt coverage. Run SHA-256 023BAE8D095FA1FC992DFE989FB5AA0390A18D4FBFDE84608B7D1E6E35CF306F.
+
+The expanded list matched ten and the run passed 9/10. The new detached Action Editor click test reproduced the ownership mismatch found in review. The host used a plain title string to derive the layer ID, while egui hashes its optional title. The accepted Apply click left the editor open. Run SHA-256 DE5156470530254F02043038A199E196C52C9478B1C680DDE94B4A98CFFD01ED.
+
+The correction matched the actual layers of the Action Editor and the other title-derived child windows. Independent review confirmed the owner and generation checks. Apply, Cancel and Open Call Target use the existing action editor behavior after retained completion. For verification, `$p = 'target/desktop-productivity-completion-recovery'` and `$f = (Get-Content $p/r02-m2-a3-filter-04.txt -Raw).Trim()`. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched seven. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 7/7, with 7441 skipped. The initial and expanded runs used the same commands with `r02-m2-a3-filter-02.txt` and `r02-m2-a3-filter-03.txt`. Final list and run SHA-256 values are 4F612609BECC434F975DE2F8B904DA1AE5B67689CF2309214A3E23A01724118E and D7F2916D9BAA5579AC1A86F9BE2065274FDE3D3968699FE2D7819D768C66FCA0. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. Production log SHA-256 0ED9343A60B7A973EA3C66DBA29C46AA42EE56E351BB293542A2FED149A452EB. Rustfmt corrections were limited to changed lines and the cumulative diff passed `git diff --check`. Source scope is `src/gui/mkmacro_dialog/`, `src/gui/mod.rs`, `src/gui/render.rs`, and `src/gui/jump_mode/ui.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| MkMacro Editor | One editor across Dock and Pop Out, current-host focus, owned authoring children and pickers, preserved dirty draft and selection, and retained playback and recorder requests | Real host, Run, Apply and Cancel clicks, rejected pass checks, fake playback exactly once, Jump Mode, package import cancellation, production build | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+M2-A is complete within R02. M2-B begins with Dashboard Editor on the same branch.
+
+### R02/M2-B.1 — Dashboard Editor
+
+Dashboard Editor covers the Dashboard portion of original IDs 16–18/C01 M3-A. It retains one config draft, selection, and slot identities across Dock and Pop Out. The launcher and Settings command share the opener. Host and viewport provenance fence Save, Close, and presentation writes alongside the existing dashboard path and target generation checks. The detached editor stays usable while the launcher is hidden. Native confirmation and combo input use the current editor's layers, and Dock returns to the launcher without publishing the draft.
+
+The administrative pause preserved the Dashboard worktree above `069e556ad1149684567521a2211183581b040d5f`. The first exact list exited 101 for three Settings-only `NavigationWindows` fixtures missing `dashboard_editor_layer` and ran no tests. Log SHA-256 0AA6E790D35D4B0031FE2D54BBF04012D47A678DFA527EAC6A955622627CDCE5. The user updated the implementer configuration in `9686ea0c6cafaddb6321d74ad3de0cd12459bb15`. The resumed implementer supplied `None` in those three fixtures and kept their owner assertions.
+
+The corrected exact list matched seven and the initial runtime passed 6/7, with 7444 skipped. The failed real-click test recorded target generation before the first draw initialized the fallback draft's slot identities. The fixture now records the generation after initialization and still requires exact preservation through Pop Out, failed Save, and Dock. Run SHA-256 4CDCF432CCBD74250B046E72659B47A820AC335BAEAF697BAADD546CFECA11D0. Independent review also found a focused combo option could be rejected by the embedded host. The correction accepts the recognized popup focus and leaves Escape to the popup. Re-review cleared the correction and the fixture baseline.
+
+The exact selectors are in `r02-m2-b1-filter-01.txt` and `r02-m2-b1-filter-03.txt` under the ignored recovery evidence directory. With `$f` set to the trimmed contents of each selector, `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched seven initially and three for the final affected set. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed the final set 3/3 with 7448 skipped. Final run SHA-256 33151AC805372FBB28191C17E533831E16A31A1E333A925F6C36D53A64D7B4EA. Formatting corrections were scoped to changed lines. `git diff --check` passed.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. Log SHA-256 B2B84EB410C96C071AF0F9C99089B975B90178F6343D2CAE1FFA2603EFA4D979. Source scope is `src/gui/dashboard_editor_dialog.rs`, `src/gui/render.rs`, `src/gui/command_host.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/render.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Dashboard Editor | One draft, owned confirmations and current combo focus across hosts, retained save and close, hidden launcher support, Dock restores launcher | Real host buttons, failed Save preserving the draft, hidden-launcher routing, exact confirmation binding, retained root effects, and production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
+
+Next is R02/M2-B.2 Main Settings on the same branch.
+
+### R02/M2-B.2 — Main Settings
+
+The Main Settings portion of original IDs 16–18/C01 M3-A starts from pushed Dashboard checkpoint `a7139ea15f694c2149492e4cb10d2af2c254f11b`. The launcher owns presentation and viewport lifecycle outside the replaceable editor draft. The existing settings save worker remains app-owned. Docked, Immediate, and embedded presentations share the editor body. Save, Cancel, Close, host moves, and cross-owner activation publish only after the current ROOT and owner passes are retained.
+
+The initial exact list matched five and the initial run passed 5/5, with 7448 skipped. It covered real host buttons and hidden launcher routing, staged Cancel, search Escape, and settings worker completion after hiding. Run SHA-256 7CC4D3332DF274FD02E51125158FFFAA5014922B4F8588AC3D64AC4AA83EB698. Review then identified native Jump Mode configuration, ROOT Escape, child-pass rollback, pinned focus, OCR continuity, and shortcut ownership corrections. The first correction list stopped at compile time after partial formatter alignment moved a test button assignment and removed the host module declaration. Log SHA-256 42382687F8F1FFAACEB7962C2ABC456C6348640DA5DB4A2589C6781F610515B3. Both splices were corrected. The three-case correction selector is `r02-m2-b2-filter-02.txt` in the ignored recovery evidence directory.
+
+The corrected three-case run passed 3/3, with 7450 skipped. It includes real Escape input on discarded ROOT and Immediate passes. Run SHA-256 D2D3F3D8CB71223CC9F7D362B9CA5A79C07E6E9C8384327181FF72EBCAE19077. The production check exited 0. A final review found a raised Settings window could still accept a launcher shortcut when another Middle layer retained keyboard focus. The owner guard now requires the raised layer and compatible focus. The child replay test also checks that a subsequent accepted Escape clears the search while keeping Settings open. Final two-case verification uses `r02-m2-b2-filter-04.txt`.
+
+For verification, `$f` is the trimmed contents of the exact selector in the ignored recovery evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched five initially, three for the correction, and two for the final owner change. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed the final set 2/2, with 7451 skipped. Final run SHA-256 701BA4091CDD23D3E3D6AE7C60075478A19123FD8E147E7A148A9517C1E3A96C. Independent review confirmed the final owner guard and the accepted child Escape control.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 on the final source. Log SHA-256 B128108F67C9C135F2551F9AF854597FAC561A01119F3AD1835A59F6726EE7A4. Scoped formatting and `git diff --check` passed. Source scope is `src/gui/{settings_window_host,mod,render}.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/{mapping,render,state}.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Main Settings | One draft and save worker across Dock and Pop Out, current-owner navigation, hidden-launcher operation, retained Save and Cancel | Visible host and Cancel clicks, discarded and accepted launcher and child Escape, hidden save-worker completion, production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
+
+Next is R02/M2-B.3 Mouse Settings and Gesture Settings on the same branch.
+
+### R02/M2-B.3 — Mouse Settings and Gesture Settings
+
+The Mouse Settings and Gesture Settings portion of original IDs 16–18/C01 M3-A starts from pushed Main Settings checkpoint `7b1c0f03214288e09fb80c2cdf337230293c7573`. Both forms retain their existing draft across Dock and Pop Out, use the same body in ROOT and detached presentations, and stay live while the launcher is hidden. Mouse appearance Apply and the five runtime switches retain their separate semantics. Gesture Save keeps its persisted plugin, Main Settings, and runtime synchronization. Its ignore-window picker stays in the owning viewport and prevents parent shortcut and host-move takeover.
+
+Independent review identified ROOT close bypass, detached popup input loss, Settings navigation mutation on discarded passes, and an embedded close shortcut bypass. The corrections use exact owner checks, retain recognized native combo ownership, and commit Settings search observations only with current retained ROOT and child passes. Re-review cleared those findings. Tests use actual enabled host controls and a detached combo selection, preserve an unsaved Gesture edit, exercise hidden launcher rendering and Dock, and check discarded Escape and picker ownership.
+
+The initial exact list matched eight. A preliminary direct harness diagnostic passed six selected cases. The final exact selector is `r02-m2-b3-filter.txt` under the ignored recovery evidence directory. With `$f` set to its trimmed contents, `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched nine (log SHA-256 B74B789A79F491653AB7B98C02BA6A65CD5B500658DE5DD11B263C72A9FCBE7A). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 9/9 with 7448 skipped (run SHA-256 A3157AE3D086408AFEFE2A2DDDB50473386A57D600BE1B104EFE7955B343331D). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (log SHA-256 F4555492B1A941F201D839ADA5F747B62FF80C90767B07D4155F064287ABAEBE). Scoped formatting and `git diff --check` passed.
+
+Source scope is `src/gui/{mouse_form_host,mouse_settings_dialog,mouse_gesture_settings_dialog,mod,render}.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/render.rs`. Native N3 remains `IMPLEMENTED_USER_VALIDATION_PENDING`.
+
+Next is R02/M2-B.4 Mouse Gestures editor on the same branch.
+
+### R02/M2-B.4 — Mouse Gestures editor
+
+The editor completes the Mouse Gestures portion of original IDs 16–18/C01 M3-A from pushed checkpoint `18fe3416a5b1a3701f2299536a72338fb3eb6cf4`. The editor retains its database, gesture and binding identities, selection, and recorder across Dock and Pop Out. Binding and delete confirmation remain separate exact Jump Mode owners within the active viewport. Save, Copy, and Close are published after retained ROOT and owner passes. A discarded pass restores a value checkpoint, including when Jump Mode already consumed the original key event. A recorder stroke uses its own viewport's pointer and focus, disables host movement during capture, and leaves the existing save transaction in charge of persistence and publication.
+
+The initial exact list matched 11 and the run passed 10/11. The new detached fixture tried to locate Confirm before the child had finished sizing and Jump Mode owner admission (run SHA-256 A377417B7BDCF23BA23BB232A55B001E310BA519D8F4586C8AA230A0C63AFB84). The five-case correction proved ROOT selection rollback after a real consumed hint, the docked recorder lifecycle, and both earlier Mouse settings host round trips. Its detached case proved a discarded Confirm preserved disk and child, then hit disabled replay geometry on the next press (run SHA-256 CED9E65421E9E85EE23689870544375EB81AC682FC08E229B036DFBD24138F1F). Requesting a repaint on rejection and reacquiring the current Confirm let the next run prove accepted deletion. The recorder immediately after child close hit the same retained-layer handoff (run SHA-256 3B10604D77F247FDBF70B63BFD0BF4FBE4C8A595F10749BE7ED9EC9A016D8DC7). The final source requests repaint when the exact native owner changes, and the fixture drives the real enabled recorder response after parent admission. Independent review confirmed the snapshot and replay corrections.
+
+For verification, `$f` is the trimmed contents of `r02-m2-b4-filter.txt`, `r02-m2-b4-filter-2.txt`, or `r02-m2-b4-filter-3.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` listed 11, five and one respectively. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed the final detached case 1/1 with 7458 skipped (run SHA-256 D51BC8B15F3A3C6490F54C2AA87F89538317A8165B26CF708B63FAAC0C64FD1D). The test clicks both host buttons, hides ROOT, rejects a discarded delete click, commits a fresh delete, records and persists a real pointer stroke, and Docks the same editor. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 on final source (SHA-256 3198F1E21D46EF7F5B78A723516C3332DAD2668C45188A70F969601BBE562F7E). Scoped formatting and `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,mouse_form_host,mouse_gestures_dialog,render}.rs`, `src/gui/jump_mode/ui.rs`, and `src/mouse_gestures/engine.rs`. Native N3 remains `IMPLEMENTED_USER_VALIDATION_PENDING`.
+
+M2-B is complete within R02. Next is R02/M2-C.1 File Search on the same branch.
+
+### R02/M2-C.1 — File Search
+
+File Search now hosts the same search coordinator and preview receiver in docked, embedded fallback, and native Immediate presentations. The host snapshots editable form and selection values without cloning workers. Search, cancel, result actions, export, picker actions, preference publication, and Preview actions require the current retained ROOT and owner passes. Deferred row actions revalidate the search and row identity. File Lock and Folder Size receive the accepted ROOT provenance when a result action crosses viewports. A view preference save updates the view and persisted settings without rebuilding the executor or cancelling the current search.
+
+The staging selection passed 4/4 (SHA-256 CFB467933A4CBCF5CFC5682FA4D476949DC45F6F1BB01978004C882ABDB6B118). The initial integrated list matched eight and the run passed 7/8. Its held-worker fixture disconnected before any host interaction because preference publication had reapplied full search settings (SHA-256 5875C4EE02A8F5FF1BE34C59E9659F8C4336A99D1A050C98A16985E0D1B1C4AF). Review also identified ownership leaks in row selection, sort, and title-bar close, stale focus, and Preview completion. The correction fences those paths, raises ROOT after an accepted Dock or ROOT tool handoff, and publishes preferences without resetting the worker. The first correction list exited 101 at a missing deserialization type annotation, before any test ran (SHA-256 F9B901121E34C11E215CE5F1FE3FCFA04EA7F4BDF68F3F187ED0D33E77B3AC1A). The corrected four-case run passed three. Its new round-trip fixture retained the same search ID and accepted a detached filter edit, then failed because the held executor had never sent the Started event counted by diagnostics (SHA-256 65A358310FC29F89DB2D379BCCB1B0C40002E260FD7E8C072C945A5FF50CC726). The final fixture sends that event and checks that no second worker starts.
+
+For the exact final selector, set `$f` to the trimmed contents of `r02-m2-c1-filter-4.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched one and `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 1/1 with 7460 skipped (SHA-256 7FE6299E4F91B5B8726FDC278766328B349B63C96C3209393153666131641A99). The test uses enabled Pop Out and Dock buttons, a held search executor, and real detached filter input while ROOT is hidden. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 35B34ADB90574288AC1396DFB871E32949AE9DE8FD1266D7440ADAFCD5E31B37). Scoped formatting and `git diff --check` passed.
+
+Source scope is `src/gui/{file_search_dialog,file_search_window_host,file_search_preview_dialog,command_host,mod,render,file_lock_dialog,folder_size_dialog}.rs`, `src/gui/file_search_dialog/keyboard.rs`, and `src/gui/jump_mode/ui.rs`. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.2 Diff on the same branch.
+
+### R02/M2-C.2 — Diff
+
+Diff moves one workspace between docked, embedded fallback, and native Immediate presentations. The active text comparison, folder operation, and watcher handles stay with that workspace. The retained ROOT and owner passes authorize picker, save, export, rule, navigation, and operation intents. Each child window checks its input owner. Worker polling precedes the UI checkpoint so a discarded frame restores editor and navigation values while preserving autonomous results. Text source and undo storage are shared across the checkpoint with copy-on-write edits. Native Close routes dirty comparisons through Save, Discard, or Cancel.
+
+The first list attempt found a test-only attribute and a mismatched action return. Later compile attempts found stale Rules fixture arguments, an embedded renderer argument, and the pane setting reference moved with Binary polling. Those attempts ran no tests. The first runtime subset passed 11/12, and the expanded run passed 13/14 (SHA-256 8E0780A874CED45BA9B342A5AF4D5A711AEAAE3706E1B0D8F0EF13EB266F2076). The failing round-trip fixture installed its held operation before binding scan roots, so the initial poll cancelled it. The corrected fixture binds both roots, clicks the enabled Pop Out and Dock controls, and proves that the same uncancelled operation receives its terminal event while the launcher is hidden. Independent review cleared the final owner and rollback corrections.
+
+Set `$f` to the trimmed contents of `r02-m2-c2-filter-8.txt` in the ignored recovery evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched three (SHA-256 35207F2842D1413CEFF5AD4C4B68C0EAF52D85673E270F358841DF272239DDC6). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 3/3 with 7460 skipped (SHA-256 4A71EDB994737D23C9FBFEEEFC3E8AF3AACDEA52DF5E98F21EB93BE94608FEE5). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 1B94C94C99B4850C86AD9997FB0BF35D76A30423DD020DCE8177B1246B754972). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/diff_dialog/`, `src/diff/{model,text_file}.rs`, and `src/gui/{command_host,mod,render}.rs`. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.3 Batch Rename and Search & Replace on the same branch.
+
+### R02/M2-C.3a — Batch Rename
+
+The Batch Renamer retains its scan ticket, verified snapshot, selected entries, rule draft, preview, frozen confirmation and coordinator across docked, embedded fallback, and native Immediate presentations. A retained owner and ROOT pass authorize scan, Apply, Undo, cancellation, picker, and close commands. Interaction rollback shares the verified preview and row caches and leaves the live ticket with the dialog. The native picker uses the verified active HWND. The launcher continues polling the coordinator while hidden. The exact confirmation layer owns input and Jump Mode in its viewport, and keyboard close respects panel pinning.
+
+The first list exposed a viewport bootstrap array length mismatch (SHA-256 1B23CC882315A0C048F2EE1C97EC674E0AFB96800082D1D01212FE58BF0EF2C6) and ran no tests. After correction, nine tests passed. The final list matched ten and all ten passed with 7457 skipped. The real-click round trip rejects a discarded Pop Out, detaches while the launcher is hidden, and docks the same verified preview. The detached confirmation test opens Apply, rejects a Confirm release on a discarded ROOT pass, checks the same pending confirmation and untouched files, then cancels from its native owner. The existing guarded transaction test still applies and undoes through the launcher. Independent review cleared the final close and confirmation ownership corrections.
+
+Set `$f` to the trimmed contents of `r02-m2-c3a-filter-3.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched ten (SHA-256 392586BA9F9C92967A395CADD53857AAB5C29418B7A42358ED60207DFAD0ECEC). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 10/10 (SHA-256 E2F36FAD7AE3EDBA198D125F878A634204ED2DB2FB932FAE00AEDF48DC92AEC1). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 93DFC688CCA190832F60EAA9D56C7BA8764C3E2BD47E75AE433B35D201F63953). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{batch_rename_dialog,batch_rename_window_host,mod,render}.rs` and `src/gui/jump_mode/ui.rs`. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.3b Search & Replace on the same branch.
+
+### R02/M2-C.3b — Search & Replace
+
+Search & Replace uses the same viewport shell as Batch Rename. Its search coordinator, candidate worker, guarded replacement executor, and current confirmation remain with the existing launcher and dialog owners. The retained frame applies form invalidation, selection recomputation, picker, and worker commands. A ready frozen replacement is submitted after accepted Close and Cancel handling, including with ROOT hidden. A deferred native Close keeps submission on hold. Pinned opens preserve the current popup anchors.
+
+The detached fixture clicks Pop Out, hides ROOT, retains the selected match and search generation, and opens the exact reviewed candidate. A discarded Confirm release leaves its source and receipt store untouched. The next accepted Confirm writes the disposable fixture and publishes one receipt while ROOT is hidden. Dock returns the same session and receipt. The selection includes the Batch Rename round-trip and confirmation tests because both tools now use the shared shell. Independent review cleared the deferred Close and pinned popup corrections.
+
+Set `$f` to the trimmed contents of `r02-m2-c3b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 11 (SHA-256 F2BDB0844E833FBB13FE3D5770671020D9908C34006C0C36661D7D2030D990BD). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 11/11 with 7459 skipped (SHA-256 2DC94959AC27953521B2CAB320C297976303063F7A5993D652B2D94092F7BA71). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 EDB9907871DAF8B4872B9C61DA1D445DC0DA3C0FCA92D2CB62627A99A63650C2). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{search_replace_dialog,file_operation_window_host,mod,render}.rs` and `src/gui/jump_mode/ui.rs`. The Batch Rename host module became the shared shell. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.4 Clipboard History, Snippets, and Clipboard Modify on the same branch.
+
+### R02/M2-C.4a — Clipboard History
+
+Clipboard History retains one browse/edit session and observes history versions in both presentations, including while the launcher is hidden. Retained ROOT and viewport passes authorize checked Save, Copy, and Remove. The existing expected-entry, edit, and version checks still guard storage. An inline removal uses the exact confirmation and entry identities, and its checked snapshot is shared across frames. The owned row context menu remains admitted during its sizing pass. Docked and native Close respect pinning, and a detached Save refreshes search without focusing ROOT.
+
+Early runs found a test-only fixture initializer missing the new menu observation field and ran no tests (SHA-256 16B3E2B22C82FF8EE349D62ECB0C1ABD5A9700E4DE7A9441D885F4BBC1FDCF13). Independent review identified the menu sizing handoff and editor Copy/Cut platform output. The corrected fixture clicks real controls, hides ROOT, checks that accepted keyboard Copy writes once to the fake backend, rejects a discarded Cut, Save and row Copy, and asserts that the detached viewport emits no direct clipboard command. It then clicks Remove from the row's context menu, Docks the same pending confirmation, and cancels without removing the entry.
+
+Set `$f` to the trimmed contents of `r02-m2-c4a-filter-1.txt` or `r02-m2-c4a-lifecycle-filter.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 11 and one respectively (11-case list SHA-256 5C1C52DDD7A7BB5BEAD4C32701EFC4CE39946464C50149823136A6A2B759BDCF). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 11/11 and 1/1 (SHA-256 149D9AA63E78CBF6D26E1B3CBDE92B5814CEE9883515D6EC3967B2B3FF5F3D9F and 93838393D3B4DCD43404E12AAE243EC80CC2D73AD629CAE9D6060A3B02791C9E). Scoped Rustfmt and `git diff --check` passed. A test-generated default clipboard modifiers file was preserved under ignored evidence.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 after restricting the host API to its GUI scope (SHA-256 E9209F7CF45CAA111905B7F5C8D70BA73CA4B3C8A2A65A97CAF893594666017C). Source scope is `src/gui/{clipboard_dialog,utility_window_host,command_host,universal_action_executor,mod,render}.rs` and `src/gui/jump_mode/ui.rs`. Clipboard History joins Batch Rename and Search & Replace in the renamed shared shell. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.4b Snippets on the same branch.
+
+### R02/M2-C.4b — Snippets
+
+Snippets retains its editor session, selected entry, filters, draft, privacy state and exact removal confirmation across Dock and Pop Out. The existing Preview session renders in the active editor viewport and has exclusive input while open. Return restores the same unsaved draft. Execution prompts and Paste Sequence preflight use their existing ROOT routes. Checked Save and Remove, Preview, clipboard effects and Reveal scrolling require retained host passes.
+
+The first two exact runs passed 9/11. The diagnostic run measured the owned Reveal response below the editor clip (SHA-256 42C967D86A6AA3F2BFEDAF7A3F9C56C1191B5B7DE0091CFFE1AB1A84EF5B60FB). Reveal moved beside Hide contents and the scroll update was staged for acceptance. The revealed grid's sizing pass now registers exact-owner Jump targets without applying focus intents or running input. Fixtures address the body at its retained scroll offset. Independent review cleared Preview layering, Input Type popup sizing, discarded Reveal and replay registration. The detached test clicks Edit, Reveal, Pop Out, Preview, Return, Save and Dock with the launcher hidden during the native leg. It rejects discarded Reveal, Return and Save and verifies exact Unicode draft persistence.
+
+Set `$f` to the trimmed contents of `r02-m2-c4b-filter-3.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 14 (SHA-256 36EBA65F65222A04CE6D50BCBD101E13B6C96E47564184E49FCF90631CE3CE4D). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 14/14 with 7460 skipped (SHA-256 25CB33D76A5E540577DB481C5BA21A20F50CDF6D17D15C44BBB7943EDCBEAB07). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 3B0C928A4BC216D9C80EAD70BFC7CA94F7C9783F10BF2D98872D72935E956D2D). Rustfmt parsed all eight touched Rust files and `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,render,snippet_dialog,snippet_prompt_dialog,universal_action_executor,utility_window_host}.rs` and `src/gui/jump_mode/ui.rs`. The detached fixture uses the immediate viewport test renderer. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.4c Clipboard Modify on the same branch.
+
+### R02/M2-C.4c — Clipboard Modify
+
+Clipboard Modify uses the shared host for all six sections. Dock and Pop Out retain the source, stage IDs, current section, drafts, and existing preview coordinator. Hidden ROOT continues polling the same preview and repaints its owner when it completes. Explicit section commands and the Settings action focus the active host. Pinned refresh preserves the selected section, and successful Apply and Close leaves a pinned session open.
+
+Preview changes, clipboard writes, catalog writes and close publish only after accepted ROOT and owner passes. A same-frame edit invalidates the prior preview before Apply can write. Overwrite requires the preview that raised the conflict and checks the reviewed clipboard against the service's current value. The detached fixture uses real Add Stage, Pop Out, Apply and Dock responses with an immediate viewport test renderer and fake clipboard. It preserves the pending preview ID while ROOT is hidden, rejects a discarded Apply release, writes the expected Unicode result once and checks cleanup on close.
+
+The accepted-base libtest run passed 10/10 (SHA-256 D82418A00C1AE513CC8568054595CCD0341CCFC376B1B76922DBB189320C07A2). Independent review cleared the popup Context lock, exact anchor through replay, same-frame edit invalidation and pin handling. The first exact run passed 14/14. Set `$f` to the trimmed contents of `r02-m2-c4c-filter-2.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 16 (SHA-256 7A05F9D4C56BAC2E55CD3356FAAA113A40B74D3EEA8040A3D45328AA105B102C). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 16/16 with 7462 skipped (SHA-256 400040A99BC66E34DB81F45D89E17B4B3A72E722B162FB263A40F797CE4402F8). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with the existing warnings (SHA-256 1162916A8432113ADF8C5DCD5AB19377E722C06C2ADBC50DE452814874EDF3A6). Rustfmt formatted the dialog and service and parsed all touched files. `git diff --check` passed. The test-generated default clipboard modifiers file was preserved under ignored evidence.
+
+Source scope is `src/clipboard_modify/clipboard.rs`, `src/gui/{clipboard_modify_dialog,command_host,mod,render,utility_window_host}.rs`, `src/gui/jump_mode/ui.rs` and `src/settings_editor/render.rs`. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.5 Paste Sequences on the same branch.
+
+### R02/M2-C.5 — Paste Sequences
+
+The shared host moves one editor session, draft, selection, invocation context and pending save receiver across Dock and Pop Out. Playback keeps its existing controller and input admission. Playback suspension hides the editor and preserves its presentation. Real Close ends the editor, while Cancel Editor also cancels the run. Editor, store, playback and picker effects require retained ROOT and owner passes. The picker drops old paint and target registrations on Insert while validating the source again before appending.
+
+Detached preflight uses the same prompt session and native Tab, Ctrl+Enter and Escape. It rejects competing prompts and runs. Closing the detached editor returns the live prompt to ROOT and preserves the pending autostart through editor reopen. Independent review cleared picker privacy, exact keyboard routing, pin handling, prompt ownership and one-shot authority.
+
+The accepted-base run passed 10/10 (SHA-256 F552355C87EBC424B817FF190DCC203FA5002AE293C48D0EC3F3F58F84EFBCAD). The first integrated selection passed 12/12. The detached fixture initially reached Next, then failed to start a second run because its fake input and cleanup clocks differed (SHA-256 873E78EE770DEC2B47B2DD8D7FBE271D19C051B4C538B5840F779B0E9103DD00). Both now use the same fake clock, including the normal clipboard settle interval. The real-control tests reject a discarded Run and prompt submit, verify Dock during the first run, and verify one paste per accepted action, a fresh generation on the second Run, and preflight continuation after Close.
+
+Set `$f` to the trimmed contents of `r02-m2-c5-filter-4.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 16 (SHA-256 D8D8C926DECBAA8673D06B102F9A7376875A4FEEDC64036F6F2832952D1E5EA4). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 16/16 with 7465 skipped (SHA-256 0FC3A596998EB69D1EB97F7201C1135F4AE1771F8EF66D86EA1D2CC127C6C4A3). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 C740AB2E1336D35A5516704040DF3109B6455AF2D853CD8DEFF5DC5A5E90FF71). Rustfmt formatted the dialog and prompt and parsed all seven touched files. `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,paste_sequence_dialog,render,snippet_prompt_dialog,utility_window_host}.rs` and `src/gui/jump_mode/ui.rs`. The new detached fixtures use the immediate viewport test renderer and fake playback platform. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.6a JSON Utility on the same branch.
+
+### R02/M2-C.6a — JSON Utility
+
+The shared host moves one document, tree projection, search state and worker between Dock and Pop Out. Explicit typed opens retain strict clipboard initialization and focus the active host. Pinned reopening keeps the current document. The worker wakes ROOT and ROOT can repaint the detached owner when a result is published. Retained actions gate edits, transformations, clipboard load and output. Tree output requires the current source generation and selected node. Copy Result keeps its strict parse fallback while projection is pending.
+
+Independent review cleared rollback of pending focus and reveal and retirement of old Jump targets before source or search generation changes. The detached fixture types Unicode JSON into the actual editor, searches while ROOT is hidden, clicks Next across two matches, rejects a discarded Copy Pointer release, writes `/other` once on acceptance, and Docks and closes the same session. The fixture uses the immediate viewport test renderer and a fake clipboard.
+
+The accepted-base run passed 10/10 (SHA-256 1C18BD92EE051F4483A0F93CFAD619D5246ABDE66A67006AB82911E4E79DC538). The initial list failed to compile because the new host session field was missing (SHA-256 0D51BF72F0C8756F04946B1128737876695E68A6EB71AD9DD733CC1FCB421F87). Set `$f` to the trimmed contents of `r02-m2-c6a-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 13 (SHA-256 14586502A2E2002A4173755372039E59F735C2843D1FFA57A59246C7BFE52AA9). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 12/13, including the detached fixture (SHA-256 164B451CD5FD47E6DE1367FA526837FE86EF431964D52569C1C71B5454CA2103). The rollback test now compares against its already-built projection and checks that the same snapshot remains. With `r02-m2-c6a-filter-2.txt` the exact list matched one and the targeted rerun passed 1/1 (SHA-256 8859BE103CB13B8DE6928B38F9DA9D6A28BA8288133101F8E71A14C44D441872). The correction only changed the test.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 C1BA11C716313020ABB6FA60FD9219C8EE048C256727E30F35D58E77A54C0F54). Rustfmt formatted the dialog and parsed all five touched files. `git diff --check` passed. Source scope is `src/gui/{json_utility_dialog,mod,render,utility_window_host}.rs` and `src/gui/jump_mode/ui.rs`. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.6b XML Toolkit on the same branch.
+
+### R02/M2-C.6b — XML Toolkit
+
+The XML Toolkit keeps its native-first command route and embedded fallback. Dock and Pop Out move the same editor, COM session, file worker, and frozen overwrite request. The root runtime continues polling while the launcher is hidden. The retained ROOT and owner passes gate source edits, clipboard effects, file pickers, overwrite actions, and host changes. Windows pickers use the verified owner HWND. A deferred OS close remains scoped to the open host and is cleared if the panel becomes pinned.
+
+Independent review found that an immediate child replay could otherwise lend its provenance to actions from a discarded first pass. The correction keeps the originating provenance and restores the draft before the replay draws. Review also checked docked Escape, native close after replay, pinning, and the Windows picker boundary. Re-review cleared the corrections.
+
+The accepted-base run passed 11/11 (SHA-256 2741DF816800F730F65AFDB1FB980EA4BC7A14FB44100C274D17318D99F25E66). Set `$f` to the trimmed contents of `r02-m2-c6b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 13 (SHA-256 AC7909D054E06959A85D3E6FA11BCAE59107B97A69FF26C7C410975DCD78731C). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 13/13 with 7472 skipped (SHA-256 C7B1FC02CB50170575C4B78C0C7B2189013CC79452AE0EF23513A238BD4BDB0A). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 66363EF6D685248E08EB99D89E778DB2BA504B979D4D6EC5E2CA602DAD12749D). Rustfmt formatted the XML dialog and parsed all four touched source files. `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,render,xml_toolkit_dialog}.rs`. The host fixture uses an immediate viewport test renderer, real XML engine session, and temporary file. It checks both discard paths, an accepted replacement, Dock return, and a deferred native close event. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.6c Regex Tester on the same branch.
+
+### R02/M2-C.6c — Regex Tester
+
+Regex Tester keeps the existing native-first command, fixed viewport, and embedded fallback. Dock and Pop Out retain the same authored draft, match and case revisions, selected result, evaluation deadlines, and persistence owners. The runtime advances evaluation and records history only from committed revisions. Accepted constructor edits finish through their originating viewport so they retain the existing Undo behavior.
+
+The root and owner must both retain the originating pass before clipboard, case, substitution, preset, or history effects run. Independent review found three corrections. Rejected preset edits now restore the name, selection and optional buffer settings. Accepted navigation reveals the new match after dispatch. Clipboard actions verify the match and revision that the visible action referred to. Re-review cleared those corrections and the constructor handoff.
+
+The accepted-base run passed 11/11 (SHA-256 D7008EE22BE64CDEABB33608783B49D15978D4E836AC4C29076CB480901149FB). Set `$f` to the trimmed contents of `r02-m2-c6c-filter-3.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 17 (SHA-256 61DA04A9039859BC5D3DE970237EFFF2FD4BDD2FCEEB097126F9A57377589CDB). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 17/17 with 7473 skipped (SHA-256 A6C065CB3149969D28B49BB7998FC2C8B55431B6C9E2B30722A14D2B52C75A50). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 2F699DB49389F5193B7E2522F3232DF182AC91194977B5345CABE763B49E0C4E), including a separate build with `--features qa-framebuffer-capture` (SHA-256 C6E6D6689D6753375D9093F953FB3A224041CD29AB64C6953C072790B5DBB966). Rustfmt parsed all eight touched source files and `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,render,regex_tester_dialog}.rs` and `src/gui/regex_tester_dialog/{presets,substitution,test_cases,visualization}.rs`. The immediate viewport test renderer exercises native and docked controls, hidden ROOT, discarded clipboard actions, and one accepted copy. A separate fixture checks the persisted preset after discarded Include clicks. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.6d Table Utility on the same branch.
+
+### R02/M2-C.6d — Table Utility and CSV Viewer
+
+The profiles keep their original command routes and share one Table Utility session. Dock and Pop Out preserve the resident or file-backed source, page worker, view and selection revisions, and pending export receipt. Worker polling continues while the launcher is hidden. Accepted changes are applied before publishing an earlier export, so an intervening source edit, selection change or close can revoke it. Windows pickers use the verified active owner HWND and the existing atomic export safeguards.
+
+Independent review found that the detached ComboBox must validate a Background parent without expecting a Middle layer. It also found that replay scopes must be registration-only, keyboard close must use the exact focused owner, and HWND lookup must be Windows-gated. The first focused run passed 10/12 (SHA-256 7B532743EF2AD25249464DA4CEBB1065DDCE8A563A2845BA11AF48B8C39DF6E2). The overwrite fixture now explicitly prepares comma-delimited data after exercising the real TSV choice. Retained focus raises the current overwrite window when it is pending. Re-review cleared the corrections.
+
+The accepted-base run passed 9/9 (SHA-256 D6D06A585999B28B2ADC0412CBEF64E6AC96D68FF3CE862A208E3D5DA99224CF). Set `$f` to the trimmed contents of `r02-m2-c6d-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 12 (SHA-256 88CD416917CFC7932A993ECA2F84D55AF686D9343C16FB0FB2F964CFEA700270). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 12/12 with 7481 skipped (SHA-256 C3CA824ED6913CA8A06337D68BC3091F6ED0BB84E7228F56AEA377DF3BD7A36E). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 42623B9EA0FCA626D2F74DC2D9BCA86BFEE2931FCBEB0E829FE1BD1B39344625). Rustfmt formatted the Table dialog and parsed all four touched source files. `git diff --check` passed.
+
+Source scope is `src/gui/{mod,render,table_utility_dialog}.rs` and test-only worker gate access in `src/table_utility_session.rs`. The immediate viewport fixtures hold a real file page through a hidden-launcher move, exercise the detached delimiter popup, keep an overwrite receipt through Dock and Pop Out, and verify that only the accepted Replace changes the temporary file. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.7a Timer and alarm authoring on the same branch.
+
+### R02/M2-C.7a — Timer and alarm authoring
+
+Create Timer and Set Alarm share one retained authoring dialog. Dock and Pop Out preserve the duration or alarm draft, name, sound and validation feedback while the launcher is hidden. The two typed open commands retain their explicit mode resets. A mode reset retires the preceding native geometry identity and invalidates its Jump targets. Retained completion submits the typed timer or alarm and previews the chosen sound only from the accepted ROOT and owner passes. Cancel and presentation moves schedule nothing. Alarm submission still resolves the current local time in the scheduler.
+
+Independent review cleared the owned Sound popup and sizing, exact native and embedded keyboard gates, registration-only replays, application modal gates, pinned focus and successful submission behavior, and geometry retirement. The first QA-feature run passed 10/11 (SHA-256 D2B00287DE68ECD72A8403F74E1163CBB9696B9F1360CDD3BC0A5588E0DD5EFC). The combined popup test overflowed the test thread stack with two launcher instances. Its scenarios now run as separate tests and retain their original assertions.
+
+The accepted-base default build passed 7/7 (SHA-256 D4D9DC9587E77B2BD4B75DA19914893E92132476D68EF37A7884857CFE93CB21). Set `$f` to the trimmed contents of `r02-m2-c7a-filter-2.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --features qa-framebuffer-capture -E $f` matched 13 (SHA-256 DD9B4E163DB63F2882A6B6D0421A386B63A8967971B9EA969DDA0AF728EE6417). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --features qa-framebuffer-capture --no-fail-fast -E $f` passed 13/13 with 7539 skipped (SHA-256 4B972246B49D693301EF5F3E80539C6923326210F60EEEB3798B6FAF9338E87D). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 C273E110007875424B93B26F7CA5EA9716DE014B7447744B9CF95AE4166732A2). Rustfmt formatted the Timer dialog and parsed all five touched source files. `git diff --check` passed.
+
+Source scope is `src/gui/{command_host,mod,render,timer_dialog}.rs` and `src/gui/jump_mode/ui.rs`. The immediate viewport fixtures exercise both authoring modes, hidden launcher edits, Dock, Cancel, the detached Sound popup, and real Start and Play controls with injected scheduler and audio callbacks. Discarding either the ROOT or child pass produces zero calls, and fresh accepted actions produce one call each. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.7b Calendar on the same branch.
+
+### R02/M2-C.7b — Calendar family
+
+Calendar, Event Details and Calendar Event have independent retained hosts. Dock and Pop Out preserve their current view, captured occurrence or authoring draft. A detached parent opens a fresh child in the same presentation while ROOT is hidden. An already-open child retains its host. Completion validates all three originating ROOT and owner frames before dispatching child opens, so an older frame cannot replace a newly opened draft. Existing command routes and Date & Time Studio's refusal to overwrite an open editor remain intact.
+
+Save, Duplicate, Delete, Snooze, clipboard output, close and presentation changes require accepted frames. Update and split transactions reject removed or changed source events. Details validates the captured occurrence against the current schedule. Popup options have their own input gates, and exact epoch, viewport and parent binding allows recovery after a disabled frame. Retargeting retires the previous popup and native geometry. Independent review cleared the transaction, popup and explicit ROOT repaint corrections.
+
+The accepted-base libtest selection passed 6/6 (SHA-256 FEE4C029A4FAC13FD44C11457D0BC99168054BAAFBD3268FF75C58EC1B4716BB). The first two exact lists failed compilation and ran no tests. Their missing import, generic error inference and missing Details popup method were corrected. Set `$f` to the trimmed contents of `r02-m2-c7b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched nine (SHA-256 EAB27797A3EA9C2F19D67C23827A9F9623C3FE49C72FC0939FE90D305BA3938B). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 8/9 with 7490 skipped (SHA-256 136A4849A4BBE35A83535562E8E810229231D781B47A44C10B8D361B9DAD0296). The real-control fixture sampled Calendar's disabled controls from the frame that hid ROOT. It now renders a focused Calendar frame before the agenda click and checks that Enter in Details cannot activate Calendar behind it. With `r02-m2-c7b-filter-4.txt`, the exact list matched one and the corrected test passed 1/1 (SHA-256 5BED7CAF5D942D6A05A76F606A91A91FAB0347C1E308A77655846B87E3E1A516). Its assertions still require enabled controls with visible centers.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 E1EF908A8FB8CC13A4C232D4AC89D3F53FAC377CC94171C4E439D80B455F2C21). Scoped Rustfmt and `git diff --check` passed. Source scope is `src/gui/{calendar_popover,calendar_event_details,calendar_event_editor,calendar_window_host,mod,render}.rs` and crate visibility for the existing `snooze_event_at` transaction in `src/plugins/calendar.rs`. The immediate viewport fixture uses an isolated events file and real agenda, Edit, Save, Delete, Dock and Pop Out controls. It preserves an occurrence after Calendar navigation and rejects writes from discarded ROOT and child passes. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.7c Date & Time Studio on the same branch.
+
+### R02/M2-C.7c — Date & Time Studio
+
+This advances original C01/M4-D and its C.2 Time host row. One Studio draft, frozen reference, explicit fold choices and selected schedule occurrence move between Dock and Pop Out. The same four bodies render in both presentations. Hidden ROOT continues the current owner. The existing geometry key and window IDs remain in use, with shared sizing and Reset for docked, embedded and native windows.
+
+Accepted effects require the exact ROOT and owner passes, session and host generation. Native widget focus is deferred to the matching owner callback and consumed after retention. Host changes rearm focus for the new owner. Popup options have separate input gates, and retirement preserves their exact viewport and ID until cleanup can run in that viewport. Generic ROOT keyboard close defers to Studio's retained path. Programmatic close remains latched across a discarded frame and works with collapsed contents. Prepare carries the accepted source presentation and opens a fresh unsaved Calendar editor there. The existing whole-minute, machine-local conversion and already-open-editor guard remain in the shared helper.
+
+Independent review cleared focus, shared sizing, popup retirement, the ROOT close wrapper and test adapter consolidation. Direct dialog tests now call the production host transaction through thin adapters. The old parallel RootEffects implementation was removed. The discarded Copy test now requests discard after drawing and checks retained completion, followed by an accepted real-click retry.
+
+The accepted-base exact Nextest selection passed 8/8 (SHA-256 D9F4116F86ADE0F1C2E13F306CA63D8CEB9A3D9A9983A6D29270FB875CAA1010). With `r02-m2-c7c-filter-1.txt`, the first integrated run passed 9/10. The new host fixture used a nonexistent observation name for the schedule date field. It now uses the actual `schedule_first_date_input` response and preserves the focus assertion. The second run passed 10/10. After the direct tests migrated to the hosted path, run 3 passed 9/10 with 7491 skipped (SHA-256 4148BB628F0E4F34B5F255D496C6844110961E2ECC45CB56B45879190C028509). The titlebar close correctly closed the window, but the observation was stale on the following closed frame. Observation reset now precedes that early return. With `r02-m2-c7c-filter-4.txt`, the corrected titlebar case passed 1/1 with 7500 skipped (SHA-256 A4D2C8E6546DF69934A44FEC125CAFEFFC080F4F7B0493DC8E5DEC4DD8F54B90).
+
+Set `$f` to the trimmed filter file. The exact list command is `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f`, and the run command is `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`. List 3 matched ten (SHA-256 BAF6E4207C550C8515057F3BDC3D97DE7CF42E5F3A23CD51614CA8DB882B6069); list 4 matched one. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 E6D2FD3A051A972DB58EAB082710B612D9F6F5F348A207EBD8141D3F1999AE1A). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{date_time_studio_dialog,mod,render}.rs`. The immediate viewport fixtures click real fields, schedule rows, host controls, the cadence popup, Copy and Prepare. They preserve the draft, reference and selected occurrence, keep ROOT hidden during native actions, reject ROOT and child discards, and verify an accepted Prepare opens a detached editor exactly once. Native N4 remains `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-C.8a Image Compare on the same branch.
+
+### R02/M2-C.8a — Image Compare
+
+This advances original C01/M4-D and the C.2 Image Compare host row. Dock and Pop Out retain the same comparison session, presentation worker, input IDs and revisions, pending result, textures, wipe, zoom and pan. Runtime collection continues with ROOT hidden. File and clipboard input requests, camera changes, close and host transitions require the exact retained ROOT and owner passes, session, host and current input/presentation generation. File pickers use the verified owner HWND and recheck it and the captured identities after return.
+
+Root and native Jump expose the actual Pop Out and Dock controls. Targets include the dialog lifetime, host generation and domain revision. Replay registration cannot apply directives. Ordinary input uses the exact owner independently of Jump configuration changes, while transition gating remains on the ROOT Jump scope. The header remains usable while a reopened image session is still closed/retiring, with image actions disabled until ready. Independent review cleared these boundaries, the picker, camera rollback and final clipboard fence.
+
+The active native painter owns its texture-retirement fence. Queued callbacks capture an atomic owner generation, so callbacks queued before a move cannot acknowledge the next owner. CPU image references must drain and two actual paint callbacks must occur before the lease is released. A hidden ROOT UI pass is not a paint. After actual hidden close, holding a retired lease until a future real paint preserves this rule. The test fixture verifies that logical frames cannot release it. No native closing phase or vendor change was added.
+
+Numeric slider editing uses TextEdit and can emit platform CopyText. The render now captures only its appended CopyText commands, preserves other platform output, and carries accepted copies through the same frame receipt. Close and host moves suppress publication. Main and standalone smoke completion publish accepted copies. The actual numeric Zoom test tabs into TextEdit, selects its value and copies it. The immediate viewport fixture asserts no CopyText reaches child platform output, rejects ROOT and child discard, and observes one accepted numeric copy.
+
+The accepted-base exact Nextest selection passed 5/5 (SHA-256 B7985D1C7C835DCC1094F60E63D5A29E57D0104049C0D4D702CF860C2F374C73). The first exact list exited 101 because the reused retirement observer was enabled only for smoke builds, and ran no tests. Its test configuration was corrected. With `r02-m2-c8a-filter-1.txt`, list 2 matched eight and run 2 passed 7/8 with 7496 skipped (SHA-256 7FCFF7E718435C2A7CB516853196CB0E2F74F172770F90FBF24E4976A8BB0283). The existing ROOT Jump test found that disabling Jump suppressed keyboard close for one frame. With `r02-m2-c8a-filter-3.txt`, the corrected existing case and new closed-session host-control case passed 2/2 (SHA-256 23B8712A8408DE341BBD4896BD914D52C8D0A2E6961068B065FE8CCCB5491DF4). After the numeric clipboard correction, `r02-m2-c8a-filter-4.txt` matched three. Numeric Copy, detached input/close and the ROOT Jump regression passed 3/3 with 7503 skipped (SHA-256 223F8BE676DDAA6D89CF03867F221B3E0A14FA75BB830B7C4EBC4DB54882E3C5). Ten distinct affected cases have passing evidence.
+
+Set `$f` to the trimmed filter file. The commands are `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` and `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`. Final list 4 SHA-256 is D9AEC745890B06FA4A6986C5129A6679843BFFCFF62A344A0553BE98737A5612. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 FF1832F1DF93284C3D497C16053A81E48BF0EE1A57E393BE450C5DC010C49890). The separate `cargo check --locked --offline -p multi_launcher --lib --bin image_compare_smoke --profile fast-dev --features dev-smoke-binaries` exited 0 (SHA-256 54EC90E85681E06A3979644A91DF738A66DC540EE33BF42F5AE30232CC551BD2). Existing warnings remain. Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{image_compare_dialog,image_compare_smoke,mod,render}.rs`, including reuse of the viewport test helper. Tests use generated temporary PNG/raw images and a released-on-drop hold on the presentation worker to prove an in-flight job survives the actual host moves. The same fixture checks hidden-owner updates, camera preservation, current native Jump, rejected Open/Paste and keyboard close, and safe lease retention without a renderer acknowledgement. The smoke fixture was compiled, with native HWND/GPU/clipboard interaction left `IMPLEMENTED_USER_VALIDATION_PENDING` under N4. Next is R02/M2-C.8b Duplicate Finder on the same branch.
+
+### R02/M2-C.8b — Duplicate Finder
+
+This advances original C01/M4-D and the C.2 Duplicate Finder host row. Dock and Pop Out preserve one discovery session, worker, selected roots, editor text, snapshot and result cache. Hidden ROOT continues worker collection and detached controls. Cancel invalidates publication while existing I/O drains; restart and reopen retain the existing retirement protocol. The Activity Center attachment remains on the same session. No deletion or result-selection feature was added.
+
+Root edits, picker requests, Start, Cancel, verified Open/Reveal/Copy Paths, clipboard output, close and host moves require the retained ROOT and exact owner passes plus current host/session identities. Ordered Start reads roots after earlier accepted edits. Pickers use the verified owner HWND and recheck identity and revision on return. File actions retain their originating snapshot and exact alias proof and revalidate the real file before the sink. Editor CopyText is captured from this body alone and published only after completion. Replayed Jump scopes are registration-only, and ROOT keyboard close respects active Jump ownership.
+
+The accepted-base exact subset matched five and passed 4/5 (baseline run SHA-256 134BEB82487479E0AC32520C1DDC9C572FEC3282D952CDB645BD3D8AB4062DE2). The response-flow test timed out waiting for its first content-read gate. Diagnostic run 1 showed the real Start admitted generation 1, but CreateFileW could not open ancestor C:\Users\Jay under restricted execution (AccessDenied5; SHA-256 E513269574C97CDD8D8F37E31F3ED2A6C7FFF827E415CBDA8EE824BAC7706528). The same isolated test passed 1/1 with native filesystem access (SHA-256 BA08A4F886A2DDF8F2F59C23780F1D81AFEE96A4B589DFBF5F67F1B06E947C7A). Scanner admission and real-click assertions were preserved. This was an execution permission boundary, not an application scan failure. Two pre-final incorrectly scoped compile/list invocations were interrupted and drained before listing or running tests; they are diagnostic only.
+
+Independent review cleared the retained host, picker/proof, clipboard, hidden-root and retirement paths after correcting replay registration, ordered root intents and the active ROOT Jump close gate. Final test review strengthened the changed-file test to require an enabled visible Open and an explicit new proof-refusal message, so a missed click cannot satisfy the assertion.
+
+Set `$f` to the trimmed contents of `r02-m2-c8b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched eight (SHA-256 AF8F7669C45BCAD26DDB377B3C54E937C530231917C3845E513D8ABF24493C48). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`, with native filesystem access for disposable fixtures, passed 8/8 with 7501 skipped (SHA-256 0DBE6174FE5C569E8642462B6D2221A07A3CF6A821E14D1E8D4C472403105580). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 F2D525A262039D8770D149A5066706014F2BF354E429BE18F33B412E294F4D4B). The separate `cargo check --locked --offline -p multi_launcher --lib --bin duplicate_finder_smoke --profile fast-dev --features dev-smoke-binaries` exited 0 (SHA-256 2727E614E20ACAA2DE81A51CFC3E8A314B7388237FF9767A56F5CBE29572BC38). Existing Note Panel, Table Utility and dependency warnings remain. Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{duplicate_finder_dialog,duplicate_finder_smoke,mod,render}.rs`. New app fixtures use the immediate viewport renderer and generated disposable files. They hold a real scan across Pop Out and hidden ROOT, Cancel, drain and restart, preserve the result snapshot through Dock, reject ROOT/child picker, Open, editor CopyText and close effects, accept one Open and one exact text copy, and refuse a file changed after discovery. The alias fixture also refuses an old originating snapshot even with an accepting proof sink. These are CPU viewport and native file-proof tests; HWND/native user interaction remains `IMPLEMENTED_USER_VALIDATION_PENDING` under N4. Next is R02/M2-C.8c ZIP Extractor on the same branch.
+
+### R02/M2-C.8c — ZIP Extractor
+
+This completes the original C.2 file/image host group within C01/M4-D. One retained ZIP dialog moves between Dock and Pop Out while ArchiveSession remains launcher-owned. Source and destination PathBuf authority, physical-entry selection, filter/sort, catalog, preview token and confirmation state survive host moves. Background inspection, preview preparation and extraction retain the existing worker and closed/draining behavior. Opening still starts no I/O. Preview holds capabilities and creates no output; session.confirm with the exact current token remains the sole extraction admission.
+
+Ordered UI actions, picker requests, editor CopyText, close and presentation changes require retained ROOT and exact owner passes, current lifetime/host, and source/destination/selection revisions. The two pickers use the verified owner HWND and recheck captured authority after returning. Obsolete unparented picker implementations were removed. Domain path/reparse, Stored-only, output-limit and no-overwrite policies were unchanged. Native Jump admission includes ZIP, and ROOT/native target generations include source/catalog and preview-token identity. Hidden rendering, geometry/Reset, exact ordinary-input ownership, pin suppression and explicit native focus use the shared host paths.
+
+The accepted-base exact subset matched six and passed 6/6 (SHA-256 E56B106A745E6AA8668FAEA1A509EC850A4D3F7A3AB4322F94363342985D8363). The initial scoped integration list exited 101 with two E0308 bootstrap array-size errors and ran no tests; the repaint helper signature was corrected. A subsequent diagnostic list matched the one new workflow fixture before final assertion additions. Independent review identified and cleared hidden draw routes, ROOT navigation/retained close, pinned body Close, focus admission and transfer, token-aware Jump freshness, replay registration, and stale unparented picker code. Final review found no material remaining issue.
+
+Set `$f` to the trimmed contents of `r02-m2-c8c-filter-1.txt` in the ignored recovery evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched seven (SHA-256 9183F00630121F6A3BD6E9D2AFF6196B8CDCCD2B8489AC03DAD6178BB754D04B). After scoped formatting, `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`, with native filesystem access to disposable archives/destinations, passed 7/7 with 7503 skipped (SHA-256 7406EFBB3B7875EC469F87F135DC2E4C2083F270246B303E6C48CB4B7FC2D613). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (SHA-256 9A582B425EE8F5264AC11E0ADBA9D4920D0095B4FAE5E052845A05D4905EB540). Existing Note Panel, Table Utility and dependency warnings remain. Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{zip_extractor_dialog,mod,render}.rs` and `src/gui/jump_mode/ui.rs`. The actual-app CPU viewport fixture opens through the typed route, uses real picker responses with injected disposable Stored ZIP/destination paths, verifies no-output Preview, preserves its token through Pop Out and hidden ROOT, edits the filter, invalidates selection and regenerates preview, rejects ROOT/child destination picker, CopyText, selection and Confirm actions, accepts one exact text copy and one selected file output, Docks and closes. Existing tests retain duplicate-name physical-entry, held-capability and stale-token coverage. Native HWND/actual desktop interaction remains `IMPLEMENTED_USER_VALIDATION_PENDING` under N4. Next is R02/M2-D.1 Folder Size Analyzer on the same branch; accepted reference hosts are not repeated.
+
+### R02/M2-D.1 — Folder Size Analyzer
+
+This advances original C05/ID 88 and the C.2 Folder Size host row. Dock and Pop Out retain one FolderSizeSession, root and recursion choice, projection, result generation, selected row and drill location. Hidden ROOT continues native rendering and session collection. Local Scan, Refresh, Cancel, picker, row actions, Copy, close and host moves require the exact retained ROOT and owner passes plus dialog lifetime/host. Row effects retain the originating projection so progressive publication cannot reinterpret an old row index. Actual close preserves cancellation and selection cleanup; no scan algorithm changed.
+
+Incoming File Search prefill retains its own already-validated ROOT provenance, independently of the receiver's viewport pass. Open, Choose and prefill remain selection-only. Existing native owners receive focus rather than being replaced. Retained Close wins over a same-frame prefill FocusPanel, and a host move suppresses other local effects in that transaction. Picker parent HWND, selected root/session state, host and lifetime are rechecked after return. Shared geometry/Reset, explicit focus, pin and keyboard-close gates remain presentation-aware.
+
+Native selectable labels can generate CopyText after the body returns. A Folder Size output-hook mailbox captures only the reserved native viewport's commands and carries the original ROOT/owner receipt through accepted completion. Blocked/replay output, close and host moves cannot publish it; ROOT and unrelated commands remain untouched. Copy success feedback is generic because label selection may copy only part of a path.
+
+The accepted-base exact subset matched six and passed 6/6 (SHA-256 C9119E3E970367F68679382DC3C208443D604E4BFE9D0883EB7E340D4A6317CC). An initial integration list matched one before the final hook and fixtures. With `r02-m2-d1-filter-1.txt`, the exact list matched ten (SHA-256 6B0B42A6C6E2049F13EC821E8B79D952675B6C576E2A70A3C75A85EC47AAE5FD); runtime passed 8/10 with 7504 skipped (SHA-256 CDC52B962EF028AA7314F7B4B9665EC647DCDFFC8C8B4C530E53FED56D8D53FC). The two failures were actual Close after Dock and a genuine late native label CopyText leak caught before platform delivery. egui restores the parent viewport before output_hook, so lookup by ctx.viewport_id missed the child. The hook now matches the captured ending child pass/frame counters; the outer ROOT output cannot match after child frame advancement. Docked pending focus is admitted only when no competing Middle layer exists, with application/modal/popup/focused-layer gates intact. Independent re-review cleared both corrections.
+
+With `r02-m2-d1-filter-2.txt`, only the two failed cases ran and passed 2/2 with 7512 skipped (SHA-256 8ECFCE8B27A5E4E6576822676ECB6ED5AD6DE9C261BA0412BAC362094B34EA6C); this invocation used Nextest's default fail-fast setting and both selected cases executed. Ten distinct affected cases have passing evidence. Set `$f` to the trimmed filter file. The established commands are `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` and `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`; runtime used native filesystem access for disposable scan fixtures. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. A test-only label response binding warning was corrected, and the final repeat exited 0 with existing warnings (SHA-256 F05233B881CF42B981A1148D1C5869E82290E1E7AB9CC70780264D4DE5D83BB7). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{folder_size_dialog,mod,render}.rs`. The CPU viewport fixtures click actual Choose, recursion, Scan, selection/drill, Copy Path, host and Close controls; preserve result Arc, generation and navigation state through hidden ROOT and Dock; reject ROOT/child action effects; and use actual pointer-drag label selection plus Copy to prove late-output rejection and one accepted nonempty copy. The workflow does not deterministically hold a busy worker across a host move; no such proof is claimed. Native focus/picker interaction and full progressive/cancel/refresh desktop behavior remain `IMPLEMENTED_USER_VALIDATION_PENDING` under N9 (and representative host N4). Next is R02/M2-D.2 File Lock Inspector on the same branch.
+
+### R02/M2-D.2 — File Lock Inspector
+
+This advances original C06/ID 89 and the C.2 File Lock host row. One FileLockSession, selected/submitted path, inspection generation, selected PID/creation identity, feedback and reveal-validation worker move between Dock and Pop Out. Incoming typed Open and File Search prefill retain separate ROOT authority; Open, Choose and prefill still select without inspecting. Local actions require exact retained owner/ROOT, lifetime and host. Close wins over queued opens/prefills; host moves suppress competing local effects. Picker ownership and selected/submitted state are rechecked after return. Hidden ROOT continues inspection/reveal collection and the native owner; geometry/Reset, focus, pin and keyboard close remain presentation-aware.
+
+Reveal still validates the exact inspection generation, PID, creation time and executable path, waits for the worker's join receipt, and retains a held executable capability. A move preserves valid ready state but retires its old display receipt. Only a fresh retained current owner/ROOT receipt can dispatch it once; app dispatch keeps its final request and held-process validation. Path/inspection/process changes, cancel and close continue invalidation and retirement lockout. Successful empty results, metadata gaps, stale state and failures retain distinct feedback. No unlocking or process-termination feature was added.
+
+Folder Size's late-copy implementation was extracted into one HostedCopyCapture plugin in utility_host.rs. Both tools retain their original owner stamps and ending-child pass/frame matching, separate viewport mailboxes, ROOT isolation and close/move suppression. File Lock label-copy feedback is neutral while explicit inspection snapshot-copy feedback remains unchanged. The existing Folder Size actual label-copy fixture passed against the shared helper.
+
+The initial accepted-tip list matched five. Runtime passed 3/5 and two fixtures aborted with stack overflow (SHA-256 20FDDA7BCF7C8A19A47C1A0DEA3D012B6BC67FA2BADD4BD372C59E139C10C7AD). Each failing function constructed two full launcher instances. Eight added lines split the independent retained/discarded scenarios into separate one-app tests, preserving every assertion and without changing production code or stack settings. Before product edits, the updated exact baseline matched seven and passed 7/7 (SHA-256 977E46D8A4FCBC396685CBC67ED846C10A2A7B7A2EF9178BB1AD12E48029DAF6). A later diagnostic compile listed four new/shared cases. Final test review strengthened the ready-Reveal oracle: release its hold before the real Dock release, require ShowRoot without Reveal and preserved ready capability, reject a discarded ROOT pass, then require exactly one Reveal from the next accepted ROOT pass. Independent review cleared production and the final oracle.
+
+Set `$f` to the trimmed contents of `r02-m2-d2-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched eleven (SHA-256 6E110A5BAF9575254665D000A9E549FCC5B735405F86C5FF41A80907AB1B6138). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`, with native filesystem access for disposable fixtures, passed 11/11 with 7508 skipped (SHA-256 E0193CF7B16F088B18FD54A8E09277D7AC70B4F5ADF6FC466DEFD22C2175BA6F). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 BE6075F5E25CB50AD53E15C4CB05B4D4E2477CAD8B3AC8A9A6E675C25018D027). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{file_lock_dialog,folder_size_dialog,utility_host,mod,render}.rs`. New CPU viewport fixtures use injected inspection/validation jobs, a deterministically held inspection, actual Choose/Inspect/process/Copy/Reveal/host/Close responses, and actual pointer-drag label selection plus Copy. They preserve inspection and selection through hidden ROOT, test ready Reveal across Dock, reject ROOT/child picker, inspection, copy, reveal and close effects, and accept current effects once. These fixtures do not constitute native Restart Manager, HWND or Explorer-user proof. Full N10 and representative N4 remain `IMPLEMENTED_USER_VALIDATION_PENDING`. Next is R02/M2-D.3 Recorder setup on the same branch; specialized selector/countdown/compact-controller surfaces remain separate.
+
+### R02/M2-D.3 — Recorder setup
+
+This advances original C07/ID 119 and the ordinary Recorder setup C.2 host row. One RecordingDialogState retains selection, setup epoch, selection revision, preview, target enumeration and region state through Dock and Pop Out. Setup uses the existing recording-setup-window identity and now-registered screen-recording utility key. Idle detached setup remains renderable with ROOT hidden, with shared geometry/Reset and explicit native focus. Closing setup retires its selector/UI while leaving an active RecordingController job and specialized compact controller independent.
+
+Setup selections and actions carry exact ROOT/owner/setup-lifetime/host receipts. Receipt-less setup commands are rejected. Compact Stop/Discard keeps its original viewport receipt and recording-generation checks. Same-pass selection revision adjustment is preserved. Close/Host suppress external setup effects, owned popup Escape dismisses the popup first, and Source/Display/Window/Format/Scale controls remain in the active owner. The accepted Start freezes a RecordingRequest, verifies its save chooser HWND and setup/host/revision before and after return, then retains the existing can_start, reciprocal capture-conflict and target-validity checks before the sole controller.prepare admission. Writer-before-countdown and retirement remain controller-owned.
+
+Immediate numeric CopyText is captured only from setup's own body output and staged through its receipt, preserving unrelated ROOT/compact commands. The shared native hook separately captures late label selection output. Close, move, ROOT discard and owner discard cannot publish those setup copies.
+
+The accepted-base exact subset matched four and passed 4/4 (SHA-256 4024566A584A53E6032A272A70BD9D3AE2E5F1076D3600D2830B3EC93AC932E4). The first diagnostic list exited 101 with one E0308 ShowRoot arm return-type error and ran no tests; its returned visibility revision is now discarded. The corrected diagnostic listed the two new fixtures before final test additions. Independent review cleared duplicate hidden-demand naming, popup-first ROOT Escape, the numeric clipboard fence, setup/compact independence and chooser guards. Test review added actual native format choice and docked popup Escape, corrected the fixture to the existing MP4 default 30 FPS, and strengthened native label Copy to exactly one nonempty result.
+
+Set `$f` to the trimmed contents of `r02-m2-d3-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched six (SHA-256 52D8583434A8EF129393533397B14E263D79457B863B5575287BC8BCBE3DDEDD). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`, with disposable-fixture access, passed 6/6 with 7515 skipped (SHA-256 93B412FC0960751DAEC87CE56E80508CA4E8D56D2000DF40EB9B9C209DC8416D). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 EBDAC43976BE7D09DF133BF418AEBD6E6FF3F832D42D044AFC3F74C576AB71B4). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is `src/gui/{recording_dialog,mod,render}.rs` and `src/settings/utility_dialog_sizes.rs`. The CPU viewport fixtures use actual setup controls, owned ROOT/native popups and format options, numeric and drag-label Copy, hidden ROOT, Dock and close. They reject discarded Start before chooser invocation, preserve chooser cancellation, refuse synthetic stale selection/host return, assert the frozen request and admit one job through the existing controller with a fake backend. Only OS target validation is explicitly bypassed for the synthetic test monitor; retained admission and controller preparation remain exercised. Target enumeration was not deterministically held across a move, and no such proof is claimed. Native chooser/focus/region/capture-user flows remain `IMPLEMENTED_USER_VALIDATION_PENDING` under N11/N12. Next is the R02 category inventory/reporting handoff, then R03/M0-A from its exact reporting tip.
+
+## R02 final category disposition
+
+Prepared 2026-11-07 07:00:59 UTC on feat/productivity-host-migrations. Accepted source checkpoint and configured upstream both equal 85f5ba8711df522aa08f0661276fab860e5b5445. This category reporting commit follows that source checkpoint; R03 must start from the actual reporting HEAD read after committing this section, not the source SHA. R02 started directly from pushed R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820, with M0-A 9fb5099a. The user-authored model configuration checkpoint and all linear recovery history were preserved.
+
+The current disposition below supersedes only the historical baseline host statuses, not their evidence. All 32 existing ordinary R02 host rows now have implementation, focused state/action verification, production compilation and independent review evidence in their checkpoint sections above. The three reference hosts remain accepted from R01. The two not-yet-created surfaces are explicitly carried to their owning categories: Programmer Inspector in R03 and Explorer saved-list editor/launcher in R05. R02 does not claim those features exist or that their native gates passed. Specialized overlays/prompts and the compact recording controller retain their own lifecycles.
+
+In the Native column, Pending means IMPLEMENTED_USER_VALIDATION_PENDING for an implemented/preserved row; a future-surface row remains NOT_IMPLEMENTED in its owning category and its native check is NOT_RUN. All native requests remain deferred to the single R06 N1–N12 packet.
+
+| Original host row | Implementation / checkpoint | Focused state evidence | Native |
+| --- | --- | --- | --- |
+| Quick Notes | M2-A.2a | Draft, save/template, query return, discarded host intents | Pending N2 |
+| Each note editor | M2-A.2b | Independent instances, dirty/history, Find/prompts/export | Pending N2 |
+| Markdown Studio | M2-A.1 | Source, Unicode selection/history, dirty close and picker ownership | Pending N2 |
+| MkMacro | M2-A.3 | Real host/Run/Apply controls, exactly-once fake playback | Pending N2 |
+| Main Settings | M2-B.2 | Retained editor replacement/save worker and popup ownership | Pending N3 |
+| Dashboard Settings | M2-B.1 | Draft/slot identity, failed Save, discarded effects and Dock | Pending N3 |
+| Mouse Settings | M2-B.3 | Retained settings draft, save/cancel and host ownership | Pending N3 |
+| Mouse Gestures | M2-B.4 | Editor/recorder identity, accepted controls and host ownership | Pending N3 |
+| Gesture Settings | M2-B.3 | Independent settings draft and accepted owner actions | Pending N3 |
+| File Search | M2-C.1 | Same coordinator/preview, hidden work, qualified result/prefill actions | Pending N4 |
+| Diff | M2-C.2 | Same comparison owner, retained input and host effects | Pending N4 |
+| Batch Rename | M2-C.3a | Retained plan/scan/actions and accepted publication | Pending N4 |
+| Search & Replace | M2-C.3b | Retained scan/preview/apply ownership and host state | Pending N4 |
+| Clipboard History | M2-C.4a | Retained history view, owner-qualified popup/actions | Pending N4 |
+| Snippets | M2-C.4b | Retained snippet state and owned prompt/run flow | Pending N4 |
+| Clipboard Modify | M2-C.4c | Retained draft/presets and accepted persistence | Pending N4 |
+| Paste Sequences | M2-C.5 | Retained presentation, prompt/runtime ownership, repeated-run coverage | Pending N4 |
+| JSON | M2-C.6a | Retained document/work and accepted actions | Pending N4 |
+| XML | M2-C.6b | Retained document/tool state and owner-qualified actions | Pending N4 |
+| Regex | M2-C.6c | Retained regex state, popup actions, copied/persisted output | Pending N4 |
+| Table | M2-C.6d | Page worker/source/selection and revocable export/overwrite receipt | Pending N4 |
+| Timer/alarm authoring | M2-C.7a | Retained modes/draft, accepted Start/Play, Sound popup | Pending N4 |
+| Calendar root | M2-C.7b | Retained navigation and qualified occurrence/child opening | Pending N4 |
+| Calendar event editor | M2-C.7b | Independent draft host, retained Save/Delete and stale-source checks | Pending N4 |
+| Calendar event details | M2-C.7b | Captured occurrence, retained Edit/Delete/Snooze and child ownership | Pending N4 |
+| Date & Time Studio | M2-C.7c | Draft/reference/fold/occurrence, popup, Copy and Prepare | Pending N4 |
+| Image Compare | M2-C.8a | Worker/camera/result preservation, clipboard and texture retirement | Pending N4 |
+| Duplicate Finder | M2-C.8b | Held scan/cancel/drain/restart, exact alias proof and clipboard | Pending N4 |
+| ZIP Extractor | M2-C.8c | Read-only preview/token, discarded Confirm and one selected output | Pending N4 |
+| Calculation Pad | R01/M1-B reference | Accepted session/history/geometry/owner and dirty-close checks | Pending N1 |
+| Diagram Studio | R01/M1-A/M1-B reference | Recovered real Pop Out, shared owner/revision and picker bindings | Pending N6/N7 host subset |
+| Diagram viewer | R01/M1-A/M1-B reference | Recovered viewer click, independent camera and focused close | Pending N6/N7 host subset |
+| Programmer inspector | R03/M3-A/B/C pending | Model/UI absent at R02; separate hosted surface remains required | NOT_IMPLEMENTED; NOT_RUN N5 |
+| Explorer saved-list editor/launcher | R05/M5-B pending | Editor/launcher absent at R02; ordinary host remains required | NOT_IMPLEMENTED; NOT_RUN N8 |
+| Folder Size Analyzer | M2-D.1 | Retained result/navigation, source prefill, late-label copy fence | Pending N9 |
+| File Lock Inspector | M2-D.2 | Held inspection/ready Reveal, current receipt and shared copy fence | Pending N10 |
+| Silent recorder setup / compact controller | M2-D.3 | Setup host/chooser/copy; compact controller independently preserved | Pending N11/N12 |
+
+There is no known unaccepted R02 source increment or active implementation blocker at this handoff. Focused failures and compiler corrections were resolved without weakening interaction assertions, changing Nextest configuration, merging, rebasing, resetting or discarding work. The latest production check passed; individual exact test inventories and hashes remain above. No additional broad regression run is introduced for this documentation-only handoff. R06 retains the required final cumulative affected-case run, scoped first-party Clippy and truthful manual acceptance packet.
+
+R03 next: create the fresh programmer-inspector category branch directly from the actual committed R02 reporting tip, commit its M0-A ledger update with verified direct parent, attempt one normal push, then execute M3-A only. The inspected planner handoff calls for a pure independent exact working-copy model, lossless source snapshots with ephemeral document incarnation, formatting/labels, and a checked one-undo source-range Insert seam. Separate hosted UI/caret/accepted-pass dispatch and comparison remain M3-B/M3-C. R04–R06 remain pending. The overall Goal stays active.
+
+## R03/M0-A — Programmer Inspector foundation baseline
+
+Prepared 2026-11-07 07:06:39 UTC on fresh feat/productivity-programmer-inspector. The checked-out base is exactly the clean, pushed R02 final reporting tip 7912a9f591c301d7a161a0675eea650d07d9148e, whose parent is accepted Recorder source checkpoint 85f5ba8711df522aa08f0661276fab860e5b5445. The R02 M0-A parent was verified as exact R01 final b8c3f259cbd55d483fb1346b262026ed42d5d820, and no new-range merge commits exist. No worktree, reset, rebase, merge, cherry-pick or discarded changes were used. This M0-A documentation commit must have direct parent 7912a9f591c301d7a161a0675eea650d07d9148e; its actual SHA/push receipt will be recorded outside committed source after commit.
+
+Source snapshot: existing TypedInteger supports exact 8/16/32/64/128 modes, checked casts, bit reinterpretation, masks, shifts/rotates and extraction. Existing scalar, unit, variable/reference and exact-base semantics remain the compatibility baseline. Calculation Pad's R01 reference host remains accepted. The independent inspector model/UI and comparison are not yet implemented. Original C02 IDs5–6,8,11 and residual12 remain partially implemented until their corresponding R03 acceptance is met; no model-only checkpoint will claim UI completion. Full N1/N5 and all other native user gates remain pending under the final R06 packet.
+
+Read-only planning found stable result LineIds, current evaluation revision and source ranges, but no selected-result/caret owner. Reloading the same saved document can reuse DocumentId, LineIds and revision0; an ephemeral document-incarnation token is required for safe source/range identity without changing persistence. The planner handoff is adopted for M3-A only:
+
+- **M3-A pending:** add src/calculation_pad/inspector.rs plus narrow session.rs interfaces and mod.rs exports. Own an independent exact working copy, frozen adopted source and separately observed candidate; never hold a mutable session reference. Empty mode defaults unsigned64. Typed sources retain mode; legacy ExactBase adopts unsigned64 when lossless and existing unsigned128 otherwise, retaining tagged origin. Reject noninteger outcomes without f64 conversion. Preserve local work through stale/unavailable selection/document changes, with explicit Refresh. Reuse engine semantics for bounded bit operations, distinguish checked casts from reinterpretation, keep labels/ranges bounded and avoid silent annotation loss. Formatting is pure; canonical Insert text uses typed decimal constructors. Session final validation owns current incarnation/document/revision, UTF8 range and pending-transition checks, followed by the existing one-undo source-edit path. Refusal/no-op must not mutate source/history/dirty/cache.
+- **M3-B pending:** separate dockable clickable Inspector, selected-result and retained caret ownership, real bits/Copy/explicit Insert controls, source/host/pass/current-selection fences. Implement after the M3-A core is accepted.
+- **M3-C pending:** immutable-context side-by-side comparison, bounded preferences and in-app/reference/discovery updates. Implement after the UI foundation is accepted.
+
+M3-A verification is the new model/session subset plus programmer_integer_operators_are_exact_and_select_explicit_modes, exact_integer_modes_survive_session_cache_edit_undo_and_redo, checked_casts_and_bit_reinterpretation_are_distinct, popcount_masks_and_extraction_check_empty_full_and_overflowing_ranges, and undo_and_redo_recompute_dependent_lines_and_restore_stable_ids. Run an exact nonzero Nextest list/run with established locked/offline fast-dev lib flags, targeted production check when relevant, scoped formatting/diff, independent review, coherent commit and one normal push. No broad test suite or native user request is introduced at this baseline. R04–R06 remain pending and the overall Goal remains active.
+
+### R03/M3-A — Exact Inspector working-copy model and checked Insert
+
+The independent ProgrammerInspector owns an exact TypedInteger working value, its adopted source binding and separately observed candidate, bounded bit/range annotations and pure representation formatting. Empty work defaults unsigned64; typed sources keep mode, and legacy ExactBase adopts unsigned64 when lossless or existing unsigned128 otherwise. Scalar/quantity/blank/error outcomes are not coerced through floating point. Dirty numeric/mode or annotation work retains its original binding through source/candidate changes; explicit Refresh replaces the binding while preserving valid labels. Bit operations, checked numeric casts and distinct bit reinterpretation reuse the unchanged integer engine. Canonical Insert uses typed decimal constructors; grouped/nondecimal Copy strings are not used as checked signed source constructors.
+
+Session snapshot lookup reads only current cached evaluation. ActiveDocument gets a fresh ephemeral DocumentIncarnation on actual new/loaded installation, retained through edits and undo/redo and excluded from persistence. This prevents collision when the same saved document reuses DocumentId, LineId, revision0, text and value after reopening. Final session Insert checks pending transition, the full current session-produced source snapshot and UTF8 byte target before one existing replace_source call. Failure and no-op leave source, IDs, revision, dirty state, history and cache unchanged. Successful Insert creates exactly one undo entry. No GUI, clipboard dispatch, preference persistence or comparison is implemented by this checkpoint.
+
+The exact five existing engine/session baselines passed 5/5 (SHA-256 82312694A6E644FBDF2547AE9969772D66BF9C3810D9C2740F24324CF712962E). A diagnostic compile/list using the broad inspector_ substring also listed unrelated names, ran no tests and is not counted as behavioral coverage. Independent review found no production defect. Test review strengthened saved-document reinstall to revision0 snapshots identical in every field except incarnation, and saved-clean no-op/refusal fingerprints to include source, line IDs, revision, dirty, undo/redo lengths, cache revision/count/full contents.
+
+Set `$f` to the trimmed contents of `r03-m3-a-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched eleven (SHA-256 5C2FB92E2B0F4D2509EBE2C17A75FD09435652BAA7265F69FDF366E4563236BF). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 10/11 with 7516 skipped (SHA-256 CF0CC8FD34ED0365E0823DAFCC6FCB15830705C1F7D307EC6EC69FB318F5A9D6). The observation fixture used bare hex rows that did not produce the intended legacy ExactBase result. Its inputs now use the existing exact decimal-to-hex conversion grammar, preserving >2^53 and u128::MAX assertions and keeping noninteger rejection unchanged. With `r03-m3-a-filter-2.txt`, the exact list matched one and the corrected case passed 1/1 with 7526 skipped (SHA-256 48B7840BD2A01237A6F8C9DEC1CF6038ACAD58D0F86E2841113CA30B77AF46E1). Eleven distinct affected cases have passing evidence. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 27F036A7DF027BDEF00989E8A44507626C2748EEC4DAA4BD893489E433EA9B7F). Scoped Rustfmt and `git diff --check` passed.
+
+Source scope is new src/calculation_pad/inspector.rs plus session.rs and mod.rs. Tests cover exact width/sign and formatting/labels, legacy wide adoption, dirty binding/candidate preservation, changed/missing sources, pure cached observation, canonical round trips, pending/stale/reinstalled/invalid UTF8 refusal, no-op atomicity and one-undo/redo insertion. This is the accepted core foundation for the carried C02 requirements, not their UI completion. Programmer Inspector UI and N5 remain NOT_IMPLEMENTED/NOT_RUN until M3-B; comparison/preferences/reference remain M3-C. Next is the bounded M3-B separate hosted bit grid, selected-result/caret ownership and accepted Copy/Insert dispatch on the same R03 branch.
+
+
+### R03/M3-B — Separate hosted Inspector, retained caret and explicit Copy/Insert
+
+The separate Programmer Inspector now opens from actual per-result Inspect bits actions and a visible Pad reopen entry. It owns one independent exact working model and transient UI drafts, retained through close/reopen and Dock/Pop Out. Its responsive LSB0 grid, signed/unsigned width controls (including existing 128), distinct Checked cast/Reinterpret actions, four simultaneous representations, prefix/padding/group/plain formatting, bounded bit/range labels, Refresh, Copy and explicit Insert use the accepted core. The Pad remains a normal text editor. Comparison and preference persistence are intentionally M3-C, not claimed by this checkpoint.
+
+Pad owns result selection by installed-document identity and stable LineId, plus a logical UTF8 byte selection/caret captured from actual editor interaction. Render-time document basis qualifies staged source/selection/caret observations; same-pass caret revision advancement is allowed only for the exact accepted source edit. Source/history/document transitions complete before Inspector external effects. Reopening the same saved document invalidates the old caret even when persistent IDs/revision/text collide. Idle widget state, F12 and ignored raw text/paste cannot recapture that cursor. Actual click/drag, changed editor response, supported navigation and select-all may capture it under the current incarnation. There is no end-of-document/source-row/clamped fallback.
+
+Current cached source observations are keyed and immutable, with Arc-backed source text avoiding idle deep clones. Accepted private draft edits survive a changed source context or host move; current candidate publication remains separate. Dirty bits, labels and unfinished controls are not silently replaced. Copy/Insert carry working/input generation, Pad source/selection/caret and host/ROOT/owner receipts. Stale private values remain copyable under their current captured context; Insert additionally requires the adopted source to equal the current selected candidate and calls only the checked session seam. A successful canonical typed Insert is one undo step and focuses the current Pad host.
+
+The ordinary host uses the shared geometry, focus, Reset, pin, close and hidden-ROOT paths. A narrow default-preserving shared adapter hook admits this new native surface without weakening other tools. Explicit Pad focus now raises its ROOT/embedded layer. Explicit Inspector focus surrenders only a focused response belonging to the exact current Pad ROOT/embedded layer before shared host focus; foreign/native/modal focus guards remain intact. ROOT/embedded generated labels disable text selection because egui's late label-selection output bypasses body capture; explicit Copy buttons and editable fields remain. Native generated-label output uses the shared late-copy fence. Unrelated platform output is preserved.
+
+The six existing baselines listed and passed 6/6 before implementation. The first diagnostic list failed compilation (CharIndex conversions and a missing recipe argument); it ran no tests. The corrected diagnostic listed one. Early real-flow runs exposed an unreachable bottom Insert (moved into the upper controls), then native retry geometry after discarded frames (fixture settles and reacquires current geometry). The next exact real flow passed 1/1. The four-case expansion passed 3/4: stale-flow accepted typing did not regain focus. A focused retry failed the explicit focus assertion; the next production Pad layer-raise correction proved typing succeeded, then reached a clipped Copy. Copy retries retained actual enabled/full-clip checks and use real pointer/wheel scrolling in the correct viewport; the native/ROOT route mixup and an unconverted direct rectangle call were corrected. No internal method substitutes for the entry, bit, Copy, Insert, Dock or Undo clicks under test.
+
+Independent review separately corrected private-draft commit ordering, stale render-basis observations, post-reopen no-op-key cursor promotion, and ROOT late label Copy. The final stale Copy failure after actual scrolling exposed an independent focus boundary: raising Inspector left Pad TextEdit focused, so owner admission correctly disabled Inspector. The narrowly qualified explicit-focus surrender above fixed that root without widening owner admission. Each independent runtime failure and bounded correction remains in its original log; no Nextest configuration, expectations, clipping predicate or production arithmetic semantics were weakened. Final source/fixture review reported no material findings.
+
+Set `$f` to the trimmed contents of `r03-m3-b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly ten. The same subset with `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 8/10 with 7521 skipped. The exact two failures in `r03-m3-b-filter-2.txt` then listed two and passed 1/2 with 7529 skipped (native workflow passed; stale ROOT Copy still disabled). Finally, `r03-m3-b-ui-filter-4.txt` listed exactly the stale case and passed 1/1 with 7530 skipped. Ten distinct affected tests have passing evidence. Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings. Scoped Rustfmt and `git diff --check` passed.
+
+The real flows cover a value above 2^53, actual Unicode editor selection and result entry, private bit edits, discarded Pad/Inspector actions, Pop Out, hidden ROOT, discarded ROOT/native effects, native Copy, Dock, canonical Insert and keyboard Undo. The stale flow covers signed checked cast/high bit, stale Copy/Refresh, actual generated-label drag with discarded and accepted ROOT Copy producing no raw output, label/prefix controls, close/reopen preservation, and same-saved-document caret invalidation with F12 then real recapture. Two narrow tests protect stale Pad receipts and private drafts through newer context/host movement. These CPU viewport fixtures are not real HWND/clipboard/native-user proof. Full N1/N5 remain IMPLEMENTED_USER_VALIDATION_PENDING for implemented behavior; comparison/preferences/reference remain unimplemented until M3-C.
+
+Source scope: src/calculation_pad/{inspector,session}.rs; new src/gui/programmer_inspector_dialog.rs; src/gui/{calculation_pad_dialog,mod,render,utility_window_host}.rs; src/settings/utility_dialog_sizes.rs. The accepted M3-A tip is 4ff5350d64c42141ea1171c268a5cbc9e0b45d62. This source/reporting checkpoint stays on feat/productivity-programmer-inspector; its actual commit/upstream receipt is written outside tracked source after commit. Next is M3-C immutable-context comparisons, bounded format preferences and reference/discovery updates on this same branch. R04–R06 remain pending and the Goal remains active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original diagnostic/failure files retained):
+
+| Log | SHA-256 |
+| --- | --- |
+| r03-m3-b-baseline-list.log | 5AB6A4D154E7B71686CF68C6AE09111664E2876CFBC9155EE3A251211006A77E |
+| r03-m3-b-baseline-run.log | 08E3183B9895EFB91E225AD32A6020080F02220F7B6EDC43109131D0149D117E |
+| r03-m3-b-diagnostic-list.log | 03B4DAE9CAAED6957D03E888E8CF1DC0BDFC3C33633CAA00805225D5641D7E59 |
+| r03-m3-b-diagnostic-list-2.log | 6BA022BC77824B8BB2C3C1DB3D32A8DD41CC4D6F46D253D756FF70E030845CD4 |
+| r03-m3-b-ui-diagnostic-run.log | AE380146D7CE32D37FB7FC4C24977C88EAE1FA8DA9AFF3980FB4362FB0F08B41 |
+| r03-m3-b-ui-run-1.log | F4A5F2BCB40E8CCAA9FE3AD62312A8C4EDE78AC71EAB4DAB8FE59B92EC03D331 |
+| r03-m3-b-ui-run-2.log | 3A06C214AF38F5CBEE7E4902578D0885C9AF2E3BBAE906E78C63052CDBBD2CFD |
+| r03-m3-b-ui-run-3.log | B2EBDB57A40D1B763ECB415B5049E8EFB1DE82F28412CFF638ED56AAE99E562D |
+| r03-m3-b-ui-run-4.log | 3D6F6F84EB8166A3F28D541461934E53402074062B757BD294F1AB800C77F231 |
+| r03-m3-b-ui-run-5.log | 11BDFE6AE14324FFA9E025B69E5E7270A602513FDC157BDB13278D30658AEB2C |
+| r03-m3-b-list-1.log | 36DB5EC8B74199226C48E41B8A6C234B619352D6C6B15BCBA71C13009C398C5C |
+| r03-m3-b-run-1.log | 0EE302FB0B41E867A37F315DF274161A49A2B028A8091E8D23BF845A293EEF88 |
+| r03-m3-b-list-2.log | 1C37733D0412D119FCF2772BBDBFFBC54DB8C669C804387C08DD849D00222038 |
+| r03-m3-b-run-2.log | B894AE1A6666BE955E907983669C4B1B50BC67A2E968851611DB195FFF87CB2C |
+| r03-m3-b-list-3.log | 8225264BBC26886EF7D26EEEDEA12EA80829D77DC64505FFC1AF230C8A1E55C2 |
+| r03-m3-b-run-3.log | 8C8FE84DEC1EE283A32B0E355B545B0C647208AAF9784E484152AAB594652914 |
+| r03-m3-b-production-check.log | 7651742C1B3FA487D6B888B503DB9E7A367331BCA11FC192271F1C3AA2ADA414 |
+
+The final explicit Inspector-focus correction postdated the native-flow run2 pass, so its directly affected real entry/host/Copy/Insert/Undo case was rechecked on final source. With exact `r03-m3-b-filter-4.txt`, the same locked/offline/lib/fast-dev list matched one and run passed 1/1 with 7530 skipped. This closes that source-version gap without repeating the unrelated eight cases. Final ledger review confirmed counts/hashes and no native or M3-C overclaim.
+
+- r03-m3-b-list-4.log: SHA-256 FE90F9F25B2DCFB41BF8DA8452EFAED31DA0EA808728524D7267CA4DE62CD0ED.
+- r03-m3-b-run-4.log: SHA-256 72F6B338EEA3B4355B306B8BDC975F559FAABABD8C16E428C84DA5AAAC3522EF.
+
+
+### R03/M3-C — Immutable comparisons, owned format preferences and reference
+
+The new comparison module owns typed expression/result slots and independent side outcomes from one immutable current cached Pad context. Session capture retains installed-document identity, revision and every bounded physical row/LineId, assignment name and outcome; it neither evaluates nor mutates the Pad. The narrow document seam reuses statement preparation, the extracted existing reference resolver and evaluate_line. Comparison operands cannot assign or span lines, see each other, create a synthetic visible rN binding, or convert formatted values back into source. Existing duplicate/failed-name diagnostics, original physical row numbering and resource bounds remain authoritative.
+
+Selected-result slots carry incarnation/document/LineId, not just a colliding row number. A same-file reopen with matching persistent IDs/revision cannot silently retarget an old slot; the user must explicitly select its replacement. Expression slots intentionally use the refreshed current context. Cached old results remain readable with a stale indication until explicit Compare/Refresh. Inspector working bits are never substituted for the selected source result. Both sides display values, type/mode, representations and approximation status; errors remain side-specific. Same-mode integer ordering/absolute differences/XOR remain exact through full 128 endpoints without f64 or overflow. Width/sign/type mismatches are explicit. Quantity comparison remains in quantity.rs, preserves category/approximation and finite bounds, and normalizes nonlinear temperatures to Kelvin and fuel economy to km/L so ordering is antisymmetric. Scalar and dimensional grammar/operations are unchanged.
+
+The existing Inspector host contains the comparison section, actual expression controls and Use selected result, Compare/Refresh and Copy controls. Result selection for comparison is available separately from exact integer inspection. Pad completion precedes accepting comparison context. Input, source, selection and owner/ROOT/host fences reject stale or discarded actions; comparison and Copy do not change Pad source/history/caret or Inspector bits/Insert authority. Idle renders reuse comparison work. New typed defaulted preferences persist only prefix, padding and bounded grouping 0–128. No working bits, labels, comparison drafts/results, source binding or caret is persisted as a document save.
+
+Preferences use a narrow SettingsSaveIntent ownership path, editor mapping/baseline and General-save reconciliation. Old/partial/malformed settings normalize safely; stale editors preserve newer owned preferences and unrelated fields. Failed writes/runtime application preserve the in-memory Inspector choice with retry feedback while rollback touches only the owned settings field. Matching success clears only its own preference failure, not unrelated feedback. An older acknowledgement advances the committed baseline while retaining a newer queued local choice, which then receives its own write. Accepted preference edits survive a simultaneous Dock or unrelated Pad context update; host moves alone save nothing, and external comparison/Copy/Insert still obey their fences. Close/discard/generation retirement keeps existing precedence.
+
+The executable catalog now has 31 examples, including default-u64 123 >> 12; existing signed/masked/wide/unit examples remain checked. In-app help, src/calculation_pad/README.md and calc pad discovery describe actual selection, Inspector-only edits, formatting/Insert/Undo and immutable comparison routes while preserving the exact opener, inline calculator and unit arithmetic discovery wording. This completes the reference work carried from original C02/M7-B; native N5 is still pending.
+
+Verification: eight exact existing baselines listed and passed 8/8 before source edits. The initial six-new-case diagnostic list failed one E0282 closure type inference error and ran no tests; the selected-result closure was annotated. The second diagnostic compiled and listed eight new cases, with no runtime claim. Source review corrected reciprocal ordering, selected-slot document identity, owned preference failure clearing, queued-ack ordering and same-pass preference/host precedence before acceptance; each has a focused owner/receipt test.
+
+Set `$f` to the trimmed contents of `r03-m3-c-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched 17. The same subset with `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 14/17 with 7523 skipped. The two reference failures were a catalog count still 30 after adding one example and a discovery description dropping the required unit arithmetic wording; the exact count became 31 and production wording was restored without weakening assertions. The hosted flow reached its accepted preference request but failed the committed-baseline assertion.
+
+With exact `r03-m3-c-filter-2.txt`, list matched four and run passed 3/4 with 7537 skipped: corrected examples/discovery and a new actual settings-worker runtime-failure rollback passed. Hosted diagnostics proved its isolated app lacked the hotkey runtime, with no queued/pending work and honest failure/Retry status. The fixture now installs the existing main-runtime test receiver and drives actual matching Prepare/Apply request_id/generation responses, preserving the production worker, persistence and acknowledgement paths. This fixes missing fixture runtime, not production hotkey behavior. With `r03-m3-c-filter-3.txt`, list matched two and both hosted flow and the directly changed host/context preference receipt test passed 2/2 with 7539 skipped. A final representation adjustment added explicit approximation status and exact legacy decimal alongside binary/octal/hex; `r03-m3-c-filter-4.txt` listed and passed the directly affected integer/base and hosted cases 2/2 with 7539 skipped. Nineteen distinct affected names have passing evidence across these runs, not one uninterrupted 19-case run.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing unrelated warnings. Scoped Rustfmt and git diff --check passed. Independent final review cleared domain/reference semantics, nonlinear normalization, selected-result identity, preference acknowledgement/rollback ownership, retained host fences and displayed representation/reference accuracy. No broad suite, Nextest configuration or vendored changes were introduced.
+
+The actual hosted fixture covers selected integer source result versus expression, idle reuse, hidden native host movement, ROOT/child discarded Compare and preference actions, one accepted preference request, worker Prepare/Apply, acknowledged baseline and disk prefix persistence, comparison Copy and unchanged Pad/private bits. CPU/protocol persistence is not real OS hotkey/HWND/native clipboard proof. It does not click a failed-save Retry button or scalar/quantity row selection controls; owner tests cover failure/rollback and quantity/scalar semantics, without claiming those GUI clicks passed. Full N1/N5 remain IMPLEMENTED_USER_VALIDATION_PENDING for the final R06 packet.
+
+Source scope: new src/calculation_pad/comparison.rs; calculation_pad/{document,session,quantity,mod,examples,README.md}; gui/{calculation_pad_dialog,programmer_inspector_dialog,mod,render}; settings/model.rs; settings_editor/{mapping,state,save}; settings_save.rs; plugins_builtin.rs. Accepted parent is pushed M3-B b15579575b7317186e378838d2cb12b580f86f93 on feat/productivity-programmer-inspector. This checkpoint's actual SHA/upstream receipt is recorded outside tracked source after commit. Next is R03 category reporting, then R04/M0-A directly from its actual final reporting tip. R04–R06 remain pending; Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original failure logs retained):
+
+| Log | SHA-256 |
+| --- | --- |
+| r03-m3-c-baseline-list.log | 0C3445B7635093098F693110336BF64C2CB4D48AC82C88E52DB6DE6C01627D3B |
+| r03-m3-c-baseline-run.log | F25490242186DC57E22938CF21E7DBC5806E3C4BF2CA1C704F14A39C5D8EAF76 |
+| r03-m3-c-diagnostic-list-2.log | E79681B807454BD1BE7FB9564096A04608B62669F32F671D62BB83E71E16630C |
+| r03-m3-c-diagnostic-list.log | 8DCC302F9F6D5D643D108059D3A123F386311ACF43E918091C8CE8E9C1E676F5 |
+| r03-m3-c-list-1.log | 15FCDD483D80DE5713697EA36B832A9D91E12A5E49F0606A58D8AACFCD216C90 |
+| r03-m3-c-list-2.log | 13F8E5885B60CD48E60BBD56BFC4EB69574CBBD4AED6C6FCE10B5EBF27CE7484 |
+| r03-m3-c-list-3.log | 738B0CB0A30850A38D2AC491CE22CCD07516AA5179A061C9E920F4B92C3879F3 |
+| r03-m3-c-list-4.log | 2DAFFCA6566B5C8E9046622B5B05C362CBD5D72B882082E4E0A3629C67106685 |
+| r03-m3-c-production-check.log | 5B7AA3E288CD1B11BDE79CDF0F96FB694243225CE59EF03F31F664A92EE28646 |
+| r03-m3-c-run-1.log | 7810C3275B5829DAF2D60FF21E6E4B9CAA62454F6C69091C08F487B931D00387 |
+| r03-m3-c-run-2.log | 8B3B549773C945F4696490200757044908C733ACFC97D6BD22808A746D92E4F1 |
+| r03-m3-c-run-3.log | 4CF3A73E48E0B2FF5EEB527C69EF20794F27489205DC77F48B3EF5DB588BF023 |
+| r03-m3-c-run-4.log | 4B4A0AEB79CD0D1D1662EDAA86098DAA1EBCB02297F328011999280EA826BC8D |
+
+
+## R03 final category disposition
+
+Prepared 2026-11-07 09:24:30 UTC on feat/productivity-programmer-inspector. Accepted source and configured upstream both equal 103e8b17cae696e7676885a83fb703765a5e53c6. This reporting commit follows that source checkpoint. R04 must start from the actual HEAD read after this report is committed, not from 103e8b17 or an earlier source checkpoint.
+
+The category M0-A 91ae5aa0eeb3b5f93f457a03f632f10d310c1945 has direct parent 7912a9f591c301d7a161a0675eea650d07d9148e, the exact R02 final reporting tip. M3-A 4ff5350d64c42141ea1171c268a5cbc9e0b45d62, M3-B b15579575b7317186e378838d2cb12b580f86f93 and M3-C 103e8b17cae696e7676885a83fb703765a5e53c6 are accepted/pushed checkpoints in this linear branch. The new range contains no merge commits. No branch reset/rebase/merge/cherry-pick, auxiliary checkout or discarded work was used. Both tracked Recovery Goal/Kickstart blobs still exactly match 05153ac1 (Goal 4cade0dd04454b016f0f2ad913af33ee271eb779; Kickstart 2db89c9f35efa91afaea8e3e6c3bb89c09730dcf). Agent model settings were read and preserved; implementation uses configured Terra/medium.
+
+The following disposition supersedes the baseline C02 implementation gaps while preserving their historical evidence. IMPLEMENTED_VERIFIED_LOCALLY describes scoped code/automated evidence; full native N1/N5 remain IMPLEMENTED_USER_VALIDATION_PENDING and no user pass is presumed.
+
+| Original IDs / milestone | Current implementation and evidence | Remaining acceptance |
+| --- | --- | --- |
+| 1–4,7,10 / M5-A,M5-B | Accepted exact engine/grammar preserved; current programmer, modulo, min/minute and reference baselines pass. Existing 128 support and legacy u128 exact-base remain intact. No global scalar-mode change. | Full user N5; final R06 cumulative union |
+| 5–6,8,11 / M6-A | M3-A/B independent exact working owner, required modes/representations, numbered bits and labels, bounded Copy formatting, stale/Refresh behavior and checked one-undo Insert. Separate shared ordinary host with real docked/native CPU control flows, hidden ROOT and receipt rejection. | Full real-system N5 and N1; no native HWND proof from CPU fixtures |
+| 5–6,8,11 / M6-B | M3-C two visible expression/selected-source slots evaluate independently against immutable current cached rows. Exact differences, mode/type/unit mismatch and per-side errors; no source/history/working-bit mutation. Installed-document-qualified result slots and stale actions are tested. | Full real-system N5 |
+| 9 / M7-A | Accepted dimensional arithmetic preserved, current unit/reference baseline passes. Comparison reuses owner semantics including approximation/category and canonical nonlinear normalization. | Final R06 cumulative union; user unit smoke inside N5 |
+| 12 / M7-B | Executable 31-example catalog, in-app selection/Inspector/comparison help, grammar README and exact calc pad discovery updated and tested. Bounded format preference default/validation/save/rollback/queue/stale-editor cases pass. | User discovery/flow inside N5 |
+| C.2 Programmer Inspector host carryforward | Now implemented with one retained owner and shared geometry/focus/Reset/Dock/Pop Out/close/hidden-root integration. R02's historical future-surface row is closed by M3-B/C. | Real-system host/N5 check pending |
+
+M3-A has 11 distinct passing affected cases; M3-B has 10 and M3-C 19, with overlaps. These are checkpoint evidence, not an additive 40-test unique total or an uninterrupted full-suite run. Exact commands, original failures/corrections, counts, hashes, source/version rechecks and reviewer dispositions are in their sections above. Latest production lib/main-bin check succeeds with classified existing warnings; final relevant Clippy/cumulative affected union remain R06. Native gates N1–N12 remain pending as complete user flows. No known unaccepted R03 source increment or current implementation blocker remains. Scalar/quantity result GUI clicks and failed-save Retry GUI were not claimed from owner tests; final packet retains practical user coverage.
+
+R04 next: create a fresh feat/productivity-diagram-completion category branch directly from the actual committed reporting tip, commit M0-A with verified direct parent and attempt normal push before product edits. M4-A recovers containers/groups/swimlanes and the original genuine canvas group-drag failure, with bounded renewed correction budget; M4-B starters, M4-C actual export controls and M4-D grouped supported draw.io remain sequential. Read-only planning may inspect accepted source and preserved patch hashes, but failed historical patches are not automatically accepted. R05 Explorer/utilities and R06 final acceptance remain pending. Goal active; no intermediate native user request or completion/cancellation is implied.
+
+
+## R04/M0-A — Diagram completion baseline
+
+Prepared 2026-11-07 09:26:24 UTC on fresh feat/productivity-diagram-completion. Before any R04 source edits/builds, HEAD is exactly 00e199e00df7513153ceb00a42e8cb5cb1f5b9e0, the clean pushed R03 final reporting tip (parent 103e8b17cae696e7676885a83fb703765a5e53c6). This baseline commit must have that exact direct parent; its actual SHA/upstream receipt is recorded outside tracked source after commit. One checkout and the linear branch chain are preserved; no reset/rebase/merge/cherry-pick/discard/worktree operation was used.
+
+R03 implementation is locally verified and reported above; full native N1/N5 remain user-pending. R04 inherits accepted dual Mermaid/Visual authority, rich bounded scene/layers/styles/connectors/assets, projected editor/viewer, current-source snapshots, vector/raster encoder, ungrouped draw.io and native Save As collision correction. Do not reimplement those foundations. The accepted visual model currently lacks persistent container membership; grouping/swimlane, five visual starter controls, actual Studio rich export controls and grouped interchange remain recovery work. Original C03 IDs 27–46 and M8–M11 retain baseline history until their corresponding current acceptance is met. Full N6/N7 remain pending; no model-only or fake-pointer test will claim native acceptance.
+
+Read-only planning recovered the exact original M9-B.2 failure `gui::diagram_studio::tests::diagram_studio_visual_container_controls_membership_and_group_drag_once` (historical selector `test(diagram_studio_visual_container_controls_membership_and_group_drag_once)`). Its final historical recheck fails `mapping.contains_screen_point(child_screen_point)` at old diagram_studio.rs:10419 before pointer dispatch. The companion container-header/border hit test passed. The ignored preserved `target/desktop-productivity-expansion/stalls/M9-B.2-preserved-source.patch` exists and SHA-256 exactly matches 93F5E267100D22CF83B9BB26784A70470D1C824C0C5840D190899555C07B53FE; it has not been applied. The candidate computed a child screen point before focusing the canvas and rebuilt mapping afterward; stale mapping/camera is a hypothesis to verify, not established production fault. Reconstruct relevant ownership deliberately on current accepted asset-rich source, rather than wholesale apply the failed patch.
+
+- **M4-A pending:** persistent group/container/swimlane membership, cycle-safe nested transforms, group/ungroup and descendant movement/resize/rotation, hit testing/anchors, undo/reopen and export geometry agreement. Preserve source authority/layers/assets/connectors/backward compatibility. Recover the genuine visible canvas drag/selection path with strict clipping, actual pointer events and accepted pass semantics. Fresh initial runtime plus at most three focused correction/retest cycles per independently documented root cause; compile/no-test errors recorded separately. No expectation/clipping weakening or internal-action substitute.
+- **M4-B pending:** five actually enabled/clickable visual starters, preserving Mermaid templates and dirty/undo/cancel.
+- **M4-C pending:** reachable actual PNG/SVG controls, scale/background, worker/picker/source revision, cancel and atomic no-clobber publication; retain accepted encoder and native Save As race fix.
+- **M4-D pending:** supported grouped uncompressed one-page draw.io subset with truthful preflight/reporting and Diagram coverage closure; compressed optional, no silent flattening or active resources.
+
+Scoped exact Nextest list/run, production lib/main-bin fast-dev check, diff/format and independent review remain checkpoint gates. No full suite before R06, no Nextest/vendor changes and no intermediate user native request. Read-only M4-A planner handoff is in progress; source implementation begins only after this M0-A is committed, its direct parent verified and normal push attempted. R05–R06 remain pending; Goal active.
+
+
+### R04/M4-A — Persistent hierarchy and recovered real group drag
+
+This recovers original C03/M9-B.2 containers/membership and associated transform/routing invariants on the accepted asset-rich model. VisualScene now retains bounded parent_by_child membership with Container/Swimlane kinds and orientation. World-space geometry remains independent of membership, layers and stack order. Parent/child kinds, reserved title/connector restrictions, one-parent/cycle/depth/affected-work limits and duplicate serialized child keys are validated. SetParent preserves geometry. Remove promotes members to a surviving parent/top level while retaining existing anchored-connector cascade. Group allocates a container and binds selected roots in one existing model transaction; Ungroup promotes members without moving them. Invalid operations preserve scene, allocator, revision and history. Every ancestor walk is bounded even inside a temporarily invalid staged transaction, before final validation.
+
+One deterministic scene-order membership closure folds ancestor-plus-child selection and includes descendants once. Existing drag/resize/rotate/snap/layout and property-transform paths share it; previewed replacements are committed through the same document transaction. Single-frame hierarchy property edits apply bounded translation, rotation and uniform scaling to descendants; unsupported nonuniform hierarchy resize is refused. Connectors reroute from transformed endpoint owners. Rich Visual had no keyboard nudge entry point to migrate; unchanged Mermaid graph nudges are not claimed as new hierarchy behavior.
+
+Shared projection describes transparent frame interiors, pickable header/border/label and swimlane divider/orientation. Actual clip, zoom, rotation, painted-prefix and geometry/work bounds remain enforced. Unrelated frames do not block connector routing, while endpoint frames and real contents remain respected. Studio, Viewer and SVG/PNG consume the same header fill, outer outline/dividers and shadow policy. New header coordinates and vertex counts participate in export validation and paint-work admission. Existing v1/v2 decode paths remain unchanged; focused codec tests preserve old v3 empty-membership wire omission, and raw current/history duplicate membership bytes reach the typed decoder and fail with the exact duplicate-key diagnostic. The listed subset does not claim to rerun frozen v1/v2 fixtures. Stable IDs, assets, layers, allocator, saved state and undo/redo remain owned by the existing document.
+
+Studio stages frame/swimlane creation, labels/orientation, valid parent selection, assign/reparent/detach and explicit Group/Ungroup through current document/revision/owner/ROOT fences. Group uses one eligible-root helper for enablement, bounds and members, excluding reserved title/connectors while leaving general title transforms available. Tests include mixed and all-ineligible selections and the actual disabled title-only response. Existing dirty/host/import/viewer ownership remains intact. drawio.rs needed an empty membership initializer and explicit unsupported frame/membership preflight; supported ungrouped round-trip remains tested. Grouped draw.io mapping is NOT_IMPLEMENTED until M4-D, not a native-test deferral.
+
+The optional historical patch was rehashed to required SHA-256 93F5E267100D22CF83B9BB26784A70470D1C824C0C5840D190899555C07B53FE and only relevant concepts were adapted; it was not applied wholesale. Baseline exact five listed and passed 5/5 before source edits. Compile-only discoveries exposed partial-adaptation imports/helpers/initializer/signature gaps, then two remaining adapter errors; corrected diagnostic 3 listed the recovered pair. These compilation-only stages ran no tests and did not spend the runtime correction budget.
+
+The exact recovered pair listed two; `r04-m4-a-recovered-run-1.log` passed 1/2 with 7546 skipped. The companion header/border/interior test passed, while the original real GUI test still failed strict child-point containment before pointer dispatch, despite fresh post-focus mapping. An early run 2 invocation was interrupted during compilation before any tests; its log is preserved and all task-owned processes retired before the exact-one list. It is not a runtime correction. The instrumented exact-one run 3 was correction/investigation 1: it proved genuine camera exclusion, center (0,0), zoom 2.748718, child world x=-285 mapping to screen x=-248.359 outside clip x 20..1160, hit layer None. Stale mapping was not the actual cause.
+
+Correction 2 uses the existing actual visual_fit control via press/release, settles layout, derives the frame-header point, then asserts current clip, painted projection and exact frame hit before pointer. It derives the child point again after focus. The exact GUI list matched one and recovered run 4 passed 1/1 with 7547 skipped. The test genuinely exercises frame/member controls, Shift selection, preview and accepted group drag, connector rerouting, one Undo and discarded release. No containment predicate or expected movement was weakened; no internal camera/selection/transform call substituted for the user interaction. The original root is resolved within fresh initial runtime plus two corrections, below the three-correction limit. Independent review confirmed the measured root and actual Fit pathway.
+
+During final review, the Group ancestor traversal was bounded against an intermediate transaction cycle, shared frame shadows were reconciled, header validation/work accounting and an actual shifted-shadow pixel oracle were added, and Group admission excluded connectors/title consistently. A scoped formatter initially moved an orientation import incompletely; its restored complete block and original failed compile-only list remain recorded. The first final list was diagnostic only; the second listed 22 but was superseded by the title-admission correction before runtime. No zero-match or unexecuted list is counted as behavior proof.
+
+Set `$f` to trimmed `r04-m4-a-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` (list 3) matched exactly 22 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` (run 1) passed 21/22 with 7534 skipped. All real Studio interactions, hierarchy, codec, routing and draw.io cases passed. The new export test expected an outline stroke, but its shared style fixture explicitly set border_width 0. Production correctly omitted that stroke. The fixture now sets border_width 2, retaining exact SVG header/outline paths, PNG transparent interior/header and shifted-shadow pixel, and invalid-header assertions. With exact `r04-m4-a-filter-2.txt`, list 4 matched one and run 2 passed 1/1 with 7555 skipped. Twenty-two distinct affected names have passing evidence across retained runs, not one uninterrupted 22-case pass.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` initially exited 0 with eleven application warnings, including five new test-observation locals unused only outside cfg(test). Parent renamed only those local bindings/references with underscore prefixes, preserving ComboBox.response fields and UI calls. Narrow review confirmed alpha-equivalence; no behavioral rerun was warranted. The same production command, log production-check-2, exited 0 with only the six existing unchanged Note Panel/Table warnings and existing dependency warnings. Scoped Rustfmt and git diff --check passed. Independent source, fixture, root/budget and final rename reviews report no remaining material M4-A finding.
+
+The 22-case scope comprises five baselines, fifteen hierarchy/codec/projection/export/Studio cases and two draw.io fail-closed/unchanged-round-trip cases. It covers nested reparent/detach/delete/cycle/allocator/history, duplicate and legacy wire, scene-order/affected-work closure, descendant property/layout/rotation/uniform resize, actual Group/Ungroup with accepted/discarded owner/ROOT receipts, actual swimlane orientation with discarded Apply, original strict pointer workflow, route obstacles and actual SVG/PNG header/interior/border/shadow output. These are CPU/state/artifact fixtures, not native HWND/pointer/DPI user proof. Full N6/N7 remain IMPLEMENTED_USER_VALIDATION_PENDING. Templates, Studio export controls and grouped draw.io remain M4-B/C/D rather than claimed complete here.
+
+Source scope is diagram/{visual,visual_canvas,visual_scene,codec,mod,export,drawio}.rs and gui/diagram_studio.rs. Parent is pushed R04/M0-A 6dc92c904b7cd6cc0f966131561b299e4bfdb295 on feat/productivity-diagram-completion. This checkpoint's actual SHA/push receipt is recorded outside tracked source after commit. Next is M4-B five actual visual starter controls on this same branch. The M4-B read-only handoff verified its preserved patch and exact original disabled-menu test; no M4-B source work has started. R05–R06 remain pending. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all original diagnostics/failures retained):
+
+| Log | SHA-256 |
+| --- | --- |
+| r04-m4-a-baseline-list.log | 2FA81059F915C7D3A54E992BA4D630D62022A244F7B0FD11E65A2B52C3EE1F11 |
+| r04-m4-a-baseline-run.log | 896D5D5CEFAA2E388C1FBCCC7417CFB2C37C6D7B49777977901E81F98F78CA61 |
+| r04-m4-a-list-1.log | E63519F5C2217AF3255D1034F3C14F80432D0CFD581534EDD3C4BCE5E23F0C97 |
+| r04-m4-a-list-2.log | D2322044432C4A6DA8C933468C8B637CBF35C7A9E456B199240C282F15DFFD82 |
+| r04-m4-a-list-3.log | 96258FEF3B72C9800E8AA9709B99748C0A42607067A97273AD20FD6C8612D27A |
+| r04-m4-a-list-4.log | 408A1F17860FB3EADC65E1A4E770CE548AEA19FE47EB38F071BE453210002D83 |
+| r04-m4-a-production-check-2.log | BEB24F592B393C0516AC2CCC09E6BE12B825AD07F45DFF77A85D963B7FAA2129 |
+| r04-m4-a-production-check.log | F5BC1050A14F1D74D47231178EA8B470F3ED899A7D48F3609DDF741BEE3E96D9 |
+| r04-m4-a-recovered-list-1.log | ABF0DA192162A2C665B4BA2D9936A7DA5393A38DE031E021A6482FD364990921 |
+| r04-m4-a-recovered-list-2.log | 8CB2542FF31EA87E382AE437D35F27EB1B4AE8CD257D3578A471735ECBAAB7AC |
+| r04-m4-a-recovered-list-3.log | B5B9D1086187563AE6BDF0F7E92A76B3B4E647A325637D8A119030C7E25DFE1E |
+| r04-m4-a-recovered-list-diagnostic-2.log | 9A16A9A72BBEED5466ECAB284D1E71B1C893F3F76C0B1B726BE1416BB879B078 |
+| r04-m4-a-recovered-list-diagnostic-3.log | 4F36B9DD351D8E0F358C35057DB3B8A40DD53BBC06B4D3E4E7B1DDF6BE99C6DF |
+| r04-m4-a-recovered-list-diagnostic.log | 9B2A85ACDC4D5C6870FC7C54C6B3C74EC1AFC8F1A5DCD4E2EC6099BD64BCEBD3 |
+| r04-m4-a-recovered-run-1.log | 849FAACDE33C4BD78ECFE3B753683F2444F5EAA90BA2D2970E79F751A44867BB |
+| r04-m4-a-recovered-run-2.log | A8489498615EA3DDD441433F1B9534EC9071E66EFF08FC22902140D9D51DC2A9 |
+| r04-m4-a-recovered-run-3.log | 6F888B8F7CDBA69177C8C9BC813633D620C95B82E26321705789BA67D7C03192 |
+| r04-m4-a-recovered-run-4.log | A2C7B14EA756FA709439D97DBBE66F854E7A81918A8AF908E8DA85BB08FA1AAA |
+| r04-m4-a-run-1.log | 2C72F77988642BBCB53E078904D6028E5F4972AA2AF2454045084566335CBF40 |
+| r04-m4-a-run-2.log | 2C0DDCBC5B50548FB4CBD11CF7710262741F2149CC2FC531DC6D4A8DBA753A35 |
+
+
+### R04/M4-B — Five owned Visual starters and recovered enabled menu
+
+Five distinct editable Visual starters (Flowchart, Architecture, Mind map, Sequence-style and Dependencies) now live in the diagram domain catalog. Scenes use current bounded VisualScene/from_fresh_scene validation, IDs, connectors and M4-A metadata. A narrow from_unsaved_starter_scene constructor gives template choices a blank saved baseline, revision 1 and fresh history; existing clean conversion construction is unchanged. No external assets or additional UML semantics are introduced. DiagramDocumentController owns typed ApplyVisualTemplate requests and fresh untitled Visual payloads through the existing pending Save/Discard/Cancel transition. Candidate validation precedes mutation; competing pending requests are rejected. Cancel preserves old identity/content/history/path and clears the pending choice; failed Save preserves those states, the pending choice and old file bytes. Accepted replacement has a fresh runtime identity/history even at an equal numeric revision, and ordinary edits/Undo/Redo and save/reopen remain functional.
+
+Studio stages typed document intents through existing document/revision/owner/ROOT fences. The discoverable Visual Templates menu uses popup-independent menu eligibility and exact MenuFocusScope trigger/item/sizing receipts; unrelated modals, pending/property gates and invalid/discarded owners remain blocked. Existing presentation invalidation resets old selection/property/projection identity only after an applied transition. Shared menu_focus_request_for_ui factors the accepted Mermaid keyboard policy for both scopes, preserving key order/wrapping/default focus/traversal/Escape. Real pointer and keyboard choices apply once. Existing Mermaid templates/assistance/conversion/host/viewer behavior is preserved and focused baselines pass.
+
+The M10-A.1 preserved patch exists and was rehashed to required SHA-256 DAA2CC401B7F5E57CB8DFF9034F10B4C0EDD3153927BF29EBAE95C434669DA63. Only starter/transition concepts were selectively adapted; accepted Mermaid assistance was not overwritten. Five exact baselines listed and passed 5/5 before editing. The first recovered exact pair listed 2 and run 1 passed 0/2 (both failed) with 7558 skipped: populated catalog scenes were unexpectedly clean, and the real Flowchart response was Some(false) inside its popup, reproducing the original enablement boundary. No assertion was weakened.
+
+The following independently reviewed causes and bounded corrections explain the runtime sequence; they are not a reset based only on a later assertion or another test name:
+
+| Root and first failure | Measured/source cause | Correction and result |
+| --- | --- | --- |
+| Catalog unsaved state, run 1 | from_fresh_scene intentionally supplies a clean conversion baseline | Starter-only validated dirty constructor; correction 1 catalog passes run 2. Conversion unchanged. |
+| Original menu item enablement, run 1 | Instrumented run 2: actions_allowed/template_allowed=true, but menu_enabled=false, visible=false, sizing=true. egui builds invisible measuring UI in its sizing pass. | Correction1 instrumented; correction 2 allows two ordinary owner frames after the real trigger. The unchanged all-five enabled/full-clip checks pass run 3 and later full flows. No force-enabled ancestor or internal template invocation. |
+| Visual decision observation, first reached run 3 | run 4 confirms pending ApplyVisualTemplate(Architecture), visible enabled menu, but no decision_cancel observation. The actual Visual buttons lacked the response registrations already present in Mermaid. | Diagnostic correction 1 run 4; correction 2 captures each existing Save/Discard/Cancel response.rect and ui.clip_rect, using the same response.clicked for existing ResolvePending. Run5 reaches the actual button, resolving this observation gap. |
+| Footer scroll visibility, first reached run 5 | run 6 measures decision_cancel y756.9..774.9 against enabled outer ScrollArea clip ending 752. The footer follows canvas/authoring/properties, requiring ordinary navigation; it is not the old popup gate or missing observation. | Independent source/data review explicitly records a separate causal root. Diagnostic correction 1 run 6; actual owner-wheel correction 2 passes run 7, retaining strict containment, Architecture selection, Cancel and Discard. |
+
+The durable reviewed scroll decision and resolution are in ignored r04-m4-b-reviewed-scroll-root.json (hash below). There was no silent budget restart: the constructor, sizing, missing-observation and physical-scroll fixes have different first responsible boundaries and measured evidence. Each used at most two corrections after its own initial manifestation, below the authorized three. During the scroll correction, read-only review caught a prospective wheel point derived from the content clip outside the actual ScrollArea; the test observes ScrollAreaOutput.inner_rect and requires real wheel input inside it and outside the canvas, then recaptures current full-clip geometry. It scrolls upward to the menu after Cancel. List 7 was kept compile-only. After the actual inner-rectangle correction, list 8 preceded the first authorized wheel runtime, recovered run 7. No direct camera/scroll/model mutation, viewport enlargement, clipping relaxation or fake observer rectangle was used.
+
+The recovered selector remained catalog plus gui::diagram_studio::tests::diagram_studio_visual_authoring_template_uses_accepted_dirty_transition for its first runtime. Subsequent diagnostic/correction runs used exact lists before runtime; after the catalog passed, failed GUI-only filters were used. Recovered run 3 repeated the small catalog alongside the shared pair gate, not as another constructor correction. All original logs remain. Root-observation instrumentation now identifies action, rect/clip, owner/pending and popup sizing state rather than replacing real controls.
+
+Set `$f` to trimmed `r04-m4-b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 12 fully qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 12/12 with 7551 skipped on the final frozen source. The subset includes five existing baselines plus catalog, controller transition/Save failure/reopen, recovered GUI, discarded child, discarded ROOT/pending decisions, keyboard and all-five actual menu flows. All five real choices produce the intended fresh scene, dirty state and runtime identity once; ordinary model edit/Undo/Redo remains meaningful. Keyboard uses actual focus/Enter. Discarded passes preserve both active document and pending choice. Injected production save-writer failure preserves the old file/path/draft/pending, followed by successful starter save/reopen.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with only six existing Note Panel/Table warnings and existing dependency warnings; no introduced Diagram warnings. Scoped Rustfmt and git diff --check passed. Independent final source/oracle review is clear. These are CPU/owner/file fixtures, not native HWND/GUI user acceptance. Full N6/N7 remain IMPLEMENTED_USER_VALIDATION_PENDING; no user run is requested here.
+
+Source scope is new diagram/visual_templates.rs, diagram/{document,mod,visual}.rs and gui/diagram_studio.rs. The visual.rs constructor is the narrow owner-level addition required to keep conversion clean while starters are dirty. Parent is pushed M4-A 47bee821f16f33473aa0a0da4d113c9a2b27f64e on feat/productivity-diagram-completion. Actual checkpoint SHA/push is recorded outside tracked source after commit. Next is M4-C actual rich SVG/PNG workflow on the same branch; its read-only plan verified the preserved patch, current encoder and publication owner. No M4-C source implementation has started. Grouped draw.io remains M4-D, then R05/R06. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original failure/diagnostic files retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r04-m4-b-baseline-list.log | F44BAE8044DCC161FE8A5DF2A3E1459DF60A7BE0590F35A0EBE8F3F54A3807D1 |
+| r04-m4-b-baseline-run.log | E000776F9C65AF909D8966F50C83943EBDBBFAFECB5EABC789B3C13CEC08E1DE |
+| r04-m4-b-list-1.log | 7E355D6DC8E961485963792ED4B998E508F92B336FA804E39FAB996D3CE7C5F2 |
+| r04-m4-b-production-check.log | 6595FBB52C8D2D3F9385454C95A681372F30B5F5A52F4D00A314FF384A3AE834 |
+| r04-m4-b-recovered-list-1.log | 5ECEB7F5BAEC7544F94DCD9BEDFA95F622703034EDF77C32C96EA46505B015C4 |
+| r04-m4-b-recovered-list-2.log | 6E842E691B9548C53572CB19180B50B3AAE5AD6EAC8A7BCE858A667D7F457071 |
+| r04-m4-b-recovered-list-3.log | F06410195E303DD268C2EE31354D6AB0339E893B2D89A6DF303136A354D4BEFA |
+| r04-m4-b-recovered-list-4.log | DA4F46ED7246F5D483AC8CF6389670EFFF5EE5349BBAC3210FE87DE398AAD73E |
+| r04-m4-b-recovered-list-5.log | 87EB736333C5C596B4F3E370FC942AE148130444981F6E2F24E29F36C973E193 |
+| r04-m4-b-recovered-list-6.log | FA0A633027FA03AA21E601F9DDFED3DA16A630BCF9DB95C1C48406E32C5EA0F5 |
+| r04-m4-b-recovered-list-7.log | DC09C70CC014F4BACC5DE44F2FEAFFEE794C8A1885B522298EF28B3308BB0958 |
+| r04-m4-b-recovered-list-8.log | 6D450CFE3F8528823533600F58884645C6CE5A468D1BE72EBD9B01B21A225856 |
+| r04-m4-b-recovered-run-1.log | A7F5401944AC567FDA5DEB70372B61F1CA92B3DA0B7C11D8305F79E9A75836AD |
+| r04-m4-b-recovered-run-2.log | CA5706029328B15AA62D994081E9800FD6E6C4A1384687821570B5137EB92C07 |
+| r04-m4-b-recovered-run-3.log | 71B15F88BD8D3525F04AAF177B82D4E9A2C5409937874FE560D72B0E9B5D5B18 |
+| r04-m4-b-recovered-run-4.log | 6156E4BBDC27B5DF9A01F1EFE9291C39CE4A69602499F1747F0D5E089F748314 |
+| r04-m4-b-recovered-run-5.log | 363E2ECF5DA12A440B851E53E4C6E0F4E76998C910E190250C601786EC78D659 |
+| r04-m4-b-recovered-run-6.log | 1143C7DB992A724B99DD0981E8A98323EEEF3E1200C0B014781B445EB58583D1 |
+| r04-m4-b-recovered-run-7.log | 30087A7B86E8FA2A6814BAFE344953CAD0497013D4D234AC43120880F3D426DD |
+| r04-m4-b-run-1.log | DE57B2CB2227E86BFB3CF9D5A5A3AA803ED87DC8029F42E77A72AC5BDF7F8C5C |
+| r04-m4-b-reviewed-scroll-root.json | 80CA351B9712CF19905840CC41F68BCD3EABBCEFBD5A531AF6D2F9EF4B065EF8 |
+
+
+### R04/M4-C — Owned rich SVG/PNG workflow and no-clobber publication
+
+Studio now exposes actual Visual SVG/PNG actions, existing scales, transparent/white/chosen RGBA background, progress and cancellable active/staged work. Options use an owned popup with CloseOnClickOutside so scale/background may be changed together; an explicit Export action closes it. Cancel occupies toolbar space only for a cancellable export, preserving the ordinary property viewport. Current accepted edits/options complete before DiagramVisualSnapshot capture; existing immutable projection/encoders remain the rendering owner. No viewport-pixel renderer was introduced. Viewer camera stays independent, and native document bytes/path/source are not overwritten by image export.
+
+Persistence now owns a destination-bound, same-directory synced temporary stage. Format and resolved absolute parent are captured before work; requested-parent resolution is rechecked at stage and publication. An owned stage cleans up on Drop and publishes only through persist_noclobber. Both the Studio stage and DiagramExportArtifact::publish_unoccupied use this one owner; the old check-then-replacing export path/API has no remaining references. Existing native Save As retains its post-stage-sync hook and no-clobber late-collision behavior. Existing callers' behavior outside intended Visual validation remains preserved.
+
+The existing typed visual work slot now encodes/stages exports off the GUI thread in production. Workers cannot publish. Polling may produce an owned completed stage, but only a current retained ROOT/owner completion can consume it after accepted edits, cancellation, close and document transitions. Discarded ROOT or child completion retains a still-valid stage. Source/identity/revision/owner/host changes and accepted close retire it. The occupied slot remains owned through cancellation/retirement; completed stages block competing asset hydration/import and draw.io entry points. Export Cancel targets only export work, precedes Save/other effects and suppresses publication, without cancelling unrelated assets. Running/staged work uses existing hidden-ROOT demand and owner/ROOT wakes; an open Popout Studio also independently requires hidden-root service.
+
+DocumentActionFence now captures actual HostIdentity as well as owner generation, document/revision and pass provenance. Host moves do not necessarily change owner_generation, so this is a required independent check. Owned picker return revalidates live identity/revision/authoring/pending/open state, exact host and Windows picker HWND before worker/disk work. Existing normalized same_export_destination refusal still protects an active native path even after deletion. Visual export takes its scale from committed options rather than an old intent field; feedback is tied to captured revision/options. Review corrected those boundaries and staged-slot guards before first runtime; these code-review changes spent no runtime correction allowance.
+
+The M10-B.2 preserved patch was rehashed to required SHA-256 747CB18B2CF569922F7C607A0ADCA4513721EE5F17881FACFABC77E41AA44929 and selectively adapted, not applied wholesale. Exact seven existing baselines listed and passed 7/7 before editing, including the two shared asset-worker cases. The first two recovered lists were compile-only; both matched the exact original PNG control test and property/cache companion, without claiming runtime proof.
+
+The initial recovered pair run 1 passed 0/2 with 7562 skipped. The PNG test actually accepted 2×, passing the original scale-control clipping boundary, but the default menu CloseOnClick policy closed it before White lookup. Independently, an always-rendered idle disabled Cancel export button added wrap pressure, placing the unchanged property Apply bottom at 752.9 against clip 752. Review confirmed both production causes. Correction 1 uses outside-click popup dismissal/explicit Export close and shows Cancel only when actionable. The same exact pair list 3 matched two and recovered run 2 passed 2/2 with 7562 skipped at the original viewport. No clipping predicate or expected dimensions were relaxed, no wider window or direct option assignment substituted for real controls, and no extra scroll workaround hid the property regression. Each root resolved after its initial attempt plus one correction.
+
+Final scoped fixtures cover actual SVG and transparent PNG/overlap controls, Viewer move/zoom through actual input, same-pass accepted scale/edit, host-only equal-revision picker change and revision changes, discarded options/picker/start/publication, running/staged cancel/close/stale state, late collision, staged import/hydration exclusion, and shared artifact publication. Final oracle review strengthened actual SVG bytes to equal the current overlapping-scene snapshot; changes identity while a real encoded result is still queued, then verifies retirement and temporary-file removal; and makes the original PNG stage survive both ROOT and child discarded completions before accepted decoded publication. The first final list failed one test-only prepare_visual_asset_file qualification, ran no tests and is retained. The helper was qualified and the same names relisted.
+
+Set `$f` to trimmed `r04-m4-c-filter-1.txt` in ignored evidence. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` (list 2) matched exactly 25 full-qualified names. The same filter with `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` (run 1) passed 23/25 with 7554 skipped. All actual PNG/SVG/options/picker/collision/asset/Save As cases passed; two Cancel-focused fixtures required correction.
+
+For the Cancel+Save fixture, exact-one list 3/run 2 was diagnostic correction 1 and passed 0/1 with 7578 skipped. It proved the already-ready stage published on mouse-down before the Save/release; its button geometry came from a discarded disabled pass. That fixture did not place accepted cancellation at the intended completion boundary. Correction 2 holds the actual encoded stage outside an empty live result receiver, warms and presses the real enabled Cancel, then queues the result immediately before actual release plus Save. The same retained completion path must now cancel/drop the stage before Save; restoring the old intent-exclusion bug would publish and fail no-file/temp cleanup assertions. No synthetic Cancel intent or revocation of already-published output is used.
+
+The second failure was an obsolete proxy: a retired export was expected to make hidden-ROOT demand false, but open Popout Studio itself requires that demand. Its corrected assertion checks worker/stage cleanup and compares demand with the initial host-only baseline; production scheduling is unchanged. With exact `r04-m4-c-filter-3.txt`, list 4 matched two and run 3 passed 2/2 with 7577 skipped. The Cancel timing root used an initial failure, one diagnostic and one correction; the retirement oracle needed one correction. Twenty-five distinct affected cases have passing evidence across these receipts, not one uninterrupted 25-case run. The prior 23 cases were unchanged by these test-only corrections.
+
+Final cleanup only formats the export menu and alpha-renames three test-observation local names to _name, preserving all UI order/gates/options/action/close logic and cfg(test) observations. Independent narrow review confirms equivalence, so no behavioral rerun was warranted. Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0, compiling the real non-test worker and picker paths, with six existing Note Panel/Table warnings and existing dependency warnings; no introduced Diagram warning. Scoped Rustfmt and git diff --check passed. Independent final source, lifecycle, oracle and alpha-format reviews are clear.
+
+Evidence limits are explicit: cfg(test) encoding uses the existing synchronous worker path; controlled receivers exercise production stage/retirement/publication ownership, not real OS asynchronous timing. Changed-parent tests alter private requested-parent bindings to model a changed resolution, proving validation and cleanup, not actual Windows junction/symlink retargeting. Real native HWND/picker/DPI/timing and complete N6/N7 flows remain IMPLEMENTED_USER_VALIDATION_PENDING. Disk no-clobber/late-collision, actual byte decoding and temporary cleanup are locally tested; internal SVG equality is current-snapshot workflow evidence, not an independent external-reader pass. No intermediate user run is requested.
+
+Source scope: diagram/{export,persistence,mod}.rs and gui/diagram_studio.rs. Parent is pushed M4-B 06d61ae88fb312720a500509c2e4bf7c39f06623 on feat/productivity-diagram-completion. Actual checkpoint SHA/push receipt is recorded outside tracked source after commit. Next is M4-D supported grouped draw.io import/export and Diagram category closure, with the read-only planner handoff ready. No M4-D source implementation has started. R05/R06 remain pending and Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all original diagnostics/failures retained):
+
+| Log | SHA-256 |
+| --- | --- |
+| r04-m4-c-baseline-list.log | FF3FDED27F9276175442DB0937BA843A0845BD7B0BF4D24D8339DD1851B36E47 |
+| r04-m4-c-baseline-run.log | E41E6A5C16B7C8AAA7B7A7078C5DDF655D69B7960D6B924439E269668892B0E4 |
+| r04-m4-c-list-1.log | 99025A37245DC99D6A18DACB300A44728EFDFEF0FB8E1B00E1D2FCBAA8BDA63A |
+| r04-m4-c-list-2.log | 55F72CA1B455D410F8D95ECF127ECF968838F7376ACA98958056078082A1EB34 |
+| r04-m4-c-list-3.log | 3D7C3B2B540A02D133AFD8B54933A457AB4E78E24DE7D646DA796B2210F83C0B |
+| r04-m4-c-list-4.log | 33950DAC53E07AB1233F3C9C55C39F240BFB5E3511E7BD0B7E6BE6A7689E5E91 |
+| r04-m4-c-production-check.log | 697B240EA54C80E8A83015292EDD42840E529C0FF7634DA8E83209892E0871E3 |
+| r04-m4-c-recovered-list-1.log | D0B2629CE2EC4388B8F40EEF58865EF01589AE8ACA76F6AD162B587215F7ADF7 |
+| r04-m4-c-recovered-list-2.log | 1027B994F0B50A573C241769A5D028751F49897F7857D623B131402033207077 |
+| r04-m4-c-recovered-list-3.log | 6415CD35B62809FB4216169261CE343335261EEFFB4C5F2F2215E05C3053F928 |
+| r04-m4-c-recovered-run-1.log | 7CD01A5A3B997290059B2B5CD355E305194781929D6D411B5983E5A5AEA335FD |
+| r04-m4-c-recovered-run-2.log | 401E63ED6CF116338F67B2EE69F0C5D295ECAC83ADEC14A427D3D99902F2F0C6 |
+| r04-m4-c-run-1.log | 733A039B2E74D5FDF963B5562814B2CD76D423D835E917D1C7BF4DB4E366C017 |
+| r04-m4-c-run-2.log | 8B5F53CA907A7508C9E4759B4D83A96A0A1D9F1E68F34547DD6274198D41A48E |
+| r04-m4-c-run-3.log | 0DA7E0DF5E3967F147F2D0C9D71A64D31234D10B43883ED4D76FA5A08817D71C |
+
+
+### R04/M4-D — Faithful bounded grouped draw.io interchange
+
+The existing draw.io adapter now supports bounded nested transparent groups, compatible containers and both swimlane orientations alongside the accepted layers/primitives/text/connectors. A complete cell index and bounded ancestry resolution replace direct-layer/XML-order assumptions. IDs and tree order are deterministic; parent-local positions become world-space once, parents exist before child installation and endpoint IDs precede deferred edge resolution. Missing/self/cyclic/non-frame/deep ancestry and nonfinite/overflowing resolved geometry are refused before any candidate. Native membership still excludes connectors and the reserved title; no native schema/version expansion was needed.
+
+Invisible groups become transparent zero-stroke Container owners without visible headers/dividers, with nonempty group labels represented as editable member text. Visible frames must match current native header geometry, transparent body, text/border color and supported style/orientation. Export uses standard swimlane properties plus inert validated mlFrame=container only where needed to preserve native Container kind. Contradictory or unknown markers cannot bypass ordinary geometry/style checks. Rotated leaves are supported; rotated parents with descendants are explicitly refused rather than assuming unverified draw.io renderer inheritance. Relative vertex ports, custom offsets/waypoints, compressed/multipage/active/external resources, unsupported presets/images/shadows/styles and incompatible cross-layer/tree paint order remain explicit subset limits. No unsupported group is silently flattened, relayered or approximated.
+
+Export emits parent IDs and inverse parent-local coordinates, validates representability before exposing bytes and retains labels/styles/anchors/endpoints under deterministic ID remapping. Read-only review caught a local/world-bound asymmetry: valid opposite-extreme parent/member positions can require a larger local offset, and nested local terms can cancel. Wire-local parsing now has its own finite bounds; only complete ancestor translation is checked against native world limits, with every parent's final geometry independently validated. Opposite-extreme and nested-cancellation cases require real export/reimport; direct-layer overflow remains refused. Conservative tree-stack refusal is retained rather than inventing new global z-order semantics.
+
+Connector parent is a routing namespace, never native membership. Its supplied source parent is compared with indexed endpoint ancestry; only an actual non-NCA change emits a source-edge-specific nonfatal normalization note. Export derives the conventional common ancestor. The tested lane-to-outer-group edge requires the original note, preserves endpoint anchors and label, and has no note after canonical reimport. Same-lane edges are covered too; this does not claim a broader connector matrix. Unsupported-content reports retain structured source IDs/properties across the import worker into a read-only ImportUnsupported review, with no candidate/publish controls. Successful notes remain nonfatal.
+
+The accepted Studio route remains actual menu → import → review → Create .mld copy → optional Open copy → existing dirty decision, and actual grouped export → review → Save .drawio. Original source/native bytes remain unchanged until explicit separate-copy Open; Cancel preserves the old document, Discard opens the separate native copy, and group edit/Undo/Redo/reopen remains functional. Existing owned picker, M4-C busy-stage/no-clobber owner, retained ROOT/child/document/host checks, stale retirement and hidden-root scheduling stay authoritative. docs/DIAGRAM_EXPORT.md and DIAGRAM_STUDIO.md describe the supported profile and correct stale ungrouped-only/Visual-export text. Parent also corrected the current export reference's old best-effort publication description to match M4-C atomic staging; historical plans/stops were not rewritten.
+
+Before source edits, exact existing wire/workflow inventory listed 11 and passed 11/11 with 7568 skipped. Incremental exact importer 2, symmetric 5 and focused 7 selections listed and passed 2/2, 5/5, 7/7 respectively; they were intermediate seam evidence, not milestone completion. Read-only reviews refined world/local bounds and nested accumulation before acceptance. No additional native format or production dependency was introduced.
+
+Set `$f` to trimmed `r04-m4-d-final-filter.txt` under ignored evidence. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 24 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 24/24 with 7560 skipped. This combines eleven affected baselines, five new wire/workflow cases and eight representative category-closure cases: frozen invalid v1 source without rewrite, deterministic v2 migration, v3 empty-membership wire, unknown/malformed/future codec refusal, failed pending Open, recents/dirty transitions, same-pass source export and current-image/picker freezing. It reuses accepted M4-A/B/C evidence rather than repeat their entire suites.
+
+Final oracle review then strengthened actual visible Container reimport to require kind, label, transform and style, not just shape/parent count, and added the non-NCA routing note. The exact five-case routing selection listed five and passed 4/5 with 7579 skipped. Its one failure was a malformed-marker oracle that expected generic vertex geometry while a combined branch reported orientation; review also showed the marker-free control's default border/text colors differed, independently triggering appearance refusal. The final control explicitly supplies matching black colors, transparent body and correct vertical extent 22 for width 100, requires marker-free import success, and expects an accurate source-ID/property-specific invalid-frame-marker refusal for the inconsistent discriminator. Exact marker list 2 matched one and marker run 2 passed 1/1 with 7583 skipped. Superseded diagnostic lists are preserved without runtime claims. This isolates the required guard rather than merely accepting any rejection.
+
+The sample is portable at fixtures/diagram-grouped-supported.drawio (also retained in ignored target). A final cfg(test)-only assertion added that exact tracked input to the existing grouped wire case: import → export → reimport must preserve transparent group/horizontal lane/member hierarchy, both endpoint shapes and connector identities/anchors/label in both scenes. Its exact list/run passed 1/1 with 7583 skipped, without changing production code or fixture bytes. The passing-name union remains 24, not a sum of repeated runs. All required new oracle cases now have passing evidence.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with six existing Note Panel/Table warnings and existing dependency warnings, no new draw.io warning. Later edits were only the portable test assertion and documentation; production source is unchanged. Scoped formatting and git diff --check passed. Independent final hierarchy/geometry/profile/reporting/ownership/Container/marker/oracle reviews are clear.
+
+Parent independently parsed the fixture using .NET XmlReader/XmlDocument with DTD prohibited and no resolver: seven unique mxCell IDs, four vertices, one edge, and every declared parent/source/target resolves. This is separate XML syntax/reference proof, not independent draw.io semantic/rendering evidence. Local fixture SHA-256 is 5BE761849849A557A8C7DBB085527F3E0F34F0EB308E3D7D04E7800501116ED8. The fixture also passes the application wire path. No draw.io/diagrams.net CLI was on PATH, but that is not proof no GUI reader exists elsewhere; no independent reader was invoked. That reader check and full native N6/N7 remain IMPLEMENTED_USER_VALIDATION_PENDING for the single R06 packet. No user test is requested now.
+
+Source scope is diagram/drawio.rs and gui/diagram_studio.rs; reference updates are docs/DIAGRAM_EXPORT.md and DIAGRAM_STUDIO.md plus the small portable fixture. Parent is pushed M4-C d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8 on feat/productivity-diagram-completion. Actual checkpoint SHA/push is recorded outside tracked source after commit. Next is R04 category reporting and exact-tip R05/M0-A, not a branch from this pre-report source SHA. M5-A read-only handoff is ready; no R05 source has started. R05/R06 remain pending. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original diagnostic/failure logs retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r04-m4-d-baseline-list.log | CE4A12761D0B6AD2761AD009E8464D2DDB23B3C33AADFABB37F70FDB5F5BF96E |
+| r04-m4-d-baseline-run.log | FB9BCF61F3B2C205F8742E7A850A8346BDBBFDEDF49289FD774E67B98AFC8368 |
+| r04-m4-d-discriminator-list.log | 80176B2BE2508489BD74E50B87729DDB20A96D94A346F9D0D19EF2BFD1684A74 |
+| r04-m4-d-final-list.log | F9637B4293282BDE5E5C2AD2FD70CBD4CF30D656581B28A16D0CB438C3A5DD8A |
+| r04-m4-d-final-run.log | 679C166BF5BF63F74C398163C3B8404C56220BE6933783F19D695CDE3B15C1CC |
+| r04-m4-d-focused-list.log | C54C0294B16551394C6366FEED693227B40503623315146224708F53AED98BB3 |
+| r04-m4-d-focused-run.log | B1A764CB0457837CF5DD5ACC450C1CA3116470FE796CEC7F7AD01B156340622B |
+| r04-m4-d-import-list.log | CCD725D707E1D2F2050C7A6E6944CF1AF35FCBA2F5D97C20484675E696B8B574 |
+| r04-m4-d-import-run.log | F6FC7162B33DB39EE428871DBDDE0C008CBF3AC31EFE63885A45A17E3B64F4EA |
+| r04-m4-d-marker-list-2.log | 3D0FA59BC148AF84951D79F3811E5AB2AB3DC9AEBCBED3FB155006BD782D9924 |
+| r04-m4-d-marker-list.log | DD20E4627E4ADC97D6B7166A2AA0C64B966C1A3090C8DBD9C43C90E066751350 |
+| r04-m4-d-marker-run-2.log | EC9F7AA67327A59C143FB1FF3939D85638CF8E7901D0605A2FF51A4A00F91F2C |
+| r04-m4-d-portable-fixture-list.log | 273031ED01253D3C98664D9BA604526149E2D9F5F756D7ECE005A64B1E5D89C6 |
+| r04-m4-d-portable-fixture-run.log | 8F451A0DF69A0366F544BB8E90332800D70A57233A7716F3CA0062F51D5F0649 |
+| r04-m4-d-production-check.log | F4CA78329E2F63DA373214DE4EC75C864AE4E1BC1D3E8763B7503FCD051D5936 |
+| r04-m4-d-routing-list.log | 34CDF75E7F1DAD4E285E9263D84D93E2EEC6C93627415E84E98573487064FAAA |
+| r04-m4-d-routing-run.log | B422C5AA6773BAEF238461E8DADD77DCFB9ADB0525EE3B4135FB77120BEC6517 |
+| r04-m4-d-symmetric-list.log | 55A6510362CA20821C91B777B0E22E088172A0EE829243C581A46FA4811A49E2 |
+| r04-m4-d-symmetric-run.log | A2B4917B27B95FBA479AABEA4F18AD45C6769BCFB47FA8F3BDF81CC6A9C4944D |
+| r04-m4-d-independent-xml-check.json | 56796B438472F3902482CD979F67C7D3625388AF28D746CE2872D0C088CC0E0E |
+
+
+## R04 final category disposition — Diagram completion
+
+M4-D source checkpoint a797430bae48e9c40a66d81e59ec3bac9d0e9889 is committed and pushed; upstream equals HEAD and the checkout is clean before this reporting update. R04 M0-A 6dc92c904b7cd6cc0f966131561b299e4bfdb295 has exact direct parent R03 final reporting tip 00e199e00df7513153ceb00a42e8cb5cb1f5b9e0. Accepted source checkpoints are M4-A 47bee821f16f33473aa0a0da4d113c9a2b27f64e, M4-B 06d61ae88fb312720a500509c2e4bf7c39f06623, M4-C d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8 and M4-D above. Every normal push succeeded. The range has no merge commits or history rewrites. The actual final reporting SHA is read after this documentation commit, recorded separately, and becomes the sole R05 parent.
+
+This disposition supersedes the inherited C03 frozen rows without erasing their failure history. Original IDs are individually enumerated below using the original E.4 owner mapping; grouped rows there do not establish more detailed per-number labels than the source Goal supplies.
+
+| Original ID | Final local disposition / evidence owner | Remaining full native proof |
+| --- | --- | --- |
+| 27 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 28 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 29 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 30 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 31 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 32 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 33 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 34 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 35 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 36 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 37 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 38 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 39 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 40 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 41 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 42 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 43 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 44 | Implemented and locally verified: M11-A/B and M4-D supported grouped draw.io profile, explicit refusals/reports and separate-copy workflow | N6/N7 user pending |
+| 45 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 46 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+
+| Original milestone | Final recovery disposition |
+| --- | --- |
+| M8-A | Retained explicit Mermaid/Visual authority and versioned persistence; M4-D actually executes frozen invalid v1 and deterministic v2 migration and v3 legacy-wire checks. No eager source rewrite. |
+| M8-B | Retained primitives/styles/layers/shared projection; M4-A adds validated hierarchy/frame geometry while retaining bounded native model. |
+| M9-A | Retained ordinary transforms/snapping/guides/minimap; M4-A actual visible grouped drag now passes strict canvas mapping after real Fit, with descendant closure and coherent undo. Full native pointer/DPI remains pending. |
+| M9-B | Retained connectors/assets/presets; M4-A completes persistent group/container/swimlane editing and shared projection/export. |
+| M10-A | Retained Mermaid assistance, explicit supported Visual copy and recents/duplicate; M4-B adds five editable Visual starter categories with real menu and dirty decisions. No promise of rich-to-Mermaid conversion. |
+| M10-B | M4-C completes reachable scale/background controls, current SVG/PNG encoding, retained cancellation/staging and atomic no-clobber publication. Viewer stays read-only with independent camera. |
+| M11-A | M4-D implements faithful bounded uncompressed grouped interchange; layers, supported nested unrotated frames, rotated leaves and anchored connectors round-trip. Unsupported content is explicitly refused before publication. |
+| M11-B | Current Diagram Studio/export references and portable fixture updated; all 20 selected Diagram IDs accounted for here. Local workflow/owner tests and review complete; full N6/N7 and external reader deferred to final packet. |
+
+M4-A/B/C/D have respectively 22, 12, 25 and 24 distinct passing affected-case inventories within their recorded receipts. These overlap and must not be summed as unique category tests. Original failures, diagnostic runs, focused corrections and compile-only attempts remain separately recorded above. The latest production lib/main-bin check passes with six pre-existing Note Panel/Table warnings and existing dependency warnings; final M4-D changes after that check are cfg(test)/docs only. All scoped source, lifecycle, geometry, wire-profile, test-oracle and final accuracy reviews are clear. This reporting-only checkpoint requires diff/review, not another Cargo run. R06 will perform the required cumulative affected-case verification and scoped Clippy once.
+
+No implementation blocker remains within the documented draw.io subset. Compressed/multi-page/active/external content, relative ports/offsets/waypoints, unsupported styles/assets/presets, rotated parents with descendants, cross-layer membership and unrepresentable tree/paint stacking are explicit refusals rather than lossless claims. The portable fixture passes the app's import/export/reimport and independent XML syntax/reference checks; no independent draw.io reader was invoked. Full native N6/N7, external-reader rendering and complete monitor/DPI/picker/timing checks remain IMPLEMENTED_USER_VALIDATION_PENDING. R01/R02 Diagram shared-host evidence carries forward; no intermediate user check is requested.
+
+Next: read this commit's actual pushed HEAD, create the fresh R05 category branch directly from it, commit/verify/push R05/M0-A before any source edits, then implement M5-A from the existing read-only handoff. M5-B list editor/typed launcher/progress/cancel and M5-C utility/recorder checks follow sequentially. R06 then closes the cumulative matrix and supplies the single N1–N12 packet. Do not repeat Dashboard fixtures, accepted R01–R04 milestones or previous native reprobes. Goal remains active.
+
+
+## R05/M0-A — Explorer and utility integration baseline
+
+R04 final reporting tip 102eaf9fbe291530acf0901f641bf6f822fcbc0f is pushed on feat/productivity-diagram-completion with upstream equal and a clean checkout. The next sole-checkout branch feat/productivity-explorer-utility-completion was created directly from that exact SHA; HEAD was verified equal before this M0-A ledger update. Its direct parent must be checked after commit. No merge, reset, rebase, cherry-pick, worktree, clone or discarded changes were used. Parent retains Git/ledger ownership; source implementation remains sequential with configured Terra/medium, freshly read from implementer.toml.
+
+R05 adopts only the current recovery scope: M5-A actual guarded Windows Explorer backend, M5-B editable saved folder lists and typed launcher/action/progress/cancel/common host, M5-C focused Folder Size/File Lock/recorder integration. Original ID61/M12-A/B is partial at this baseline: ordered operation, identity observation and immutable saved-list store exist; native creation/tab mutation and GUI/typed launch do not. Original IDs88/89/119 and M13–M16 already have accepted domain/adapters/docked UI, native disposable artifacts and R02 shared host migration; verify directly affected cooperation rather than reimplement those owners. N8–N12 remain full user-pending, distinct from accepted narrow native evidence.
+
+M5-A plan is persisted in ignored target/desktop-productivity-completion-recovery/r05-m5-a-planner-handoff.txt. It requires one worker-owned driver over FolderTabOperation, operation-private attributable bootstrap, target-rooted UIA tab identity/selected-pane-to-Shell binding, real New Tab invocation and literal PIDL navigation, final ordered validation and honest bounded cancellation/partial outcomes. Unsupported OS/preflight known missing capability must cause zero resource/native mutation; provider facts discoverable only after attributed bootstrap must report that partial bootstrap without speculative requested-folder navigation or append. No blind input, guessed AutomationId/private commands, universal unsupported-success stub, or pre-existing-window navigation is permitted. Positive Windows11 provider exposure remains unobserved; implement conditional real calls now and defer only the final native test. Missing implementation is never relabeled as merely native pending.
+
+The handoff defines exact new backend/fake-port cases plus narrow operation/identity and two unchanged MkMacro single-folder baselines. List exact nonzero cases then run the same locked/offline fast-dev selection; finish with production lib/main-bin check, scoped formatting/diff and independent review. No unchanged Win10 probe, new observer attempt, broad suite or intermediate user request. GUI/launcher/storage changes are outside M5-A. Commit and normal push this baseline before source edits, verify direct parent, then assign only M5-A. R01–R04 and Dashboard fixtures are complete and must not be repeated. Goal active; R06 cumulative checks/manual packet/final receipt follow R05.
+
+
+### R05/M5-A — Guarded Windows Explorer tab backend
+
+The accepted ordered operation now has one worker-backed native path. New backend.rs owns ExplorerTabsJob start/cancel/poll, immutable OperationReport progress and final ExplorerTabsReport diagnostics. A private RAII process resource lease rejects concurrent/replacement owners with Busy until the actual worker exits, even after owner Drop; native port/COM teardown precedes lease release. Cancellation does not join a live worker or spawn a replacement around a stuck call. UI presentation remains independent and is not yet implemented. The public job is the callable request entry point; M5-B will integrate it rather than create another worker.
+
+FolderTabOperation now always requires authoritative VerifyFinal before Completed. The tentative legacy completion bypass was removed after review; directly affected tests were migrated. A final failure/cancel/deadline cannot report Completed merely because every requested slot once entered the verified prefix. Error-return paths sample post-call cancellation/deadline first. Before-dispatch refusal and bootstrap-only side effects are distinct from an attempted requested-folder mutation; all unattempted folders remain in remaining(). Native diagnostics expose bootstrap stage, owned resource path/remaining state and requested-step uncertainty without manufacturing a verified tab.
+
+The Windows owner implements build/capability preflight, an exclusively created private bootstrap directory/PIDL, documented SBSP_NEWBROWSER through a retained Shell browser or conditional explicit opennew activation, and a typed successful-launch receipt plus complete unique non-baseline bootstrap correlation. It does not infer authority from PID, registration timing or path/HWND alone. Known unsupported preflight exits before bootstrap resources/native mutation; provider capabilities discoverable only after an attributed bootstrap yield an honest partial bootstrap and no speculative requested-folder navigation. Cleanup concerns only owned temporary resources; uncertain windows are not closed or rolled back.
+
+Target-rooted bounded UIA observes ordered opaque tab runtime IDs plus retained element identity, unique selected tab, distinct content-pane relationships and a unique live semantic New Tab Invoke capability. No guessed AutomationId, desktop-wide control search, blind keys, private message or clipboard path is used. TabItems use SelectionItem.Select, not Invoke. The separate selected-pane Shell path preserves the legacy observer's rejection of ambiguous shared-HWND bindings. The actual join requires a target-descendant pane distinct from root, rejects shared/overlapping panes, and brackets selected tab/pane, Shell binding/view and exact PIDL. Every non-null ControllerFor element must resolve to exactly one bounded target-tree Pane; zero/multiple matches or provider failures refuse rather than disappear. Tree walking distinguishes successful null from failing HRESULT and owns returned interfaces across post-call cancellation.
+
+New Tab is invoked once only after target/prefix/selection/control revalidation. The attempt flag is set immediately before Invoke, after pattern acquisition and cancellation checks. The new selected tab must append at the expected ordinal with all prior identities/order preserved; literal absolute PIDL navigation then uses its proved owning view. Duplicate paths retain distinct tab identities. Final verification checks all count/order/path associations. Typed NotReady permits bounded polling only for an initial expected-folder mismatch; a contradictory read after exact evidence is terminal even if the expected folder returns later. Native calls are checked before/after control boundaries. UIA connection/transaction timeouts are configured, but arbitrary Shell/UNC RPC interruption is not promised; the retiring lease remains held until calls settle.
+
+Before edits, the first baseline inventory listed 19 because two unchanged MkMacro tests were under direct_open_execution_tests rather than the guessed namespace. Corrected exact inventory listed 21; matching run passed 21/21, 7563 skipped. Initial driver list compiled five (no runtime); after early cancellation/final-completion review correction the exact seven selection passed 7/7, 7583 skipped. One early native list failed ordinary E0502 borrowing and executed zero tests; the worker-local pending identity was cloned before mutable Shell lookup. Integrated inventories listed 13 (two retained list logs); matching run passed 13/13, 7583 skipped. These are incremental evidence, not additional unique final counts.
+
+Set `$f` to trimmed r05-m5-a-final-filter.txt under ignored target/desktop-productivity-completion-recovery. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 35 full-qualified names. The same filter with `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 35/35 with 7563 skipped: all 21 operation/identity/MkMacro baselines and 14 new backend/evidence cases. Tests use the same production runner/admission helpers, with explicit fake-port/native-boundary limits. They cover ordered Unicode/space/UNC/duplicate requests, zero-request preflight refusal, cancellation/error precedence and uncertainty, partial bootstrap versus requested work, final-veto, live progress and owner-drop/replacement retirement, prefix/runtime identity/order, exact pane relation and changed-pane rejection, typed polling contradiction and dispatch-attempt boundary.
+
+Final oracle strengthening extended the existing bootstrap case through backend::drive and the actual attribution helper with a fake navigation-target log: preexisting-only/ambiguous observations yield no navigation target; unique attribution logs only the new root. Its exact list/run passed 1/1, 7597 skipped. A final concrete ControllerFor completeness correction extended the existing relation case to reject zero/multiple matches even with a child-derived pane, and accept unique merge/dedup. Exact relation+attribution list matched two and run passed 2/2, 7596 skipped. The passing-name union stays 35; repeated executions are not added. All required final oracle cases have passing evidence.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` first passed but exposed one introduced atomic fetch_update deprecation. The equivalent repository-standard try_update correction was independently checked against installed Rust core's direct delegation. Final production check 2 exited 0 with six existing unrelated Note Panel/Table warnings plus existing vendor/table-core warnings, and no new Explorer warning. Final scoped `rustfmt --check --edition 2024 --config skip_children=true` on the six changed Rust files and git diff --check passed. Independent bounded source/native/lifetime/oracle reviews cleared every concrete finding, including the last ControllerFor correction. No full suite, unchanged Win10 reprobe or intermediate user request was added.
+
+No Explorer/native mutation was exercised. Real Windows11 provider schema, New Tab/pane capability availability and positive same-window N8 remain IMPLEMENTED_USER_VALIDATION_PENDING; deterministic tests and Windows compilation do not prove them. Unsupported/ambiguous observable capabilities fail closed with an explicit diagnostic. The conditional real creation/Invoke/selection/BrowseObject paths are implemented rather than a universal Unsupported stub. Original ID61/M12-A is locally implemented; saved-list GUI/typed command/progress presentation M12-B remains M5-B, not claimed here. No new dependency, storage change, MkMacro semantic change or agent configuration change was made.
+
+Source scope is explorer_tabs/{backend,evidence,native_uia,mod,operation,windows}.rs. Parent is pushed R05/M0-A 188389bcfa474bab2d01fc51a66d975b506d3039, direct parent R04 final 102eaf9fbe291530acf0901f641bf6f822fcbc0f. Actual accepted commit/push receipt is recorded separately after commit. Next is M5-B on this same branch using the prepared handoff and accepted ExplorerTabsJob API; M5-C follows, then R06. Both later handoffs are ignored reference artifacts, not executed milestones. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original failed/diagnostic logs retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r05-m5-a-attribution-list.log | FB9C196BA6AB023A7C9C5DC714427C2360E2338D9C941BB38F97C694C8220E00 |
+| r05-m5-a-attribution-run.log | 86D0CB98FFDC111C6A3F2B7DD3B9E36DF73B1B97012036CF2289CCD2CE80AB9C |
+| r05-m5-a-baseline-list-2.log | BDF4D890DDECBA9E5D2BE6587EEFFD4C6E42DDD76B49BDE9803CB43DA3ACD80A |
+| r05-m5-a-baseline-list.log | B8E59C5F5ABF6B5E2C07D2F9418A7D9A387D269AB59ECCBB32A3CE4B0C02A3FF |
+| r05-m5-a-baseline-run.log | D6B9D2A196E2BA27E609B1EE27FDA91AA59ACBE57E32C7632AB1079C44942BEB |
+| r05-m5-a-driver-list-2.log | 3C008D11AC8BA44E558B3F51E91BA2F28A314B6C195650996DDCC734D6BB2DCA |
+| r05-m5-a-driver-list.log | 6E8BE482F8A5F2E44C5D2F743BEFF0BBCAD0A5051A40251AB0ED80C2CA673C5B |
+| r05-m5-a-driver-run-2.log | E46FF2DB9350FE771A9EA7F8FDA5FF6F71139E413062C3B1DD822DF8A80BBC0B |
+| r05-m5-a-final-list.log | 8C634F4D5484F4F1BFF08D18766AB98677E5259BB7D2DC85A7C470EB6683D495 |
+| r05-m5-a-final-run.log | 474BBE965BE11F957E58452247E8EB5A91D09C44620663954DF6E5F7A2B478E7 |
+| r05-m5-a-integration-list-2.log | 813D6DF82E24C051EF6ADB391C16883533C39C5CD4AAE9F54D17215AB85B5632 |
+| r05-m5-a-integration-list.log | 3D3654DB029ED9310F1A52BF974247A782E0D6FFA208816392A115406F21D397 |
+| r05-m5-a-integration-run-2.log | 2824C06C2EE98381C3D34C757034AD265F7DACF80A67B7C1B5CF7E3902FAACCD |
+| r05-m5-a-native-list.log | 0FAD21AED2468016A0808C682DACE0DEB9EF50A52313869D09D440CF3288936D |
+| r05-m5-a-production-check-2.log | 507E1AA918400D01977E77EA0FD0D2CAD7E375AAC9A20ABFAD3FE6BD0292C8D8 |
+| r05-m5-a-production-check.log | 9D14DAAB387D5242D1F2D8D1A4FFE6C0EEEC8E23C6686B9532090BAF191B0EEF |
+| r05-m5-a-relation-list.log | EAE6E9B022059ACA9BA081FEA9E6D759A438770456E4B4482C3C498DA26CECB7 |
+| r05-m5-a-relation-run.log | 9C064502316B2BE67570EBFFDD9B9381D184360B8540A287BE9FE0DB2A788440 |
+
+
+### R05/M5-B — Saved Explorer folder lists, typed launcher and ordinary host
+
+Explorer Tabs now has one retained editor over the accepted FolderListStore and ExplorerTabsJob. The GUI supports bounded names and literal ordered folder rows, invalid-draft retention, add/remove/reorder, list ordering, Save/Delete, owned Save/Discard/Cancel decisions and explicit Run/Cancel. Empty lists remain saveable but cannot run. No duplicate serialization, scan/native pipeline or schema migration was added. A narrow checked nonzero FolderListId constructor supports typed wire parsing. Failed/stale persistence preserves draft, accepted memory baseline and saved bytes; corrupt/future/unavailable stores remain errors, not writable empty replacements.
+
+The plugin receives the app's settings-derived AppDataRoot through an app-instance shared root; it never opens an alternate default store. Search/catalog reads are nonwriting and preserve an honest management opener on store error. Query explorertabs exposes the opener and stable saved-ID run rows. Typed commands explorertabs:open, explorertabs:run:<canonical nonzero ID> and explorertabs:cancel use the existing command bus, GUI host, plugin filtering, command cache/universal action catalog and configurable activation route. Malformed reserved routes, including mixed-case namespace variants, cannot fall through to external execution; headless invocation reports the GUI requirement. No default global shortcut or hook was added, and MkMacro single-folder behavior is preserved.
+
+All durable/editor/start/cancel effects use retained originating ROOT/child authority and current host/session/draft/saved basis. A discarded or stale action cannot save, launch or cancel. Current accepted Run opens a fresh store at the configured root and resolves the stable ID before making one immutable FolderListRunSnapshot; cached labels/paths and row positions are never run authority. Editing/renaming/reordering/deleting saved data cannot change or cancel that snapshot. Delayed Cancel is qualified by current job identity; active/retiring repeat Run is Busy without a second worker. Durable successful CRUD refreshes the existing command cache; failed/discarded effects do not. Text clipboard output uses retained RootDialogEffect ownership and native Close clears only its viewport's capture entries.
+
+The new Panel/UtilityWindowHost uses the existing ordinary host, geometry, pin/focus/input/hidden-ROOT and accepted completion paths. Dock/Pop Out preserve one draft/store/job/report. Closing hides while preserving draft and job; explicit Cancel and app shutdown use the job owner. Explicit Open/Run focus performs the foreign TextEdit handoff and moves Explorer to the front of panel_stack; background progress does neither. Stable absolute TextEdit IDs combine tool/editor incarnation and field or stable row identity: list replacement/reload renews incarnation; row reordering and host movement preserve the appropriate undo identity. Owned decision Escape cancels the decision before generic close. The job wake is installed once, explicitly requests ROOT repaint on progress/final events, and keeps only a bounded 100ms active/retiring ROOT fallback to observe actual thread exit or blocked provider calls. Idle hosts do not schedule periodic job polling or allocate replacement wake callbacks.
+
+Report projection distinguishes verified tab/path/ordinal, attempted-unverified and not-attempted folders, outcome, bootstrap/new-window diagnostics and remaining owned temporary path. Plain outcome/failure/new-window labels replace internal Debug enums in the final reference pass; detailed reasons remain available without implying native success. Help documents saved ordered folders and explicit Run/Cancel. This completes the pending Explorer ordinary-host row inherited from R02; the original 37-row inventory now has its 32 existing ordinary hosts, three R01 references and two new Inspector/Explorer surfaces implemented. Full native host acceptance remains separate.
+
+Before source edits, exact five storage/MkMacro baselines listed and passed 5/5, 7593 skipped. The first diagnostic list failed E0433 (egui qualification) and E0308 (TRACKED_PANELS length), with zero execution. Both were corrected; diagnostic list2 compiled two parser/plugin names. Lists3/4/5 compiled three names while reviews refined identity/focus/action fences; superseded inventories are compile evidence only. One unsupported shell Set-Content encoding option affected filter-file persistence, not Cargo's intended expression; the identical filter was persisted with .NET and actual inventories were reconciled.
+
+The first three-case runtime passed 2/3, 7599 skipped: held-job and stale-store passed, actual-control failed name-field enabled/full-clip. Exact-one instrumented UI list1/run1 retained the same strict oracle and failed 0/1, 7601 skipped. Its measured field rectangle (25,515)-(305,539) was fully within clip (17,431)-(655,891), but disabled; focus was None and actual top layer was title-derived Id::new(Some("Explorer Tabs")), while the host expected explorer-tabs-window. The real docked Window lacked an explicit Window.id; geometry instance ID does not assign its egui layer. The reviewed production correction sets exactly that Window ID, without force-enabling or changing clipping/geometry. Exact-one list2/run2 then passed 1/1, 7601 skipped. This independent root used the initial failure, one instrumented diagnostic and one correction within budget.
+
+The first five-name focused run passed 4/5, 7599 skipped. Its plugin/hotkey case failed because the standard isolated profile intentionally enabled no plugins, correctly filtering the manually registered provider out of command_cache. The fixture now explicitly enables the intended providers, preserving production filtering and route assertions. A second focused list compiled five but was superseded before runtime when review required an uncancelled continuity oracle. Review refinements also fixed reserved-case fallthrough, exact-owner Escape, explicit focus/panel order, semantic plus absolute TextEdit identity, negative-test fake isolation and ROOT-qualified wake. The held-job fixture was reordered so actual Dock, disk-confirmed rename/delete and Ctrl+W hide/reopen occur BEFORE accepted Cancel, with unchanged job/snapshot and false cancellation token throughout. Discarded child Cancel remains false; accepted Cancel becomes true; the retiring retry requires both unchanged job and explicit Busy notice, so deleted-ID NotFound cannot pass. Focused list3/run2 passed 5/5, 7599 skipped, including real invalid/duplicate row saves and stable list order. Creation is tested through the initial blank draft and actual Save; no specific New-button click proof is claimed.
+
+Set `$f` to trimmed r05-m5-b-final-filter.txt under ignored evidence. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 12 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f --no-fail-fast --test-threads 1` passed 12/12 with 7592 skipped. This is the five focused cases, parser/plugin pair and five baseline cases; repeated runs are not added to distinct coverage. Actual fixtures cover current plugin query/catalog -> typed Hotkey dispatch -> discarded/accepted completion, one held backend, no catalog-browse execution, ROOT-discarded Save, failed stale-store Save preserving draft/disk/cache/error, fresh-store deleted/corrupt refusal with fake backend, real controls/strict clip/input/Undo/host continuity and retiring Busy. All new app profiles disable Paste Sequences Next/Cancel before construction. Fake worker RAII cleanup prevents a regression from opening Explorer or leaking a blocked fixture.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` first exited 0 with six existing unrelated Note Panel/Table package warnings plus existing dependency warnings, no Explorer warning. Final diff inspection then completed scoped formatting of introduced parser/command-host/plugin/render blocks and replaced raw report enum labels with plain user-facing copy. No operation/storage/ownership behavior changed. Final production check2 exited 0 with the same six unrelated application warnings and existing dependency warnings; no introduced Explorer warning. Scoped formatting/copy review confirms equivalent operation semantics and exhaustive truthful label mapping, and git diff --check passes. The prior 12 behavioral passes remain evidence for unchanged controls; no new tests were added for copy-only formatting. R06 will run the required cumulative affected cases on the final integrated source. Independent source/ownership/lifetime/test-oracle reviews are clear; the final formatting/copy/evidence accuracy review is recorded before commit.
+
+Source scope: new gui/explorer_tabs_dialog.rs and plugins/explorer_tabs.rs; commands/{model,parser,bus,host,headless}.rs; explorer_tabs/{backend,folder_lists}.rs; gui/{command_host,mod,render}.rs; plugin.rs, plugins/mod.rs, settings/utility_dialog_sizes.rs and help_window.rs. Backend changes add only the existing job's wake callback and cfg(test) held-port seam, not native logic redesign. Parent is pushed M5-A 5198a885e3c1b0a1692779f9cc82cb80f61c299a on feat/productivity-explorer-utility-completion. No native Explorer action was exercised; positive Win11/N8 and full native host/picker/focus/timing remain IMPLEMENTED_USER_VALIDATION_PENDING, distinct from fake-port checks and Windows compilation. Next is M5-C focused existing utility/recorder cooperation on this same branch, then R05 category report and exact-tip R06. Goal active.
+
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all diagnostic/failure inventories retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r05-m5-b-baseline-list.log | 9BD49E22080F84651C8B6569A7770D2DBEC3C5CF4EB9B29716A5A505AA1487D1 |
+| r05-m5-b-baseline-run.log | D4A2F28E9759EAD37E389613B298F1F1480515F739490B3647851A22CD09AF3B |
+| r05-m5-b-diagnostic-list-2.log | EFB18E5636F45F9BFFD3B1B7F8C844A85A38984DEB5734DA772993543011F806 |
+| r05-m5-b-diagnostic-list-3.log | 26E7965A61387FB84E89B404A11F4A829FC13039B970A69ACF6F52E537291EBB |
+| r05-m5-b-diagnostic-list-4.log | F8FECDE8EDC12286DF48A641945F51B67137DA42E36FD1E415A3E6FD82568529 |
+| r05-m5-b-diagnostic-list-5.log | 781F08A535B30CBB1CCE987DDC8793F62B63A07C03F5E3CDD9323715C0AD0A31 |
+| r05-m5-b-diagnostic-list.log | E289C0C4BDA3CBBD0B6DAC6E112BF748E78B8C8E219481D06973028807927C2B |
+| r05-m5-b-diagnostic-run-1.log | DBD9E1BF5367CC3D14CAF7419E9D219AB8EB3CCE578FD5809FF6727CA465315F |
+| r05-m5-b-final-list.log | 7D051EA8C53C3E0EDB2AC8817827316D8D9DF503837C217F5D1C22F123459E2A |
+| r05-m5-b-final-run.log | 714143FAA84999924C6438CA1B053DC73B234617C44E830AC212E6B1DA667C04 |
+| r05-m5-b-focused-list-2.log | 81D6C5658CCE48E5FFE2FC3D78E6864D34226F78FCB01353E7E0ACC46B6AC748 |
+| r05-m5-b-focused-list-3.log | 1AB33C1B70CFF7577A6ED021FBEB3F8BC120ADE44A1B4B037E7812F35400F115 |
+| r05-m5-b-focused-list.log | D25E955125212FA027E6A70B4CB41F38EDAE1B9BC32B3B3C53094116EB26478E |
+| r05-m5-b-focused-run-1.log | 0AFFF1AB4312D72719FBEF14F9D7D0EC824DB92BF0C2B6332FA3E1F575F7224B |
+| r05-m5-b-focused-run-2.log | 47536DFA49F3C27FBDBF06E8B5BACE66FB1C75CA2FC9A3AFE34BFB95D01A6677 |
+| r05-m5-b-production-check-2.log | 38A7F2E3110C892576002ED62024BF3B4ECAF898EF1B21D3E950C3A340930A6F |
+| r05-m5-b-production-check.log | A8274E3358C1367247BA9339E9B602D2BAADF8A1A36300ADC94EF24C344C4592 |
+| r05-m5-b-ui-list-1.log | C061138C5AA4FC75C5787D91F16A84614BC7F9A8530BEE4AC876194A334477BB |
+| r05-m5-b-ui-list-2.log | E82C0409371159E2D9CFCAAEA9D579A8EECB7B915707A15F3F0E79824E90D6A1 |
+| r05-m5-b-ui-run-1.log | 1EF6E794D082709B19A4AFEE91DC098FFD328B482BAA6F5B046986150E6F9B1C |
+| r05-m5-b-ui-run-2.log | C12990EB5A312B9C20D08439C21B552615AB53F5A72B9296D52B4A6CB850B0C7 |
+
+
+### R05/M5-C — Existing utility and recorder cooperation closure
+
+This checkpoint adds three bounded actual-control fixtures without changing production behavior: Folder Size held progress/Refresh/Cancel/host lifecycle, same-file File Lock release/Refresh, and real recorder setup Start through hidden compact Stop/output retirement with a genuine fake-backed live pin. Existing scan/session, Restart Manager adapter, recording controller/encoder, capture admission and ordinary host owners remain authoritative. Narrow cfg(test) bridges reuse the existing FolderSizeSession scan-job seam, progress model, Pinboard native presenter/visibility/parking/live-capture fakes and recording response observations. No new production service, native mechanism, dependency or persistent format was added.
+
+Folder Size begins with the actual File Search directory menu: discarded handoff is inert, accepted prefill does not scan, and real Scan starts the controlled job over a disposable real tree. A positive held subtotal is frozen by accepted Cancel; a demonstrably different late old-generation subtotal/publication cannot replace it. Discarded real Refresh/Cancel controls are both enabled and fully clipped before click. Queued Refresh/Cancel does not overlap workers. Actual Pop Out, supported typed launcher:hide through Action/parser/dispatcher/visibility owner, hidden child frames and Dock retain the held scan/current generation. Actual Close occurs before releasing the held worker; later ROOT frames cannot republish a result, selection/current-directory state or reopened tool. Repeated cancel after the pending request is already cancelled is source-defined idempotence; this UI Close calls session.cancel, so its domain generation need not increment again. These assertions preserve the final generation, no-result/no-reopen and max-active-one postconditions.
+
+File Lock opens through the existing typed/plugin path and uses the SAME disposable path for a scripted nonempty first inspection and successful empty Refresh. Real Inspect/process selection/Refresh and host/hidden-ROOT routing preserve identity until accepted replacement. Discarded Refresh is enabled/visible but inert; current Refresh advances generation and retires old selection/ready Reveal. No old request/copy/reveal may act on the current result. The actual copied current status includes truthful No processes reported, not guaranteed unlocked or stale process data. This is UI/session/fencing proof with a scripted provider, not a native Restart Manager or real held-process query.
+
+Recorder opens through the plugin/typed route and uses actual setup Start with a frozen request and owned disposable GIF destination, a real header Pop Out preserving generation/output/request, native setup close through the retained host, then hidden compact Stop. Discarded/stale Stop is inert; accepted current Stop drives production app-frame service to writer retirement, Saved and decoded nonempty GIF. A pre-Stop no-file assertion remains. Publication is checked against its actual owner: after observing a destination, a FRESH snapshot must show capture no longer busy and claimed finalization or Completed. The writer slot/reaper can legitimately remain occupied after publication; the fixture keeps pumping actual app frames until that slot retires and admission releases. Inside finish_and_publish, the publication owner requires capture retirement, no pending mailbox/consumer lease and matching terminal/frame acknowledgements before physical publication; it does not require a writer thread to exit before its own final write. This corrects an overstrong reviewed oracle, not a production publication defect.
+
+The live pin is a real staged/committed existing Pinboard session backed by fake native presenter, visibility, parking and live capture. Processed frame sequence updates before/during/after recording prove continuity, rather than a pin-exists Boolean. Both the visibility coordinator AND the separate PinWindowPresenter are replaced before pin creation, preventing the exercised fixture path from reaching native pin window/capture APIs. Save/clipboard pin adapters are not exercised. Reciprocal still/new-Pinboard capture admission rejects before selector/parking mutation while recording; guards release after exact retirement. No native WGC/display/monitor capture, Explorer mutation or media encoder redesign was introduced.
+
+Before changes, exact seven baselines listed and passed 7/7, 7597 skipped. The first new list failed E0603 on install_fake_live_pin visibility and executed zero tests. The helper was widened only to the GUI test scope. New list2 compiled three but remained diagnostic because fake-presenter isolation changed during that compile; no runtime is attributed to it. Frozen new list3 matched three, then new run1 passed 1/3 with 7604 skipped: File Lock passed, Folder Size timed out on positive progress and Recorder failed the writer-slot publication proxy. Exact-two instrumented list/run matched two and passed 1/2 with 7605 skipped; Recorder happened to pass its old timing-sensitive proxy, while Folder Size still had zero subtotal. That timing pass is not proof of the later corrected finalization oracle.
+
+Exact-one Folder Size result diagnostic listed one and failed 0/1, 7606 skipped. It proved real Scan had dispatched generation1 but returned Failed/zero entries because CreateFileW on ancestor C:/Users/Jay was denied by the agent sandbox. No scanner or control defect was established. Existing R02 precedent and this measured failure justified one normal-user test rerun outside the sandbox for the owned disposable filesystem fixture, preserving every native ancestry/admission guard. Native-access run1 crossed the positive-progress boundary, then failed a distinct ROOT-hide prerequisite assertion (0/1, 7606 skipped). This environment root used initial failure plus two instrumented diagnostics and the native-access retry within the initial+three focused budget; the later hide root was independently reviewed rather than resetting that exhausted environmental diagnosis budget.
+
+The new real File Search handoff leaves its originating dialog open. Assuming one ROOT Escape hides the launcher was wrong for this state. A reviewed two-owner Escape correction also failed in native-access run2 (0/1, 7606 skipped), disproving the unmeasured claim that first Escape closed File Search in this fixture. The accepted correction uses the existing explicit typed launcher:hide user route, not a visibility flag setter or blind Escape loop. It requires File Search to remain open, ROOT hidden and held generation/busy unchanged. This is the same reviewed hide-prerequisite root, resolved within its focused budget, with no production input change. Folder lists2/3/4 each compiled one; superseded inventories and the two failed native-access logs remain preserved. Final enabled-response observations and correct idempotent-cancel assertions were reviewed before the closure run, without relaxing clips or force-enabling widgets.
+
+Set `$f` to trimmed r05-m5-c-final-filter.txt under ignored target/desktop-productivity-completion-recovery. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 10 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f --no-fail-fast --test-threads 1`, with normal-user native filesystem access outside the agent sandbox for the disposable scan, passed 10/10 with 7597 skipped (15.031s Nextest summary). This includes the three corrected cooperation cases and all seven baselines. Ten is the distinct closure inventory; earlier timing/diagnostic/repeated runs are not added. All new application profiles disable Paste Sequences Next/Cancel before construction; held fixtures use RAII release/cleanup and one app per test.
+
+Exact closure inventory (all package multi_launcher library target):
+
+| Full-qualified case |
+| --- |
+| gui::file_search_dialog::tests::file_search_folder_size_context_action_is_directory_only |
+| gui::recording_dialog::tests::recording_ui_hidden_controller_commits_only_retained_current_stop |
+| gui::recording_dialog::tests::recording_ui_reciprocal_capture_guards_reject_before_mutation |
+| gui::render::tests::file_lock_host_preserves_held_inspection_selection_and_reveal |
+| gui::render::tests::file_lock_ui_file_search_prefill_requires_a_retained_result_menu_action |
+| gui::render::tests::file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal |
+| gui::render::tests::folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves |
+| gui::render::tests::recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission |
+| gui::render::tests::recorder_setup_hosts_preserve_real_controls_popup_and_stale_region |
+| gui::render::tests::recording_ui_exit_waits_for_capture_and_writer_retirement |
+
+All eight changed files are test-only by independent final diff review: folder_size/{model,session}.rs and gui/{file_lock_dialog,folder_size_dialog,pinboard,pinboard_windows,recording_dialog,render}.rs. The only visibility widenings are inside test modules. Scoped fixture/helper formatting and git diff --check pass. Parent explicitly reuses accepted M5-B production-check-2 at 35c85e57cbcb6cc6278f9b91dcbbfebeb96acb65: production paths/configuration are unchanged, so an identical production compile adds no evidence for this cfg(test)-only checkpoint. No fresh production check or native RM/WGC proof is claimed. R06 will compile/test the integrated code and build the final runnable artifact. Independent source, fake isolation, fixture-root/budget and final oracle reviews are clear; no required production fix remains.
+
+Original IDs88/89/119 and M13–M16 now have this cooperation evidence in addition to their accepted domain/native-adapter/artifact and R02 host evidence. Full N9–N12 remain IMPLEMENTED_USER_VALIDATION_PENDING. Parent is pushed M5-B 35c85e57cbcb6cc6278f9b91dcbbfebeb96acb65 on feat/productivity-explorer-utility-completion. Actual checkpoint SHA/push is recorded separately after commit. Next is R05 final category disposition/reporting, then R06/M0-A directly from that actual reporting tip; no R06 source or manual packet has started. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; failed, superseded and instrumented logs retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r05-m5-c-baseline-list.log | B6566AF2B4AA9DD62E7CCCE23AB182C5C37D2C683FE753651A98756F80FD6268 |
+| r05-m5-c-baseline-run.log | 30A425BF07CDCB97E8D7F8A303CB4C299A49FA6B279D624E2E4E1AB03BCA8342 |
+| r05-m5-c-failed-list-1.log | 4656FC6ABF911239A5B273073DA4F59BF2520F5851B67FA82BC05E83804AE884 |
+| r05-m5-c-failed-run-1.log | A9C7FAC561641DCF3770B37C438A04B4C1511B7F657600695F429E109B027C1D |
+| r05-m5-c-final-list-1.log | 640B358735C6590E2D3D609232213B61FD9034BD05C7814A29CBAC68ECB1D08E |
+| r05-m5-c-final-run-1.log | B8E7C0D5F9E182548058C339ACA4FCD4B7CA541117EFD94D072B0DA7E5BBA22E |
+| r05-m5-c-folder-list-1.log | 10BF7453071B6E568D47DE188E27ECC518E782FE670A7516F2171485C9F5D789 |
+| r05-m5-c-folder-list-2.log | 760038DAE487983539687718C41616CD43B8BF54740D9F63C764CBCE8075F60A |
+| r05-m5-c-folder-list-3.log | 760038DAE487983539687718C41616CD43B8BF54740D9F63C764CBCE8075F60A |
+| r05-m5-c-folder-list-4.log | 23488CED6489CBCA49C0501B134A6CBA891FD8C1AA43684AAA9548BAAAFF7015 |
+| r05-m5-c-folder-run-1.log | EC6F1941C8DFF27DF38D7A24C76F5D7BDDE0F682F82B3C058A4B1292CE6C0BEF |
+| r05-m5-c-folder-run-native-1.log | A58BC464022E954B2AADA90AF9D421D41E0321ED7165FFF38463A238FC30EBAB |
+| r05-m5-c-folder-run-native-2.log | 890E10AFD0851DD0B820DBA9E74943340F0FC1CBF434061D7B495B8AD88B02E3 |
+| r05-m5-c-new-list-1.log | 78FDC00B2E10711EBBC9605D3AB493E060F845A60B285F1B6218AA100E68EE6E |
+| r05-m5-c-new-list-2.log | 0794396F772B28FE302790CD690B3AF47275410B57B6792895A4D495012BA022 |
+| r05-m5-c-new-list-3.log | 37F6406FEF5A443C71E6DB5112386B0987AD6189A2916FB7857258EBAA9CF03F |
+| r05-m5-c-new-run-1.log | 34D04DB070EE075851E55CAED26D34DF577A06D5A715D129744347AC8EF311E8 |
+
+
+## R05 final category disposition — Explorer and utility cooperation
+
+M5-C 4df122a0552367748d6b9341f761a1176e4a3c2d is committed and pushed on feat/productivity-explorer-utility-completion; upstream equals HEAD and the checkout is clean before this reporting update. M0-A 188389bcfa474bab2d01fc51a66d975b506d3039 has exact direct parent R04 final reporting tip 102eaf9fbe291530acf0901f641bf6f822fcbc0f. Accepted source checkpoints are M5-A 5198a885e3c1b0a1692779f9cc82cb80f61c299a, M5-B 35c85e57cbcb6cc6278f9b91dcbbfebeb96acb65 and M5-C above. Every normal push succeeded; no merge exists in the new R05 range. No reset/rebase/cherry-pick, auxiliary checkout, forced push or discarded work was used. The actual final reporting SHA is read only after this documentation commit, recorded separately, and is the sole R06 parent.
+
+This supersedes the inherited C04–C07 partial rows without rewriting their history. All remaining original utility IDs are individually reconciled:
+
+| Original ID / category | Current implementation and local evidence | Remaining full native proof |
+| --- | --- | --- |
+| 61 / C04 | Accepted ordered operation/identity/store retained. M5-A adds real conditional guarded Windows creation/append/navigation with attributed private bootstrap, tab/pane/Shell-PIDL verification, cancellation and mandatory final sweep; M5-B completes safe saved-list editor, strict ID-only plugin/typed/configurable action route, immutable run/progress/cancel and shared host. | N8 on a supported Win11 Explorer provider. OS build alone is insufficient; absent or ambiguous observed capabilities fail closed with zero preflight mutation or honest partial bootstrap, never fake tab success. |
+| 88 / C05 | Existing bounded logical-per-entry metadata scan/accounting/partial diagnostics retained. R02/M2-D.1 supplies the ordinary host; M5-C adds actual File Search prefill, held positive progress, discarded/current Refresh/Cancel, hidden/Dock/close and late-result retirement proof. Its disposable real scan passed with normal-user native filesystem access outside the agent sandbox; production guards unchanged. | Full N9 real GUI/focus/picker/progressive flow; narrow filesystem proof is not the complete gate. |
+| 89 / C06 | Existing read-only Restart Manager boundary and guarded process identity retained; R02/M2-D.2 ordinary host plus M5-C same-file scripted release/Refresh retires old selection/Reveal and copies truthful empty status. Earlier exact owned held/released-file native observation remains inherited evidence. | Full N10 real held-helper/release/Refresh and native host/reveal flow; M5-C scripted results do not prove native RM. |
+| 119 / C07 | Existing bounded WGC/GIF/video-only MP4, generation-stamped controller/Stop and capture interlocks retained; R02/M2-D.3 setup host plus M5-C actual setup/hidden Stop, finalized GIF decode, fake live-pin frame continuity and reciprocal capture admission. Earlier narrow native artifacts/retirement proofs retained. | Full N11/N12 actual launcher GIF/MP4, native selection/root-hidden Stop/optional chord, cancel/loss/repeat/exit, monitor/DPI and live Pinboard/still-capture coexistence. |
+
+| Original milestone | Final recovery disposition |
+| --- | --- |
+| M12-A — Targeted Explorer tab operation | M5-A guarded real native port plus single retiring worker/lease, exact attribution/selection/folder evidence and final verification. Conditional provider profile is implemented and compiled; positive native tabs remain N8 pending. |
+| M12-B — Saved folder lists and command integration | Accepted store plus M5-B actual retained editor/CRUD/order, fresh saved-ID snapshot, plugin/catalog/Hotkey route, honest progress/cancel, Busy retirement and ordinary host. |
+| M13-A — Bounded progressive scan and accounting | Original accepted metadata-only algorithm/limits/partial totals retained; M5-C positive frozen subtotal versus distinct late progress and nonoverlapping refresh/cancel prove current cooperation. |
+| M13-B — Folder-size interface and launcher actions | Original typed/File Search route plus R02 ordinary host and M5-C real prefill/controls/hidden close. |
+| M14-A — Restart Manager inspection boundary | Original accepted read-only Windows boundary/identity retained; no shutdown/restart/unlock/kill/elevation added. |
+| M14-B — File lock inspector UI and actions | R02 ordinary host plus M5-C current same-file generation/selection/ready-Reveal/empty-copy status proof. |
+| M15-A — Recording target and bounded capture lifecycle | Original accepted capture/session retained; R02 setup host and M5-C actual setup-to-controller path, host move and hidden Stop preserve one generation/frozen request. |
+| M15-B — Streaming animated GIF output | Original production encoder/finalization retained; M5-C fake-frame real GIF pipeline decodes after Saved/retirement. Native moving-content acceptance remains N11. |
+| M15-C — Video-only MP4 output | Original accepted video-only MF/H.264 output and earlier narrow media proof retained; no audio source/path added. Actual launcher workflow remains N11. |
+| M16-A — Recorder controls and command integration | Existing typed Record open/Stop/configurable invocation preserved; R02 setup host and M5-C real Start/compact Stop/retained ownership cooperation. |
+| M16-B — Recording interoperability and cleanup acceptance | Earlier narrow retirement/native artifacts plus M5-C app-frame publication authority, writer-slot drain, fake live-pin updates and reciprocal capture admission. Full N12 remains pending. |
+
+Per-checkpoint accepted affected inventories are 35,12,10 for M5-A/B/C. They overlap, so this is not a summed unique total. The exact final M5-C closure passed 10/10; M5-B final 12/12 plus copy-only final production recheck remains applicable to unchanged production code. Latest production lib/main-bin check has six existing unrelated Note Panel/Table warnings plus dependency warnings and no introduced Explorer warning. All scoped source/oracle/fake-isolation/format/copy/evidence reviews are clear. This reporting-only checkpoint needs diff/review, not another Cargo run. R06 owns one mechanically reconciled original 444+recovery cumulative affected run, scoped first-party Clippy and actual runnable build.
+
+The 37-row ordinary host inventory now has all 32 existing hosts, three R01 references and both new Inspector/Explorer surfaces wired. Specialized capture selectors/countdown/compact controller remain separate owners. Native N1–N12 remain full user-pending unless explicitly distinguished as earlier narrow adapter/artifact proof. In particular, draw.io external-reader rendering remains pending from R04, and no native Win11 tab/capture proof is inferred from fakes. No known required code gap remains in the documented capability profiles; absent/unsupported content or provider capabilities are explicit refusals/partial reports rather than compatibility claims.
+
+Next: read this commit's actual HEAD/upstream after normal push, create test/productivity-native-acceptance-closeout directly from it (fresh suffix only if needed), commit R06/M0-A and verify direct parent before executing M6-A. The read-only M6-A handoff is ready at ignored r06-m6-a-planner-handoff.txt; bind its final R05/M5-C SHA/inventory from this accepted record, not stale top-level receipt.json. M6-B then creates the single N1–N12 user packet at the end, followed by M6-C truthful final receipt. No manual packet/user probe or R06 source execution has begun. Goal active.
+
+
+## R06/M0-A — Integrated acceptance baseline
+
+R05 final reporting tip 1a47fb3f91e69a50b1c80f26d0e2735a906aaf00 is pushed with matching upstream and clean checkout. The sole-checkout branch test/productivity-native-acceptance-closeout was created directly from that exact SHA; HEAD was verified equal before this baseline update. Its committed direct parent must be verified after M0-A. No source, history rewrite, worktree/clone, ignored native probe or manual packet was created in this transition. R01–R05 and the Dashboard fixture checkpoint remain accepted and must not be reimplemented.
+
+M6-A now owns one cumulative affected-case verification and evidence audit. Use ignored r06-m6-a-planner-handoff.txt as the bounded handoff, binding R05 source/reporting and final M5-C 10 names from their accepted receipts/ledger. Original accepted 444 includes both library and main-binary cases; use --lib --bin multi_launcher, retain package/binary/FQName identity and mechanically reconcile all accepted recovery checkpoint/correction inventories. A stale top-level receipt.json does not override later canonical dispositions. Exact nonzero selected-set equality is required before one matching serial run; do not broaden to the entire suite or silently drop renamed/missing/ignored cases. Scoped first-party Clippy and one actual production main-binary build follow with classified warnings and real artifact/source identity. No app/native probe is launched.
+
+The audit must account individually for all 50 selected IDs, 38 original milestones, 37 ordinary host rows and 12 full native flows, using accepted current owner/entry/test evidence without broad unrelated exploration. Full native N1–N12 and draw.io external-reader rendering remain user-pending, distinct from earlier narrow native artifacts/adapters and current fakes. Real task-related regressions are fixed narrowly with one source writer and reviewed root budgets. Preserve old tests/profile/configuration/vendor behavior, Nextest TOML and production Paste Sequences defaults. New app tests disable Next/Cancel before construction.
+
+Parent owns branch/Git/canonical documents; configured Terra/medium implementer will own M6-A source/Cargo/evidence after this M0-A is committed, direct-parent checked and pushed. M6-B prepares the one consolidated user packet only after code/verification closure; M6-C provides the actual final committed/pushed receipt and code/build equivalence. Do not mark the Goal complete or presume any user result now. No intermediate user test request. Goal active.
+
+
+## R06/M6-A — Cumulative affected verification, source/evidence audit and runnable artifact
+
+Verification ran on test/productivity-native-acceptance-closeout from M0-A f04c2eccaf7219eb7acc1c04b9cdd2153c717da5, whose direct parent is R05 final report 1a47fb3f91e69a50b1c80f26d0e2735a906aaf00. Parent independently verified all six M0 direct parents, base 1852f264dae69056f79bc0c3b593c70331fa620f ancestry, no new-range merges, matching upstreams and one worktree. Current Recovery Goal/Kickstart Git blobs exactly match 05153ac1. Final-tip ancestry and artifact/code-input equivalence are rerun after commit; the commit cannot include its own computed SHA.
+
+### Reconciled inventory and exact execution
+
+The original 444 accepted baseline is initial 443/444 plus its exact 1/1 correction, not a fabricated single 444/444 run. Explicitly curated accepted R01–R05 runtime/correction sources produce 836 historical package/target/FQName identities. Four early R02 Markdown/Quick Notes logs have tracked accepted narrative/count/checkpoint support but no historical hash citation; their current computed hashes identify the inputs and are qualified accordingly. They contribute 13 otherwise absent cases; duplicate evidence is not counted again. All other cited hashes and accepted source commits were reconciled. The frozen assembly/enrichment scripts retain the actual original M17 runtime/correction paths, accepted commits/sections/omission metadata and bounded task-history lookup, rather than a stale generator or blind PASS-file glob.
+
+One old initial-candidate Markdown runtime location is an alias of the committed gui::render::tests case already present; its oracle is preserved and deduplicated. Two accepted Timer ROOT Jump/popup cases were QA-feature-gated with no fully equivalent default replacement. Read-only dependency review showed only an existing sound-index observation dependency, so their original assertions now run under ordinary cfg(test), using an equivalent getter in timer_dialog.rs. No Cargo feature/profile, QA API, production behavior or assertion was weakened. The final current required set is 835: 831 library and 4 main-bin identities. An earlier 833 default list is preserved as inventory work before the Timer migration, not runtime.
+
+The direct full-name trie was 52,199 characters, exceeding the Windows process command-line limit. A 10,576-character end-anchored suffix selector was derived against current function names. Its syntax is not intrinsically full-qualified exact matching: the acceptance gate is actual machine-readable Nextest package/binary/FQName set equality on frozen source/filter. That check passed 835 expected=835 selected, with zero missing/extra/duplicate/ignored. Source-name uniqueness alone was not accepted as proof. Frozen filter SHA256 is 45FAEDA6F7B2792AF8D77791CD36ACC6D48D7BEBF8668051FD6993A3ACF6DF8E; accepted list2 JSON SHA256 is 0917B331571F9E78C48F8D376CFFA5575DC60ECCF53E551EDA1E4A6110EA6F78.
+
+Set `$f` to trimmed ignored r06-m6-a-filter.txt. Commands were:
+
+```text
+cargo nextest list --locked --offline -p multi_launcher --lib --bin multi_launcher --cargo-profile fast-dev --message-format json -E $f
+cargo nextest run --locked --offline -p multi_launcher --lib --bin multi_launcher --cargo-profile fast-dev --no-fail-fast --test-threads 1 -E $f
+```
+
+The one serial cumulative runtime used normal-user native filesystem access outside the agent sandbox for selected disposable filesystem cases, following measured earlier ancestry-read denials; production guards remained unchanged. No ignored tests, opt-in native probes, native UI/WGC/Explorer action or executable launch was enabled. Initial execution ran 835: 829 passed, 6 failed, 6845 skipped in 199.538s. The six exact failures were:
+
+| Required case | Initial failure / responsible fixture boundary |
+| --- | --- |
+| gui::diagram_studio::tests::diagram_studio_visual_connector_controls_create_edit_select_and_delete | Ordinary Visual ScrollArea control below fold: connector-label bottom 752.9 vs clip 752. |
+| gui::diagram_studio::tests::diagram_studio_visual_container_controls_create_and_edit_swimlane | Property Apply below fold: bottom 758 vs clip 752. |
+| gui::render::tests::batch_rename_detached_confirmation_requires_a_retained_owner_pass | Stack overflow through an extra by-value App setup/return layer. |
+| gui::render::tests::batch_rename_real_host_buttons_retain_the_same_verified_preview | Same owned-App fixture construction boundary. |
+| gui::render::tests::jump_mode_batch_rename_confirmation_apply_hint_requires_fresh_cancel | Same owned-App fixture construction boundary. |
+| gui::render::tests::notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft | Analogous extra by-value Notes App setup layer. |
+
+Only test fixtures changed. Diagram cases reuse the accepted real owner-wheel reveal helper, preserve the ordinary viewport and strict fully clipped enabled controls, reacquire rectangles and place the Viewer projection-reuse baseline after reveal immediately before the Viewer action. They do not call internal transforms or relax clip tolerances. Batch/Notes each retain one App but now construct it once at the caller and borrow it into the same setup, preserving the pre-isolation repository root and all settings/actions/assertions. No production boxing, stack size, Nextest TOML, default hotkey, dependency or profile change was used.
+
+Correction1 exactly listed 9: the six failures plus three directly affected setup callers outside the historical835. It passed 6/9 with 7671 skipped: all original six failures passed, while the three extra callers exposed the same remaining owned-return pattern. Those callers were migrated to the same borrowed setup; the now-unused owned Batch wrapper was removed. Correction2 exactly listed/ran those 3 and passed 3/3, 7677 skipped. Its extra cases are jump_mode_batch_rename_rows_focus_only_and_native_ids_follow_sort, jump_mode_file_operations_integration_sort_headers_are_focus_only_and_current, and notes_query_mouse_quick_notes_round_trip_in_both_jump_modes (all gui::render::tests). Reviews confirmed equivalent setup, repository path authority, no domain recursion/production change and preserved oracles. The stack-layout root is supported by the narrow construction-only correction passing; no broad stack-setting workaround was made. These roots stayed within their focused correction budgets.
+
+Honest result: 835 required current cases have passing evidence across initial 829 plus 6 corrected, and 3 additional directly affected callers passed separately (838 distinct current cases with passing evidence). This is NOT a single uninterrupted835/835 run. No automatic rerun of the full union followed local fixture corrections. The initial source was base f04c2ecc plus the recorded Timer-test diff hash638F4DA00ECEEF44CDD4E8FB6AD7E1C29F121F5999EAACFC39F42B074AB8C06F; later fixture corrections and final build are separately identified below.
+
+### Scoped Clippy, warnings and build identity
+
+```text
+cargo clippy --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev --no-deps
+cargo build --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev --message-format=json-render-diagnostics
+```
+
+Clippy exited 0 (1m58s), with 117 application-library and 3 main-bin first-party warning findings, plus 3 workspace table-core dependency warnings and other dependency/vendor messages. The location-by-location TSV classifies all 120 against the recovery base source: 8 unchanged constructs in untouched files, 38 unchanged constructs in touched files, 5 touched existing constructs, 56 recovery-introduced/materially changed constructs and 13 findings in recovery-introduced files. These are finding/location counts, not files, and source comparison does not prove an old Clippy run emitted or lacked each diagnostic under older types/toolchains. The six familiar rustc Note Panel/Table warnings were baseline relative to recent checkpoints; three Note Panel constructs are recovery changes, so they are not all pre-goal/unrelated. This final source-origin classification supersedes any broader reading of earlier phase-relative wording.
+
+Independent material-warning review found finite staged size carriers (288B Settings/Clipboard,864B Inspector,384B Explorer,1128B MkMacro), owned error/rollback data (184/152B) and style/argument/unused-code suggestions, without a task-related correctness fix. No blanket cleanup, lint suppression, dependency/vendor edit or behavior-changing boxing was warranted. Warnings remain visible and classified, not falsely reported as zero or all legacy.
+
+The one actual production build exited 0 in 3m02s. Cargo compiler-artifact metadata identifies G:/Repos/rust/Multi_Launcher/target/fast-dev/multi_launcher.exe, 143,680,000 bytes, SHA256 E393FD9F07B58758105C429DAE9467AC41A914226A1D288631A756901F6F8BC8. It was not launched. Toolchain is rustc1.99.1/cargo1.99.1, Nextest0.9.135, target x86_64-pc-windows-msvc, profile fast-dev. The artifact was built with base HEAD f04c2eccaf7219eb7acc1c04b9cdd2153c717da5 plus the FINAL three-file test-only diff SHA256 735AD635ACB4C67D1F553A0AC9AD09503CAAA76EE8D27E2093B9E57290BA3781. The 1,225 tracked production/build-input content manifest SHA256 is 1FC89C5D61CFE09F33C5259E15AF08EA0ECD635F4A94A7A6A09EF94A4B8E9ABB. This is a working-tree content identity, not a claimed clean base or embedded future commit SHA.
+
+Parent independently rehashed every recorded evidence file and the executable, checked all 1,225 current inputs and the exact source patch: zero mismatches. An input-equivalence receipt after commit binds this built content to the accepted code commit; later docs-only tips must retain that equality rather than invent a binary SHA/commit from its filename. Original build/artifact metadata stays immutable. A test-generated root clipboard_modifiers.json (absent before the run) was moved intact into ignored r06-m6-a-test-generated-clipboard-modifiers.json, SHA256 83056CDDBB642660F6077E1C8D64495A65E3C6476ED486601BE238BF9C9DE5E2; it is neither source nor discarded/user data.
+
+### Coverage and compatibility audit
+
+Parent read the complete bounded audit and mechanically verified all 50 requested IDs, 38 exact original milestone keys/titles, 37 exact ordinary host names/order and 12 full native flows. All 80 concrete representative FQName references resolve into the required 835 inventory. Independent review checked ownership/normal routes and evidence attribution; no generic-host test substitutes for individual surface wiring. Numeric labels retain the original E.4 groups without invented per-number micro-titles. The tables below supersede historical partial status only where locally proved; all full native flows remain user-pending. The source compatibility/support limits remain explicit. At this historical M6-A checkpoint, M6-B/M6-C and original M17-B were still pending; the final M6-C disposition below supersedes that delivery status.
+
+### Accepted closure keys
+
+| Key | Accepted ownership / checkpoint |
+| --- | --- |
+| C1 | R01/M1-A `9057106f13492004bc25a57e8900d916d27aa290`; R01/M1-B/final `b8c3f259cbd55d483fb1346b262026ed42d5d820`: reference host clicks, geometry, focus and picker authority. R02 host checkpoints complete the ordinary migrations; R03 Inspector and R05 Explorer close the two future surfaces. |
+| C2 | R03/M3-A `4ff5350d64c42141ea1171c268a5cbc9e0b45d62`, M3-B `b15579575b7317186e378838d2cb12b580f86f93`, M3-C `103e8b17cae696e7676885a83fb703765a5e53c6`; final report `00e199e00df7513153ceb00a42e8cb5cb1f5b9e0`. Exact engine retained, independent Inspector/comparison/reference delivered. |
+| C3 | R04/M4-A `47bee821f16f33473aa0a0da4d113c9a2b27f64e`, M4-B `06d61ae88fb312720a500509c2e4bf7c39f06623`, M4-C `d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8`, M4-D `a797430bae48e9c40a66d81e59ec3bac9d0e9889`; final report `102eaf9fbe291530acf0901f641bf6f822fcbc0f`. Source identities read from the accepted per-checkpoint receipts/ledger. |
+| C4 | R05/M5-A/B above: actual guarded Explorer backend, saved-list store/editor, typed/plugin/catalog/configurable activation, one retiring job and ordinary host. |
+| C5 | Original M13 algorithm/accounting plus R02/M2-D.1 `70820b485e6665bf9f61a2f73ca42d7ff924506e`; R05/M5-C adds held progressive/Refresh/Cancel/File Search cooperation. |
+| C6 | Original M14 read-only Restart Manager plus R02/M2-D.2 `ee678f1de638de7e48809c402deb19ba3c23dcdc`; R05/M5-C adds same-file scripted release/Refresh invalidation. |
+| C7 | Original M15–M16 capture/media/controller/interlocks plus R02/M2-D.3 `85f5ba8711df522aa08f0661276fab860e5b5445`; R05/M5-C adds actual setup-to-hidden-Stop/GIF/fake-live-pin cooperation. |
+
+R02 final report is `7912a9f591c301d7a161a0675eea650d07d9148e`. Its per-host checkpoint references below are the canonical accepted sections, not claims that the final report added product code. Per-checkpoint totals overlap: R03 11/10/19, R04 22/12/25/24, R05 35/12/10 must not be summed as distinct tests.
+
+### Individual original ID accounting — exactly 50 rows
+
+All rows are `LOCAL`; the referenced current cases have passing M6-A evidence across the initial run and narrow corrections, not a claimed uninterrupted all-green run. Native column is the full flow still pending. Normal routes and concrete host/domain case keys are expanded below.
+
+| ID | Original E.4 owner group (not an individual micro-label) | Current owner and normal route | Accepted closure / concrete cases | Full native pending |
+| --- | --- | --- | --- | --- |
+| 1 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through Calculation Pad text entry | C2; K1, H30 | N5 |
+| 2 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 3 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 4 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 5 | C02/M6 separate inspector, bitfields, copying, comparison | Independent `calculation_pad::inspector`/comparison; Pad result to hosted Inspector | C2 M3-A/B/C; K2, K3, H33 | N5 |
+| 6 | C02/M6 separate inspector, bitfields, copying, comparison | Same independent working-copy/comparison owner and retained UI | C2; K2, K3, H33 | N5 |
+| 7 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through ordinary Pad | C2; K1 | N5 |
+| 8 | C02/M6 separate inspector, bitfields, copying, comparison | Independent Inspector/comparison; explicit retained Copy/Insert | C2; K2, K3, H33 | N5 |
+| 9 | C02/M7 dimensional arithmetic, examples, references | Pad document/quantity evaluation; ordinary source/target-unit grammar | C2 retains M7-A; K4 | N5 |
+| 10 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through ordinary Pad | C2; K1 | N5 |
+| 11 | C02/M6 separate inspector, bitfields, copying, comparison | Independent Inspector/comparison; frozen result context and explicit Insert | C2; K2, K3, H33 | N5 |
+| 12 | C02/M7 dimensional arithmetic, examples, references | Executable examples/help plus Inspector format-only preferences | C2 M3-C; K4, K5 | N5 |
+| 13 | C01/M2 Notes, Markdown, MkMacro hosting | Individual document owners and typed GUI open routes | R02 M2-A.1/.2a/.2b/.3; H01–H04 | N2 |
+| 14 | C01/M2 Notes, Markdown, MkMacro hosting | Same document-owner group; no ID-specific label asserted | Same; H01–H04 | N2 |
+| 15 | C01/M2 Notes, Markdown, MkMacro hosting | Same document-owner group; no ID-specific label asserted | Same; H01–H04 | N2 |
+| 16 | C01/M3 Main/Dashboard and mouse/gesture hosting | Settings/draft/gesture owners; normal settings/editor routes | R02 M2-B.1–.4; H05–H09 | N3 |
+| 17 | C01/M3 Main/Dashboard and mouse/gesture hosting | Same settings/gesture-owner group | Same; H05–H09 | N3 |
+| 18 | C01/M3 Main/Dashboard and mouse/gesture hosting | Same settings/gesture-owner group | Same; H05–H09 | N3 |
+| 19 | C01/M4 remaining required utility families | Existing file/clipboard/developer/time/image owners through normal typed routes | R02 M2-C; H10–H29 | N4 |
+| 20 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 21 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 22 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 23 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 24 | C01/M1 plus every migration: one session, geometry, focus, return | Shared host/geometry/provenance with each live tool owner | C1 plus all 37 host rows H01–H37 | N1–N4 and family native flows |
+| 25 | C01/M1 plus every migration: one session, geometry, focus, return | Same shared and individual ownership; no generic-test substitution | Same | Same |
+| 26 | C01/M1 plus every migration: one session, geometry, focus, return | Same shared and individual ownership; no generic-test substitution | Same | Same |
+| 27 | C03/M8 authoring model, shapes/style/layers, compatibility | Diagram document/visual/codec; typed Studio opener | C3; D1, H31 | N6/N7 |
+| 28 | C03/M8 authoring model, shapes/style/layers, compatibility | Same discriminated Mermaid/Visual authority | C3; D1, H31 | N6/N7 |
+| 29 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram visual/scene/canvas; actual Studio controls | C3 M4-A plus retained M9; D2, D3 | N6/N7 |
+| 30 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 31 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 32 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 33 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 34 | C03/M8 authoring model, shapes/style/layers, compatibility | Diagram document/visual/codec; typed Studio opener | C3; D1, H31 | N6/N7 |
+| 35 | C03/M8 authoring model, shapes/style/layers, compatibility | Same discriminated Mermaid/Visual authority | C3; D1, H31 | N6/N7 |
+| 36 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram visual/scene/canvas and retained asset owner | C3; D2, D3 | N6/N7 |
+| 37 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 38 | C03/M10 templates, assistance, export, conversion, library | Diagram template/export/conversion/recents plus Studio action owner | C3 M4-B/C; D4–D6 | N6/N7 |
+| 39 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram scene/canvas; current tool/selection ownership | C3; D2, D3 | N6/N7 |
+| 40 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 41 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 42 | C03/M10 templates, assistance, export, conversion, library | Diagram templates/export/conversion/recents and Studio intents | C3; D4–D6 | N6/N7 |
+| 43 | C03/M10 templates, assistance, export, conversion, library | Same bounded domain/GUI owners | C3; D4–D6 | N6/N7 |
+| 44 | C03/M11 documented draw.io subset | `diagram::drawio`, reviewed Studio import/new-copy/Open and export | C3 M4-D; D7 | N6/N7; external reader pending |
+| 45 | C03/M10 templates, assistance, export, conversion, library | Same templates/export/conversion/recents owners | C3; D4–D6 | N6/N7 |
+| 46 | C03/M10 templates, assistance, export, conversion, library | Same bounded domain/GUI owners | C3; D4–D6 | N6/N7 |
+| 61 | C04/M12 Explorer multi-tab folder lists | `ExplorerTabsJob`/native evidence + saved-ID utility/plugin typed routes | C4; H34, E1 | N8 |
+| 88 | C05/M13 folder size analyzer | `FolderSizeSession`; foldersize/File Search -> retained analyzer | C5; H35 | N9 |
+| 89 | C06/M14 file lock inspector | `FileLockSession`; filelock/File Search -> retained inspector | C6; H36 | N10 |
+| 119 | C07/M15–M16 silent recording/native integration | `RecordingController`; record Open/setup Start/compact Stop | C7; H37 | N11/N12 |
+
+### All original milestones — exactly 38 rows
+
+Scopes retain the exact canonical original titles. `LOCAL` is accepted source/local evidence. The final M6-C disposition below completes implementation delivery; native acceptance remains pending.
+
+| Original milestone | Original scope | Current owner / normal route and accepted recovery closure | Concrete evidence / disposition |
+| --- | --- | --- | --- |
+| M0-B | Bounded baseline and host inventory | Original baseline retained; current canonical 50/38/37/12 inventories | Original 444 manifest/list, accepted ledgers and current reconciled cumulative evidence above |
+| M1-A | Reusable single-session host lifecycle | Shared host plus individual owners; R01/M1-A and R02 migrations | LOCAL; H30–H32 and H01–H37 |
+| M1-B | Geometry, focus and host controls | `utility_dialog_size`/geometry/provenance; R01/M1-B | LOCAL; H30–H32; real DPI/picker N1/family checks pending |
+| M2-A | Notes and Markdown hosting | `NotesDialog`, per-instance `NotePanel`, `MarkdownStudioDialog`; R02 M2-A.1/.2a/.2b | LOCAL; H01–H03 |
+| M2-B | MkMacro editor hosting | `MkMacroDialog`, independent playback/children; R02 M2-A.3 | LOCAL; H04 |
+| M3-A | Main Settings and Dashboard Settings hosting | Settings host/editor and DashboardEditorDialog; R02 M2-B.1/.2 | LOCAL; H05/H06 |
+| M3-B | Mouse Settings and Gesture hosting | Mouse settings, gesture settings/editor/recorder; R02 M2-B.3/.4 | LOCAL; H07–H09 |
+| M4-A | File workflow dialogs | File Search/Diff/Batch Rename/Search & Replace owners; R02 M2-C.1/.2/.3 | LOCAL; H10–H13 |
+| M4-B | Clipboard workflow dialogs | History/Snippets/Modify/Paste owners; R02 M2-C.4/.5 | LOCAL; H14–H17; prompt/runtime remain owned separately |
+| M4-C | Developer utility dialogs | JSON/XML/Regex/Table owners; R02 M2-C.6 | LOCAL; H18–H21 |
+| M4-D | Time and image/file utility dialogs; host coverage closure | Timer/Calendar/DateTime/Image/DFF/ZIP; R02 M2-C.7/.8 | LOCAL; H22–H29; all 37 rows now wired |
+| M5-A | Exact integer domain and checked operations | Accepted evaluator retained; Pad -> typed integer results | LOCAL; C2/K1 |
+| M5-B | Grammar, references and compatibility | Pad document/evaluator, row/variable resolver | LOCAL; C2/K1/K4; scalar/units semantics retained |
+| M6-A | Separate programmer result inspector | Independent Inspector working copy; R03/M3-A/B | LOCAL; K2/H33; explicit Insert is qualified/undoable |
+| M6-B | Side-by-side calculation comparison | Immutable current-context slots; R03/M3-C | LOCAL; K3; no source or working-bit mutation |
+| M7-A | Dimensional arithmetic | Existing quantity/evaluator owner retained | LOCAL; K4; original nonlinear/unit grammar maintained |
+| M7-B | Examples, reference and calculator acceptance | Shared executable examples/help/preferences; R03/M3-C | LOCAL; K5; full N5 pending |
+| M8-A | Authoring modes and backward-compatible document format | Diagram controller/codec; original source + R04 compatibility | LOCAL; D1; no legacy source rewrite |
+| M8-B | Rich scene objects, styles and layers | Visual model/history/shared projection; R04/M4-A foundation | LOCAL; D1–D3 |
+| M9-A | Direct manipulation and navigation | Canvas geometry/gesture owner; R04/M4-A recovered visible drag | LOCAL; D2; native pointer/DPI pending |
+| M9-B | Connectors, containers and reusable assets | World-space scene hierarchy/connectors/assets; R04/M4-A | LOCAL; D2/D3; atomic Group/Ungroup/history |
+| M10-A | Mermaid assistance, templates, conversion and library | Accepted Mermaid assistance/copy/recents; R04/M4-B five starters | LOCAL; D4/D6; rich-to-Mermaid conversion not claimed |
+| M10-B | Current-scene exports and viewer parity | Immutable snapshot/encoder + Studio staged worker; R04/M4-C | LOCAL; D5/H32; independent Viewer camera |
+| M11-A | Bounded draw.io XML interchange | Current adapter/Studio review; R04/M4-D supported grouped profile | LOCAL; D7; unsupported fields refuse before bytes/publication |
+| M11-B | Diagram usability acceptance and documentation | Studio help/portable fixture/current source references; R04 final | LOCAL; D1/D5/D7; external rendering/full N6/N7 pending |
+| M12-A | Targeted Explorer tab operation | Guarded native port, job/lease and evidence; R05/M5-A | LOCAL; E1; positive Win11 provider/N8 pending |
+| M12-B | Saved folder lists and command integration | Store + retained editor/typed routes; R05/M5-B | LOCAL; H34; no new default global shortcut |
+| M13-A | Bounded progressive scan and accounting | Original metadata scanner/session + R05/M5-C cooperation | LOCAL; H35; real disposable filesystem proof narrower than N9 |
+| M13-B | Folder-size interface and launcher actions | Existing typed/File Search routes + R02 host + R05/M5-C | LOCAL; H35 |
+| M14-A | Restart Manager inspection boundary | Original read-only native/session identity guards retained | LOCAL; original held/released-file adapter proof; no unlock/kill |
+| M14-B | File lock inspector UI and actions | R02 host + R05/M5-C same-file Refresh/old-Reveal rejection | LOCAL; H36; scripted release is not native RM proof |
+| M15-A | Recording target and bounded capture lifecycle | Original session/backend; R02 setup + R05/M5-C actual Start | LOCAL; H37; real target/monitor selection pending |
+| M15-B | Streaming animated GIF output | Existing writer/finalization; R05/M5-C real GIF from fake frames | LOCAL; H37 + inherited owned-HWND decoded GIF |
+| M15-C | Video-only MP4 output | Original MF/H.264 owner retained | LOCAL; inherited synthetic/owned-HWND MP4 proof, no audio |
+| M16-A | Recorder controls and command integration | Existing typed Open/Stop/optional chord, R02 host and M5-C | LOCAL; H37, S1 |
+| M16-B | Recording interoperability and cleanup acceptance | Exact capture/publication/worker owners + fake live pin/interlocks | LOCAL; H37/S2; full N12 pending |
+| M17-A | Scoped cumulative verification and final review | Current R06/M6-A worker/parent | LOCAL COMPLETE; exact835 inventory, initial829+6 corrected, scoped Clippy/build and audited coverage above |
+| M17-B | Final delivery, status and next-tip handoff | R06/M6-B/M6-C parent ownership | IMPLEMENTATION HANDOFF COMPLETE; single packet reviewed, final docs committed/pushed and actual tip recorded externally; N1–N12 user-pending |
+
+### Exact ordinary host rows — 37
+
+Names below match the original canonical row text, including `Each note editor`, the three Calendar rows and the combined Recorder row. All use accepted per-surface retained action/host wiring, with ordinary geometry/focus/pin/close/hidden-ROOT duties shared through the existing host layers. The case references are per-surface representatives, not a claim that a generic host test proves every surface.
+
+| Original exact host row | Current owner and normal entry route | Accepted checkpoint / concrete case | Native limit |
+| --- | --- | --- | --- |
+| Quick Notes | `gui/notes_dialog.rs::NotesDialog`; `NoteCommandHost::open_notes_dialog` | R02/M2-A.2a; H01 | Full N2 pending |
+| Each note editor | `gui/note_panel.rs::NotePanel`, independent persistent note identity; note Open/Edit -> its panel | R02/M2-A.2b; H02 | Full N2; independent per-note focus/pickers pending |
+| Markdown Studio | `gui/markdown_studio.rs::MarkdownStudioDialog`; `open_markdown_studio_dialog` | R02/M2-A.1; H03 | Full N2 pending |
+| MkMacro | `gui/mkmacro_dialog::MkMacroDialog`; `open_mkmacro_dialog` | R02/M2-A.3; H04 | Full N2; fake playback is not native execution |
+| Main Settings | `SettingsWindowHost` + existing settings editor; typed `DialogCommand::Settings` | R02/M2-B.2; H05 | Full N3 pending |
+| Dashboard Settings | `DashboardEditorDialog`; `open_dashboard_settings_dialog` -> `open_dashboard_editor` | R02/M2-B.1; H06 | Full N3 pending |
+| Mouse Settings | `gui/mouse_settings_dialog.rs`; `open_mouse_settings` | R02/M2-B.3; H07 | Full N3/input-hook checks pending |
+| Mouse Gestures | `gui/mouse_gestures_dialog.rs`; existing Mouse/Gestures editor route | R02/M2-B.4; H08 | Full N3/real recorder input pending |
+| Gesture Settings | `gui/mouse_gesture_settings_dialog.rs`; existing gesture-settings route | R02/M2-B.3; H09 | Full N3 pending |
+| File Search | `gui/file_search_dialog.rs`, same coordinator/preview; `open_file_search` | R02/M2-C.1; H10 | Full N4/native focus/picker pending |
+| Diff | `gui/diff_dialog` workspace/worker; typed Diff payload -> `open_diff` | R02/M2-C.2; H11 | Full N4 pending |
+| Batch Rename | `BatchRenameDialogState`/existing plan session; `open_batch_rename` | R02/M2-C.3a; H12 | Full N4; real publication UI pending |
+| Search & Replace | `SearchReplaceDialogState`; `open_search_replace` | R02/M2-C.3b; H13 | Full N4; real filesystem/confirmation UI pending |
+| Clipboard History | `gui/clipboard_dialog.rs::ClipboardDialog`; `open_clipboard_dialog` | R02/M2-C.4a; H14 | Full N4; real private clipboard untouched by tests |
+| Snippets | `gui/snippet_dialog.rs::SnippetDialog`; `open_snippet_dialog` | R02/M2-C.4b; H15 | Full N4; owned prompt remains separate |
+| Clipboard Modify | `ClipboardModifyDialogState`; existing typed Modify opener | R02/M2-C.4c; H16 | Full N4; clipboard overwrite ownership pending native |
+| Paste Sequences | `PasteSequenceDialog` plus existing independent playback/prompt owner; `open_paste_sequence_dialog` | R02/M2-C.5; H17 | Full N4 including real repeated playback pending |
+| JSON | `JsonUtilityDialogState`; typed Json intent -> `open_json_utility` | R02/M2-C.6a; H18 | Full N4 pending |
+| XML | `XmlToolkitDialogState`; `open_xml_toolkit` | R02/M2-C.6b; H19 | Full N4/native picker pending |
+| Regex | `RegexTesterDialogState`; `open_regex_tester_dialog` | R02/M2-C.6c; H20 | Full N4 pending |
+| Table | `TableUtilityDialogState`/session; typed profile -> `open_table_utility` | R02/M2-C.6d; H21 | Full N4/native export/picker pending |
+| Timer/alarm authoring | `TimerDialog`; `open_timer_dialog` / `open_alarm_dialog` | R02/M2-C.7a; H22 | Full N4/audio-device interaction pending |
+| Calendar root | `CalendarPopover`/runtime and calendar host; `open_calendar_popover(date)` | R02/M2-C.7b; H23 | Full N4 pending |
+| Calendar event editor | `CalendarEventEditor` and independent draft host; root/details Edit/New -> captured source | R02/M2-C.7b; H24 | Full N4/native owned-child focus pending |
+| Calendar event details | `CalendarEventDetails`; root occurrence Open -> captured occurrence | R02/M2-C.7b; H25 | Full N4/native owned-child focus pending |
+| Date & Time Studio | `DateTimeStudioDialog`; `open_date_time_studio_dialog`; explicit Calendar Prepare | R02/M2-C.7c; H26 | Full N4; machine-local/DST/picker user path pending |
+| Image Compare | `gui/image_compare_dialog.rs`, same worker/camera; `open_image_compare_dialog` | R02/M2-C.8a; H27 | Full N4/native image clipboard/picker pending |
+| Duplicate Finder | `gui/duplicate_finder_dialog.rs`, existing scan/verified-alias action proof; `open_duplicate_finder_dialog` | R02/M2-C.8b; H28 | Full N4/native picker and current-alias action ownership pending |
+| ZIP Extractor | `gui/zip_extractor_dialog.rs`, inspection/selected-output token; `open_zip_extractor_dialog` | R02/M2-C.8c; H29 | Full N4; native picker and safe selected output UI pending |
+| Calculation Pad | `CalculationPadDialog` plus Pad session; `open_calculation_pad_dialog` | R01/M1-B reference; H30 | Full N1 pending |
+| Diagram Studio | `DiagramStudioDialog`/document controller; `open_diagram_studio_dialog` | R01 reference + R04/M4-A/B/C/D; H31 | Full N6/N7/native picker/DPI pending |
+| Diagram viewer | Same Studio owner, independent viewer host/camera; actual Open Viewer/Focus Viewer | R01 reference; H32 | Full N6/N7 pending |
+| Programmer inspector | `gui/programmer_inspector_dialog.rs` + independent working model; Pad selection/Inspector entry | R03/M3-A/B/C closes future row; H33 | Full N5/native host pending |
+| Explorer saved-list editor/launcher | `gui/explorer_tabs_dialog.rs`/store plus independent `ExplorerTabsJob`; `explorertabs` and typed Open/Run/Cancel | R05/M5-A/B closes future row; H34 | Full N8 requires supported observed Win11 provider |
+| Folder Size Analyzer | `FolderSizeDialogState`/`FolderSizeSession`; foldersize/OpenFolderSize File Search intent | R02/M2-D.1 + R05/M5-C; H35 | Full N9 pending; real disposable filesystem proof narrower |
+| File Lock Inspector | `FileLockDialogState`/`FileLockSession`; filelock/InspectFileUsers File Search intent | R02/M2-D.2 + R05/M5-C; H36 | Full N10 pending; scripted Refresh is not native RM |
+| Silent recorder setup / compact controller | `RecordingDialogState` ordinary setup; independent `RecordingController` and specialized compact controller; record Open/setup Start | R02/M2-D.3 + R05/M5-C; H37 | Full N11/N12 pending; compact is not an ordinary-host migration |
+
+Specialized rectangle/region selection, countdown, drawing/recording overlays, prompt/modal decisions and compact recorder control keep their existing independent lifecycle and exact owner receipts. They are described where relevant above but are **not extra ordinary rows**. Calendar/editor/details and per-note instance ownership must not be collapsed into a generic parent-only assertion.
+
+### Full native flow accounting — exactly 12 rows
+
+All full flows below remain `IMPLEMENTED_USER_VALIDATION_PENDING`; no user result is presumed. This is status/evidence data, not an ordered manual test script.
+
+| Original native flow | Current owner / available local evidence | Narrow actual evidence already accepted (if any) | Remaining full-flow limitation |
+| --- | --- | --- | --- |
+| N1 — Reference host | Pad/reference hosts and shared geometry; H30–H32 | No complete native reference-host flow established | Native dirty/edit/undo/copy/Dock/focus/Jump/DPI/picker sequence unobserved |
+| N2 — Document and macro hosts | Independent Notes/Markdown/MkMacro owners; H01–H04 | CPU controls/fake playback are not native positive execution | Real detached editing, owned prompts/pickers and harmless exactly-once macro flow unobserved |
+| N3 — Settings/mouse hosts | Settings/Dashboard/Mouse/Gestures; H05–H09 | Scoped editor/retained/input contracts, not full hook/OS proof | Real save/cancel/record/cancel and residual input suppression behavior unobserved |
+| N4 — Remaining utility families | Per-row owners H10–H29 plus shared host state; representative real CPU controls | Isolated disposable/file artifacts do not establish every native utility flow | Real clipboard, repeated sequence, native pickers/focus, time/calendar and file/image UI unobserved |
+| N5 — Programmer tools | Exact evaluator, independent Inspector and comparison; K1–K5/H33 | Exact model/CPU bit/Copy/Insert/Undo contracts only | Full actual large-result→bit edit→chosen format→insert/undo→comparison user flow unobserved |
+| N6 — Mermaid legacy | Diagram controller/codec/current source exports/viewer; D1/D5/H31/H32 | Saved artifacts and exact source/legacy codec checks; no full interactive gate | Real legacy edit, stale/invalid preview, viewer and export/dirty decisions unobserved |
+| N7 — Rich diagram | Current scene/hierarchy/assets/templates/exports/draw.io; D2–D7 | Independent XML syntax/reference checks plus app import/export/reimport; no external draw.io renderer | Native canvas/picker/DPI and external reader rendering unobserved; unsupported profiles stay explicit refusals |
+| N8 — Explorer tabs | Real conditional Windows port + job/store/host; E1/H34 | Fake-port/evidence and typed/control checks only; no native Explorer action ran | Supported Win11 New Tab/provider/pane/Shell-PIDL attribution and same-window ordering/unrelated-window preservation unobserved |
+| N9 — Folder sizes | Scanner/session/host; H35 | Original disposable Windows accounting/hard-link proof; M5-C real sandbox-external disposable scan/progress | Full native progressive/sort/cancel/refresh/host/focus/picker flow unobserved |
+| N10 — File users | Read-only RM/session/guarded Reveal; H36 | Earlier exact owned held/released helper with process creation identity | Full real inspector held→release→Refresh/host/reveal flow unobserved; current scripted empty result is separate |
+| N11 — Recording | WGC session, GIF/MF writers, setup/compact owner; H37/S1/S2 | Earlier verified owned HWND capture/GIF decode, synthetic video-only MF MP4 decode, owned-HWND controller MP4 | Actual launcher GIF/MP4, native target/region/display selection, hidden-root Stop/optional chord and non-primary/DPI unobserved |
+| N12 — Cleanup | Exact generation/claim/retirement owners, capture admission/Pinboard; H37/S1/S2 | Earlier controlled capture/MP4 repeated active discard and exact owned cleanup; current fake live pin processed frames | Full real selection/countdown/loss/repeat/exit, keyboard/mouse/still capture/live-Pinboard coexistence unobserved |
+
+Inherited opt-in native case identities are provenance only, **not new executions**: `file_lock::windows` native `native_reports_disposable_holder_then_release`; recorder `native_owned_hwnd_capture_observes_paint_and_retires`, `native_owned_hwnd_capture_writes_decodable_gif`, `native_mf_video_only_mp4_round_trips_through_source_reader`, `native_owned_hwnd_controller_mp4_save_and_discard_retire`. Their original accepted ledger sections retain exact target/module/run details. No ignored/native probe is proposed here.
+
+### Concrete representative case index
+
+Log paths below are relative to ignored `target/desktop-productivity-completion-recovery/`. All entries were observed as PASS in accepted checkpoint evidence or the accepted final ledger's exact inventory. A case shared by several rows remains one execution identity. Parent joined all 80 concrete full-qualified references to the required835 inventory; source counts are not summed as cumulative totals.
+
+| Key | Full-qualified representative case(s) | Accepted checkpoint evidence |
+| --- | --- | --- |
+| H01 | `gui::render::tests::quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent` | R02/M2-A.2a; `r02-m2-a2a-run-01.log` |
+| H02 | `gui::note_panel::tests::note_panel_visible_host_buttons_move_the_same_dirty_note_and_discard_rejected_draft` | R02/M2-A.2b; `r02-m2-a2b-run-01.log` plus accepted final/correction section |
+| H03 | `gui::markdown_studio::tests::markdown_studio_visible_host_buttons_pop_out_and_dock_the_same_document` | R02/M2-A.1; `r02-m2-a1-run-04.log` |
+| H04 | `gui::mkmacro_dialog::tests::mkmacro_visible_pop_out_and_dock_run_same_macro_once` | R02/M2-A.3; `r02-m2-a3-run-02.log` |
+| H05 | `gui::render::tests::main_settings_popout_preserves_draft_with_launcher_hidden_and_docks_back` | R02/M2-B.2; `r02-m2-b2-run-01.log` |
+| H06 | `gui::render::tests::dashboard_editor_detached_launcher_route_renders_hidden_and_docks_back`; `gui::dashboard_editor_dialog::persistence_tests::dashboard_editor_visible_host_buttons_pop_out_and_dock_the_same_draft` | R02/M2-B.1; `r02-m2-b1-run-03.log` |
+| H07 | `gui::render::tests::mouse_settings_popout_stays_live_when_root_hides_and_docks_back` | R02/M2-B.3; `r02-m2-b3-run-1.log` |
+| H08 | `gui::render::tests::mouse_gestures_detached_child_confirmation_and_dock_keep_the_same_editor` | R02/M2-B.4; `r02-m2-b4-run-4.log` |
+| H09 | `gui::mouse_gesture_settings_dialog::tests::gesture_settings_visible_host_button_preserves_pending_draft`; `gui::render::tests::jump_mode_mouse_gesture_settings_focus_save_close_and_reopen_preserve_live_semantics` | R02/M2-B.3; `r02-m2-b3-run-1.log` |
+| H10 | `gui::render::tests::file_search_moves_the_same_running_search_and_edits_while_root_is_hidden` | R02/M2-C.1; `r02-m2-c1-run-4.log` |
+| H11 | `gui::render::tests::diff_moves_the_same_busy_folder_workspace_and_polls_while_root_is_hidden` | R02/M2-C.2; `r02-m2-c2-run-8.log` |
+| H12 | `gui::render::tests::batch_rename_real_host_buttons_retain_the_same_verified_preview` | R02/M2-C.3a; `r02-m2-c3a-run-3.log` |
+| H13 | `gui::render::tests::search_replace_detached_confirmation_applies_once_after_retention` | R02/M2-C.3b; `r02-m2-c3b-run-2.log` |
+| H14 | `gui::render::tests::clipboard_history_detached_save_and_copy_require_retained_passes` | R02/M2-C.4a; `r02-m2-c4a-run-4.log` |
+| H15 | `gui::render::tests::snippets_detached_preview_returns_to_the_same_unsaved_draft` | R02/M2-C.4b; `r02-m2-c4b-run-6.log` |
+| H16 | `gui::render::tests::clipboard_modify_detached_preview_and_apply_require_retained_passes` | R02/M2-C.4c and subsequent accepted M2-C.5; `r02-m2-c5-run-4.log` |
+| H17 | `gui::render::tests::paste_sequences_detached_run_and_next_preserve_the_same_playback`; `gui::command_host::tests::saved_paste_to_advance_run_repeats_three_times_through_app_and_physical_admission` | R02/M2-C.5; `r02-m2-c5-run-4.log` |
+| H18 | `gui::render::tests::json_utility_detached_search_and_copy_retain_the_same_document`; `gui::json_utility_dialog::tests::hosted_checkpoint_restores_draft_without_reissuing_projection` | R02/M2-C.6a; `r02-m2-c6a-run-2.log` and `r02-m2-c6a-run-3.log` |
+| H19 | `gui::render::tests::xml_toolkit_host_moves_keep_the_session_and_discarded_replace_keeps_the_file` | R02/M2-C.6b; `r02-m2-c6b-run-2.log` |
+| H20 | `gui::render::tests::regex_tester_host_moves_retain_revision_and_copy_only_after_accepted_child_input` | R02/M2-C.6c; `r02-m2-c6c-run-1.log` |
+| H21 | `gui::render::tests::table_utility_moves_the_same_held_file_page_and_selection_between_hosts`; `gui::render::tests::table_utility_native_replace_rejects_discarded_passes_and_writes_the_captured_export` | R02/M2-C.6d; `r02-m2-c6d-run-2.log` |
+| H22 | `gui::render::tests::timer_and_alarm_authoring_keep_their_drafts_across_actual_host_moves` | R02/M2-C.7a; `r02-m2-c7a-run-2.log` |
+| H23 | `gui::render::tests::detached_calendar_retains_occurrence_and_saves_and_deletes_only_on_accepted_passes` | R02/M2-C.7b; `r02-m2-c7b-run-4.log`; root/children actual workflow |
+| H24 | H23 plus `gui::calendar_event_editor::persistence_tests::retained_editor_update_and_split_cannot_restore_a_deleted_event` | R02/M2-C.7b; `r02-m2-c7b-run-3.log` and run-4 |
+| H25 | H23 plus `gui::calendar_event_details::persistence_tests::stale_details_occurrence_cannot_delete_or_duplicate_the_changed_series` | R02/M2-C.7b; `r02-m2-c7b-run-3.log` and run-4 |
+| H26 | `gui::render::tests::date_time_studio_host_moves_preserve_draft_reference_selection_and_popup_ownership` | R02/M2-C.7c; `r02-m2-c7c-run-3.log` |
+| H27 | `gui::render::tests::imgdiff_host_moves_retain_inflight_pair_worker_and_camera_with_root_hidden` | R02/M2-C.8a; `r02-m2-c8a-run-2.log` |
+| H28 | `gui::render::tests::dff_host_gated_scan_survives_moves_cancel_drain_restart_and_close` | R02/M2-C.8b; `r02-m2-c8b-run-1.log` |
+| H29 | `gui::render::tests::zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions` | R02/M2-C.8c; `r02-m2-c8c-run-1.log` |
+| H30 | `gui::calculation_pad_dialog::tests::native_popout_child_discard_and_os_close_keep_the_edited_session` | R01/M1-B; `r01-m1-b-run-02.log` |
+| H31 | `gui::diagram_studio::tests::diagram_owner_dock_and_pop_out_keep_the_same_document_generation` | R01/M1-A/B; `r01-m1-b-run-02.log` |
+| H32 | `gui::diagram_studio::tests::focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner` | R01/M1-A/B; `r01-m1-b-run-02.log` |
+| H33 | `gui::render::tests::programmer_inspector_real_pad_selection_and_retained_bit_insert`; `gui::render::tests::programmer_inspector_stale_work_refresh_and_reopen_reject_old_caret` | R03/M3-B/C; `r03-m3-c-run-1.log`, final/correction acceptance in ledger |
+| H34 | `gui::render::tests::explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts`; `gui::render::tests::explorer_tabs_plugin_and_hotkey_dispatch_use_one_retained_saved_run` | R05/M5-B; `r05-m5-b-final-run.log` (12/12 full inventory, not just these two) |
+| H35 | `gui::render::tests::folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves` | R05/M5-C; `r05-m5-c-final-run-1.log` 10/10 closure |
+| H36 | `gui::render::tests::file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal`; `gui::render::tests::file_lock_host_preserves_held_inspection_selection_and_reveal` | R02/M2-D.2 + R05/M5-C; `r05-m5-c-final-run-1.log` |
+| H37 | `gui::render::tests::recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission`; `gui::render::tests::recorder_setup_hosts_preserve_real_controls_popup_and_stale_region` | R02/M2-D.3 + R05/M5-C; `r05-m5-c-final-run-1.log` |
+| K1 | `calculation_pad::document::tests::programmer_integer_operators_are_exact_and_select_explicit_modes`; `calculation_pad::document::tests::supports_remainder_and_contextual_euclidean_mod_without_reserving_mod`; `calculation_pad::document::tests::legacy_scalar_min_coexists_with_minutes` | R03/M3-C baselines; `r03-m3-c-run-1.log` |
+| K2 | `calculation_pad::session::tests::inspector_insert_checks_binding_and_is_one_undo_step`; `calculation_pad::inspector::tests::inspector_bits_labels_and_formats_stay_exact` | R03/M3-A; `r03-m3-a-run-1.log` plus corrected accepted case |
+| K3 | `calculation_pad::comparison::tests::comparison_integer_modes_and_full_width_differences_are_exact`; `calculation_pad::comparison::tests::comparison_selected_result_rejects_same_document_reopen_collision` | R03/M3-C; `r03-m3-c-run-1.log` |
+| K4 | `calculation_pad::document::tests::evaluates_dimensional_arithmetic_references_and_unit_targets`; `calculation_pad::comparison::tests::comparison_preserves_duplicate_failed_names_and_unit_semantics` | R03/M3-C; `r03-m3-c-run-1.log` |
+| K5 | `calculation_pad::examples::tests::shared_examples_evaluate_to_their_documented_results`; `settings_save::tests::inspector_preferences_owned_save_and_stale_editor_reconciliation` | R03/M3-C; `r03-m3-c-run-2.log` / run-1; executable 31-example catalog, format-only preference owner |
+| D1 | `diagram::document::tests::diagram_document_frozen_v1_invalid_draft_reopens_exactly_without_rewriting`; `diagram::codec::tests::diagram_codec_migrates_frozen_visual_v2_title_to_one_deterministic_text_object`; `diagram::codec::tests::diagram_codec_visual_container_v3_without_membership_field_keeps_legacy_scene_wire` | R04/M4-D; `r04-m4-d-final-run.log` |
+| D2 | `gui::diagram_studio::tests::diagram_studio_visual_container_controls_membership_and_group_drag_once`; `gui::diagram_studio::tests::diagram_studio_visual_group_and_ungroup_controls_are_atomic_and_retained` | R04/M4-A; both named cases passed in `r04-m4-a-run-1.log` (initial 21/22). The exact export-style fixture correction later passed 1/1: 22 distinct cases passed across runs, not an uninterrupted 22/22 run. |
+| D3 | `diagram::visual_canvas::tests::visual_frame_property_transform_moves_rotates_and_uniformly_scales_descendants_once`; `gui::diagram_studio::tests::diagram_studio_visual_asset_import_embeds_and_shares_one_decoded_texture` | R04/M4-A/C accepted inventories; shared geometry/asset evidence retained |
+| D4 | `diagram::visual_templates::tests::visual_authoring_template_catalog_projects_all_five_native_starters`; `gui::diagram_studio::tests::diagram_studio_visual_authoring_template_uses_accepted_dirty_transition` | R04/M4-B; recovered actual menu and final accepted 12-case inventory |
+| D5 | `gui::diagram_studio::tests::diagram_studio_visual_export_controls_apply_scale_background_and_publish_png`; `gui::diagram_studio::tests::diagram_studio_visual_export_svg_and_transparent_png_use_actual_controls` | R04/M4-C accepted 25-case inventory; original PNG/property pair actually passed |
+| D6 | `gui::diagram_studio::tests::diagram_recent_panel_and_open_use_accepted_dirty_document_transitions`; `gui::diagram_studio::tests::diagram_studio_same_frame_source_export_follows_edit_and_rejected_edit_aborts_picker` | R04/M4-D regression closure; `r04-m4-d-final-run.log`; accepted assistance/conversion retained separately |
+| D7 | `diagram::drawio::tests::diagram_drawio_wire_nested_group_import_resolves_parent_local_geometry`; `gui::diagram_studio::tests::diagram_drawio_workflow_import_copy_then_open_uses_dirty_transition`; `gui::diagram_studio::tests::diagram_drawio_workflow_export_review_is_atomic_and_preserves_native_document` | R04/M4-D symmetric/final accepted logs, final 24-case inventory |
+| E1 | `explorer_tabs::backend::tests::explorer_tabs_backend_drives_ordered_duplicate_paths_and_final_validation`; `explorer_tabs::native_uia::tests::explorer_tabs_backend_shared_root_pane_cannot_authorize_unique_shell_view`; `explorer_tabs::windows::native_relation_tests::explorer_tabs_backend_bootstrap_receipt_rejects_preexisting_and_ambiguous_windows` | R05/M5-A `r05-m5-a-final-run.log`, final 35-case inventory; real production runner/admission with fake native ports; not Win11 positive proof |
+| S1 | `gui::recording_dialog::tests::recording_ui_hidden_controller_commits_only_retained_current_stop`; `gui::recording_dialog::tests::recording_ui_reciprocal_capture_guards_reject_before_mutation` | R05/M5-C final closure reuses these exact accepted cases |
+| S2 | `gui::render::tests::recording_ui_exit_waits_for_capture_and_writer_retirement` | R05/M5-C final closure; capture/publication/retirement evidence, not full native cleanup |
+
+The original444 also contains main-binary recording route cases, e.g. **main binary** `hotkey_directory_runtime_tests::recording_stop_directory_receipt_requires_the_recorder_trigger_identity` and `tests::recording_stop_is_absent_from_shared_and_legacy_routes_by_default`. Preserve their binary identity in the cumulative worker's provenance; they are not lib cases; both were included under their main-binary identities in the cumulative run.
+
+### Supported-profile and evidence limitations to preserve when appending
+
+- Calculator: default `u64`, required 8/16/32/64 signed/unsigned, exact existing128 compatibility; no scalar `^`/mod/min/minute/unit grammar regression. Inspector bits/labels/comparison drafts do not save Pad source. Copy/Insert/source/caret freshness and reopen identity remain qualified; comparisons reuse immutable current context. Optional128 is preserved compatibility, not a newly required UI expansion.
+- Diagram: one Mermaid/Visual authoring authority; exact legacy v1/v2/current v3 and late Save As no-clobber remain. Five visual starters are distinct from Mermaid templates. Export captures current committed projection/revision and retains independent Viewer camera. Grouped draw.io supports the documented uncompressed one-page representable profile: nested unrotated frames/groups, rotated leaves, layers/anchors/labels/styles. Compressed/multipage/active/external content, relative ports/offsets/waypoints, unsupported styles/assets/presets, rotated parents with descendants, cross-layer membership and unrepresentable tree/paint order are explicit refusals. Bare-group faithfulness is provided by the accepted bounded native representation/discriminator; do not relabel all groups as unsupported or claim arbitrary draw.io support. Independent XML parser/reference checks are not external rendering.
+- Explorer: actual guarded mutation is implemented, but OS build alone does not prove provider support. Absent/ambiguous observed affordance/pane/Shell-PIDL evidence refuses before speculative mutation. Capabilities absent before bootstrap mean zero native mutation; provider facts found missing after attributed bootstrap produce an honest partial bootstrap/owned-resource diagnostic, not verified tabs. Fakes do not establish positive Win11 order/attribution.
+- Folder Size: logical-per-entry metrics/partial status, literal source prefill and generation-qualified progress/result remain. M5-C normal-user disposable filesystem execution is a narrow actual proof; an agent-sandbox ancestor access failure was environmental and was not fixed by weakening production path guards.
+- File Lock: Windows-reported processes, exact PID/creation/file identity, truthful empty/failure distinction. No unlocking/process kill/elevation. M5-C release is scripted; earlier real helper observation remains separately attributed.
+- Recorder: no audio; one capture/writer/controller; accepted app-frame publication checks capture retirement and frozen terminal/frame acknowledgements. The writer may still hold its slot while performing/finishing its own publication; tests wait for retirement to prove subsequent admission, rather than falsely requiring writer exit before its last write. Current Pinboard continuity uses a real Pinboard session with fake native presenter/visibility/capture and processed frame updates, not live WGC proof.
+
+
+
+### M6-A disposition and next work
+
+All required local M6-A checks and scoped reviews are complete: one exact cumulative run with honest focused corrections, scoped Clippy with classified advisories, real runnable build, current compatibility/50–38–37–12/ancestry evidence and preserved failures. Source changes are only the three reviewed cfg(test) files (gui/{diagram_studio,render,timer_dialog}.rs). Scoped formatting and git diff --check pass. No native full-flow result is presumed. Full N1–N12, external draw.io rendering and positive Win11 provider behavior remain IMPLEMENTED_USER_VALIDATION_PENDING, not implementation failures silently waived by CPU tests.
+
+Next is M6-B: create the single requested MANUAL_WINDOWS_11_ACCEPTANCE.md at the end with short exact setup/steps/expected outcomes, PASS/FAIL/NOT_RUN fields, actual code/artifact identity, safe disposable fixtures, a recommended 20–30 minute smoke subset and optional deeper checks. Then M6-C audits the final committed state, normal push and code/build equivalence, writes the actual final SHA externally and reports truthful implementation/user-validation status. Do not open/merge a PR, change default branch, launch a probe or ask for intermediate user tests. Goal remains active until those existing deliverables are complete.
+
+### M6-A evidence hashes
+
+Large manifests/logs/scripts remain ignored target evidence. Current hashes were independently checked by the parent:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r06-m6-a-provenance.json | D3227F9301886A73BECAD974B37A32CC432814F6F3E61046CC5DAF10BC68D226 |
+| r06-m6-a-case-reconciliation.tsv | 6B3F4B99B2A2C36FD53E677EB0CD1A9938AAEFA6DD6628C8A12262839D5B8C2D |
+| r06-m6-a-test-names.tsv | 76663E66550700033D926DBC76354AFB73D68AD305102E268FC633125C9323EE |
+| r06-m6-a-filter.txt | 45FAEDA6F7B2792AF8D77791CD36ACC6D48D7BEBF8668051FD6993A3ACF6DF8E |
+| r06-m6-a-list-2.json | 0917B331571F9E78C48F8D376CFFA5575DC60ECCF53E551EDA1E4A6110EA6F78 |
+| r06-m6-a-run.log | 583A8760A80746CEE1ED6EE46415CF8E5DBEDC96B4CEFE2590F8014A47F0234B |
+| r06-m6-a-correction-list-1.json | 13BEDA88DB6B6AB020F76037F10660BFFFFD2E1BB171711474B52C787B91D864 |
+| r06-m6-a-correction-run-1.log | C6C3B8189CE49ABF9F94185D33D633522F6FB9DB68FAFC950C32D5FFC7BC0430 |
+| r06-m6-a-correction-list-2.json | FE7D4EF824074818F34D944D12F38630605DED9159DEED265AAC1E011271F959 |
+| r06-m6-a-correction-run-2.log | 7F75FE5E94FC65DD17D539C15246104806D3AB027F5644A393DECBF32B51657B |
+| r06-m6-a-clippy.log | 70C403DA747A206276F9A3A301543A1A2A0039A6EAD84A8087FEF508025BF94F |
+| r06-m6-a-clippy-first-party.tsv | F7508E79925621F4134E80643ADB99BE791300D091837010A3D5EC635ED3F58B |
+| r06-m6-a-build.log | EC50D65174AB623CF0F7A265A6430EE1A88432DB4A22CEBE58D50A7AD6EC60A5 |
+| r06-m6-a-build-artifacts.jsonl | FEC2F7EBB2660352C9847F901414CAD0EF80E485EAA306CDC68ECCA40758E6C6 |
+| r06-m6-a-artifact.json | D88AFC0205FB9D8ACAD5347EF51C496B2178580CF094C321DDD16700EF224A44 |
+| r06-m6-a-worker-evidence.json | 82913459040770F8349B240884E902BF0EB5A17BAA9D6214A08B45D2A514B84B |
+| r06-m6-a-build-input-manifest.json | 458AE8891075A91E1CD5306B7BE30A399795D96E084070A54F490E7515F0872D |
+| r06-parent-ancestry-audit.json | C4FA9523F47DA67311087F33C612375813CFB4B6D77DDB17129F1D0FD7C63964 |
+| r06-parent-coverage-reference-check.json | 66303D6B60FB4DD4BA6D93442EBAD83D08E4AA51892EF18827CC930C7AC2FB1A |
+| r06-parent-artifact-evidence-check.json | 63F725B038C11CBF9159F57EE6A520D7076C5984960DFE396B3550ACAD2D21D0 |
+
+## R06/M6-B — Final manual acceptance packet
+
+M6-B is complete. The single [Windows 11 acceptance packet](MANUAL_WINDOWS_11_ACCEPTANCE.md) covers all N1–N12 with exact routes, expected outcomes, initially NOT_RUN gate/subcheck fields, executable identity, disposable setup, suggested 20–30 minute smoke subset, optional deeper checks and redacted feedback. Its minimal settings template is copied into a uniquely owned runtime directory before construction, with Paste Sequence Next/Cancel shortcuts null. The executable, working directory and note/template locations are isolated; tracked fixtures are not used as writable profiles.
+
+Independent read-only review checked current routes, labels, settings schema, profile isolation and helper disposal. Corrections incorporated the separate gesture editor and auto-save semantics, Paste Sequence Run/preflight/Next and second run, Diagram align/layer actions, and actual live-pin opener. Static inspection confirms all twelve gates and 43 initially NOT_RUN gate/subcheck fields; no PASS/FAIL is preselected. JSON parses, the grouped draw.io fixture exists, and git diff --check passes. No Cargo, application, helper, native capture or Explorer action was run for this documentation milestone.
+
+The packet binds the executable to accepted code checkpoint 08c91e819ef8f488fdc83da33f0e052230a6a34d and preserves the original dirty-build provenance. No later documentation SHA is claimed to be embedded. Full native N1–N12 and independent external draw.io rendering remain user-pending. An applicable Windows 11 Explorer capability refusal is FAIL/capability-gap feedback, not a successful five-tab proof. M6-C final reporting/receipt is next; the implementation is not waiting for user execution of this packet.
+
+## R06/M6-C — Final implementation handoff
+
+**Disposition: IMPLEMENTATION_COMPLETE_USER_VALIDATION_PENDING.** This is implementation delivery, not a claim that complete native acceptance passed. R01–R06 implementation milestones and original M17-A/M17-B delivery are complete. No known missing/unsafe implementation or unresolved failing affected test remains in the accepted scope. The conditional Windows 11 Explorer provider and bounded draw.io profile retain their documented capability limits. Full N1–N12, external draw.io rendering and optional monitor/DPI checks remain unobserved user checks, covered by the single [manual packet](MANUAL_WINDOWS_11_ACCEPTANCE.md).
+
+### Category and branch receipt
+
+| Category | Existing linear branch | Final reporting checkpoint |
+| --- | --- | --- |
+| R01 — shared hosts | fix/productivity-host-core-recovery | b8c3f259cbd55d483fb1346b262026ed42d5d820 |
+| R02 — individual host migrations | feat/productivity-host-migrations | 7912a9f591c301d7a161a0675eea650d07d9148e |
+| R03 — independent Inspector/comparisons | feat/productivity-programmer-inspector | 00e199e00df7513153ceb00a42e8cb5cb1f5b9e0 |
+| R04 — Diagram hierarchy/starters/export/interchange | feat/productivity-diagram-completion | 102eaf9fbe291530acf0901f641bf6f822fcbc0f |
+| R05 — guarded Explorer lists/utility cooperation | feat/productivity-explorer-utility-completion | 1a47fb3f91e69a50b1c80f26d0e2735a906aaf00 |
+| R06 — acceptance and delivery | test/productivity-native-acceptance-closeout | Code 08c91e819ef8f488fdc83da33f0e052230a6a34d; packet 6182b6403e420a745ac648da2a1e1056c38545f6; final reporting SHA read after this commit into ignored r06-m6-c-final-receipt.json |
+
+All category checkpoints above are normally pushed. Each M0-A is the direct child of the preceding exact reporting tip, starting at 1852f264dae69056f79bc0c3b593c70331fa620f. Fresh parent verification after the packet commit checked six direct M0 parents, baseline-only document paths, base ancestry, zero new-range merges, unchanged R01–R05 tips, all upstreams equal, one checkout/worktree and exact Goal/Kickstart blobs from 05153ac1. No default branch/PR/merge action was performed. The final post-report verifier writes a fresh receipt rather than overwriting prior evidence or editing a report to include its own SHA.
+
+### Verification and proof boundaries
+
+- Required cumulative inventory: 835 current tests (831 lib, four bin), reconciled from the accepted baseline and recovery inventories. Initial run passed 829 with six failures; focused corrections passed those six and three additionally affected callers. All 835 required cases have passing evidence, with 838 distinct current passing cases across runs. This is not a single uninterrupted all-green 835 run. Exact selectors, lists, commands, failures and corrections remain in M6-A above.
+- Production lib/bin build succeeded using locked/offline fast-dev; actual executable size 143,680,000 bytes and SHA-256 E393FD9F07B58758105C429DAE9467AC41A914226A1D288631A756901F6F8BC8. It was not launched during closeout. Fresh comparison checks all 1,225 tracked build inputs against the original manifest and confirms only documentation changed after accepted code 08c91e81. Original dirty-build provenance remains intact.
+- Scoped first-party Clippy succeeded with 120 classified advisory findings, including recovery-introduced/materially changed constructs; these are not all described as pre-existing. Details and scope decisions remain in M6-A. No lint suppression, vendor or Nextest configuration workaround was used.
+- The 50 original IDs, 38 exact milestone titles and 37 individual ordinary hosts remain individually accounted above; no generic host pass replaces individual wiring evidence. Earlier narrow native accounting/held-file/capture/media proofs remain distinct from current scripted/fake tests and from complete N1–N12 flows. No new native full gate was run or marked PASS.
+- M6-B source/route/profile review cleared its final packet and all 43 NOT_RUN gate/subcheck fields. M6-C independent review cleared the final requirement/branch/evidence disposition, confirmed the exact matrix counts and found no blocking issue. Documentation-only closeout uses static checks and content equivalence; no redundant Cargo run or native application launch is needed.
+
+Fresh M6-B audit evidence (ignored target directory): r06-parent-ancestry-m6-b.json SHA-256 4FE836985F28F312BA1942A64E869E19F53D76326DF0F574E73452B17712145A; r06-parent-code-build-equivalence-m6-b.json SHA-256 BC120321F3BEABC3711AA52D7B5D0A01F19DB08DD189E7B62892FD0B6B9A231F. Final post-commit ancestry/content receipts and r06-m6-c-final-receipt.json capture the actual final HEAD, upstream, clean status and receipt hashes without changing committed history.
+
+### Next safe action
+
+Run the manual packet once when convenient, using its verified executable and uniquely isolated profile. Return only gate/subcheck IDs, expected/observed behavior, OS/build and redacted diagnostics. Unperformed checks stay NOT_RUN; any applicable failure becomes a focused follow-up against the final branch. Do not repeat the completed Dashboard three-fixture checkpoint, recovered documents, R01–R06 implementation, cumulative baseline or native probes merely to resume from this report. Agent model configuration was reread and preserved; no agent configuration edits are included. No additional milestones, queued implementation or automatic merge are part of this handoff.

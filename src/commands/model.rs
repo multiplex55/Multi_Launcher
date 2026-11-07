@@ -75,6 +75,7 @@ pub enum Command {
     ClipboardModify(ClipboardModifyCommand),
     Screenshot(ScreenshotCommand),
     Pinboard(PinboardCommand),
+    Recording(RecordingCommand),
     ScreenDraw(ScreenDrawCommand),
     CoordinateTool(CoordinateToolCommand),
     Shell(ShellCommand),
@@ -100,6 +101,7 @@ pub enum Command {
     Data(DataCommand),
     HotFolder(HotFolderCommand),
     PasteSequence(PasteSequenceCommand),
+    ExplorerTabs(ExplorerTabsCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
 }
@@ -122,6 +124,7 @@ impl Command {
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
             Self::Pinboard(_) => "pinboard",
+            Self::Recording(_) => "recording",
             Self::ScreenDraw(_) => "screen_draw",
             Self::CoordinateTool(_) => "mouse",
             Self::Shell(_) => "shell",
@@ -147,6 +150,7 @@ impl Command {
             Self::Data(_) => "data",
             Self::HotFolder(_) => "hotfolder",
             Self::PasteSequence(_) => "paste_sequence",
+            Self::ExplorerTabs(_) => "explorer_tabs",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
         }
@@ -168,6 +172,7 @@ impl Command {
             Self::ClipboardModify(v) => v.kind_name(),
             Self::Screenshot(v) => v.kind_name(),
             Self::Pinboard(v) => v.kind_name(),
+            Self::Recording(v) => v.kind_name(),
             Self::ScreenDraw(v) => v.kind_name(),
             Self::CoordinateTool(v) => v.kind_name(),
             Self::Shell(v) => v.kind_name(),
@@ -193,6 +198,7 @@ impl Command {
             Self::Data(v) => v.kind_name(),
             Self::HotFolder(v) => v.kind_name(),
             Self::PasteSequence(v) => v.kind_name(),
+            Self::ExplorerTabs(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
         }
@@ -217,6 +223,14 @@ kinds!(ScreenDrawCommand,
     Self::NewCapture => "new_capture", Self::Ghost => "ghost",
     Self::Done => "done", Self::Clear => "clear", Self::Close => "close"
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingCommand {
+    Open,
+    Stop,
+}
+
+kinds!(RecordingCommand, Self::Open => "open", Self::Stop => "stop");
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoordinateToolCommand {
@@ -446,9 +460,11 @@ pub enum DialogCommand {
     Theme,
     ImageCompare,
     DuplicateFinder,
+    FolderSize,
+    FileLock { path: Option<std::path::PathBuf> },
     Activity,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::Activity => "activity");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::FolderSize => "folder_size", Self::FileLock { .. } => "file_lock", Self::Activity => "activity");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },
@@ -1009,6 +1025,16 @@ pub enum PasteSequenceCommand {
     Cancel,
     InvalidRun,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerTabsCommand {
+    Open,
+    Run(crate::explorer_tabs::FolderListId),
+    Cancel,
+}
+kinds!(ExplorerTabsCommand,
+    Self::Open => "open", Self::Run(_) => "run", Self::Cancel => "cancel"
+);
 kinds!(PasteSequenceCommand,
     Self::Open => "open",
     Self::Run(_) => "run",

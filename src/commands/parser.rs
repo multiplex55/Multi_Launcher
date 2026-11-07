@@ -64,6 +64,40 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod recording_parser_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn recording_namespace_parses_only_open_and_stop() {
+        for (raw, expected) in [
+            ("record:open", RecordingCommand::Open),
+            ("RECORD:OPEN", RecordingCommand::Open),
+            ("Record:Stop", RecordingCommand::Stop),
+        ] {
+            let parsed = parse_action(&action(raw, None)).unwrap();
+            assert_eq!(parsed, Command::Recording(expected));
+            assert_eq!(parsed.domain(), "recording");
+            assert_eq!(parsed.kind_name(), expected.kind_name());
+        }
+        assert!(parse_action(&action("record:start", None)).is_err());
+        assert!(parse_action(&action("record:stop", Some("payload"))).is_err());
+        assert!(matches!(
+            parse_action(&action("recording:open", None)).unwrap(),
+            Command::External(_)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod brightness_legacy_protocol_tests {
     use super::*;
 
@@ -359,6 +393,28 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         };
         return Ok(Command::Pinboard(command));
     }
+    if s.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("record:"))
+    {
+        if action.args.is_some() {
+            return Err(CommandError::new(
+                "recording",
+                "Screen recording commands do not accept a payload",
+            )
+            .with_gui_failure_policy());
+        }
+        let command = match s[7..].to_ascii_lowercase().as_str() {
+            "open" => RecordingCommand::Open,
+            "stop" => RecordingCommand::Stop,
+            _ => {
+                return Err(
+                    CommandError::new("recording", "Unknown screen recording command")
+                        .with_gui_failure_policy(),
+                );
+            }
+        };
+        return Ok(Command::Recording(command));
+    }
     if s == "qr:open" {
         return Ok(Command::Dialog(DialogCommand::Qr {
             initial_text: action.args.clone(),
@@ -377,6 +433,40 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
 
     if let Some(command) = parse_paste_sequence(s) {
         return Ok(Command::PasteSequence(command));
+    }
+
+    if s.get(.."explorertabs".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("explorertabs"))
+        && (s.len() == "explorertabs".len()
+            || s.as_bytes().get("explorertabs".len()) == Some(&b':'))
+    {
+        if action.args.is_some() {
+            return Err(CommandError::new(
+                "explorer_tabs",
+                "Explorer Tabs commands do not accept a payload"
+            )
+            .with_gui_failure_policy());
+        }
+        let command = match s {
+            "explorertabs" | "explorertabs:open" => ExplorerTabsCommand::Open,
+            "explorertabs:cancel" => ExplorerTabsCommand::Cancel,
+            _ if s.starts_with("explorertabs:run:") => {
+                let raw = &s["explorertabs:run:".len()..];
+                let id = raw
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(crate::explorer_tabs::FolderListId::from_raw)
+                    .filter(|id| id.get().to_string() == raw)
+                    .ok_or_else(|| {
+                        CommandError::new("explorer_tabs", "Invalid saved folder-list ID")
+                            .with_gui_failure_policy()
+                    })?;
+                ExplorerTabsCommand::Run(id)
+            }
+            _ => return Err(CommandError::new("explorer_tabs", "Unknown Explorer Tabs command")
+                .with_gui_failure_policy()),
+        };
+        return Ok(Command::ExplorerTabs(command));
     }
 
     if s.starts_with("vd:") {
@@ -460,6 +550,52 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
                 "Duplicate Finder does not accept a path or content payload"
             } else {
                 "unknown Duplicate Finder command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
+    if s.starts_with("foldersize:") {
+        if s == "foldersize:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::FolderSize));
+        }
+        return Err(CommandError::new(
+            "folder_size",
+            if action.args.is_some() {
+                "Folder Size does not accept a path or content payload"
+            } else {
+                "unknown Folder Size command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
+    if s.starts_with("filelock:") {
+        if s == "filelock:open" {
+            let path = match action.args.as_deref() {
+                None => None,
+                Some(value)
+                    if !value.is_empty()
+                        && !value.contains('\0')
+                        && value.encode_utf16().count().saturating_add(1)
+                            <= crate::file_lock::MAX_FILE_LOCK_PATH_UTF16_UNITS =>
+                {
+                    Some(std::path::PathBuf::from(value))
+                }
+                Some(_) => {
+                    return Err(CommandError::new(
+                        "file_lock",
+                        "File Lock Inspector path must be non-empty, bounded, and contain no NUL",
+                    )
+                    .with_gui_failure_policy());
+                }
+            };
+            return Ok(Command::Dialog(DialogCommand::FileLock { path }));
+        }
+        return Err(CommandError::new(
+            "file_lock",
+            if action.args.is_some() {
+                "File Lock Inspector only supports filelock:open with an optional literal path"
+            } else {
+                "unknown File Lock Inspector command"
             },
         )
         .with_gui_failure_policy());
@@ -3284,5 +3420,90 @@ mod markdown_studio_parser_tests {
         assert_eq!(parsed, Command::Dialog(DialogCommand::MarkdownStudio));
         assert_eq!(parsed.domain(), "dialog");
         assert_eq!(parsed.kind_name(), "markdown_studio");
+    }
+}
+
+#[cfg(test)]
+mod file_lock_ui_command_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    fn action(args: Option<String>) -> Action {
+        Action {
+            label: "File Lock Inspector".into(),
+            desc: String::new(),
+            action: "filelock:open".into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn file_lock_ui_open_route_preserves_the_literal_path_without_touching_disk() {
+        let path = r"C:\Users\Jay\One Drive\資料 雪.txt";
+        assert_eq!(
+            parse_action(&action(Some(path.to_owned()))).unwrap(),
+            Command::Dialog(DialogCommand::FileLock {
+                path: Some(std::path::PathBuf::from(path)),
+            })
+        );
+        assert_eq!(
+            parse_action(&action(None)).unwrap(),
+            Command::Dialog(DialogCommand::FileLock { path: None })
+        );
+    }
+
+    #[test]
+    fn file_lock_ui_open_rejects_malformed_literal_path_payloads() {
+        let too_long = "x".repeat(crate::file_lock::MAX_FILE_LOCK_PATH_UTF16_UNITS);
+        for value in [String::new(), "bad\0path".to_owned(), too_long] {
+            let error = parse_action(&action(Some(value))).unwrap_err();
+            assert_eq!(error.domain, "file_lock");
+            assert!(error.to_string().contains("path"));
+        }
+
+        let unknown = Action {
+            label: "unknown".into(),
+            desc: String::new(),
+            action: "filelock:future".into(),
+            args: None,
+        };
+        assert_eq!(parse_action(&unknown).unwrap_err().domain, "file_lock");
+    }
+}
+
+#[cfg(test)]
+mod explorer_tabs_parser_tests {
+    use super::*;
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned)
+        }
+    }
+    #[test]
+    fn explorer_tabs_commands_are_typed_and_malformed_reserved_routes_fail_closed() {
+        assert_eq!(
+            parse_action(&action("explorertabs:open", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Open)
+        );
+        assert_eq!(
+            parse_action(&action("explorertabs:cancel", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Cancel)
+        );
+        assert_eq!(
+            parse_action(&action("explorertabs:run:42", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Run(
+                crate::explorer_tabs::FolderListId::from_raw(42).unwrap()
+            ))
+        );
+        for invalid in [
+            "explorertabs:run:0", "explorertabs:run:01", "explorertabs:run:1:extra",
+            "explorertabs:unknown", "EXPLORERTABS:run:0", "ExplorerTabs:unknown"
+        ] {
+            assert!(parse_action(&action(invalid, None)).is_err());
+        }
+        assert!(parse_action(&action("explorertabs:open", Some("extra"))).is_err());
     }
 }

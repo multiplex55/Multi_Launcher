@@ -657,7 +657,7 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     });
     eframe::egui::Window::new("Recording Review")
         .id(eframe::egui::Id::new("mkmacro_recording_review"))
-
+        .enabled(dialog.host_child_input_allowed())
         .collapsible(false)
         .default_size([780.0, 620.0])
         .resizable(true)
@@ -1187,24 +1187,49 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             .unwrap()
             .retarget_append(macro_id);
     }
-    if stop_preview {
-        dialog.stop_owned_recording_preview();
+    if dialog.defer_host_effects {
+        if let Some(target) = dialog
+            .recording_review
+            .as_ref()
+            .map(|review| review.effective_target())
+        {
+            if stop_preview {
+                dialog.stage_host_review_action(super::ReviewCommand::StopPreview, target, false);
+            }
+            if preview_all {
+                dialog.stage_host_review_action(super::ReviewCommand::Preview, target, false);
+            }
+            if preview_selected {
+                dialog.stage_host_review_action(super::ReviewCommand::Preview, target, true);
+            }
+            if apply {
+                dialog.stage_host_review_action(super::ReviewCommand::Apply, target, false);
+            }
+            if cancel || (!open && !review_editor_open) {
+                dialog.stage_host_review_action(super::ReviewCommand::Cancel, target, false);
+            }
+        }
+    } else {
+        if stop_preview {
+            dialog.stop_owned_recording_preview();
+        }
+        if preview_all && let Err(error) = dialog.preview_recording_review(false) {
+            dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
+        }
+        if preview_selected && let Err(error) = dialog.preview_recording_review(true) {
+            dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
+        }
+        if apply
+            && let Err(error) = dialog.apply_recording_review()
+            && let Some(review) = &mut dialog.recording_review
+        {
+            review.message = Some(error);
+        }
+        if cancel || (!open && !review_editor_open) {
+            dialog.cancel_recording_review();
+        }
     }
-    if preview_all && let Err(error) = dialog.preview_recording_review(false) {
-        dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
-    }
-    if preview_selected && let Err(error) = dialog.preview_recording_review(true) {
-        dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
-    }
-    if apply
-        && let Err(error) = dialog.apply_recording_review()
-        && let Some(review) = &mut dialog.recording_review
-    {
-        review.message = Some(error);
-    }
-    if cancel || (!open && !review_editor_open) {
-        dialog.cancel_recording_review();
-    } else if !open && review_editor_open {
+    if !open && review_editor_open {
         dialog.recording_review.as_mut().unwrap().message =
             Some("Finish or cancel the Action Editor before closing Recording Review.".into());
     }

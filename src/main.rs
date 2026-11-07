@@ -211,6 +211,13 @@ fn reserved_launcher_hotkeys_with_sequences(
     {
         reserved.push(("help launcher".into(), hotkey.into()));
     }
+    if let Some(hotkey) = settings
+        .recording_stop_hotkey
+        .as_deref()
+        .filter(|hotkey| parse_hotkey(hotkey).is_some())
+    {
+        reserved.push(("recording Stop & Save".into(), hotkey.into()));
+    }
     if let Ok(Some(hotkey)) = screen_draw_launch_hotkey_text(settings) {
         reserved.push(("launch Screen Draw".into(), hotkey));
     }
@@ -552,6 +559,17 @@ fn related_launcher_bindings_with_sequences(
         });
     }
     if include_process_hotkeys
+        && let Some(hotkey) = settings
+            .recording_stop_hotkey
+            .as_deref()
+            .and_then(parse_hotkey)
+    {
+        bindings.push(RelatedBinding {
+            hotkey,
+            action: RelatedAction::RecordingStop,
+        });
+    }
+    if include_process_hotkeys
         && let Ok(Some(text)) = screen_draw_launch_hotkey_text(settings)
         && let Some(hotkey) = parse_hotkey(&text)
     {
@@ -613,6 +631,7 @@ fn shared_drain_control_bindings(
             binding.action,
             RelatedAction::Quit
                 | RelatedAction::Help
+                | RelatedAction::RecordingStop
                 | RelatedAction::ScreenDrawLaunch
                 | RelatedAction::ScreenDrawEmergency
                 | RelatedAction::PasteSequence(_)
@@ -681,6 +700,71 @@ fn legacy_listener_triggers_with_sequences(
     watched
 }
 
+fn legacy_listener_triggers_with_stop(
+    shared_invocation: bool,
+    launcher: &Arc<HotkeyTrigger>,
+    quit: Option<&Arc<HotkeyTrigger>>,
+    help: Option<&Arc<HotkeyTrigger>>,
+    screen_draw: Option<&Arc<HotkeyTrigger>>,
+    emergency: Option<&Arc<HotkeyTrigger>>,
+    sequence_triggers: &[PasteSequenceHotkeyTrigger],
+    recording_stop: Option<&Arc<HotkeyTrigger>>,
+) -> Vec<Arc<HotkeyTrigger>> {
+    let mut watched = legacy_listener_triggers_with_sequences(
+        shared_invocation,
+        launcher,
+        quit,
+        help,
+        screen_draw,
+        emergency,
+        sequence_triggers,
+    );
+    if !shared_invocation {
+        watched.extend(recording_stop.cloned());
+    }
+    watched
+}
+
+fn recording_stop_trigger(
+    settings: &Settings,
+    bridge: &Arc<multi_launcher::recording::RecordingStopHotkeyBridge>,
+) -> Option<Arc<HotkeyTrigger>> {
+    settings
+        .recording_stop_hotkey
+        .as_deref()
+        .and_then(parse_hotkey)
+        .map(|hotkey| {
+            Arc::new(HotkeyTrigger::new_recording_stop(
+                hotkey,
+                Arc::clone(bridge),
+            ))
+        })
+}
+
+fn legacy_listener_triggers_for_settings(
+    settings: &Settings,
+    shared_invocation: bool,
+    launcher: &Arc<HotkeyTrigger>,
+    quit: Option<&Arc<HotkeyTrigger>>,
+    help: Option<&Arc<HotkeyTrigger>>,
+    screen_draw: Option<&Arc<HotkeyTrigger>>,
+    emergency: Option<&Arc<HotkeyTrigger>>,
+    sequence_triggers: &[PasteSequenceHotkeyTrigger],
+    bridge: &Arc<multi_launcher::recording::RecordingStopHotkeyBridge>,
+) -> Vec<Arc<HotkeyTrigger>> {
+    let recording_stop = recording_stop_trigger(settings, bridge);
+    legacy_listener_triggers_with_stop(
+        shared_invocation,
+        launcher,
+        quit,
+        help,
+        screen_draw,
+        emergency,
+        sequence_triggers,
+        recording_stop.as_ref(),
+    )
+}
+
 fn take_paste_sequence_trigger_actions(
     triggers: &[PasteSequenceHotkeyTrigger],
 ) -> Vec<PasteSequenceHotkeyAction> {
@@ -696,6 +780,12 @@ fn take_paste_sequence_trigger_actions(
             })
         })
         .collect()
+}
+
+fn take_recording_stop_generation(triggers: &[Arc<HotkeyTrigger>]) -> Option<u64> {
+    triggers
+        .iter()
+        .find_map(|trigger| trigger.take_recording_stop_generation())
 }
 
 struct PendingLauncherRoute {
@@ -816,6 +906,13 @@ fn apply_service_related_action(
     let trigger = match action {
         RelatedAction::Quit => quit,
         RelatedAction::Help => help,
+        RelatedAction::RecordingStop => None,
+        RelatedAction::RecordingStopGeneration(generation) => {
+            multi_launcher::gui::send_event(
+                multi_launcher::gui::WatchEvent::RecordingStopGeneration(generation),
+            );
+            None
+        }
         RelatedAction::ScreenDrawLaunch => screen_draw,
         RelatedAction::ScreenDrawEmergency => emergency,
         RelatedAction::DirectMenu { .. } => None,
@@ -841,6 +938,7 @@ struct PreparedHotkeyRoute {
     launcher: Arc<HotkeyTrigger>,
     quit: Option<Arc<HotkeyTrigger>>,
     help: Option<Arc<HotkeyTrigger>>,
+    recording_stop_bridge: Option<Arc<multi_launcher::recording::RecordingStopHotkeyBridge>>,
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
     sequence_routes: Vec<PasteSequenceHotkeyRoute>,
@@ -867,6 +965,7 @@ struct HotkeyRouteDependencies {
     launcher: multi_launcher::hotkey::Hotkey,
     quit: Option<multi_launcher::hotkey::Hotkey>,
     help: Option<multi_launcher::hotkey::Hotkey>,
+    recording_stop: Option<multi_launcher::hotkey::Hotkey>,
     screen_draw_launch: Option<multi_launcher::hotkey::Hotkey>,
     screen_draw_emergency: Option<multi_launcher::hotkey::Hotkey>,
     radial: multi_launcher::radial::model::RadialFeatureSettings,
@@ -883,6 +982,7 @@ impl HotkeyRouteDependencies {
             launcher: routes.launcher,
             quit: routes.quit,
             help: routes.help,
+            recording_stop: routes.recording_stop,
             screen_draw_launch: routes.screen_draw_launch,
             screen_draw_emergency: routes.screen_draw_emergency,
             radial: settings.radial.clone(),
@@ -1015,6 +1115,20 @@ fn resolve_hotkey_route_candidate_with_macro(
     })?;
     let raw = paste_sequence_hotkey_routes_for_candidate(settings, sequence_bindings)
         .map_err(Error::Validation)?;
+    if let Some(stop) = base.recording_stop
+        && let Some(route) = raw
+            .iter()
+            .find(|route| hotkeys_can_cofire(stop, route.hotkey))
+    {
+        let action = match route.action {
+            PasteSequenceHotkeyAction::Next => "Next",
+            PasteSequenceHotkeyAction::Cancel => "Cancel",
+            PasteSequenceHotkeyAction::Start(_) => "a saved sequence",
+        };
+        return Err(Error::Validation(format!(
+            "recording Stop & Save shortcut can co-fire with Paste Sequence {action}"
+        )));
+    }
     // Saved starts have priority over optional built-in playback controls.
     let mut sequences = raw
         .iter()
@@ -1075,6 +1189,84 @@ fn resolve_hotkey_route_candidate_with_macro(
         omissions,
         physical_paste,
     })
+}
+
+fn resolve_startup_hotkey_route_candidate_with_macro(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> (
+    Settings,
+    Result<
+        ResolvedHotkeyRouteCandidate,
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+    >,
+) {
+    let resolved = resolve_hotkey_route_candidate_with_macro(
+        settings,
+        radial_document,
+        macro_document,
+        sequence_bindings,
+    );
+    if settings.recording_stop_hotkey.is_some() && resolved.is_err() {
+        let mut effective_settings = settings.clone();
+        effective_settings.recording_stop_hotkey = None;
+        let baseline = resolve_hotkey_route_candidate_with_macro(
+            &effective_settings,
+            radial_document,
+            macro_document,
+            sequence_bindings,
+        );
+        if baseline.is_ok() {
+            (effective_settings, baseline)
+        } else {
+            // A prior route was already invalid. Keep its original startup
+            // diagnostic and fail-closed behavior instead of masking it as a
+            // recorder conflict.
+            (effective_settings, baseline)
+        }
+    } else {
+        (settings.clone(), resolved)
+    }
+}
+
+fn resolve_startup_hotkey_route_candidate(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> (
+    Settings,
+    Result<
+        ResolvedHotkeyRouteCandidate,
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+    >,
+) {
+    let macro_document =
+        match multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot() {
+            Ok(document) => document,
+            Err(error) => {
+                let mut effective_settings = settings.clone();
+                effective_settings.recording_stop_hotkey = None;
+                return (
+                effective_settings,
+                Err(multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation(
+                    error,
+                )),
+            );
+            }
+        };
+    let revision = physical_paste_bridge().route_revision();
+    let (effective_settings, mut resolved) = resolve_startup_hotkey_route_candidate_with_macro(
+        settings,
+        radial_document,
+        macro_document.as_deref(),
+        sequence_bindings,
+    );
+    if let Ok(resolved) = &mut resolved {
+        resolved.physical_paste.revision = revision;
+    }
+    (effective_settings, resolved)
 }
 
 /// Fixed Ctrl+V has no Shift/Alt/Win. Existing routes accept extra Control,
@@ -1306,6 +1498,21 @@ fn legacy_listener_hotkeys(listener: &HotkeyListener) -> Vec<multi_launcher::hot
         .collect()
 }
 
+fn legacy_listener_recording_stop_hotkey(
+    listener: &HotkeyListener,
+) -> Option<multi_launcher::hotkey::Hotkey> {
+    listener
+        .is_active()
+        .then(|| {
+            listener
+                .triggers()
+                .iter()
+                .find(|trigger| trigger.is_recording_stop())
+                .map(|trigger| trigger.hotkey())
+        })
+        .flatten()
+}
+
 /// Payload-free evidence retained only after a successful shared-route startup,
 /// handoff, or restoration. Service presence alone is deliberately insufficient.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1389,6 +1596,7 @@ fn directory_source_snapshot(
 
 struct HotkeyDirectorySourceInputs<'a> {
     settings: &'a Settings,
+    configured_recording_stop_hotkey: Option<&'a str>,
     radial_document: &'a RadialDocument,
     sequence_snapshot: Option<&'a multi_launcher::paste_sequence::SequenceSnapshot>,
     sequence_routes: &'a [PasteSequenceHotkeyRoute],
@@ -1397,6 +1605,7 @@ struct HotkeyDirectorySourceInputs<'a> {
     macro_document: Option<&'a multi_launcher::mkmacro::MkMacroDocument>,
     macro_revision: u64,
     active_legacy_triggers: &'a [multi_launcher::hotkey::Hotkey],
+    active_legacy_recording_stop: Option<multi_launcher::hotkey::Hotkey>,
     applied_shared_route: Option<&'a AppliedSharedRouteEvidence>,
     runtime_generation: u64,
     sequence_runtime_acknowledged: bool,
@@ -1409,6 +1618,7 @@ fn hotkey_directory_source_snapshots(
 ) -> Vec<multi_launcher::hotkey::directory::SourceSnapshot> {
     let HotkeyDirectorySourceInputs {
         settings,
+        configured_recording_stop_hotkey,
         radial_document,
         sequence_snapshot,
         sequence_routes,
@@ -1417,6 +1627,7 @@ fn hotkey_directory_source_snapshots(
         macro_document,
         macro_revision,
         active_legacy_triggers,
+        active_legacy_recording_stop,
         applied_shared_route,
         runtime_generation,
         sequence_runtime_acknowledged,
@@ -1480,6 +1691,12 @@ fn hotkey_directory_source_snapshots(
             settings.help_hotkey.as_deref(),
             MainSetting::Help,
         ),
+        (
+            "main.recording_stop",
+            "Stop and save recording",
+            configured_recording_stop_hotkey.or(settings.recording_stop_hotkey.as_deref()),
+            MainSetting::RecordingStop,
+        ),
     ] {
         let state = configured.map_or((CandidateState::Disabled, None), |chord| {
             candidate_runtime_state(chord, runtime_generation, route_pending)
@@ -1508,6 +1725,7 @@ fn hotkey_directory_source_snapshots(
             MainSetting::Launcher => None,
             MainSetting::Quit => Some(RelatedAction::Quit),
             MainSetting::Help => Some(RelatedAction::Help),
+            MainSetting::RecordingStop => Some(RelatedAction::RecordingStop),
         };
         let exact_shared = if setting == MainSetting::Launcher {
             shared_route_current
@@ -1526,11 +1744,20 @@ fn hotkey_directory_source_snapshots(
                 })
             })
         };
+        let exact_legacy = if setting == MainSetting::RecordingStop {
+            chord
+                .as_deref()
+                .and_then(parse_hotkey)
+                .is_some_and(|hotkey| active_legacy_recording_stop == Some(hotkey))
+        } else {
+            chord
+                .as_deref()
+                .is_some_and(|chord| exact_legacy_trigger_active(active_legacy_triggers, chord))
+        };
         if !route_pending
             && let Some(chord) = chord.as_deref()
             && (exact_shared
-                || (!settings.radial.enabled || !settings.radial.shared_tap_hold)
-                    && exact_legacy_trigger_active(active_legacy_triggers, chord))
+                || (!settings.radial.enabled || !settings.radial.shared_tap_hold) && exact_legacy)
         {
             main_receipts.push(receipt(id, chord, runtime_generation));
         }
@@ -2266,6 +2493,7 @@ fn hotkey_directory_source_snapshots(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HotkeyDirectoryPublicationKey {
     settings_generation: u64,
+    configured_recording_stop_hotkey: Option<String>,
     radial_revision: u64,
     paste_document_revision: u64,
     macro_revision: u64,
@@ -2278,6 +2506,7 @@ struct HotkeyDirectoryPublicationKey {
 #[derive(Clone, Copy)]
 struct HotkeyDirectoryPublicationInputs<'a> {
     settings: &'a Settings,
+    configured_recording_stop_hotkey: Option<&'a str>,
     settings_generation: u64,
     radial_document: &'a RadialDocument,
     paste_document_revision: u64,
@@ -2295,6 +2524,9 @@ fn hotkey_directory_publication_key(
 ) -> HotkeyDirectoryPublicationKey {
     HotkeyDirectoryPublicationKey {
         settings_generation: inputs.settings_generation,
+        configured_recording_stop_hotkey: inputs
+            .configured_recording_stop_hotkey
+            .map(str::to_owned),
         radial_revision: inputs.radial_document.revision.0,
         paste_document_revision: inputs.paste_document_revision,
         macro_revision: inputs.macro_revision,
@@ -2322,6 +2554,7 @@ fn publish_hotkey_directory_if_changed(
 ) {
     let HotkeyDirectoryPublicationInputs {
         settings,
+        configured_recording_stop_hotkey,
         settings_generation,
         radial_document,
         paste_document_revision,
@@ -2348,8 +2581,15 @@ fn publish_hotkey_directory_if_changed(
                 sequence_omissions,
             ),
         };
+    let candidate_configured_recording_stop = (!matches!(
+        pending_route.map(|pending| &pending.completion),
+        Some(PendingLauncherRouteCompletion::Hotkey(_))
+    ))
+    .then_some(configured_recording_stop_hotkey)
+    .flatten();
     let resolved_inputs = HotkeyDirectoryPublicationInputs {
         settings: candidate_settings,
+        configured_recording_stop_hotkey: candidate_configured_recording_stop,
         settings_generation: candidate_generation,
         radial_document,
         paste_document_revision,
@@ -2408,6 +2648,7 @@ fn publish_hotkey_directory_if_changed(
         .flatten();
     for source in hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
         settings: candidate_settings,
+        configured_recording_stop_hotkey: candidate_configured_recording_stop,
         radial_document,
         sequence_snapshot: sequence_snapshot.as_ref(),
         sequence_routes: candidate_sequence_routes,
@@ -2416,6 +2657,7 @@ fn publish_hotkey_directory_if_changed(
         macro_document: macro_document.as_deref(),
         macro_revision,
         active_legacy_triggers: &legacy_listener_hotkeys(listener),
+        active_legacy_recording_stop: legacy_listener_recording_stop_hotkey(listener),
         applied_shared_route,
         runtime_generation: candidate_generation,
         sequence_runtime_acknowledged,
@@ -2469,6 +2711,11 @@ fn validate_paste_sequence_hotkey_routes(
     let mut protected = vec![("launcher".to_owned(), routes.launcher)];
     protected.extend(routes.quit.map(|hotkey| ("quit".to_owned(), hotkey)));
     protected.extend(routes.help.map(|hotkey| ("help".to_owned(), hotkey)));
+    protected.extend(
+        routes
+            .recording_stop
+            .map(|hotkey| ("recording Stop & Save".to_owned(), hotkey)),
+    );
     protected.extend(
         routes
             .screen_draw_launch
@@ -2539,11 +2786,28 @@ fn validate_paste_sequence_hotkey_routes(
     }
 }
 
+#[cfg(test)]
 fn prepare_legacy_hotkey_fallback(
     old_settings: &Settings,
     radial_document: &RadialDocument,
     sequence_routes: &[PasteSequenceHotkeyRoute],
     event_tx: &Sender<()>,
+) -> Result<PreparedLegacyHotkeyFallback, String> {
+    prepare_legacy_hotkey_fallback_with_recording_stop_bridge(
+        old_settings,
+        radial_document,
+        sequence_routes,
+        event_tx,
+        None,
+    )
+}
+
+fn prepare_legacy_hotkey_fallback_with_recording_stop_bridge(
+    old_settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+    event_tx: &Sender<()>,
+    recording_stop_bridge: Option<&Arc<multi_launcher::recording::RecordingStopHotkeyBridge>>,
 ) -> Result<PreparedLegacyHotkeyFallback, String> {
     let mut settings = old_settings.clone();
     settings.radial.enabled = false;
@@ -2556,6 +2820,14 @@ fn prepare_legacy_hotkey_fallback(
     let help = routes
         .help
         .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let recording_stop_trigger = routes.recording_stop.and_then(|hotkey| {
+        recording_stop_bridge.map(|bridge| {
+            Arc::new(HotkeyTrigger::new_recording_stop(
+                hotkey,
+                Arc::clone(bridge),
+            ))
+        })
+    });
     let screen_draw = routes
         .screen_draw_launch
         .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
@@ -2564,7 +2836,7 @@ fn prepare_legacy_hotkey_fallback(
         .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
     let sequence_triggers = sequence_hotkey_triggers_from_routes(sequence_routes);
     let listener = HotkeyTrigger::prepare_listener(
-        legacy_listener_triggers_with_sequences(
+        legacy_listener_triggers_with_stop(
             false,
             &launcher,
             quit.as_ref(),
@@ -2572,6 +2844,7 @@ fn prepare_legacy_hotkey_fallback(
             screen_draw.as_ref(),
             emergency.as_ref(),
             &sequence_triggers,
+            recording_stop_trigger.as_ref(),
         ),
         "hotkey-owner-failure-fallback",
         event_tx.clone(),
@@ -2905,6 +3178,7 @@ fn invocation_priority_owner(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn fail_closed_radial_route(
     settings: &mut Settings,
     control: &RadialControlMainEndpoint,
@@ -2919,6 +3193,39 @@ fn fail_closed_radial_route(
     sequence_triggers: &[PasteSequenceHotkeyTrigger],
     event_tx: &Sender<()>,
 ) {
+    fail_closed_radial_route_with_recording_stop_trigger(
+        settings,
+        control,
+        controller,
+        service,
+        listener,
+        launcher,
+        quit,
+        help,
+        screen_draw,
+        emergency,
+        sequence_triggers,
+        None,
+        event_tx,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fail_closed_radial_route_with_recording_stop_trigger(
+    settings: &mut Settings,
+    control: &RadialControlMainEndpoint,
+    controller: &mut RadialController,
+    service: &mut Option<LauncherInvocationService>,
+    listener: &mut HotkeyListener,
+    launcher: &Arc<HotkeyTrigger>,
+    quit: Option<&Arc<HotkeyTrigger>>,
+    help: Option<&Arc<HotkeyTrigger>>,
+    screen_draw: Option<&Arc<HotkeyTrigger>>,
+    emergency: Option<&Arc<HotkeyTrigger>>,
+    sequence_triggers: &[PasteSequenceHotkeyTrigger],
+    recording_stop_bridge: Option<&Arc<multi_launcher::recording::RecordingStopHotkeyBridge>>,
+    event_tx: &Sender<()>,
+) {
     settings.radial.enabled = false;
     control.set_enabled(false);
     if let Some(active) = service.as_ref() {
@@ -2929,7 +3236,19 @@ fn fail_closed_radial_route(
         active.stop();
     }
     listener.stop();
-    *listener = HotkeyTrigger::start_listener(
+    let triggers = if let Some(bridge) = recording_stop_bridge {
+        legacy_listener_triggers_for_settings(
+            settings,
+            false,
+            launcher,
+            quit,
+            help,
+            screen_draw,
+            emergency,
+            sequence_triggers,
+            bridge,
+        )
+    } else {
         legacy_listener_triggers_with_sequences(
             false,
             launcher,
@@ -2938,10 +3257,9 @@ fn fail_closed_radial_route(
             screen_draw,
             emergency,
             sequence_triggers,
-        ),
-        "main",
-        event_tx.clone(),
-    );
+        )
+    };
+    *listener = HotkeyTrigger::start_listener(triggers, "main", event_tx.clone());
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -3037,6 +3355,7 @@ fn reconcile_screen_draw_cycle_notices(
     }
 }
 
+#[cfg(test)]
 fn prepare_hotkey_runtime_message(
     request: multi_launcher::hotkey::reconfiguration::HotkeyPreparationRequest,
     radial_document: &RadialDocument,
@@ -3044,6 +3363,31 @@ fn prepare_hotkey_runtime_message(
     event_tx: &Sender<()>,
     has_invocation_service: bool,
     owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+    prepared_routes: &mut HashMap<
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
+        PreparedHotkeyRoute,
+    >,
+) {
+    prepare_hotkey_runtime_message_with_recording_stop_bridge(
+        request,
+        radial_document,
+        settings_generation,
+        event_tx,
+        has_invocation_service,
+        owner,
+        None,
+        prepared_routes,
+    );
+}
+
+fn prepare_hotkey_runtime_message_with_recording_stop_bridge(
+    request: multi_launcher::hotkey::reconfiguration::HotkeyPreparationRequest,
+    radial_document: &RadialDocument,
+    settings_generation: u64,
+    event_tx: &Sender<()>,
+    has_invocation_service: bool,
+    owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+    recording_stop_bridge: Option<Arc<multi_launcher::recording::RecordingStopHotkeyBridge>>,
     prepared_routes: &mut HashMap<
         multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
         PreparedHotkeyRoute,
@@ -3082,13 +3426,21 @@ fn prepare_hotkey_runtime_message(
         let help = routes
             .help
             .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let recording_stop_trigger = routes.recording_stop.and_then(|hotkey| {
+            recording_stop_bridge.as_ref().map(|bridge| {
+                Arc::new(HotkeyTrigger::new_recording_stop(
+                    hotkey,
+                    Arc::clone(bridge),
+                ))
+            })
+        });
         let screen_draw = routes
             .screen_draw_launch
             .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
         let emergency = routes
             .screen_draw_emergency
             .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
-        let triggers = legacy_listener_triggers_with_sequences(
+        let triggers = legacy_listener_triggers_with_stop(
             routes.shared_invocation,
             &launcher,
             quit.as_ref(),
@@ -3096,16 +3448,26 @@ fn prepare_hotkey_runtime_message(
             screen_draw.as_ref(),
             emergency.as_ref(),
             &sequence_triggers,
+            recording_stop_trigger.as_ref(),
         );
         let listener = HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
             .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
         let staged_service = if invocation_service_needed(&settings) && !has_invocation_service {
-            LauncherInvocationService::start(
-                inert_invocation_config(&settings, radial_document, generation.0),
-                Vec::new(),
-                owner,
-                event_tx.clone(),
-            )
+            match recording_stop_bridge.as_ref() {
+                Some(bridge) => LauncherInvocationService::start_with_recording_stop_bridge(
+                    inert_invocation_config(&settings, radial_document, generation.0),
+                    Vec::new(),
+                    owner,
+                    event_tx.clone(),
+                    Arc::clone(bridge),
+                ),
+                None => LauncherInvocationService::start(
+                    inert_invocation_config(&settings, radial_document, generation.0),
+                    Vec::new(),
+                    owner,
+                    event_tx.clone(),
+                ),
+            }
             .map(Some)
             .map_err(HotkeyReconfigurationError::RuntimeTransition)?
         } else {
@@ -3126,6 +3488,7 @@ fn prepare_hotkey_runtime_message(
                 launcher,
                 quit,
                 help,
+                recording_stop_bridge,
                 screen_draw,
                 emergency,
                 sequence_routes,
@@ -3607,11 +3970,12 @@ impl HotkeyRuntimeCommitContext<'_> {
         use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
 
         *self.applied_shared_route = None;
-        let fallback = prepare_legacy_hotkey_fallback(
+        let fallback = prepare_legacy_hotkey_fallback_with_recording_stop_bridge(
             &application.old_settings,
             self.radial_document,
             &application.old_sequence_routes,
             self.event_tx,
+            application.prepared.recording_stop_bridge.as_ref(),
         );
         *self.settings = application.old_settings.clone();
         self.settings.radial.enabled = false;
@@ -4032,6 +4396,7 @@ struct GuiStartupServices {
     recovery: multi_launcher::persistence::RecoveryStartupResult,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
+    recording_stop_hotkey_bridge: Arc<multi_launcher::recording::RecordingStopHotkeyBridge>,
     visibility_revision: VisibilityRevision,
     paste_sequence_document_revision: Arc<AtomicU64>,
     event_tx: Sender<()>,
@@ -4069,6 +4434,7 @@ fn spawn_gui(
         recovery: startup_recovery,
         enabled_capabilities,
         screen_draw_recovery_bridge,
+        recording_stop_hotkey_bridge,
         visibility_revision,
         paste_sequence_document_revision,
         event_tx,
@@ -4215,6 +4581,7 @@ fn spawn_gui(
                 app.install_visibility_revision(visibility_revision);
                 app.install_root_window_bridge(root_window_bridge_for_gui.clone());
                 app.install_screen_draw_recovery_bridge(screen_draw_recovery_bridge);
+                app.install_recording_stop_hotkey_bridge(recording_stop_hotkey_bridge);
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
                 app.actions_persistence_diagnostic = startup_actions_diagnostic;
                 app.set_startup_persistence_context(startup_recovery);
@@ -4316,6 +4683,8 @@ fn main() -> anyhow::Result<()> {
         startup_action_catalog(actions_vec, index_config)?;
     index_timer.finish("startup.action_indexing");
     let screen_draw_recovery_bridge = Arc::new(ScreenDrawRecoveryBridge::default());
+    let recording_stop_hotkey_bridge =
+        Arc::new(multi_launcher::recording::RecordingStopHotkeyBridge::default());
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
@@ -4332,7 +4701,10 @@ fn main() -> anyhow::Result<()> {
     let mut shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     let mut settings_generation = 1u64;
     let mut paste_sequence_triggers = Vec::new();
-    let watched = legacy_listener_triggers_with_sequences(
+    let mut prevalidation_settings = settings.clone();
+    prevalidation_settings.recording_stop_hotkey = None;
+    let watched = legacy_listener_triggers_for_settings(
+        &prevalidation_settings,
         shared_invocation,
         &trigger,
         quit_trigger.as_ref(),
@@ -4340,6 +4712,7 @@ fn main() -> anyhow::Result<()> {
         screen_draw_trigger.as_ref(),
         emergency_trigger.as_ref(),
         &paste_sequence_triggers,
+        &recording_stop_hotkey_bridge,
     );
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
@@ -4381,9 +4754,12 @@ fn main() -> anyhow::Result<()> {
     // Initialize the existing macro owner before resolving Paste priorities.
     // No Paste routes are active yet; reserve process/radial routes while the
     // macro runtime loads, then install the selected Paste reservations below.
-    let mut startup_reservations = reserved_launcher_hotkeys_with_sequences(&settings, &[]);
+    prevalidation_settings = settings.clone();
+    prevalidation_settings.recording_stop_hotkey = None;
+    let mut startup_reservations =
+        reserved_launcher_hotkeys_with_sequences(&prevalidation_settings, &[]);
     startup_reservations.extend(radial_global_hotkey_reservations(
-        &settings,
+        &prevalidation_settings,
         &radial_document,
     ));
     let startup_reservation_refs = startup_reservations
@@ -4421,14 +4797,15 @@ fn main() -> anyhow::Result<()> {
     let startup_radial_issues = multi_launcher::radial::settings::validate(
         &settings.radial,
         &radial_document,
-        &reserved_launcher_hotkeys_with_sequences(&settings, &[]),
+        &reserved_launcher_hotkeys_with_sequences(&prevalidation_settings, &[]),
     );
     if !startup_radial_issues.is_empty() {
         settings.radial.enabled = false;
         shared_invocation = false;
         listener.stop();
         listener = HotkeyTrigger::start_listener(
-            legacy_listener_triggers_with_sequences(
+            legacy_listener_triggers_for_settings(
+                &prevalidation_settings,
                 false,
                 &trigger,
                 quit_trigger.as_ref(),
@@ -4436,6 +4813,7 @@ fn main() -> anyhow::Result<()> {
                 screen_draw_trigger.as_ref(),
                 emergency_trigger.as_ref(),
                 &paste_sequence_triggers,
+                &recording_stop_hotkey_bridge,
             ),
             "main",
             event_tx.clone(),
@@ -4444,26 +4822,46 @@ fn main() -> anyhow::Result<()> {
             tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
         }
     }
-    let (mut paste_sequence_routes, startup_sequence_omissions) =
-        match resolve_hotkey_route_candidate(&settings, &radial_document, None) {
-            Ok(resolved) => {
-                report_paste_sequence_route_omissions(&resolved.omissions);
-                (resolved.sequences, resolved.omissions)
-            }
-            Err(error) => {
-                multi_launcher::gui::send_event(
-                    multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(format!(
-                        "Paste Sequence shortcuts are inactive: {error}"
-                    )),
-                );
-                (Vec::new(), Vec::new())
-            }
-        };
-    refresh_macro_hotkey_reservations(&settings, &radial_document, &paste_sequence_routes);
+    let (mut startup_route_settings, startup_resolution) =
+        resolve_startup_hotkey_route_candidate(&settings, &radial_document, None);
+    let startup_unadmitted_recording_stop = (startup_route_settings.recording_stop_hotkey
+        != settings.recording_stop_hotkey)
+        .then(|| settings.recording_stop_hotkey.clone())
+        .flatten();
+    if startup_route_settings.recording_stop_hotkey != settings.recording_stop_hotkey {
+        tracing::warn!(
+            configured = ?settings.recording_stop_hotkey,
+            "recording Stop & Save shortcut was omitted from the startup route after validation failed"
+        );
+    }
+    // This is the authoritative runtime Settings snapshot used by later
+    // rebuilds and rollback. The GUI retains the saved value so the user can
+    // repair an invalid hand-edited shortcut without writing a migration.
+    settings.recording_stop_hotkey = startup_route_settings.recording_stop_hotkey.clone();
+    let (mut paste_sequence_routes, startup_sequence_omissions) = match startup_resolution {
+        Ok(resolved) => {
+            report_paste_sequence_route_omissions(&resolved.omissions);
+            (resolved.sequences, resolved.omissions)
+        }
+        Err(error) => {
+            multi_launcher::gui::send_event(
+                multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(format!(
+                    "Paste Sequence shortcuts are inactive: {error}"
+                )),
+            );
+            (Vec::new(), Vec::new())
+        }
+    };
+    refresh_macro_hotkey_reservations(
+        &startup_route_settings,
+        &radial_document,
+        &paste_sequence_routes,
+    );
     paste_sequence_triggers = sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
     listener.stop();
     listener = HotkeyTrigger::start_listener(
-        legacy_listener_triggers_with_sequences(
+        legacy_listener_triggers_for_settings(
+            &startup_route_settings,
             shared_invocation,
             &trigger,
             quit_trigger.as_ref(),
@@ -4471,6 +4869,7 @@ fn main() -> anyhow::Result<()> {
             screen_draw_trigger.as_ref(),
             emergency_trigger.as_ref(),
             &paste_sequence_triggers,
+            &recording_stop_hotkey_bridge,
         ),
         "main",
         event_tx.clone(),
@@ -4529,17 +4928,17 @@ fn main() -> anyhow::Result<()> {
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
     let mut invocation_service = None;
     let mut applied_shared_route = None;
-    if invocation_service_needed(&settings) {
-        match LauncherInvocationService::start(
+    if invocation_service_needed(&startup_route_settings) {
+        match LauncherInvocationService::start_with_recording_stop_bridge(
             radial_invocation_config(
-                &settings,
+                &startup_route_settings,
                 &radial_document,
                 shared_invocation,
                 settings_generation,
                 &paste_sequence_routes,
             ),
             related_launcher_bindings_with_sequences(
-                &settings,
+                &startup_route_settings,
                 &radial_document,
                 shared_invocation,
                 &paste_sequence_routes,
@@ -4554,11 +4953,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }),
             event_tx.clone(),
+            Arc::clone(&recording_stop_hotkey_bridge),
         ) {
             Ok(service) => {
                 invocation_service = Some(service);
                 applied_shared_route = applied_shared_route_after_successful_install(
-                    &settings,
+                    &startup_route_settings,
                     &radial_document,
                     &paste_sequence_routes,
                     settings_generation,
@@ -4566,8 +4966,8 @@ fn main() -> anyhow::Result<()> {
             }
             Err(error) => {
                 tracing::error!(%error, "shared radial invocation unavailable; disabling radial runtime and restoring legacy launcher hotkey");
-                fail_closed_radial_route(
-                    &mut settings,
+                fail_closed_radial_route_with_recording_stop_trigger(
+                    &mut startup_route_settings,
                     &radial_control_endpoint,
                     &mut radial_controller,
                     &mut invocation_service,
@@ -4578,8 +4978,10 @@ fn main() -> anyhow::Result<()> {
                     screen_draw_trigger.as_ref(),
                     emergency_trigger.as_ref(),
                     &paste_sequence_triggers,
+                    Some(&recording_stop_hotkey_bridge),
                     &event_tx,
                 );
+                settings.radial = startup_route_settings.radial.clone();
                 radial_resources.set_runtime_enabled(false);
                 radial_resources.reconcile(&mut radial_controller);
             }
@@ -4590,7 +4992,7 @@ fn main() -> anyhow::Result<()> {
     let visibility_revision = VisibilityRevision::default();
     let settings_save_workers = multi_launcher::gui::SettingsSaveWorkerRegistry::default();
     publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
-        &settings,
+        &startup_route_settings,
         settings_generation,
         if invocation_service.is_some() || listener.is_active() {
             &paste_sequence_routes
@@ -4598,7 +5000,11 @@ fn main() -> anyhow::Result<()> {
             &[]
         },
         &startup_sequence_omissions,
-        active_physical_paste_policy(&settings, &radial_document, &paste_sequence_routes),
+        active_physical_paste_policy(
+            &startup_route_settings,
+            &radial_document,
+            &paste_sequence_routes,
+        ),
     ));
     let startup_services = GuiStartupServices {
         settings_diagnostic: startup_settings_diagnostic,
@@ -4606,6 +5012,7 @@ fn main() -> anyhow::Result<()> {
         recovery: startup_recovery,
         enabled_capabilities: settings.enabled_capabilities.clone(),
         screen_draw_recovery_bridge: Arc::clone(&screen_draw_recovery_bridge),
+        recording_stop_hotkey_bridge: Arc::clone(&recording_stop_hotkey_bridge),
         visibility_revision: visibility_revision.clone(),
         paste_sequence_document_revision: Arc::clone(&paste_sequence_document_revision),
         event_tx: event_tx.clone(),
@@ -4613,11 +5020,15 @@ fn main() -> anyhow::Result<()> {
         target_repair_radial: Arc::clone(&radial_store),
         target_repair_root: app_data_root.path().to_path_buf(),
     };
+    let mut startup_gui_settings = settings.clone();
+    if let Some(configured_stop_hotkey) = startup_unadmitted_recording_stop.clone() {
+        startup_gui_settings.recording_stop_hotkey = Some(configured_stop_hotkey);
+    }
     let (gui_worker, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),
         custom_len,
         startup_indexing,
-        settings.clone(),
+        startup_gui_settings,
         "settings.json".to_string(),
         plugins,
         startup_services,
@@ -4640,6 +5051,9 @@ fn main() -> anyhow::Result<()> {
         &mut hotkey_directory_source_publication_revision,
         HotkeyDirectoryPublicationInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: (settings_generation == 1)
+                .then_some(startup_unadmitted_recording_stop.as_deref())
+                .flatten(),
             settings_generation,
             radial_document: &radial_document,
             paste_document_revision: paste_sequence_document_revision.load(Ordering::Acquire),
@@ -4720,7 +5134,8 @@ fn main() -> anyhow::Result<()> {
                     if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers_with_sequences(
+                            legacy_listener_triggers_for_settings(
+                                &settings,
                                 false,
                                 &trigger,
                                 quit_trigger.as_ref(),
@@ -4728,6 +5143,7 @@ fn main() -> anyhow::Result<()> {
                                 screen_draw_trigger.as_ref(),
                                 emergency_trigger.as_ref(),
                                 &paste_sequence_triggers,
+                                &recording_stop_hotkey_bridge,
                             ),
                             "main",
                             event_tx.clone(),
@@ -4813,7 +5229,7 @@ fn main() -> anyhow::Result<()> {
                             Err(error) => {
                                 tracing::error!(%error, "radial trigger reload failed closed");
                                 applied_shared_route = None;
-                                fail_closed_radial_route(
+                                fail_closed_radial_route_with_recording_stop_trigger(
                                     &mut settings,
                                     &radial_control_endpoint,
                                     &mut radial_controller,
@@ -4825,13 +5241,14 @@ fn main() -> anyhow::Result<()> {
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
                                     &paste_sequence_triggers,
+                                    Some(&recording_stop_hotkey_bridge),
                                     &event_tx,
                                 );
                             }
                         }
                     } else if invocation_service_needed(&settings) {
                         let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
-                        match LauncherInvocationService::start(
+                        match LauncherInvocationService::start_with_recording_stop_bridge(
                             route_plan.config,
                             route_plan.related,
                             Arc::new(move || {
@@ -4844,6 +5261,7 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }),
                             event_tx.clone(),
+                            Arc::clone(&recording_stop_hotkey_bridge),
                         ) {
                             Ok(service) => {
                                 invocation_service = Some(service);
@@ -4858,7 +5276,7 @@ fn main() -> anyhow::Result<()> {
                             Err(error) => {
                                 tracing::error!(%error, "radial trigger service restart failed closed");
                                 applied_shared_route = None;
-                                fail_closed_radial_route(
+                                fail_closed_radial_route_with_recording_stop_trigger(
                                     &mut settings,
                                     &radial_control_endpoint,
                                     &mut radial_controller,
@@ -4870,6 +5288,7 @@ fn main() -> anyhow::Result<()> {
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
                                     &paste_sequence_triggers,
+                                    Some(&recording_stop_hotkey_bridge),
                                     &event_tx,
                                 );
                             }
@@ -4877,7 +5296,8 @@ fn main() -> anyhow::Result<()> {
                     } else {
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers_with_sequences(
+                            legacy_listener_triggers_for_settings(
+                                &settings,
                                 false,
                                 &trigger,
                                 quit_trigger.as_ref(),
@@ -4885,6 +5305,7 @@ fn main() -> anyhow::Result<()> {
                                 screen_draw_trigger.as_ref(),
                                 emergency_trigger.as_ref(),
                                 &paste_sequence_triggers,
+                                &recording_stop_hotkey_bridge,
                             ),
                             "main",
                             event_tx.clone(),
@@ -4946,15 +5367,18 @@ fn main() -> anyhow::Result<()> {
                 HotkeyReconfigurationError, HotkeyRuntimeMessage,
             };
             match message {
-                HotkeyRuntimeMessage::Prepare(request) => prepare_hotkey_runtime_message(
-                    request,
-                    &radial_document,
-                    settings_generation,
-                    &event_tx,
-                    invocation_service.is_some(),
-                    Arc::clone(&hotkey_service_owner),
-                    &mut prepared_hotkey_routes,
-                ),
+                HotkeyRuntimeMessage::Prepare(request) => {
+                    prepare_hotkey_runtime_message_with_recording_stop_bridge(
+                        request,
+                        &radial_document,
+                        settings_generation,
+                        &event_tx,
+                        invocation_service.is_some(),
+                        Arc::clone(&hotkey_service_owner),
+                        Some(Arc::clone(&recording_stop_hotkey_bridge)),
+                        &mut prepared_hotkey_routes,
+                    )
+                }
                 HotkeyRuntimeMessage::Apply(request) => {
                     begin_hotkey_application(HotkeyApplicationStart {
                         request,
@@ -5231,7 +5655,8 @@ fn main() -> anyhow::Result<()> {
                             if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                                 listener.stop();
                                 listener = HotkeyTrigger::start_listener(
-                                    legacy_listener_triggers_with_sequences(
+                                    legacy_listener_triggers_for_settings(
+                                        &settings,
                                         false,
                                         &trigger,
                                         quit_trigger.as_ref(),
@@ -5239,6 +5664,7 @@ fn main() -> anyhow::Result<()> {
                                         screen_draw_trigger.as_ref(),
                                         emergency_trigger.as_ref(),
                                         &paste_sequence_triggers,
+                                        &recording_stop_hotkey_bridge,
                                     ),
                                     "main",
                                     event_tx.clone(),
@@ -5306,7 +5732,8 @@ fn main() -> anyhow::Result<()> {
                                         }
                                         listener.stop();
                                         listener = HotkeyTrigger::start_listener(
-                                            legacy_listener_triggers_with_sequences(
+                                            legacy_listener_triggers_for_settings(
+                                                &settings,
                                                 false,
                                                 &trigger,
                                                 quit_trigger.as_ref(),
@@ -5314,6 +5741,7 @@ fn main() -> anyhow::Result<()> {
                                                 screen_draw_trigger.as_ref(),
                                                 emergency_trigger.as_ref(),
                                                 &paste_sequence_triggers,
+                                                &recording_stop_hotkey_bridge,
                                             ),
                                             "main",
                                             event_tx.clone(),
@@ -5427,7 +5855,8 @@ fn main() -> anyhow::Result<()> {
                             if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                                 listener.stop();
                                 listener = HotkeyTrigger::start_listener(
-                                    legacy_listener_triggers_with_sequences(
+                                    legacy_listener_triggers_for_settings(
+                                        &settings,
                                         false,
                                         &trigger,
                                         quit_trigger.as_ref(),
@@ -5435,6 +5864,7 @@ fn main() -> anyhow::Result<()> {
                                         screen_draw_trigger.as_ref(),
                                         emergency_trigger.as_ref(),
                                         &paste_sequence_triggers,
+                                        &recording_stop_hotkey_bridge,
                                     ),
                                     "main",
                                     event_tx.clone(),
@@ -5502,7 +5932,8 @@ fn main() -> anyhow::Result<()> {
                                         }
                                         listener.stop();
                                         listener = HotkeyTrigger::start_listener(
-                                            legacy_listener_triggers_with_sequences(
+                                            legacy_listener_triggers_for_settings(
+                                                &settings,
                                                 false,
                                                 &trigger,
                                                 quit_trigger.as_ref(),
@@ -5510,6 +5941,7 @@ fn main() -> anyhow::Result<()> {
                                                 screen_draw_trigger.as_ref(),
                                                 emergency_trigger.as_ref(),
                                                 &paste_sequence_triggers,
+                                                &recording_stop_hotkey_bridge,
                                             ),
                                             "main",
                                             event_tx.clone(),
@@ -5800,7 +6232,8 @@ fn main() -> anyhow::Result<()> {
                         if start_legacy {
                             listener.stop();
                             listener = HotkeyTrigger::start_listener(
-                                legacy_listener_triggers_with_sequences(
+                                legacy_listener_triggers_for_settings(
+                                    &settings,
                                     false,
                                     &trigger,
                                     quit_trigger.as_ref(),
@@ -5808,6 +6241,7 @@ fn main() -> anyhow::Result<()> {
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
                                     &paste_sequence_triggers,
+                                    &recording_stop_hotkey_bridge,
                                 ),
                                 "main",
                                 event_tx.clone(),
@@ -5832,7 +6266,8 @@ fn main() -> anyhow::Result<()> {
                         }
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers_with_sequences(
+                            legacy_listener_triggers_for_settings(
+                                &settings,
                                 false,
                                 &trigger,
                                 quit_trigger.as_ref(),
@@ -5840,6 +6275,7 @@ fn main() -> anyhow::Result<()> {
                                 screen_draw_trigger.as_ref(),
                                 emergency_trigger.as_ref(),
                                 &paste_sequence_triggers,
+                                &recording_stop_hotkey_bridge,
                             ),
                             "main",
                             event_tx.clone(),
@@ -6192,6 +6628,11 @@ fn main() -> anyhow::Result<()> {
             &paste_sequence_triggers,
         ));
         if !settings_hotkey_route_is_pending(&pending_launcher_route) {
+            if let Some(generation) = take_recording_stop_generation(listener.triggers()) {
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RecordingStopGeneration(generation),
+                );
+            }
             for action in deferred_paste_sequence_actions.drain(..) {
                 multi_launcher::gui::send_event(
                     multi_launcher::gui::WatchEvent::PasteSequenceHotkey(action),
@@ -6493,7 +6934,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 pending_launcher_route = None;
                 applied_shared_route = None;
-                fail_closed_radial_route(
+                fail_closed_radial_route_with_recording_stop_trigger(
                     &mut settings,
                     &radial_control_endpoint,
                     &mut radial_controller,
@@ -6505,6 +6946,7 @@ fn main() -> anyhow::Result<()> {
                     screen_draw_trigger.as_ref(),
                     emergency_trigger.as_ref(),
                     &paste_sequence_triggers,
+                    Some(&recording_stop_hotkey_bridge),
                     &event_tx,
                 );
                 publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
@@ -6724,6 +7166,9 @@ fn main() -> anyhow::Result<()> {
             &mut hotkey_directory_source_publication_revision,
             HotkeyDirectoryPublicationInputs {
                 settings: &settings,
+                configured_recording_stop_hotkey: (settings_generation == 1)
+                    .then_some(startup_unadmitted_recording_stop.as_deref())
+                    .flatten(),
                 settings_generation,
                 radial_document: &radial_document,
                 paste_document_revision: paste_sequence_document_revision.load(Ordering::Acquire),
@@ -8095,6 +8540,102 @@ mod tests {
     }
 
     #[test]
+    fn recording_stop_is_absent_from_shared_and_legacy_routes_by_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.recording_stop_hotkey, None);
+        let radial = RadialDocument::starter();
+        let shared = related_launcher_bindings_with_sequences(&settings, &radial, true, &[]);
+        assert!(
+            !shared
+                .iter()
+                .any(|binding| binding.action == RelatedAction::RecordingStop)
+        );
+
+        let mut legacy_settings = settings;
+        legacy_settings.radial.enabled = false;
+        legacy_settings.radial.shared_tap_hold = false;
+        let launcher = Arc::new(HotkeyTrigger::new(legacy_settings.hotkey()));
+        let help = legacy_settings
+            .help_hotkey()
+            .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let bridge = Arc::new(multi_launcher::recording::RecordingStopHotkeyBridge::default());
+        let legacy = legacy_listener_triggers_for_settings(
+            &legacy_settings,
+            false,
+            &launcher,
+            None,
+            help.as_ref(),
+            None,
+            None,
+            &[],
+            &bridge,
+        );
+        assert!(!legacy.iter().any(|trigger| trigger.is_recording_stop()));
+    }
+
+    #[test]
+    fn startup_recording_stop_conflicts_preserve_existing_paste_routes() {
+        let radial = RadialDocument::starter();
+        let mut defaults = Settings::default();
+        defaults.radial.enabled = false;
+        defaults.recording_stop_hotkey = defaults.paste_sequence.next_hotkey.clone();
+        let next_bindings = Vec::new();
+        let (effective_defaults, resolved_defaults) =
+            resolve_startup_hotkey_route_candidate_with_macro(
+                &defaults,
+                &radial,
+                None,
+                Some(&next_bindings),
+            );
+        assert_eq!(effective_defaults.recording_stop_hotkey, None);
+        let resolved_defaults = resolved_defaults.unwrap();
+        assert!(
+            resolved_defaults
+                .sequences
+                .iter()
+                .any(|route| { route.action == PasteSequenceHotkeyAction::Next })
+        );
+        assert!(
+            resolved_defaults
+                .sequences
+                .iter()
+                .any(|route| { route.action == PasteSequenceHotkeyAction::Cancel })
+        );
+        let (fallback_tx, _fallback_rx) = std::sync::mpsc::channel();
+        let stop_bridge = Arc::new(multi_launcher::recording::RecordingStopHotkeyBridge::default());
+        let fallback = prepare_legacy_hotkey_fallback_with_recording_stop_bridge(
+            &effective_defaults,
+            &radial,
+            &resolved_defaults.sequences,
+            &fallback_tx,
+            Some(&stop_bridge),
+        )
+        .unwrap();
+        assert_eq!(fallback.settings.recording_stop_hotkey, None);
+        assert!(legacy_listener_recording_stop_hotkey(&fallback.listener).is_none());
+
+        let bindings = paste_route_test_snapshot("Ctrl+F10").hotkey_bindings();
+        let mut saved_start = Settings::default();
+        saved_start.radial.enabled = false;
+        saved_start.paste_sequence.next_hotkey = None;
+        saved_start.paste_sequence.cancel_hotkey = None;
+        saved_start.recording_stop_hotkey = Some("Ctrl+F10".into());
+        let (effective_saved, resolved_saved) = resolve_startup_hotkey_route_candidate_with_macro(
+            &saved_start,
+            &radial,
+            None,
+            Some(&bindings),
+        );
+        assert_eq!(effective_saved.recording_stop_hotkey, None);
+        let resolved_saved = resolved_saved.unwrap();
+        assert!(
+            resolved_saved.sequences.iter().any(|route| {
+                route.action == PasteSequenceHotkeyAction::Start(bindings[0].id())
+            })
+        );
+    }
+
+    #[test]
     fn g06_jump_r1_final_resolver_rejects_custom_paste_controls_and_respects_disables() {
         let document = RadialDocument::starter();
         for next in [false, true] {
@@ -8679,6 +9220,65 @@ mod tests {
             parse_hotkey(before.as_deref().unwrap()).unwrap().key
         );
         assert!(listener.is_active());
+        listener.stop();
+    }
+
+    #[test]
+    fn invalid_recording_stop_candidate_keeps_the_installed_listener_trigger() {
+        use multi_launcher::hotkey::reconfiguration::{
+            HotkeyRuntimeMessage, prepare_hotkey_reconfiguration,
+        };
+
+        let (wake_tx, _wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut installed_settings = Settings::default();
+        installed_settings.radial.enabled = false;
+        installed_settings.radial.shared_tap_hold = false;
+        installed_settings.paste_sequence.next_hotkey = None;
+        installed_settings.paste_sequence.cancel_hotkey = None;
+        installed_settings.enabled_plugins = Some(Default::default());
+        installed_settings.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let bridge = Arc::new(multi_launcher::recording::RecordingStopHotkeyBridge::default());
+        let launcher = Arc::new(HotkeyTrigger::new(installed_settings.hotkey()));
+        let installed_stop = Arc::new(HotkeyTrigger::new_recording_stop(
+            parse_hotkey("Ctrl+Shift+F10").unwrap(),
+            Arc::clone(&bridge),
+        ));
+        let mut listener = HotkeyTrigger::start_listener(
+            vec![Arc::clone(&launcher), Arc::clone(&installed_stop)],
+            "recording-stop-candidate-test",
+            wake_tx.clone(),
+        );
+        assert!(listener.is_active());
+
+        let mut candidate = installed_settings.clone();
+        candidate.recording_stop_hotkey = Some("Ctrl+F1".into());
+        let mut ticket = prepare_hotkey_reconfiguration(candidate).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let mut prepared_routes = HashMap::new();
+        prepare_hotkey_runtime_message_with_recording_stop_bridge(
+            request,
+            &RadialDocument::starter(),
+            1,
+            &wake_tx,
+            false,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            Some(Arc::clone(&bridge)),
+            &mut prepared_routes,
+        );
+
+        assert!(ticket.wait_prepared(Duration::from_secs(1)).is_err());
+        assert!(prepared_routes.is_empty());
+        assert!(listener.is_active());
+        assert!(
+            listener
+                .triggers()
+                .iter()
+                .any(|trigger| Arc::ptr_eq(trigger, &installed_stop))
+        );
         listener.stop();
     }
 
@@ -9278,6 +9878,7 @@ mod tests {
                                 source_revision: u64| {
             hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings,
+                configured_recording_stop_hotkey: None,
                 radial_document: &radial_document,
                 sequence_snapshot: None,
                 sequence_routes: &[],
@@ -9286,6 +9887,7 @@ mod tests {
                 macro_document: Some(&directory_macros),
                 macro_revision: 1,
                 active_legacy_triggers: active,
+                active_legacy_recording_stop: None,
                 applied_shared_route: None,
                 runtime_generation: generation,
                 sequence_runtime_acknowledged: false,
@@ -9544,6 +10146,7 @@ mod tests {
                                      source_revision: u64| {
             hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings,
+                configured_recording_stop_hotkey: None,
                 radial_document: &radial_document,
                 sequence_snapshot: None,
                 sequence_routes: &[],
@@ -9552,6 +10155,7 @@ mod tests {
                 macro_document: Some(&directory_macros),
                 macro_revision: 1,
                 active_legacy_triggers: active,
+                active_legacy_recording_stop: None,
                 applied_shared_route: None,
                 runtime_generation: generation,
                 sequence_runtime_acknowledged: false,
@@ -9970,6 +10574,7 @@ mod tests {
              applied: Option<&AppliedSharedRouteEvidence>| {
                 hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                     settings,
+                    configured_recording_stop_hotkey: None,
                     radial_document: &radial_document,
                     sequence_snapshot: None,
                     sequence_routes: &[],
@@ -9978,6 +10583,7 @@ mod tests {
                     macro_document: Some(&directory_macros),
                     macro_revision: 1,
                     active_legacy_triggers: &[],
+                    active_legacy_recording_stop: None,
                     applied_shared_route: applied,
                     runtime_generation: generation,
                     sequence_runtime_acknowledged: false,
@@ -10922,6 +11528,7 @@ mod hotkey_directory_runtime_tests {
     ) -> multi_launcher::hotkey::directory::SourceSnapshot {
         hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings,
+            configured_recording_stop_hotkey: None,
             radial_document: radial,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -10930,6 +11537,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(macro_document),
             macro_revision: 1,
             active_legacy_triggers: active_triggers,
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: generation,
             sequence_runtime_acknowledged: false,
@@ -10952,6 +11560,7 @@ mod hotkey_directory_runtime_tests {
     ) -> multi_launcher::hotkey::directory::SourceSnapshot {
         hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings,
+            configured_recording_stop_hotkey: None,
             radial_document: radial,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -10960,6 +11569,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(macro_document),
             macro_revision: 1,
             active_legacy_triggers: active_triggers,
+            active_legacy_recording_stop: None,
             applied_shared_route: evidence,
             runtime_generation: generation,
             sequence_runtime_acknowledged: false,
@@ -11243,6 +11853,7 @@ mod hotkey_directory_runtime_tests {
         };
         let radial_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial_a,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11251,6 +11862,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&macros),
             macro_revision: 1,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 7,
             sequence_runtime_acknowledged: false,
@@ -11282,6 +11894,7 @@ mod hotkey_directory_runtime_tests {
         };
         let radial_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial_b,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11290,6 +11903,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&macros),
             macro_revision: 1,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 7,
             sequence_runtime_acknowledged: false,
@@ -11351,6 +11965,7 @@ mod hotkey_directory_runtime_tests {
         assert!(accepted_macro_revision > revision_before_save);
         let macro_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial_b,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11359,6 +11974,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&accepted_macro_document),
             macro_revision: accepted_macro_revision,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 7,
             sequence_runtime_acknowledged: false,
@@ -11387,6 +12003,7 @@ mod hotkey_directory_runtime_tests {
         let disabled_macro_source =
             hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings: &disabled_settings,
+                configured_recording_stop_hotkey: None,
                 radial_document: &radial_b,
                 sequence_snapshot: None,
                 sequence_routes: &[],
@@ -11395,6 +12012,7 @@ mod hotkey_directory_runtime_tests {
                 macro_document: Some(&accepted_macro_document),
                 macro_revision: accepted_macro_revision,
                 active_legacy_triggers: &[],
+                active_legacy_recording_stop: None,
                 applied_shared_route: None,
                 runtime_generation: 7,
                 sequence_runtime_acknowledged: false,
@@ -11422,6 +12040,7 @@ mod hotkey_directory_runtime_tests {
         let reenabled_macro_source =
             hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings: &reenabled_settings,
+                configured_recording_stop_hotkey: None,
                 radial_document: &radial_b,
                 sequence_snapshot: None,
                 sequence_routes: &[],
@@ -11430,6 +12049,7 @@ mod hotkey_directory_runtime_tests {
                 macro_document: Some(&accepted_macro_document),
                 macro_revision: accepted_macro_revision,
                 active_legacy_triggers: &[],
+                active_legacy_recording_stop: None,
                 applied_shared_route: None,
                 runtime_generation: 7,
                 sequence_runtime_acknowledged: false,
@@ -11493,6 +12113,7 @@ mod hotkey_directory_runtime_tests {
         ];
         let sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11501,6 +12122,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&macros),
             macro_revision: 9,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 4,
             sequence_runtime_acknowledged: false,
@@ -11549,6 +12171,7 @@ mod hotkey_directory_runtime_tests {
         let radial = RadialDocument::default();
         let before = hotkey_directory_publication_key(&HotkeyDirectoryPublicationInputs {
             settings_generation: 1,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial,
             paste_document_revision: 10,
             macro_revision: 2,
@@ -11562,6 +12185,7 @@ mod hotkey_directory_runtime_tests {
         });
         let after = hotkey_directory_publication_key(&HotkeyDirectoryPublicationInputs {
             settings_generation: 1,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial,
             paste_document_revision: 11,
             macro_revision: 2,
@@ -11581,6 +12205,7 @@ mod hotkey_directory_runtime_tests {
         let macros = multi_launcher::mkmacro::MkMacroDocument::default();
         let legacy_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11589,6 +12214,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&macros),
             macro_revision: 2,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 1,
             sequence_runtime_acknowledged: false,
@@ -11619,6 +12245,7 @@ mod hotkey_directory_runtime_tests {
         shared_settings.radial.shared_tap_hold = true;
         let shared_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings: &shared_settings,
+            configured_recording_stop_hotkey: None,
             radial_document: &radial,
             sequence_snapshot: None,
             sequence_routes: &[],
@@ -11627,6 +12254,7 @@ mod hotkey_directory_runtime_tests {
             macro_document: Some(&macros),
             macro_revision: 2,
             active_legacy_triggers: &[],
+            active_legacy_recording_stop: None,
             applied_shared_route: None,
             runtime_generation: 1,
             sequence_runtime_acknowledged: false,
@@ -11653,5 +12281,87 @@ mod hotkey_directory_runtime_tests {
                 .any(|receipt| receipt.id.as_str() == "main.launcher"),
             "shared mode without a receipt must not claim the hook is applied"
         );
+    }
+
+    #[test]
+    fn recording_stop_directory_receipt_requires_the_recorder_trigger_identity() {
+        use multi_launcher::hotkey::directory::{EntryId, Status};
+
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        settings.radial.shared_tap_hold = false;
+        settings.recording_stop_hotkey = None;
+        let chord = parse_hotkey("Ctrl+Shift+F10").unwrap();
+        let radial = RadialDocument::starter();
+        let macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        // An unrelated installed trigger with the same chord cannot stand in
+        // for a recorder trigger after startup omitted the invalid setting.
+        let active_legacy_triggers = [chord];
+        let snapshot = |active_legacy_recording_stop| {
+            hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+                settings: &settings,
+                configured_recording_stop_hotkey: Some("Ctrl+Shift+F10"),
+                radial_document: &radial,
+                sequence_snapshot: None,
+                sequence_routes: &[],
+                sequence_presentation: None,
+                sequence_omissions: &[],
+                macro_document: Some(&macros),
+                macro_revision: 1,
+                active_legacy_triggers: &active_legacy_triggers,
+                active_legacy_recording_stop,
+                applied_shared_route: None,
+                runtime_generation: 5,
+                sequence_runtime_acknowledged: false,
+                route_pending: false,
+                source_publication_revision: 1,
+            })
+            .into_iter()
+            .find(|source| source.source == Source::MainSettings)
+            .unwrap()
+        };
+        let without_identity = snapshot(None);
+        assert_eq!(
+            without_identity
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == EntryId::new("main.recording_stop"))
+                .unwrap()
+                .state,
+            CandidateState::Configured
+        );
+        assert!(
+            !without_identity
+                .applied_routes
+                .iter()
+                .any(|receipt| receipt.id.as_str() == "main.recording_stop")
+        );
+
+        let with_identity = snapshot(Some(chord));
+        let receipt = with_identity
+            .applied_routes
+            .iter()
+            .find(|receipt| receipt.id.as_str() == "main.recording_stop")
+            .unwrap();
+        assert_eq!(receipt.chord, "Ctrl+Shift+F10");
+        assert_eq!(receipt.generation, 5);
+        assert_eq!(
+            with_identity
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == EntryId::new("main.recording_stop"))
+                .unwrap()
+                .state,
+            CandidateState::Configured
+        );
+
+        let status =
+            multi_launcher::hotkey::directory::Snapshot::from_sources(1, vec![with_identity])
+                .entries()
+                .iter()
+                .find(|candidate| candidate.id.as_str() == "main.recording_stop")
+                .unwrap()
+                .status;
+        assert_eq!(status, Status::Active { generation: 5 });
     }
 }

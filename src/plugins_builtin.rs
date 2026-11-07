@@ -61,7 +61,7 @@ impl Plugin for CalculatorPlugin {
         if trimmed.eq_ignore_ascii_case("calc pad") {
             return vec![Action {
                 label: "Open Calculation Pad".into(),
-                desc: "Calculator".into(),
+                desc: "Open the multi-line pad with exact integers, bit inspection, comparison, and unit arithmetic".into(),
                 action: "calc:pad".into(),
                 args: None,
             }];
@@ -124,7 +124,7 @@ impl Plugin for CalculatorPlugin {
     }
 
     fn description(&self) -> &str {
-        "Evaluate mathematical expressions (prefix: `=`; `= history` to list)"
+        "Evaluate inline scalar expressions or open the pad for exact integers, bit inspection, comparisons, and units (prefix: `=`; `= history` to list)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -135,7 +135,7 @@ impl Plugin for CalculatorPlugin {
         vec![
             Action {
                 label: "calc pad".into(),
-                desc: "Open multi-line calculations".into(),
+                desc: "Open multi-line calculations with exact integers, bit inspection, comparison, and unit arithmetic".into(),
                 action: "query:calc pad".into(),
                 args: None,
             },
@@ -198,7 +198,17 @@ mod calculator_plugin_tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action, "calc:pad");
         assert_eq!(actions[0].args, None);
+        assert!(actions[0].desc.contains("exact integers"));
         assert!(plugin.search("calc pad more").is_empty());
+
+        let command = plugin
+            .commands()
+            .into_iter()
+            .find(|command| command.action == "query:calc pad")
+            .expect("the original Calculation Pad command remains registered");
+        assert_eq!(command.label, "calc pad");
+        assert!(command.desc.contains("unit arithmetic"));
+        assert!(plugin.description().contains("inline scalar expressions"));
 
         let inline = plugin.search("= 1 + 1");
         assert_eq!(inline.len(), 1);

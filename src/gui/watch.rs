@@ -225,6 +225,7 @@ mod track_c3c_dispatch_receipt {
             WatchEvent::ScreenDrawRecover(_) => "screen_draw_recover",
             WatchEvent::ScreenDrawEmergency(_) => "screen_draw_emergency",
             WatchEvent::PasteSequenceHotkey(_) => "paste_sequence_hotkey",
+            WatchEvent::RecordingStopGeneration(_) => "recording_stop_generation",
             WatchEvent::PhysicalPaste(_) => "physical_paste",
             WatchEvent::ClipboardModify(_) => "clipboard_modify",
             WatchEvent::VirtualDesktop(_) => "virtual_desktop",
@@ -723,6 +724,11 @@ impl LauncherApp {
                 }
                 WatchEvent::PasteSequenceHotkey(action) => {
                     self.handle_paste_sequence_hotkey(action);
+                }
+                WatchEvent::RecordingStopGeneration(generation) => {
+                    if let Err(error) = self.recording_controller.stop_generation(generation) {
+                        tracing::debug!(generation, %error, "ignored stale recorder Stop hotkey event");
+                    }
                 }
                 WatchEvent::PhysicalPaste(notice) => {
                     self.handle_physical_paste_notice(notice);

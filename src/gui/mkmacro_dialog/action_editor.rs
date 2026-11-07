@@ -298,6 +298,23 @@ pub struct ActionEditorState {
 }
 
 #[derive(Clone)]
+pub(super) enum NativeFilePickerKind {
+    ProcessProgram,
+    ProcessWorkingDirectory,
+    OpenFolder,
+    ImportReferenceImage,
+    ImportConditionImage(super::condition_editor::ConditionImageRequest),
+}
+
+#[derive(Clone)]
+pub(super) struct NativeFilePickerIntent {
+    pub macro_id: u64,
+    pub step_id: u64,
+    pub draft_generation: u64,
+    pub picker: NativeFilePickerKind,
+}
+
+#[derive(Clone)]
 enum PreviewRequest {
     Notification(ResolvedNotification),
     Sound(String),
@@ -3472,6 +3489,7 @@ fn action_ui(
     Option<PreviewRequest>,
     Option<super::visual_overlay::VisualPointDestination>,
     Option<u64>,
+    Option<NativeFilePickerKind>,
 ) {
     let target_context = TargetEditorContext {
         store: image_context.store,
@@ -3486,6 +3504,7 @@ fn action_ui(
     let mut preview_request = None;
     let mut point_pick = None;
     let mut open_call_target = None;
+    let mut file_picker = None;
     let draft_id = step.id;
     match &mut step.action {
         MkAction::CallMacro(call) => {
@@ -3867,12 +3886,8 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Program");
                 ui.text_edit_singleline(&mut p.program);
-                if ui.button("Browse…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Executable", &["exe", "bat", "cmd", "com"])
-                        .pick_file()
-                {
-                    super::launcher_action_picker::apply_chosen_program_path(p, path);
+                if ui.button("Browse…").clicked() {
+                    file_picker = Some(NativeFilePickerKind::ProcessProgram);
                 }
                 if ui.button("Choose From Launcher…").clicked() {
                     launcher_pick = Some(super::launcher_action_picker::PickerPurpose::Process);
@@ -3888,10 +3903,8 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Working directory");
                 ui.text_edit_singleline(wd);
-                if ui.button("Browse…").clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_folder()
-                {
-                    *wd = path.to_string_lossy().into_owned();
+                if ui.button("Browse…").clicked() {
+                    file_picker = Some(NativeFilePickerKind::ProcessWorkingDirectory);
                 }
             });
             if wd.trim().is_empty() {
@@ -4148,12 +4161,7 @@ fn action_ui(
                     *browse_message = None;
                 }
                 if ui.button("Browse…").clicked() {
-                    let selected = rfd::FileDialog::new().pick_folder();
-                    match apply_open_folder_picker_choice(payload, selected.as_deref()) {
-                        Ok(true) => *browse_message = None,
-                        Ok(false) => {}
-                        Err(message) => *browse_message = Some(message.into()),
-                    }
+                    file_picker = Some(NativeFilePickerKind::OpenFolder);
                 }
             });
             ui.weak("Use an absolute folder path. Browse fills this field; it does not open the folder. The path is checked when the macro runs.");
@@ -4450,11 +4458,179 @@ fn action_ui(
         preview_request,
         point_pick,
         open_call_target,
+        file_picker,
     )
 }
 
 fn play_sound_is_supported(sound: &str) -> bool {
     sound != "None" && crate::sound::SOUND_NAMES.contains(&sound)
+}
+
+fn queue_native_file_picker(
+    ctx: &egui::Context,
+    dialog: &mut MkMacroDialog,
+    picker: NativeFilePickerKind,
+) {
+    let Some(macro_id) = dialog
+        .action_editor
+        .owner_macro_id
+        .or(dialog.selected_macro_id)
+    else {
+        dialog.action_editor.capture_message =
+            Some("The macro target changed before the file picker could open.".into());
+        return;
+    };
+    let Some(step_id) = dialog.action_editor.editing_id else {
+        dialog.action_editor.capture_message =
+            Some("The action target changed before the file picker could open.".into());
+        return;
+    };
+    let intent = NativeFilePickerIntent {
+        macro_id,
+        step_id,
+        draft_generation: dialog.action_editor.draft_generation,
+        picker,
+    };
+    if dialog.defer_host_effects {
+        dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::ActionPicker(intent));
+    } else if let Err(error) = complete_native_file_picker(ctx, dialog, intent) {
+        dialog.action_editor.capture_message = Some(error.to_string());
+    }
+}
+
+pub(super) fn native_file_picker_is_current(
+    dialog: &MkMacroDialog,
+    intent: &NativeFilePickerIntent,
+) -> bool {
+    dialog.action_editor.draft.is_some()
+        && dialog.action_editor.owner_macro_id == Some(intent.macro_id)
+        && dialog.action_editor.editing_id == Some(intent.step_id)
+        && dialog.action_editor.draft_generation == intent.draft_generation
+        && dialog
+            .draft
+            .macros
+            .iter()
+            .any(|macro_| macro_.id == intent.macro_id)
+}
+
+pub(super) fn complete_native_file_picker(
+    ctx: &egui::Context,
+    dialog: &mut MkMacroDialog,
+    intent: NativeFilePickerIntent,
+) -> anyhow::Result<()> {
+    if !native_file_picker_is_current(dialog, &intent) {
+        anyhow::bail!("The action changed before its file picker completed");
+    }
+    let picker = owned_file_dialog(dialog)?;
+    let selected = match &intent.picker {
+        NativeFilePickerKind::ProcessProgram => picker
+            .add_filter("Executable", &["exe", "bat", "cmd", "com"])
+            .pick_file(),
+        NativeFilePickerKind::ProcessWorkingDirectory | NativeFilePickerKind::OpenFolder => {
+            picker.pick_folder()
+        }
+        NativeFilePickerKind::ImportReferenceImage
+        | NativeFilePickerKind::ImportConditionImage(_) => picker
+            .set_directory(dialog.store.asset_root())
+            .add_filter("PNG image", &["png"])
+            .pick_file(),
+    };
+    let Some(path) = selected else {
+        return Ok(());
+    };
+
+    match intent.picker {
+        NativeFilePickerKind::ProcessProgram => {
+            let step = dialog
+                .action_editor
+                .draft
+                .as_mut()
+                .expect("validated action editor draft");
+            let MkAction::Process(payload) = &mut step.action else {
+                anyhow::bail!("The action no longer accepts an executable path");
+            };
+            super::launcher_action_picker::apply_chosen_program_path(payload, path);
+            dialog.action_editor.draft_changed = true;
+            dialog.action_editor.draft_generation =
+                dialog.action_editor.draft_generation.wrapping_add(1);
+        }
+        NativeFilePickerKind::ProcessWorkingDirectory => {
+            let step = dialog
+                .action_editor
+                .draft
+                .as_mut()
+                .expect("validated action editor draft");
+            let MkAction::Process(payload) = &mut step.action else {
+                anyhow::bail!("The action no longer accepts a working folder");
+            };
+            payload.working_directory = Some(path.to_string_lossy().into_owned());
+            dialog.action_editor.draft_changed = true;
+            dialog.action_editor.draft_generation =
+                dialog.action_editor.draft_generation.wrapping_add(1);
+        }
+        NativeFilePickerKind::OpenFolder => {
+            let step = dialog
+                .action_editor
+                .draft
+                .as_mut()
+                .expect("validated action editor draft");
+            let MkAction::OpenFolder(payload) = &mut step.action else {
+                anyhow::bail!("The action no longer accepts a folder path");
+            };
+            apply_open_folder_picker_choice(payload, Some(path.as_path()))
+                .map_err(anyhow::Error::msg)?;
+            dialog.action_editor.draft_changed = true;
+            dialog.action_editor.draft_generation =
+                dialog.action_editor.draft_generation.wrapping_add(1);
+        }
+        NativeFilePickerKind::ImportReferenceImage => {
+            dialog.action_editor.start_import_from_selected_path(
+                dialog.store.clone(),
+                intent.macro_id,
+                path,
+            )?;
+            ctx.request_repaint();
+        }
+        NativeFilePickerKind::ImportConditionImage(request) => {
+            let destination = dialog
+                .action_editor
+                .condition_destination(intent.macro_id, request);
+            dialog
+                .action_editor
+                .start_condition_import_from_selected_path(
+                    dialog.store.clone(),
+                    destination,
+                    path,
+                )?;
+            ctx.request_repaint();
+        }
+    }
+    Ok(())
+}
+
+fn owned_file_dialog(dialog: &MkMacroDialog) -> anyhow::Result<rfd::FileDialog> {
+    #[cfg(windows)]
+    {
+        let Some((ctx, identity)) = dialog.picker_owner.as_ref() else {
+            anyhow::bail!(
+                "Could not identify the MkMacro window for the file dialog. Focus the editor and try again."
+            );
+        };
+        let hwnd = crate::gui::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+            .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
+        let Some(hwnd) = hwnd else {
+            anyhow::bail!(
+                "The MkMacro window is not ready to own the file dialog. Focus the editor and try again."
+            );
+        };
+        Ok(rfd::FileDialog::new()
+            .set_parent(&crate::gui::add_action_dialog::NativeDialogParent(hwnd)))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dialog;
+        Ok(rfd::FileDialog::new())
+    }
 }
 
 fn dispatch_preview(state: &mut ActionEditorState, request: PreviewRequest) {
@@ -5583,6 +5759,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut identify_monitors_request = false;
     let mut related_action_notice = None;
     let mut related_action_request = None;
+    let mut native_file_picker = None;
     // Opening an editor or explicitly refreshing assets invalidates this list.
     let generation = d.action_editor.draft_generation;
     if d.action_editor
@@ -5622,7 +5799,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.variable_catalog_key = Some(catalog_key);
     }
     egui::Window::new("Action Editor")
-
+        .enabled(d.host_child_input_allowed())
         .collapsible(false)
         .default_size(egui::vec2(640.0, 720.0))
         .resizable(true)
@@ -5665,7 +5842,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     }
                 }
             };
-            let (position, mut window, launcher, image, condition_image, condition_ocr, preview, pick_point, open_target)=action_ui(
+            let (position, mut window, launcher, image, condition_image, condition_ocr, preview, pick_point, open_target, file_picker)=action_ui(
                 ui,
                 step,
                 &mut state.capture_keys,
@@ -5717,6 +5894,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             preview_request = preview;
             point_pick_request = pick_point;
             open_call_target_request = open_target;
+            native_file_picker = file_picker;
             match &mut step.action {
                 MkAction::OcrFindText(payload) => {
                     super::ocr_controls::installed_language_ui(
@@ -6016,6 +6194,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
               related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
           }
         });
+    if let Some(picker) = native_file_picker.take() {
+        queue_native_file_picker(ctx, d, picker);
+    }
     if refresh_ocr_languages {
         d.action_editor.ocr_language_cache = None;
         d.action_editor.request_ocr_languages();
@@ -6132,7 +6313,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             .request_point_pick(d.selected_macro_id.unwrap_or(0), destination);
     }
     if let Some(target) = open_call_target_request {
-        apply_and_open_call_target(d, target);
+        request_finish(d, ActionEditorFinish::OpenCallTarget(target));
     }
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);
@@ -6151,6 +6332,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     } else if let Some(request) = image_request {
         let macro_id = d.selected_macro_id.unwrap_or(0);
         let result = match request {
+            ImageAuthoringRequest::Import if d.defer_host_effects => {
+                queue_native_file_picker(ctx, d, NativeFilePickerKind::ImportReferenceImage);
+                Ok(())
+            }
             ImageAuthoringRequest::Import => rfd::FileDialog::new()
                 .set_directory(d.store.asset_root())
                 .add_filter("PNG image", &["png"])
@@ -6215,6 +6400,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         if workflow_active || importing || crop_open {
             d.action_editor.capture_message =
                 Some("Finish or cancel the active authoring operation first".into());
+        } else if d.defer_host_effects {
+            queue_native_file_picker(
+                ctx,
+                d,
+                NativeFilePickerKind::ImportConditionImage(request.clone()),
+            );
         } else {
             let destination = d
                 .action_editor
@@ -6341,6 +6532,48 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.set_captured_keys(keys);
     }
     if apply {
+        request_finish(d, ActionEditorFinish::Apply);
+    } else if cancel || !open {
+        request_finish(d, ActionEditorFinish::Cancel);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ActionEditorFinish {
+    Apply,
+    Cancel,
+    OpenCallTarget(u64),
+}
+
+fn request_finish(d: &mut MkMacroDialog, action: ActionEditorFinish) {
+    if !d.host_child_input_allowed() {
+        return;
+    }
+    if d.defer_host_effects {
+        d.stage_host_action(super::MkMacroHostActionKind::FinishActionEditor {
+            generation: d.action_editor.draft_generation,
+            action,
+        });
+    } else {
+        complete_finish(d, action);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn finish_button_geometry(
+    editor: &ActionEditorState,
+    apply: bool,
+) -> Option<(egui::Rect, egui::Rect)> {
+    let (_, rect) = if apply {
+        editor.test_apply_response?
+    } else {
+        editor.test_cancel_response?
+    };
+    Some((rect, editor.test_footer_clip?))
+}
+
+pub(super) fn complete_finish(d: &mut MkMacroDialog, action: ActionEditorFinish) {
+    if matches!(action, ActionEditorFinish::Apply) {
         if let Some(outputs) = d
             .action_editor
             .draft
@@ -6414,12 +6647,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.window_picker
             .cancel("Window picker closed because the action editor was applied");
         d.launcher_action_picker.cancel();
-    } else if cancel || !open {
+    } else if matches!(action, ActionEditorFinish::Cancel) {
         d.image_crop_editor.cancel();
         d.action_editor.cancel();
         d.window_picker
             .cancel("Window picker closed because the action editor was cancelled");
         d.launcher_action_picker.cancel();
+    } else if let ActionEditorFinish::OpenCallTarget(target) = action {
+        apply_and_open_call_target(d, target);
     }
 }
 
@@ -11402,6 +11637,9 @@ mod tests {
                     }
                     RectanglePurpose::PinboardCapture => {
                         panic!("PinboardCapture is owned by the pinboard workflow")
+                    }
+                    RectanglePurpose::RecordingRegion => {
+                        panic!("RecordingRegion is owned by the standalone recorder workflow")
                     }
                 };
                 self.editor

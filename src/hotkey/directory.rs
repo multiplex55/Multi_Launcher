@@ -100,6 +100,7 @@ pub enum MainSetting {
     Launcher,
     Quit,
     Help,
+    RecordingStop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

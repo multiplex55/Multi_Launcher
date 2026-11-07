@@ -2,7 +2,7 @@
 use crate::mkmacro::{StructuralBlock, StructureAnalysis};
 use std::collections::HashSet;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct FoldState {
     collapsed: HashSet<(u64, u64)>,
 }

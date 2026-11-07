@@ -17,6 +17,7 @@ pub struct ValidatedHotkeyRoutes {
     pub launcher: Hotkey,
     pub quit: Option<Hotkey>,
     pub help: Option<Hotkey>,
+    pub recording_stop: Option<Hotkey>,
     pub screen_draw_launch: Option<Hotkey>,
     pub screen_draw_emergency: Option<Hotkey>,
     pub shared_invocation: bool,
@@ -47,6 +48,16 @@ pub fn validate_hotkey_routes(
         .help_hotkey
         .as_deref()
         .and_then(|value| parse_configured("help", value, &mut issues));
+    let recording_stop = settings
+        .recording_stop_hotkey
+        .as_deref()
+        .and_then(|value| parse_configured("recording Stop", value, &mut issues));
+    if recording_stop.is_some_and(|hotkey| hotkey.key == Key::Escape) {
+        issues.push(HotkeyRouteIssue {
+            field: "recording_stop_hotkey",
+            message: "Escape is reserved by the launcher and cannot stop a recording".into(),
+        });
+    }
 
     let screen_draw = match settings.plugin_settings.get("screen_draw") {
         Some(value) => match serde_json::from_value::<ScreenDrawSettings>(value.clone()) {
@@ -79,6 +90,7 @@ pub fn validate_hotkey_routes(
     let mut process_bindings = vec![("launcher", launcher)];
     process_bindings.extend(quit.map(|hotkey| ("quit", hotkey)));
     process_bindings.extend(help.map(|hotkey| ("help", hotkey)));
+    process_bindings.extend(recording_stop.map(|hotkey| ("recording Stop", hotkey)));
     process_bindings.extend(screen_draw_launch.map(|hotkey| ("Screen Draw launch", hotkey)));
     process_bindings.extend(screen_draw_emergency.map(|hotkey| ("Screen Draw emergency", hotkey)));
 
@@ -101,12 +113,20 @@ pub fn validate_hotkey_routes(
         "legacy polling listener"
     };
     for (name, hotkey) in &process_bindings {
-        let supported = if shared_invocation {
+        let supported = if *name == "recording Stop" {
+            launcher_invocation::vk_from_key(hotkey.key).is_some()
+                && runtime::legacy_virtual_key(hotkey.key).is_some()
+        } else if shared_invocation {
             launcher_invocation::vk_from_key(hotkey.key).is_some()
         } else {
             runtime::legacy_virtual_key(hotkey.key).is_some()
         };
         if !supported {
+            let route_mapper = if *name == "recording Stop" {
+                "both the shared input hook and legacy polling listener"
+            } else {
+                route_mapper
+            };
             issues.push(HotkeyRouteIssue {
                 field: "hotkeys",
                 message: format!(
@@ -191,6 +211,7 @@ pub fn validate_hotkey_routes(
             launcher,
             quit,
             help,
+            recording_stop,
             screen_draw_launch,
             screen_draw_emergency,
             shared_invocation,
@@ -541,6 +562,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.hotkey = Some("Ctrl+F13".into());
         settings.radial.enabled = true;
+        settings.radial.enabled = true;
         settings.radial.shared_tap_hold = true;
         let routes = validate_hotkey_routes(&settings, &RadialDocument::starter(), None).unwrap();
         assert!(routes.shared_invocation);
@@ -564,6 +586,139 @@ mod tests {
             issues
                 .iter()
                 .any(|issue| issue.message.contains("help hotkey `NotAKey` is invalid"))
+        );
+    }
+
+    #[test]
+    fn recording_stop_is_optional_conflict_checked_and_supported_by_both_routes() {
+        let radial = RadialDocument::starter();
+        let mut settings = Settings::default();
+        assert_eq!(settings.recording_stop_hotkey, None);
+        let serialized = serde_json::to_value(&settings).unwrap();
+        let mut legacy_value = serialized.clone();
+        legacy_value
+            .as_object_mut()
+            .unwrap()
+            .remove("recording_stop_hotkey");
+        let legacy: Settings = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(legacy.recording_stop_hotkey, None);
+
+        settings.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        settings.radial.enabled = false;
+        settings.radial.shared_tap_hold = false;
+        let decoded: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(
+            decoded.recording_stop_hotkey,
+            settings.recording_stop_hotkey
+        );
+        let routes = validate_hotkey_routes(&settings, &radial, None).unwrap();
+        assert_eq!(routes.recording_stop, parse_hotkey("Ctrl+Shift+F10"));
+        assert!(
+            routes
+                .legacy_triggers
+                .contains(&routes.recording_stop.unwrap())
+        );
+
+        settings.radial.enabled = true;
+        settings.radial.shared_tap_hold = true;
+        let shared_routes = validate_hotkey_routes(&settings, &radial, None).unwrap();
+        assert!(shared_routes.shared_invocation);
+        assert_eq!(shared_routes.recording_stop, routes.recording_stop);
+        assert!(shared_routes.legacy_triggers.is_empty());
+
+        settings.recording_stop_hotkey = Some("Ctrl+F13".into());
+        assert!(
+            validate_hotkey_routes(&settings, &radial, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue
+                    .message
+                    .contains("both the shared input hook and legacy polling listener"))
+        );
+
+        settings.radial.shared_tap_hold = false;
+        settings.recording_stop_hotkey = Some("Ctrl+Escape".into());
+        assert!(
+            validate_hotkey_routes(&settings, &radial, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.field == "recording_stop_hotkey")
+        );
+
+        settings.recording_stop_hotkey = Some("Shift+K".into());
+        settings.hotkey = Some("Ctrl+K".into());
+        assert!(
+            validate_hotkey_routes(&settings, &radial, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue
+                    .message
+                    .contains("launcher hotkey can co-fire with recording Stop hotkey"))
+        );
+
+        let mut jump_settings = Settings::default();
+        jump_settings.radial.enabled = false;
+        jump_settings.radial.shared_tap_hold = false;
+        jump_settings.experimental_jump_mode_enabled = true;
+        jump_settings.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        jump_settings.recording_stop_hotkey = Some("Ctrl+F8".into());
+        assert!(
+            validate_hotkey_routes(&jump_settings, &radial, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.field == "jump_mode_activation_chord"
+                    && issue.message.contains("recording Stop"))
+        );
+
+        let mut radial_settings = Settings::default();
+        radial_settings.recording_stop_hotkey = Some("Ctrl+F9".into());
+        let mut radial_with_conflict = RadialDocument::starter();
+        radial_with_conflict
+            .custom_triggers
+            .push(TriggerDefinition {
+                id: TriggerId::new("recording-stop-conflict"),
+                chord: "Ctrl+F9".into(),
+                menu_id: radial_with_conflict.default_menu_id.clone(),
+                scope: TriggerScope::Global,
+            });
+        assert!(
+            validate_hotkey_routes(&radial_settings, &radial_with_conflict, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.message.contains("recording Stop")
+                    && issue.message.contains("radial"))
+        );
+
+        let mut macro_settings = Settings::default();
+        macro_settings.radial.enabled = false;
+        macro_settings.radial.shared_tap_hold = false;
+        macro_settings.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let macros = MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 44,
+                name: "recorder conflict".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: Some(MkHotkey {
+                    key: MkKey::Function(10),
+                    modifiers: vec![MkKey::Control, MkKey::Shift],
+                }),
+                hotkey_scope: MkHotkeyScope::AnyWindow,
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate_hotkey_routes(&macro_settings, &radial, Some(&macros))
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.field == "macro_hotkeys"
+                    && issue.message.contains("recording Stop"))
         );
     }
 

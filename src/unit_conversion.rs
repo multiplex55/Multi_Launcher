@@ -299,6 +299,13 @@ impl UnitDefinition {
         self.approximation = Some(approximation);
         self
     }
+
+    pub(crate) const fn linear_factor(self) -> Option<f64> {
+        match self.strategy {
+            Strategy::Linear(factor) => Some(factor),
+            Strategy::Temperature(_) | Strategy::FuelEconomy(_) => None,
+        }
+    }
 }
 
 /// The authoritative catalog for the units supported by the existing inline
@@ -1619,6 +1626,14 @@ impl Unit {
     pub fn category(self) -> Category {
         definition(self).category
     }
+
+    pub(crate) fn linear_factor(self) -> Option<f64> {
+        definition(self).linear_factor()
+    }
+
+    pub(crate) fn approximation(self) -> Option<Approximation> {
+        definition(self).approximation
+    }
 }
 
 fn definition(unit: Unit) -> &'static UnitDefinition {
@@ -1966,24 +1981,41 @@ fn starts_number(character: char) -> bool {
 }
 
 fn match_unit_prefix(input: &str) -> Option<(Unit, usize)> {
+    match_unit_prefix_using(input, unit_alias_boundary)
+}
+
+pub(crate) fn match_unit_prefix_for_quantity(input: &str) -> Option<(Unit, usize)> {
+    match_unit_prefix_using(input, |input, consumed| {
+        unit_alias_boundary(input, consumed)
+            || matches!(
+                input[consumed..].chars().next(),
+                Some('/' | '^' | '*' | '+' | '-' | ')' | ',')
+            )
+    })
+}
+
+fn match_unit_prefix_using(
+    input: &str,
+    is_boundary: impl Fn(&str, usize) -> bool,
+) -> Option<(Unit, usize)> {
     let mut best = None;
 
     for definition in UNIT_CATALOG {
         if let Some(consumed) = match_alias_prefix(input, definition.symbol, true)
-            && unit_alias_boundary(input, consumed)
+            && is_boundary(input, consumed)
         {
             update_alias_match(&mut best, definition.unit, consumed, true);
         }
         for alias in definition.case_sensitive_aliases {
             if let Some(consumed) = match_alias_prefix(input, alias, true)
-                && unit_alias_boundary(input, consumed)
+                && is_boundary(input, consumed)
             {
                 update_alias_match(&mut best, definition.unit, consumed, true);
             }
         }
         for alias in definition.aliases {
             if let Some(consumed) = match_alias_prefix(input, alias, false)
-                && unit_alias_boundary(input, consumed)
+                && is_boundary(input, consumed)
             {
                 update_alias_match(&mut best, definition.unit, consumed, false);
             }
@@ -2045,7 +2077,18 @@ fn unit_alias_boundary(input: &str, consumed: usize) -> bool {
     }
 }
 
-fn parse_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
+pub(crate) fn parse_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
+    parse_number_prefix_with_fraction(input, true)
+}
+
+pub(crate) fn parse_quantity_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
+    parse_number_prefix_with_fraction(input, false)
+}
+
+fn parse_number_prefix_with_fraction(
+    input: &str,
+    allow_ascii_fraction: bool,
+) -> Result<(f64, usize), ConversionError> {
     let invalid = || ConversionError::InvalidNumber {
         expression: input.trim().to_owned(),
     };
@@ -2108,7 +2151,7 @@ fn parse_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
     }
 
     let integer_only = !has_decimal && !has_exponent;
-    if integer_only && bytes.get(offset) == Some(&b'/') {
+    if allow_ascii_fraction && integer_only && bytes.get(offset) == Some(&b'/') {
         let numerator: f64 = input[..offset].parse().map_err(|_| out_of_range())?;
         offset += 1;
         let denominator_start = offset;
@@ -2164,7 +2207,8 @@ fn parse_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
             return Ok((value, offset));
         }
 
-        if had_space
+        if allow_ascii_fraction
+            && had_space
             && input
                 .as_bytes()
                 .get(fraction_start)

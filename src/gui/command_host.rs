@@ -7,10 +7,10 @@ use crate::commands::{
     DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
     HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    PinboardCommandHost, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
-    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination,
-    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
-    XmlToolkitCommandHost,
+    PinboardCommandHost, QueryPolicy, RadialCommandHost, RecordingCommandHost, ResultsPolicy,
+    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay,
+    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
+    VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -198,6 +198,32 @@ impl ScreenDrawCommandHost for LauncherApp {
     }
 }
 
+impl RecordingCommandHost for LauncherApp {
+    fn execute_recording_command(
+        &mut self,
+        command: crate::commands::RecordingCommand,
+    ) -> Result<(), String> {
+        match command {
+            crate::commands::RecordingCommand::Open => {
+                self.open_recording_setup();
+                Ok(())
+            }
+            crate::commands::RecordingCommand::Stop => {
+                let generation = self
+                    .recording_controller
+                    .snapshot()
+                    .active_generation
+                    .ok_or_else(|| "No recording is active".to_owned())?;
+                if self.recording_controller.stop_generation(generation)? {
+                    Ok(())
+                } else {
+                    Err("The recording is not accepting Stop".into())
+                }
+            }
+        }
+    }
+}
+
 impl LauncherApp {
     pub(super) fn paste_sequence_invocation_context_for_open(
         &mut self,
@@ -226,7 +252,6 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::QrDialog);
     }
     fn open_regex_tester_dialog(&mut self) {
-        self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
     }
     fn open_calculation_pad_dialog(&mut self) {
@@ -265,16 +290,27 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::DuplicateFinderDialog);
     }
 
+    fn open_folder_size_dialog(&mut self) {
+        self.focus_panel(super::Panel::FolderSizeDialog);
+    }
+
+    fn open_file_lock_dialog(&mut self, path: Option<&std::path::Path>) {
+        self.file_lock_dialog
+            .request_open(&self.egui_ctx, path.map(std::path::Path::to_path_buf));
+    }
+
     fn open_activity_dialog(&mut self) {
         self.focus_panel(super::Panel::ActivityDialog);
     }
 
     fn open_timer_dialog(&mut self) {
         self.timer_dialog.open_timer();
+        self.focus_panel(super::Panel::TimerDialog);
     }
 
     fn open_alarm_dialog(&mut self) {
         self.timer_dialog.open_alarm();
+        self.focus_panel(super::Panel::TimerDialog);
     }
 
     fn open_shell_dialog(&mut self) {
@@ -286,11 +322,27 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_snippet_dialog(&mut self) {
-        self.snippet_dialog.open();
+        self.focus_panel(super::Panel::SnippetDialog);
     }
 
     fn open_paste_sequence_dialog(&mut self) {
         self.focus_panel(super::Panel::PasteSequenceDialog);
+    }
+
+    fn stage_explorer_tabs(
+        &mut self,
+        command: crate::commands::ExplorerTabsCommand,
+        _source: crate::commands::ActivationSource
+    ) -> Result<(), String> {
+        if self.egui_ctx.viewport_id() != eframe::egui::ViewportId::ROOT {
+            return Err("Explorer Tabs commands require the launcher window".into());
+        }
+        self.explorer_tabs_dialog.stage_command(
+            &self.egui_ctx,
+            self.explorer_tabs_host.identity(),
+            command
+        );
+        Ok(())
     }
 
     fn open_hash_generator_dialog(&mut self) {
@@ -303,6 +355,9 @@ impl DialogCommandHost for LauncherApp {
         id: crate::paste_sequence::SequenceId,
         source: crate::commands::ActivationSource,
     ) -> Result<(), String> {
+        if self.snippet_prompt_dialog.is_open() {
+            return Err("Paste sequence could not be prepared: SequenceAlreadyActive".to_owned());
+        }
         let snapshot = crate::paste_sequence::SequenceStore::new(
             self.paste_sequence_dialog.sequence_store_path(),
         )
@@ -347,10 +402,16 @@ impl DialogCommandHost for LauncherApp {
                 }
             },
         ) {
-            self.paste_sequence_dialog.set_autostart_when_ready(false);
             return Err(format!("Paste sequence could not be prepared: {error:?}"));
         }
         self.paste_sequence_dialog.set_autostart_when_ready(true);
+        if self.paste_sequence_host.is_popped_out()
+            && self.should_keep_paste_sequence_dialog_visible_during_playback()
+            && self.paste_sequence_dialog.open
+            && self.snippet_prompt_dialog.is_sequence_preflight()
+        {
+            self.sequence_prompt_editor_session = Some(self.paste_sequence_dialog.host_session_epoch());
+        }
         if !self.snippet_prompt_dialog.is_open() {
             self.paste_sequence_dialog.set_autostart_when_ready(false);
             self.start_sequence_playback()
@@ -377,6 +438,7 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_snippet_editor(&mut self, alias: &str) {
         self.snippet_dialog.open_edit(alias);
+        self.snippet_window_host.request_focus();
     }
 
     fn open_favorite_dialog(&mut self, label: &str) {
@@ -400,7 +462,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_clipboard_dialog(&mut self) {
-        self.clipboard_dialog.open();
+        self.focus_panel(super::Panel::ClipboardDialog);
     }
 
     fn open_convert_dialog(&mut self) {
@@ -422,9 +484,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_dashboard_settings_dialog(&mut self) {
-        let registry = self.dashboard.registry().clone();
-        self.dashboard_editor.open(&self.dashboard_path, &registry);
-        self.show_dashboard_editor = true;
+        self.open_dashboard_editor();
     }
 
     fn open_theme_dialog(&mut self) {
@@ -707,14 +767,17 @@ impl TodoCommandHost for LauncherApp {
 impl MouseGestureCommandHost for LauncherApp {
     fn open_mouse_gesture_dialog(&mut self) {
         self.mouse_gestures_dialog.open();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_add_dialog(&mut self) {
         self.mouse_gestures_dialog.open_add();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_binding_dialog(&mut self) {
         self.mouse_gestures_dialog.open_binding_editor();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_focus(
@@ -723,6 +786,7 @@ impl MouseGestureCommandHost for LauncherApp {
     ) {
         self.mouse_gestures_dialog
             .open_focus(&args.label, &args.tokens, args.dir_mode);
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_settings_dialog(&mut self) {
@@ -857,7 +921,6 @@ impl JsonUtilityCommandHost for LauncherApp {
 
 impl XmlToolkitCommandHost for LauncherApp {
     fn open_xml_toolkit(&mut self) {
-        self.xml_toolkit_dialog.open();
         self.focus_panel(super::Panel::XmlToolkitDialog);
     }
 }
@@ -915,6 +978,7 @@ impl crate::commands::HotFolderCommandHost for LauncherApp {
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
+        self.file_search_host.request_focus();
     }
 
     fn cancel_file_search(&mut self) {
@@ -928,6 +992,7 @@ impl FileSearchCommandHost for LauncherApp {
     ) {
         self.file_search_dialog
             .open_with_mode(file_search_mode(payload.search_kind()));
+        self.file_search_host.request_focus();
     }
 
     fn start_file_search(&mut self, payload: &crate::file_search::actions::FileSearchStartPayload) {
@@ -937,6 +1002,7 @@ impl FileSearchCommandHost for LauncherApp {
             payload.text.clone(),
             &mut self.file_search_coordinator,
         );
+        self.file_search_host.request_focus();
     }
 
     fn report_file_search_action_error(&mut self, message: String) {
@@ -947,7 +1013,9 @@ impl FileSearchCommandHost for LauncherApp {
 
 impl DiffCommandHost for LauncherApp {
     fn open_diff(&mut self, payload: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
-        self.diff_dialog.open_payload(payload.clone())
+        self.diff_dialog.open_payload(payload.clone())?;
+        self.diff_dialog.request_host_focus();
+        Ok(())
     }
 }
 
@@ -973,10 +1041,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
             }
             ClipboardModifySectionPayload::Help => super::ClipboardModifyDialogSection::Help,
         };
-        self.clipboard_modify_dialog.open_section(
-            section,
-            &crate::clipboard_modify::runtime::clipboard_service(),
-        );
+        self.open_clipboard_modify_section(section);
     }
 
     fn undo_clipboard_modify(&mut self) -> Result<(), String> {
@@ -1021,6 +1086,9 @@ impl ScreenshotCommandHost for LauncherApp {
         destination: ScreenshotDestination,
         markup: ScreenshotMarkup,
     ) -> Result<ScreenshotCommandResult, String> {
+        if let Some(reason) = self.recording_capture_conflict() {
+            return Err(reason.into());
+        }
         let mode = match mode {
             ScreenshotMode::Window => crate::actions::screenshot::Mode::Window,
             ScreenshotMode::Region => crate::actions::screenshot::Mode::Region,
@@ -1541,31 +1609,9 @@ impl HeadlessCommandHost for LauncherApp {
         needs_clipboard: bool,
         needs_window_title: bool,
     ) -> crate::plugins::SnippetInvocationContext {
-        let timestamp = chrono::Local::now().fixed_offset();
-        let origin = if needs_window_title {
-            select_snippet_origin_window(
-                source,
-                self.visible_flag.load(Ordering::SeqCst),
-                crate::active_window::observe_foreground_window(),
-                self.snippet_origin_window.clone(),
-            )
-        } else {
-            None
-        };
-        let clipboard_text = needs_clipboard
-            .then(|| crate::actions::clipboard::get_text().ok())
-            .flatten();
-        let (foreground_hwnd, foreground_title) = if needs_window_title {
-            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
-        } else {
-            (None, None)
-        };
-
-        crate::plugins::SnippetInvocationContext::new(
-            timestamp,
-            clipboard_text,
-            foreground_hwnd,
-            foreground_title,
+        self.capture_snippet_context_with_launcher_origin(
+            source, needs_clipboard, needs_window_title,
+            self.visible_flag.load(Ordering::SeqCst),
         )
     }
 
@@ -1573,6 +1619,9 @@ impl HeadlessCommandHost for LauncherApp {
         &mut self,
         intent: crate::commands::SnippetPromptIntent,
     ) -> Result<(), String> {
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            return Err(super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightActive.message().to_owned());
+        }
         self.snippet_prompt_dialog
             .begin_execution(&self.egui_ctx, intent);
         self.focus_panel(super::Panel::SnippetPromptDialog);
@@ -1678,7 +1727,10 @@ impl LauncherApp {
         {
             self.panel_stack.push(super::Panel::PasteSequenceDialog);
         }
-        if !self.visible_flag.load(Ordering::SeqCst) {
+        self.paste_sequence_host.request_focus();
+        if self.paste_sequence_host.root_layer().is_some()
+            && !self.visible_flag.load(Ordering::SeqCst)
+        {
             self.request_launcher_visibility(true);
         }
     }
@@ -1915,6 +1967,12 @@ impl LauncherApp {
     pub(crate) fn start_sequence_playback(
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        #[cfg(test)]
+        if let Some(mut platform) = self.test_sequence_platform.take() {
+            let result = self.start_sequence_playback_using(&mut platform);
+            self.test_sequence_platform = Some(platform);
+            return result;
+        }
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         self.start_sequence_playback_using(&mut platform)
@@ -1966,6 +2024,7 @@ impl LauncherApp {
             && !self.should_keep_paste_sequence_dialog_visible_during_playback()
         {
             self.paste_sequence_dialog.suspend_for_playback();
+            self.paste_sequence_host.suspend(&self.egui_ctx);
             self.panel_states.paste_sequence_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::PasteSequenceDialog);
@@ -1982,6 +2041,12 @@ impl LauncherApp {
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         let now = std::time::Instant::now();
+        #[cfg(test)]
+        if let Some(mut platform) = self.test_sequence_platform.take() {
+            let result = self.next_sequence_playback_using(&mut platform, now);
+            self.test_sequence_platform = Some(platform);
+            return result;
+        }
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         self.next_sequence_playback_using(&mut platform, now)
@@ -2053,6 +2118,9 @@ impl LauncherApp {
             current_history,
         )?;
         if let Some(run) = completed {
+            if self.sequence_prompt_editor_session.take().is_some() && self.paste_sequence_dialog.open {
+                self.paste_sequence_host.request_focus();
+            }
             self.panel_states.snippet_prompt_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
@@ -2073,10 +2141,48 @@ impl LauncherApp {
         Ok(())
     }
 
+    fn capture_snippet_context_with_launcher_origin(
+        &self,
+        source: crate::commands::ActivationSource,
+        needs_clipboard: bool,
+        needs_window_title: bool,
+        launcher_origin_available: bool,
+    ) -> crate::plugins::SnippetInvocationContext {
+        let timestamp = chrono::Local::now().fixed_offset();
+        let origin = if needs_window_title {
+            select_snippet_origin_window(
+                source,
+                launcher_origin_available,
+                crate::active_window::observe_foreground_window(),
+                self.snippet_origin_window.clone(),
+            )
+        } else {
+            None
+        };
+        let clipboard_text = needs_clipboard
+            .then(|| crate::actions::clipboard::get_text().ok())
+            .flatten();
+        let (foreground_hwnd, foreground_title) = if needs_window_title {
+            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
+        } else {
+            (None, None)
+        };
+
+        crate::plugins::SnippetInvocationContext::new(
+            timestamp,
+            clipboard_text,
+            foreground_hwnd,
+            foreground_title,
+        )
+    }
+
     pub(crate) fn begin_snippet_preview(
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            return Err(super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightActive);
+        }
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft) {
             Ok(
                 crate::plugins::snippets::SnippetRunMode::SystemOnly(prepared)
@@ -2087,11 +2193,11 @@ impl LauncherApp {
             }
         };
         let context = prepared.parsed.has_system_variables().then(|| {
-            crate::commands::HeadlessCommandHost::capture_snippet_invocation_context(
-                self,
+            self.capture_snippet_context_with_launcher_origin(
                 crate::commands::ActivationSource::Click,
                 prepared.parsed.uses_clipboard(),
                 prepared.parsed.uses_window_title(),
+                self.visible_flag.load(Ordering::SeqCst) || self.snippet_dialog.open,
             )
         });
         self.snippet_prompt_dialog.begin_preview_prepared(
@@ -2100,6 +2206,8 @@ impl LauncherApp {
             prepared,
             context,
         )?;
+        self.snippet_preview_editor_session = self.snippet_dialog.open
+            .then(|| self.snippet_dialog.host_session_epoch());
         self.focus_panel(super::Panel::SnippetPromptDialog);
         Ok(())
     }
@@ -2160,10 +2268,16 @@ impl LauncherApp {
         &mut self,
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
         let was_preview = self.snippet_prompt_dialog.is_preview_only();
+        self.snippet_preview_editor_session = None;
+        let was_hosted_sequence = self.sequence_prompt_editor_session.take().is_some();
         let was_sequence = self.snippet_prompt_dialog.is_sequence_preflight();
         let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
         if was_sequence {
+            self.paste_sequence_dialog.set_autostart_when_ready(false);
             self.cancel_sequence_playback();
+            if was_hosted_sequence && self.paste_sequence_dialog.open {
+                self.paste_sequence_host.request_focus();
+            }
         }
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
@@ -2567,6 +2681,14 @@ pub(in crate::gui) mod tests {
 
         pub(crate) fn pasted_values(&self) -> &[(isize, String)] {
             &self.pasted
+        }
+
+        pub(crate) fn publication_count(&self) -> usize {
+            self.publications
+        }
+
+        pub(crate) fn advance(&mut self, elapsed: std::time::Duration) {
+            self.now += elapsed;
         }
     }
 

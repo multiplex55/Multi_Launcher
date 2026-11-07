@@ -122,6 +122,36 @@ struct PresentationShared {
     state: Mutex<PresentationState>,
     changed: Condvar,
     wake: Arc<dyn Fn() + Send + Sync + 'static>,
+    #[cfg(test)]
+    next_presentation_hold: Mutex<Option<Arc<PresentationHoldState>>>,
+}
+
+#[cfg(test)]
+struct PresentationHoldState {
+    entered_and_released: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+pub(super) struct ImagePresentationTestHold(Arc<PresentationHoldState>);
+
+#[cfg(test)]
+impl ImagePresentationTestHold {
+    pub(super) fn entered(&self) -> bool {
+        self.0.entered_and_released.lock().unwrap().0
+    }
+
+    pub(super) fn release(&self) {
+        self.0.entered_and_released.lock().unwrap().1 = true;
+        self.0.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for ImagePresentationTestHold {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct PresentationWorker {
@@ -130,6 +160,7 @@ struct PresentationWorker {
     reap_permit: Mutex<Option<crate::thread_reaper::ReapPermit>>,
     retired_uploads: Mutex<Vec<RetiredUpload>>,
     paint_serial: Arc<AtomicU64>,
+    paint_owner: Arc<AtomicU64>,
 }
 
 impl PresentationWorker {
@@ -147,11 +178,14 @@ impl PresentationWorker {
                 }),
                 changed: Condvar::new(),
                 wake,
+                #[cfg(test)]
+                next_presentation_hold: Mutex::new(None),
             }),
             owner: Mutex::new(None),
             reap_permit: Mutex::new(None),
             retired_uploads: Mutex::new(Vec::new()),
             paint_serial: Arc::new(AtomicU64::new(0)),
+            paint_owner: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -328,8 +362,10 @@ impl PresentationWorker {
             return;
         }
         let paint_serial = Arc::clone(&self.paint_serial);
+        let paint_owner = Arc::clone(&self.paint_owner);
+        let expected_owner = paint_owner.load(Ordering::Acquire);
         let callback = Arc::new(eframe::egui_glow::CallbackFn::new(move |_, _| {
-            paint_serial.fetch_add(1, Ordering::AcqRel);
+            acknowledge_owner_paint(&paint_serial, &paint_owner, expected_owner);
         }));
         painter.add(egui::Shape::Callback(egui::PaintCallback {
             rect: painter.clip_rect(),
@@ -362,14 +398,72 @@ impl PresentationWorker {
     }
 }
 
+fn acknowledge_owner_paint(serial: &AtomicU64, owner: &AtomicU64, expected: u64) {
+    if owner.load(Ordering::Acquire) == expected {
+        serial.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 impl Drop for PresentationWorker {
     fn drop(&mut self) {
         self.shutdown();
     }
 }
 
+#[derive(Clone, Copy)]
+struct CompareCamera {
+    view: CompareView,
+    wipe: f32,
+    zoom: f32,
+    pan: egui::Vec2,
+}
+#[derive(Clone, Copy)]
+enum CompareAction {
+    Open(ImageSide),
+    Paste(ImageSide),
+}
+struct CompareHostBody {
+    actions: Vec<CompareAction>,
+    request: Option<super::utility_host::UtilityPresentation>,
+    close: bool,
+    copies: Vec<String>,
+}
+
+struct CompareHostFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    generation: u64,
+    revisions: [u64; 2],
+    camera: CompareCamera,
+    actions: Vec<CompareAction>,
+    copies: Vec<String>,
+    close: bool,
+    request: Option<super::utility_host::UtilityPresentation>,
+    info: Option<egui::ViewportInfo>,
+    native: bool,
+}
+#[derive(Default)]
+pub(super) struct ImageCompareHostOutcome {
+    pub(super) copies: Vec<String>,
+    pub(crate) closed: bool,
+    pub(crate) show_root: bool,
+}
+
 pub struct ImageCompareDialogState {
     pub open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    host_pending: Option<CompareHostFrame>,
+    host_os_close_pending: bool,
+    host_focus: bool,
+    host_jump: crate::gui::jump_mode::ui::JumpModeUi,
+    host_jump_frame: Option<u64>,
+    #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_focused_control: Option<egui::Id>,
     session: Arc<ImageCompareSession>,
     presentation_worker: PresentationWorker,
     presented: Option<PresentedTextures>,
@@ -397,6 +491,17 @@ impl ImageCompareDialogState {
         let presentation_ctx = ctx.clone();
         Self {
             open: false,
+            host: super::utility_host::UtilityHostState::docked(),
+            host_epoch: 0,
+            host_pending: None,
+            host_os_close_pending: false,
+            host_focus: false,
+            host_jump: crate::gui::jump_mode::ui::JumpModeUi::default(),
+            host_jump_frame: None,
+            #[cfg(test)]
+            host_button: None,
+            #[cfg(test)]
+            test_focused_control: None,
             session,
             presentation_worker: PresentationWorker::new(Arc::new(move || {
                 presentation_ctx.request_repaint();
@@ -422,6 +527,7 @@ impl ImageCompareDialogState {
         if self.open {
             return;
         }
+        self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
         let snapshot = self.session.snapshot();
         if snapshot.closed {
             match self.session.reopen() {
@@ -437,6 +543,11 @@ impl ImageCompareDialogState {
             return;
         }
         self.open = false;
+        self.presentation_worker
+            .paint_owner
+            .fetch_add(1, Ordering::AcqRel);
+        self.host_pending = None;
+        self.host_os_close_pending = false;
         self.session.close();
         self.presentation_worker.invalidate();
         if let Some(presented) = self.presented.take() {
@@ -456,6 +567,208 @@ impl ImageCompareDialogState {
         self.presentation_worker.shutdown();
     }
 
+    fn jump_generation(&self, snapshot: &ImageCompareSnapshot) -> u64 {
+        egui::Id::new((
+            self.host_epoch,
+            self.host.identity().generation,
+            image_compare_generation(snapshot),
+        ))
+        .value()
+    }
+
+    fn camera(&self) -> CompareCamera {
+        CompareCamera {
+            view: self.view,
+            wipe: self.wipe_fraction,
+            zoom: self.zoom,
+            pan: self.pan,
+        }
+    }
+    fn restore_camera(&mut self, camera: CompareCamera) {
+        self.view = camera.view;
+        self.wipe_fraction = camera.wipe;
+        self.zoom = camera.zoom;
+        self.pan = camera.pan;
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then(|| crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare.layer_id())
+        .flatten()
+    }
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn uses_root_retirement_fence(&self) -> bool {
+        !self.open
+            || self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+            || self.host.embedded_root_layer().is_some()
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.host.request_focus();
+    }
+    #[cfg(test)]
+    pub(super) fn presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("image-comparison-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse("image-comparison")
+                .expect("stable comparison key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
+        }
+    }
+    pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host.retire_to_docked();
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
+        self.host_focus = false;
+        self.close();
+    }
+    pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) {
+        self.reap_retired_uploads(ctx);
+        if self.open {
+            let snapshot = self.session.snapshot();
+            if snapshot.closed {
+                match self.session.reopen() {
+                    Ok(()) => self.status = None,
+                    Err(error) => self.status = Some(image_session_message(&error)),
+                }
+            }
+            let snapshot = self.session.snapshot();
+            self.collect_presentation(ctx, &snapshot);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.host_button
+    }
+
+    fn render_host_body(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &ImageCompareSnapshot,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        controls_enabled: bool,
+        first: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> CompareHostBody {
+        let start = ctx.output(|output| output.commands.len());
+        let mut copies_allowed = false;
+        let mut actions = Vec::new();
+        let mut request = None;
+        let mut window_open = self.open;
+        let mut draw = |ui: &mut egui::Ui| {
+            let owner = controls_enabled && ui.is_visible() && !ui.is_sizing_pass();
+            let host_actions_enabled = owner && first && !ctx.will_discard();
+            let actions_enabled = host_actions_enabled && !snapshot.closed;
+            copies_allowed |= actions_enabled;
+            let mut order = 0;
+            if let Some(presentation) = presentation {
+                let (button, target) =
+                    super::utility_host::presentation_button(ui, presentation, owner);
+                self.record_response("host-presentation", &button);
+                register_target(
+                    scope,
+                    ui,
+                    &button,
+                    "host/presentation",
+                    match target {
+                        super::utility_host::UtilityPresentation::Docked => "Dock",
+                        super::utility_host::UtilityPresentation::Popout => "Pop Out",
+                    },
+                    &mut order,
+                );
+                #[cfg(test)]
+                {
+                    self.host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+                }
+                if button.clicked() && host_actions_enabled {
+                    request = Some(target);
+                }
+            }
+            self.show_controls(
+                ui,
+                snapshot,
+                owner && !snapshot.closed,
+                actions_enabled,
+                scope,
+                &mut order,
+                &mut actions,
+            );
+            ui.separator();
+            self.show_status(ui, snapshot);
+            ui.separator();
+            self.show_canvas(ui, snapshot, actions_enabled);
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            egui::Window::new(WINDOW_TITLE)
+                .id(egui::Id::new(Some(WINDOW_TITLE)))
+                .collapsible(false)
+                .resizable(true)
+                .default_size((1100.0, 760.0))
+                .min_size((620.0, 430.0))
+                .show_utility(
+                    ctx,
+                    "image-comparison",
+                    egui::Id::new(WINDOW_TITLE),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from((1100.0, 760.0)),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::Vec2::from((620.0, 430.0))),
+                    |ui| draw(ui),
+                );
+        }
+        #[cfg(test)]
+        {
+            self.test_focused_control = ctx.memory(|memory| memory.focused());
+        }
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for command in output.commands.split_off(start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
+        CompareHostBody {
+            actions,
+            request,
+            close: first && controls_enabled && !ctx.will_discard() && !window_open,
+            copies: if copies_allowed { copies } else { Vec::new() },
+        }
+    }
+
+    // Legacy standalone entry uses the same retained body and completion path.
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
     pub(crate) fn show_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
@@ -464,92 +777,425 @@ impl ImageCompareDialogState {
         owner: crate::gui::jump_mode::ui::NavigationOwner,
         application_input_allowed: bool,
         native_owner_current: bool,
-        first_ui_pass: bool,
+        first: bool,
     ) {
-        self.reap_retired_uploads(ctx);
+        use super::utility_host::ViewportPassProvenance;
+        if let Some(previous) = self.host_pending.take() {
+            if previous.epoch == self.host_epoch {
+                self.restore_camera(previous.camera);
+            }
+        }
+        self.poll_host_background(ctx);
         if !self.open {
             return;
         }
-        if self.session.snapshot().closed {
-            match self.session.reopen() {
-                Ok(()) => self.status = None,
-                Err(error) => self.status = Some(image_session_message(&error)),
-            }
-        }
         let snapshot = self.session.snapshot();
-        self.collect_presentation(ctx, &snapshot);
-
-        let current_instance = instance.filter(|instance| {
-            matches!(
-                owner,
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare,
-                    instance: owner_instance,
-                } if owner_instance == *instance
-            )
-        });
-        let current_scope = scope.zip(current_instance).map(|(scope, instance)| {
-            scope.child_namespace("image-compare").with_surface(
-                crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance),
-                crate::gui::jump_mode::TargetGeneration(image_compare_generation(&snapshot)),
-            )
-        });
-        let parent_layer = crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare.layer_id();
-        let parent_is_current = parent_layer.is_some_and(|layer| {
-            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-        });
-        let owner_current = self.open
-            && native_owner_current
+        let jump_generation = self.jump_generation(&snapshot);
+        let owner_current = native_owner_current
             && application_input_allowed
-            && parent_is_current
+            && crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare
+                .layer_id()
+                .is_some_and(|layer| {
+                    crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                })
             && !egui::Popup::is_any_open(ctx);
+        let replay = (!first || ctx.will_discard())
+            .then(|| scope.map(crate::gui::jump_mode::ui::JumpModeScope::registration_only))
+            .flatten();
+        let current_scope = replay.as_ref().or(scope).zip(instance.filter(|instance| matches!(owner, crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind: crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare, instance: i } if i == *instance)))
+            .map(|(scope, instance)| scope.child_namespace("image-compare").with_surface(crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance), crate::gui::jump_mode::TargetGeneration(jump_generation)));
         #[cfg(any(test, feature = "dev-smoke-binaries"))]
         self.test_responses.clear();
+        let camera = self.camera();
+        let body = self.render_host_body(
+            ctx,
+            &snapshot,
+            current_scope.as_ref(),
+            owner_current,
+            first,
+            None,
+            None,
+        );
+        if first && !ctx.will_discard() {
+            let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            self.host_pending = Some(CompareHostFrame {
+                root,
+                owner: root,
+                host: self.host.identity(),
+                epoch: self.host_epoch,
+                generation: self.presentation_worker.generation(),
+                revisions: snapshot.revisions,
+                camera,
+                actions: body.actions,
+                copies: body.copies,
+                close: body.close,
+                request: body.request,
+                info: None,
+                native: false,
+            });
+        } else {
+            self.restore_camera(camera);
+        }
+    }
 
-        let mut window_open = self.open;
-        egui::Window::new(WINDOW_TITLE)
-            .id(egui::Id::new(Some(WINDOW_TITLE)))
-            .collapsible(false)
-            .resizable(true)
-            .default_size((1100.0, 760.0))
-            .min_size((620.0, 430.0))
-            .show_utility(
-                ctx,
-                "image-comparison",
-                egui::Id::new(WINDOW_TITLE),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from((1100.0, 760.0)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::Vec2::from((620.0, 430.0))),
-                |ui| {
-                    let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
-                    let controls_enabled = visible_owner && !snapshot.closed;
-                    let actions_enabled = controls_enabled && first_ui_pass;
-                    let mut order = 0_u64;
-                    self.show_controls(
-                        ui,
-                        &snapshot,
-                        controls_enabled,
-                        actions_enabled,
-                        current_scope.as_ref(),
-                        &mut order,
-                    );
-                    ui.separator();
-                    self.show_status(ui, &snapshot);
-                    ui.separator();
-                    self.show_canvas(ui, &snapshot, actions_enabled);
-                },
-            );
-        if !window_open {
-            self.close();
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        root_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        input_allowed: bool,
+        root_native_owner: bool,
+        launcher_jump: &crate::gui::jump_mode::ui::JumpModeUi,
+        jump_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+        root_shortcut_allowed: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
+        };
+        if let Some(previous) = self.host_pending.take() {
+            if previous.epoch == self.host_epoch {
+                self.restore_camera(previous.camera);
+            }
+        }
+        if !self.open {
+            return;
+        }
+        if pinned {
+            self.host_os_close_pending = false;
         }
         let snapshot = self.session.snapshot();
-        self.collect_presentation(ctx, &snapshot);
+        let jump_generation = self.jump_generation(&snapshot);
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let camera = self.camera();
+        let generation = self.presentation_worker.generation();
+        let mut staged = None;
+        let mut owner = None;
+        let mut info = None;
+        let mut native_owner = false;
+        #[cfg(any(test, feature = "dev-smoke-binaries"))]
+        self.test_responses.clear();
+        let root_close = |context: &egui::Context, first: bool, allowed: bool| {
+            first
+                && allowed
+                && root_shortcut_allowed
+                && !pinned
+                && launcher_jump.active_session().is_none()
+                && !egui::Popup::is_any_open(context)
+                && context.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                })
+        };
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = input_allowed && root_native_owner && !egui::Popup::is_any_open(ctx);
+                let closing = root_close(ctx, first, allowed);
+                let replay = (!first || ctx.will_discard())
+                    .then(|| root_scope.map(|scope| scope.registration_only()))
+                    .flatten();
+                let scope = replay.as_ref().or(root_scope).zip(instance.filter(|i| matches!(root_owner, NavigationOwner::Dialog {kind: NavigationDialogKind::ImageCompare, instance} if instance == *i)))
+                    .map(|(scope, instance)| scope.child_namespace("image-compare").with_surface(crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance), crate::gui::jump_mode::TargetGeneration(jump_generation)));
+                staged = Some(self.render_host_body(
+                    ctx,
+                    &snapshot,
+                    scope.as_ref(),
+                    allowed,
+                    first,
+                    None,
+                    Some(host.host),
+                ));
+                if let Some(body) = &mut staged {
+                    body.close |= closing;
+                }
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(WINDOW_TITLE)
+                .with_inner_size([1100.0, 760.0])
+                .with_min_inner_size([620.0, 430.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                let native = class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    native_owner = native;
+                    if native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                    self.restore_camera(camera);
+                }
+                let allowed = if native {
+                    input_allowed
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && !egui::Popup::is_any_open(&c)
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == egui::LayerId::background())
+                } else {
+                    input_allowed && root_native_owner && !egui::Popup::is_any_open(&c)
+                };
+                if native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                if native {
+                    let (chord, alphabet) = launcher_jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    let binding = instance.map(|instance| NavigationViewportBinding {
+                        viewport,
+                        owner: NavigationOwner::Dialog {
+                            kind: NavigationDialogKind::ImageCompare,
+                            instance,
+                        },
+                        base_layer: egui::LayerId::background(),
+                    });
+                    let nav = binding.map_or(NavigationOwner::Blocked, |b| {
+                        self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            b,
+                            input_allowed && jump_enabled,
+                        )
+                    });
+                    let jump_was_active = self.host_jump.active_session().is_some();
+                    self.host_jump.handle_viewport_input(
+                        &c,
+                        binding.is_some_and(|b| b.owner == nav),
+                        child_first,
+                        viewport,
+                    );
+                    let shortcut = child_first
+                        && allowed
+                        && !pinned
+                        && !jump_was_active
+                        && self.host_jump.active_session().is_none()
+                        && c.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    self.host_jump.begin_ui_pass();
+                    let scope = binding
+                        .filter(|b| b.owner == nav)
+                        .and_then(|b| {
+                            self.host_jump.scope_for_viewport_binding(
+                                crate::gui::jump_mode::SurfaceId::dialog(
+                                    "image-compare",
+                                    instance.unwrap_or_default(),
+                                ),
+                                crate::gui::jump_mode::TargetGeneration(jump_generation),
+                                "image-compare/view",
+                                b,
+                            )
+                        })
+                        .map(|scope| {
+                            let scope = scope.child_namespace("image-compare");
+                            if child_first && !c.will_discard() { scope } else { scope.registration_only() }
+                        });
+                    egui::CentralPanel::default().show(child, |ui| {
+                        self.presentation_worker.add_paint_fence(ui.painter());
+                        staged = Some(self.render_host_body(
+                            &c,
+                            &snapshot,
+                            scope.as_ref(),
+                            allowed,
+                            child_first,
+                            Some(ui),
+                            Some(host.host),
+                        ));
+                    });
+                    if let Some(body) = &mut staged {
+                        body.close |= shortcut || (!pinned && self.host_os_close_pending);
+                    }
+                    self.host_jump.finish_ui_pass();
+                    if let Some(binding) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            binding,
+                            input_allowed && jump_enabled,
+                        );
+                        if self.host_jump.prepare_pass_for_viewport(
+                            &c,
+                            binding,
+                            current,
+                            input_allowed && jump_enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&c, &self.host_jump);
+                        }
+                        if !c.will_discard() {
+                            self.host_jump.complete_frame_for_viewport(
+                                &c,
+                                binding,
+                                current,
+                                input_allowed && jump_enabled,
+                            );
+                        }
+                    }
+                } else {
+                    let closing = root_close(&c, child_first, allowed);
+                    let replay = (!child_first || c.will_discard())
+                        .then(|| root_scope.map(|scope| scope.registration_only()))
+                        .flatten();
+                    let scope = replay.as_ref().or(root_scope).zip(instance.filter(|i| matches!(root_owner, NavigationOwner::Dialog { kind: NavigationDialogKind::ImageCompare, instance } if instance == *i)))
+                        .map(|(scope, instance)| scope.child_namespace("image-compare").with_surface(crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance), crate::gui::jump_mode::TargetGeneration(jump_generation)));
+                    staged = Some(self.render_host_body(
+                        &c,
+                        &snapshot,
+                        scope.as_ref(),
+                        allowed,
+                        child_first,
+                        None,
+                        Some(host.host),
+                    ));
+                    if let Some(body) = &mut staged {
+                        body.close |= closing;
+                    }
+                }
+            });
+        }
+        if let (Some(owner), Some(mut body)) = (owner, staged) {
+            if pinned {
+                body.close = false;
+            }
+            if first && !ctx.will_discard() {
+                self.host_pending = Some(CompareHostFrame {
+                    root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                    generation,
+                    revisions: snapshot.revisions,
+                    camera,
+                    actions: body.actions,
+                    copies: body.copies,
+                    close: body.close,
+                    request: body.request,
+                    info,
+                    native: native_owner,
+                });
+                return;
+            }
+        }
+        self.restore_camera(camera);
+    }
+    pub(super) fn on_hosted_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> ImageCompareHostOutcome {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            return ImageCompareHostOutcome::default();
+        };
+        if !self.open
+            || frame.epoch != self.host_epoch
+            || frame.host != self.host.identity()
+            || frame.generation != self.presentation_worker.generation()
+            || frame.revisions != self.session.snapshot().revisions
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+        {
+            if self.open && frame.epoch == self.host_epoch {
+                self.restore_camera(frame.camera);
+            }
+            return ImageCompareHostOutcome::default();
+        }
+        let identity = self.native_identity(frame.host);
+        if let Some(info) = frame.info.as_ref() {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                WINDOW_TITLE,
+                identity,
+                info,
+                egui::vec2(1100.0, 760.0),
+                Some(egui::vec2(620.0, 430.0)),
+                None,
+            );
+            if self.host_focus {
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+            }
+        } else if self.host_focus {
+            if let Some(layer) = self.root_layer() {
+                ctx.move_to_top(layer);
+            }
+        }
+        self.host_focus = false;
+        if frame.close {
+            self.end_session_with_host(ctx);
+            return ImageCompareHostOutcome {
+                closed: true,
+                ..Default::default()
+            };
+        }
+        let show_root = frame.request == Some(UtilityPresentation::Docked);
+        if let Some(next) = frame.request {
+            if self.host.transition(next) {
+                self.presentation_worker
+                    .paint_owner
+                    .fetch_add(1, Ordering::AcqRel);
+                self.host_jump.cancel_all();
+                self.host_jump_frame = None;
+                if next == UtilityPresentation::Docked {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+                self.host_focus = true;
+                ctx.request_repaint();
+            }
+        } else {
+            for action in frame.actions {
+                match action {
+                    CompareAction::Open(side) => {
+                        self.pick_file_hosted(ctx, side, frame.host, frame.epoch, frame.native)
+                    }
+                    CompareAction::Paste(side) => self.request_paste(side),
+                }
+            }
+        }
+        if frame.host.host == UtilityPresentation::Popout {
+            self.host.complete_bootstrap(
+                frame.host,
+                (!frame.native)
+                    .then(|| {
+                        crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare.layer_id()
+                    })
+                    .flatten(),
+                None,
+            );
+        }
+        ImageCompareHostOutcome {
+            copies: if frame.request.is_none() {
+                frame.copies
+            } else {
+                Vec::new()
+            },
+            closed: false,
+            show_root,
+        }
     }
 
     fn show_controls(
@@ -560,32 +1206,33 @@ impl ImageCompareDialogState {
         actions_enabled: bool,
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         order: &mut u64,
+        actions: &mut Vec<CompareAction>,
     ) {
         ui.horizontal_wrapped(|ui| {
             let a_file = ui.add_enabled(controls_enabled, egui::Button::new("Open A…"));
             self.record_response("open-a", &a_file);
             register_target(scope, ui, &a_file, "input/open-a", "Open image A", order);
             if a_file.clicked() && actions_enabled {
-                self.pick_file(ui.ctx(), ImageSide::A);
+                actions.push(CompareAction::Open(ImageSide::A));
             }
             let paste_a = ui.add_enabled(controls_enabled, egui::Button::new("Paste A"));
             self.record_response("paste-a", &paste_a);
             register_target(scope, ui, &paste_a, "input/paste-a", "Paste image A", order);
             if paste_a.clicked() && actions_enabled {
-                self.request_paste(ImageSide::A);
+                actions.push(CompareAction::Paste(ImageSide::A));
             }
 
             let b_file = ui.add_enabled(controls_enabled, egui::Button::new("Open B…"));
             self.record_response("open-b", &b_file);
             register_target(scope, ui, &b_file, "input/open-b", "Open image B", order);
             if b_file.clicked() && actions_enabled {
-                self.pick_file(ui.ctx(), ImageSide::B);
+                actions.push(CompareAction::Open(ImageSide::B));
             }
             let paste_b = ui.add_enabled(controls_enabled, egui::Button::new("Paste B"));
             self.record_response("paste-b", &paste_b);
             register_target(scope, ui, &paste_b, "input/paste-b", "Paste image B", order);
             if paste_b.clicked() && actions_enabled {
-                self.request_paste(ImageSide::B);
+                actions.push(CompareAction::Paste(ImageSide::B));
             }
         });
 
@@ -938,37 +1585,82 @@ impl ImageCompareDialogState {
         }
     }
 
-    fn pick_file(&mut self, ctx: &egui::Context, side: ImageSide) {
+    fn pick_file_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        side: ImageSide,
+        host: super::utility_host::HostIdentity,
+        epoch: u64,
+        native: bool,
+    ) {
         let generation = self.presentation_worker.generation();
+        let revisions = self.session.snapshot().revisions;
+        #[cfg(windows)]
+        let captured_hwnd = super::utility_dialog_size::utility_picker_hwnd(
+            ctx,
+            native.then(|| self.native_identity(host)),
+        );
         #[cfg(test)]
-        let selected = self.test_file_picks.pop_front().unwrap_or_else(|| {
-            rfd::FileDialog::new()
-                .add_filter(
-                    "Supported images",
-                    crate::image_compare::SUPPORTED_IMAGE_FILE_EXTENSIONS,
-                )
-                .pick_file()
-        });
+        let queued = self.test_file_picks.pop_front();
+        #[cfg(test)]
+        let selected = if let Some(selected) = queued {
+            selected
+        } else {
+            self.host_file_picker(ctx, host, native)
+        };
         #[cfg(not(test))]
-        let selected = rfd::FileDialog::new()
-            .add_filter(
-                "Supported images",
-                crate::image_compare::SUPPORTED_IMAGE_FILE_EXTENSIONS,
-            )
-            .pick_file();
-        let still_current = self.open
-            && generation == self.presentation_worker.generation()
-            && crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare
-                .layer_id()
-                .is_some_and(|layer| {
-                    crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-                });
-        if !still_current {
+        let selected = self.host_file_picker(ctx, host, native);
+        if !self.open
+            || self.host_epoch != epoch
+            || self.host.identity() != host
+            || generation != self.presentation_worker.generation()
+            || revisions != self.session.snapshot().revisions
+        {
             return;
         }
+        #[cfg(all(windows, not(test)))]
+        if captured_hwnd.is_none()
+            || captured_hwnd
+                != super::utility_dialog_size::utility_picker_hwnd(
+                    ctx,
+                    native.then(|| self.native_identity(host)),
+                )
+        {
+            return;
+        }
+        #[cfg(all(windows, test))]
+        let _ = captured_hwnd;
         if let Some(path) = selected {
             self.replace_file(side, path);
         }
+    }
+    fn host_file_picker(
+        &mut self,
+        ctx: &egui::Context,
+        host: super::utility_host::HostIdentity,
+        native: bool,
+    ) -> Option<PathBuf> {
+        let picker = rfd::FileDialog::new().add_filter(
+            "Supported images",
+            crate::image_compare::SUPPORTED_IMAGE_FILE_EXTENSIONS,
+        );
+        #[cfg(windows)]
+        let picker = {
+            let identity = native.then(|| self.native_identity(host));
+            let Some(hwnd) = super::utility_dialog_size::utility_picker_hwnd(ctx, identity)
+                .and_then(|handle| std::num::NonZeroIsize::new(handle as isize))
+            else {
+                self.status = Some(
+                    "Cannot verify the image picker window. Focus the comparison and try again."
+                        .into(),
+                );
+                return None;
+            };
+            picker.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+        };
+        #[cfg(not(windows))]
+        let _ = (ctx, host, native);
+        picker.pick_file()
     }
 
     fn replace_file(&mut self, side: ImageSide, path: PathBuf) {
@@ -1036,6 +1728,73 @@ impl ImageCompareDialogState {
         self.wipe_fraction
     }
 
+    #[cfg(test)]
+    pub(super) fn test_focused_control(&self) -> Option<egui::Id> {
+        self.test_focused_control
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_snapshot(
+        &self,
+    ) -> (usize, [u64; 2], u64, f32, f32, egui::Vec2, usize, usize) {
+        (
+            Arc::as_ptr(&self.session) as usize,
+            self.session.snapshot().revisions,
+            self.presentation_worker.generation(),
+            self.wipe_fraction,
+            self.zoom,
+            self.pan,
+            self.test_file_picks.len(),
+            self.test_clipboard_images.len(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_next_presentation_for_test(&self) -> ImagePresentationTestHold {
+        let state = Arc::new(PresentationHoldState {
+            entered_and_released: Mutex::new((false, false)),
+            changed: Condvar::new(),
+        });
+        *self
+            .presentation_worker
+            .shared
+            .next_presentation_hold
+            .lock()
+            .unwrap() = Some(Arc::clone(&state));
+        ImagePresentationTestHold(state)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_host_jump(&self) -> &crate::gui::jump_mode::ui::JumpModeUi {
+        &self.host_jump
+    }
+    #[cfg(test)]
+    pub(crate) fn test_presentation_keys(
+        &self,
+    ) -> (Option<([u64; 2], [u64; 2])>, Option<([u64; 2], [u64; 2])>) {
+        let desired = self
+            .presentation_worker
+            .shared
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.desired)
+            .map(|key| (key.ids, key.revisions));
+        let presented = self
+            .presented
+            .as_ref()
+            .map(|item| item.key())
+            .map(|key| (key.ids, key.revisions));
+        (desired, presented)
+    }
+    #[cfg(test)]
+    pub(crate) fn test_input_ids(&self) -> [Option<u64>; 2] {
+        let snapshot = self.session.snapshot();
+        [
+            snapshot.input_a.as_ref().map(|input| input.id().get()),
+            snapshot.input_b.as_ref().map(|input| input.id().get()),
+        ]
+    }
     #[cfg(test)]
     pub(crate) fn queue_file_pick_for_test(&mut self, selected: Option<PathBuf>) {
         self.test_file_picks.push_back(selected);
@@ -1140,7 +1899,7 @@ impl ImageCompareDialogState {
         })
     }
 
-    #[cfg(feature = "dev-smoke-binaries")]
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
     pub(crate) fn smoke_retirement_observation(&self) -> serde_json::Value {
         let retired_uploads = self
             .presentation_worker
@@ -1158,7 +1917,9 @@ impl ImageCompareDialogState {
     }
 
     pub(crate) fn paint_retirement_fence(&self, painter: &egui::Painter) {
-        self.presentation_worker.add_paint_fence(painter);
+        if self.uses_root_retirement_fence() {
+            self.presentation_worker.add_paint_fence(painter);
+        }
     }
 }
 
@@ -1185,6 +1946,13 @@ fn presentation_worker_loop(shared: Arc<PresentationShared>) {
             state.active_cancel = Some(Arc::clone(&job.cancelled));
             job
         };
+        #[cfg(test)]
+        if let Some(hold) = shared.next_presentation_hold.lock().unwrap().take() {
+            let mut state = hold.entered_and_released.lock().unwrap();
+            state.0 = true;
+            hold.changed.notify_all();
+            drop(hold.changed.wait_while(state, |state| !state.1).unwrap());
+        }
         let result = prepare_presentation(&job);
         if let Ok(mut state) = shared.state.lock() {
             if state.active_generation == Some(job.generation) {
@@ -1527,6 +2295,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn imgdiff_host_transition_remains_usable_while_session_is_closed() {
+        use crate::gui::jump_mode::ui::{JumpModeUi, NavigationDialogKind, NavigationOwner};
+        use crate::gui::utility_host::UtilityPresentation;
+        let ctx = egui::Context::default();
+        let mut dialog = ImageCompareDialogState::new(&ctx);
+        let jump = JumpModeUi::default();
+        dialog.open();
+        dialog.session.close();
+        let render = |dialog: &mut ImageCompareDialogState, events| {
+            let output = ctx.run_ui(image_compare_input(events), |ui| {
+                dialog.show_hosted(
+                    ui.ctx(),
+                    None,
+                    Some(1),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::ImageCompare,
+                        instance: 1,
+                    },
+                    true,
+                    true,
+                    &jump,
+                    false,
+                    true,
+                    ui.ctx().current_pass_index() == 0,
+                    false,
+                    true,
+                );
+            });
+            let completion = dialog.on_hosted_frame_complete(&ctx);
+            output.drop_without_applying_deltas();
+            completion
+        };
+        for _ in 0..3 {
+            render(&mut dialog, Vec::new());
+        }
+        assert!(dialog.session.snapshot().closed);
+        let (_, rect, enabled) = dialog.response_for_test("host-presentation").unwrap();
+        assert!(enabled && rect.is_positive());
+        let (_, clip, _) = dialog.test_host_button().unwrap();
+        assert!(clip.contains(rect.center()));
+        assert!(!dialog.response_for_test("open-a").unwrap().2);
+        let session = Arc::clone(&dialog.session);
+        for pressed in [true, false] {
+            render(
+                &mut dialog,
+                vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(dialog.presentation(), UtilityPresentation::Popout);
+        assert!(Arc::ptr_eq(&session, &dialog.session));
+        assert!(dialog.session.snapshot().closed);
+        dialog.end_session_with_host(&ctx);
+    }
+
+    #[test]
     fn imgdiff_texture_admission_rejects_long_thin_layers_before_upload() {
         assert!(texture_dimensions_fit(
             16_384,
@@ -1542,6 +2373,21 @@ mod tests {
                 .unwrap_err()
                 .contains("maximum texture side")
         );
+    }
+
+    #[test]
+    fn imgdiff_stale_paint_owner_does_not_advance_retirement_fence() {
+        let serial = AtomicU64::new(0);
+        let owner = AtomicU64::new(1);
+        acknowledge_owner_paint(&serial, &owner, 0);
+        assert_eq!(serial.load(Ordering::Acquire), 0);
+        acknowledge_owner_paint(&serial, &owner, 1);
+        assert_eq!(serial.load(Ordering::Acquire), 1);
+        owner.store(2, Ordering::Release);
+        acknowledge_owner_paint(&serial, &owner, 1);
+        assert_eq!(serial.load(Ordering::Acquire), 1);
+        acknowledge_owner_paint(&serial, &owner, 2);
+        assert_eq!(serial.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -1665,6 +2511,7 @@ mod tests {
             );
         });
         output.drop_without_applying_deltas();
+        let _ = dialog.on_hosted_frame_complete(ctx);
     }
 
     fn click_image_compare_response(

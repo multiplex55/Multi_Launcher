@@ -84,6 +84,16 @@ The formatter emits normalized quoted labels and LF line endings. This subset do
 
 ## Unsupported and invalid source
 
+Use **Suggestions** in Diagram Studio for keywords, snippets, and node IDs in
+supported source contexts. A suggestion replaces only its indicated span;
+one undo restores the exact previous draft. Unsupported source remains
+available for editing and exact Mermaid export.
+
+The native Mermaid parser supports flat subgraphs as described above. **Copy
+as Visual…** is a separate operation and requires a current native flowchart
+without groups. It creates a new Visual Canvas `.mld` and leaves the Mermaid
+document and its exact source intact.
+
 The parser rejects unsupported constructs rather than ignoring them. Examples include comments and directives beginning with `%%`, styling/class/click statements, callbacks, nested groups, chains, semicolon-separated statements, other diagram kinds, unquoted shape labels, and unrecognized arrow forms. The source owner keeps the original draft intact and blocks graph-to-source mutations while the current text is invalid or unsupported.
 
 Diagnostics carry a byte range into the original source plus one-based line and Unicode-scalar column. CRLF input is accepted; formatting normalizes it. Ranges always start and end at UTF-8 character boundaries.

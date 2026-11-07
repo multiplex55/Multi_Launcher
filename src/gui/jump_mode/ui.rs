@@ -55,10 +55,11 @@ pub(crate) enum NavigationDialogKind {
     DuplicateFinder,
     Activity,
     ZipExtractor,
+    ClipboardModify,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -78,6 +79,7 @@ impl NavigationDialogKind {
         Self::DuplicateFinder,
         Self::Activity,
         Self::ZipExtractor,
+        Self::ClipboardModify,
     ];
 
     const fn index(self) -> usize {
@@ -101,6 +103,7 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => 16,
             Self::Activity => 17,
             Self::ZipExtractor => 18,
+            Self::ClipboardModify => 19,
         }
     }
 
@@ -125,6 +128,7 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => "duplicate-finder",
             Self::Activity => "activity",
             Self::ZipExtractor => "zip-extractor",
+            Self::ClipboardModify => "clipboard-modify",
         }
     }
 
@@ -136,6 +140,7 @@ impl NavigationDialogKind {
             Self::FileSearch => egui::Id::new(Some("File Search")),
             Self::Snippets => egui::Id::new(Some("Snippets")),
             Self::ClipboardHistory => egui::Id::new(Some("Clipboard History")),
+            Self::ClipboardModify => egui::Id::new("clipboard_modify_dialog_window"),
             Self::JsonUtility => egui::Id::new("json_utility_dialog"),
             Self::RegexTester => egui::Id::new("regex_tester_embedded_window"),
             Self::XmlToolkit => egui::Id::new("xml_toolkit_embedded_window"),
@@ -376,6 +381,7 @@ pub(crate) fn dashboard_editor_confirmation_layer_id(
 
 pub(crate) fn resolve_dashboard_editor_confirmation_owner(
     ctx: &egui::Context,
+    parent_layer: egui::LayerId,
     parent_instance: u64,
     confirmation_instance: u64,
     kind: DashboardEditorConfirmationKind,
@@ -387,7 +393,6 @@ pub(crate) fn resolve_dashboard_editor_confirmation_owner(
     };
     let child_layer =
         dashboard_editor_confirmation_layer_id(parent_instance, confirmation_instance, kind);
-    let parent_layer = NavigationDialogKind::DashboardEditor.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -395,7 +400,7 @@ pub(crate) fn resolve_dashboard_editor_confirmation_owner(
         && visible_top_middle_layer(ctx) == Some(child_layer)
         && focused_response_layer(ctx).is_none_or(|focused| {
             focused == child_layer
-                || Some(focused) == parent_layer
+                || focused == parent_layer
                 || focused.order != egui::Order::Middle
         })
     {
@@ -430,13 +435,38 @@ impl NavigationViewportBinding {
             self.owner,
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::RegexTester
+                    | NavigationDialogKind::FileSearch
+                    | NavigationDialogKind::BatchRename
+                    | NavigationDialogKind::SearchReplace
+                    | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::JsonUtility
+                    | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
+                    | NavigationDialogKind::ZipExtractor
+                    | NavigationDialogKind::DashboardEditor
+                    | NavigationDialogKind::MouseGestures
+                    | NavigationDialogKind::MouseSettings
+                    | NavigationDialogKind::MouseGestureSettings
                     | NavigationDialogKind::RadialDesigner,
                 ..
-            } | NavigationOwner::XmlOverwriteConfirmation { .. }
+            } | NavigationOwner::PasteSequence { .. }
+                | NavigationOwner::Timer { .. }
+                | NavigationOwner::Notes { .. }
+                | NavigationOwner::MkMacro { .. }
+                | NavigationOwner::Settings { .. }
+                | NavigationOwner::XmlOverwriteConfirmation { .. }
+                | NavigationOwner::BatchRenameConfirmation { .. }
+                | NavigationOwner::SearchReplaceConfirmation { .. }
+                | NavigationOwner::ClipboardRemoval { .. }
+                | NavigationOwner::SnippetRemoval { .. }
+                | NavigationOwner::SnippetPrompt { .. }
+                | NavigationOwner::DashboardEditorConfirmation { .. }
+                | NavigationOwner::MouseGestureBinding { .. }
+                | NavigationOwner::MouseGestureDelete { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
         )
     }
@@ -444,12 +474,83 @@ impl NavigationViewportBinding {
     pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
+            NavigationOwner::Dialog {
+                kind: kind @ (NavigationDialogKind::FileSearch
+                    | NavigationDialogKind::BatchRename
+                    | NavigationDialogKind::SearchReplace
+                    | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::JsonUtility
+                    | NavigationDialogKind::Snippets),
+                ..
+            } => {
+                Some(self.base_layer) == kind.layer_id() && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::BatchRenameConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+            } => {
+                self.base_layer
+                    == batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::ClipboardRemoval { .. } => {
+                Some(self.base_layer) == NavigationDialogKind::ClipboardHistory.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::SnippetRemoval { .. } => {
+                Some(self.base_layer) == NavigationDialogKind::Snippets.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::PasteSequence { .. } => {
+                self.base_layer == paste_sequence_dialog_layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Timer { .. } => {
+                self.base_layer == egui::LayerId::background() && visible_layer.is_none()
+            }
+            NavigationOwner::SnippetPrompt { generation } => {
+                self.base_layer == snippet_prompt_layer_id(generation)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::SearchReplaceConfirmation { kind, .. } => {
+                self.base_layer == kind.layer_id() && visible_layer == Some(self.base_layer)
+            }
             NavigationOwner::XmlOverwriteConfirmation {
                 parent_instance,
                 confirmation_instance,
             } => {
                 self.base_layer
                     == xml_overwrite_confirmation_layer_id(parent_instance, confirmation_instance)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::DashboardEditorConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+            } => {
+                self.base_layer
+                    == dashboard_editor_confirmation_layer_id(
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    )
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::MouseGestureBinding {
+                parent_instance,
+                binding_instance,
+            } => {
+                self.base_layer == mouse_gesture_binding_layer_id(parent_instance, binding_instance)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::MouseGestureDelete {
+                parent_instance,
+                confirmation_instance,
+            } => {
+                self.base_layer
+                    == mouse_gesture_delete_layer_id(parent_instance, confirmation_instance)
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::RadialDesignerChild {
@@ -485,8 +586,22 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
-                || (matches!(self.owner, NavigationOwner::RadialDesignerChild { .. })
-                    && layer == egui::LayerId::background())
+                || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
+                    && (Some(layer) == NavigationDialogKind::Snippets.layer_id()
+                        || layer.order != egui::Order::Middle))
+                || (matches!(self.owner, NavigationOwner::BatchRenameConfirmation { .. })
+                    && (Some(layer) == NavigationDialogKind::BatchRename.layer_id()
+                        || layer.order != egui::Order::Middle))
+                || (matches!(self.owner, NavigationOwner::SearchReplaceConfirmation { .. })
+                    && (Some(layer) == NavigationDialogKind::SearchReplace.layer_id()
+                        || layer.order != egui::Order::Middle))
+                || (matches!(
+                    self.owner,
+                    NavigationOwner::RadialDesignerChild { .. }
+                        | NavigationOwner::DashboardEditorConfirmation { .. }
+                        | NavigationOwner::MouseGestureBinding { .. }
+                        | NavigationOwner::MouseGestureDelete { .. }
+                ) && layer == egui::LayerId::background())
         })
     }
 }
@@ -785,6 +900,18 @@ pub(crate) fn resolve_batch_rename_confirmation_owner(
     confirmation_instance: u64,
     kind: BatchRenameConfirmationKind,
 ) -> NavigationOwner {
+    resolve_batch_rename_confirmation_owner_with_parent(
+        ctx, parent_instance, confirmation_instance, kind, NavigationDialogKind::BatchRename.layer_id(),
+    )
+}
+
+pub(crate) fn resolve_batch_rename_confirmation_owner_with_parent(
+    ctx: &egui::Context,
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: BatchRenameConfirmationKind,
+    parent_layer: Option<egui::LayerId>,
+) -> NavigationOwner {
     let owner = NavigationOwner::BatchRenameConfirmation {
         parent_instance,
         confirmation_instance,
@@ -792,7 +919,6 @@ pub(crate) fn resolve_batch_rename_confirmation_owner(
     };
     let child_layer =
         batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
-    let parent_layer = NavigationDialogKind::BatchRename.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -819,6 +945,7 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
     confirmation_instance: u64,
     kind: SearchReplaceConfirmationKind,
     subject: SearchReplaceConfirmationSubject,
+    parent_layer: egui::LayerId,
 ) -> NavigationOwner {
     let owner = NavigationOwner::SearchReplaceConfirmation {
         parent_instance,
@@ -827,7 +954,6 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
         subject,
     };
     let child_layer = kind.layer_id();
-    let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -835,7 +961,7 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
         && visible_top_middle_layer(ctx) == Some(child_layer)
         && focused_response_layer(ctx).is_none_or(|focused| {
             focused == child_layer
-                || Some(focused) == parent_layer
+                || focused == parent_layer
                 || focused.order != egui::Order::Middle
         })
     {
@@ -880,6 +1006,7 @@ pub(crate) fn mouse_gesture_delete_layer_id(
 pub(crate) fn resolve_mouse_gesture_child_navigation_owner(
     ctx: &egui::Context,
     owner: NavigationOwner,
+    parent_layer: egui::LayerId,
     combo_popup: Option<&ComboPopupOwner>,
 ) -> NavigationOwner {
     let child_layer = match owner {
@@ -892,9 +1019,6 @@ pub(crate) fn resolve_mouse_gesture_child_navigation_owner(
             confirmation_instance,
         } => mouse_gesture_delete_layer_id(parent_instance, confirmation_instance),
         _ => return NavigationOwner::Blocked,
-    };
-    let Some(parent_layer) = NavigationDialogKind::MouseGestures.layer_id() else {
-        return NavigationOwner::Blocked;
     };
     let focused_layer = focused_response_layer(ctx);
     let base_is_current = ctx.viewport_id() == egui::ViewportId::ROOT
@@ -986,11 +1110,16 @@ pub(crate) fn resolve_snippet_prompt_navigation_owner(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
+    pub(crate) settings_layer: Option<egui::LayerId>,
     pub(crate) notes: Option<u64>,
     pub(crate) todo: Option<u64>,
     pub(crate) timer: Option<u64>,
-    pub(crate) paste_sequence: Option<u64>,
-    pub(crate) mkmacro: Option<u64>,
+    pub(crate) paste_sequence: Option<(u64, egui::LayerId)>,
+    pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
+    pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
+    pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
+    pub(crate) file_search_layer: Option<egui::LayerId>,
+    pub(crate) hosted_utility_layers: [Option<egui::LayerId>; NavigationDialogKind::ALL.len()],
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1059,7 +1188,7 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
     let top_window = visible_top_middle_layer(ctx);
     let focused_layer = focused_response_layer(ctx);
     if let Some(layer) = top_window {
-        let owner = if layer == settings_layer_id() {
+        let owner = if layer == windows.settings_layer.unwrap_or_else(settings_layer_id) {
             windows
                 .settings
                 .map(|instance| NavigationOwner::Settings { instance })
@@ -1075,15 +1204,30 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             windows
                 .timer
                 .map(|instance| NavigationOwner::Timer { instance })
-        } else if layer == paste_sequence_dialog_layer_id() {
-            windows
-                .paste_sequence
-                .map(|instance| NavigationOwner::PasteSequence { instance })
-        } else if layer == mkmacro_dialog_layer_id() {
-            windows
-                .mkmacro
-                .map(|instance| NavigationOwner::MkMacro { instance })
-        } else if let Some(kind) = NavigationDialogKind::for_layer(layer) {
+        } else if let Some((instance, _)) = windows.paste_sequence.filter(|(_, owner_layer)| *owner_layer == layer) {
+            Some(NavigationOwner::PasteSequence { instance })
+        } else if let Some((instance, _)) = windows.mkmacro.filter(|(_, owner)| *owner == layer) {
+            Some(NavigationOwner::MkMacro { instance })
+        } else if let Some(kind) = if windows.dashboard_editor_layer == Some(layer) {
+            Some(NavigationDialogKind::DashboardEditor)
+        } else if windows.file_search_layer == Some(layer) {
+            Some(NavigationDialogKind::FileSearch)
+        } else if let Some(kind) = NavigationDialogKind::ALL
+            .into_iter().find(|kind| windows.hosted_utility_layers[kind.index()] == Some(layer))
+        {
+            Some(kind)
+        } else if windows.mouse_form_layers[0] == Some(layer) {
+            Some(NavigationDialogKind::MouseSettings)
+        } else if windows.mouse_form_layers[1] == Some(layer) {
+            Some(NavigationDialogKind::MouseGestureSettings)
+        } else if windows.mouse_form_layers[2] == Some(layer) {
+            Some(NavigationDialogKind::MouseGestures)
+        } else {
+            NavigationDialogKind::for_layer(layer).filter(|kind| {
+                *kind != NavigationDialogKind::DashboardEditor
+                    || windows.dashboard_editor_layer.is_none()
+            })
+        } {
             windows
                 .dialog_instance(kind)
                 .map(|instance| NavigationOwner::Dialog { kind, instance })
@@ -1662,9 +1806,25 @@ pub struct JumpModeScope {
     epoch: NavigationEpoch,
     root_owner_allowed: bool,
     navigation_owner: Option<NavigationOwner>,
+    apply_focus_intent: bool,
 }
 
 impl JumpModeScope {
+    pub(crate) fn registration_only(&self) -> Self {
+        Self {
+            apply_focus_intent: false,
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn has_pending_focus_intent(&self) -> bool {
+        self.apply_focus_intent
+            && self.collector
+                .lock()
+                .ok()
+                .is_some_and(|collector| collector.pending_focus_intent.is_some())
+    }
+
     pub(crate) fn child_namespace(&self, child: impl AsRef<str>) -> Self {
         let child = child.as_ref();
         let mut identity_namespace = self.identity_namespace.clone();
@@ -1989,7 +2149,8 @@ impl JumpModeScope {
 
         let directive = match collector.pending_focus_intent.clone() {
             Some(intent)
-                if intent.target == id
+                if self.apply_focus_intent
+                    && intent.target == id
                     && intent.viewport == target.viewport
                     && intent.epoch == target.epoch =>
             {
@@ -2773,6 +2934,7 @@ impl JumpModeUi {
             epoch: self.navigation_epoch,
             root_owner_allowed,
             navigation_owner,
+            apply_focus_intent: true,
         })
     }
 
@@ -4102,6 +4264,11 @@ mod tests {
                     NavigationDialogKind::ClipboardHistory => {
                         egui::Window::new("Clipboard History").show(ctx, |_| {});
                     }
+                    NavigationDialogKind::ClipboardModify => {
+                        egui::Window::new("Clipboard Modify")
+                            .id(egui::Id::new("clipboard_modify_dialog_window"))
+                            .show(ctx, |_| {});
+                    }
                     NavigationDialogKind::JsonUtility => {
                         egui::Window::new("JSON Utility")
                             .id(egui::Id::new("json_utility_dialog"))
@@ -4254,11 +4421,16 @@ mod tests {
         let ctx = egui::Context::default();
         let windows = NavigationWindows {
             settings: Some(11),
+            settings_layer: None,
             notes: Some(22),
             todo: Some(33),
             timer: None,
             paste_sequence: None,
             mkmacro: None,
+            dashboard_editor_layer: None,
+            mouse_form_layers: [None; 3],
+            file_search_layer: None,
+            hosted_utility_layers: [None; NavigationDialogKind::ALL.len()],
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
@@ -6091,6 +6263,112 @@ mod tests {
             },
         );
         raw
+    }
+
+    #[test]
+    fn jump_mode_dashboard_native_confirmation_requires_exact_viewport_and_child_layer() {
+        let viewport = egui::ViewportId::from_hash_of("dashboard native owner test");
+        let parent = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::DashboardEditor,
+            instance: 3,
+        };
+        let parent_binding = NavigationViewportBinding {
+            viewport,
+            owner: parent,
+            base_layer: egui::LayerId::background(),
+        };
+        let kind = DashboardEditorConfirmationKind::ResetWidgetSettings;
+        let child = NavigationOwner::DashboardEditorConfirmation {
+            parent_instance: 3,
+            confirmation_instance: 7,
+            kind,
+        };
+        let child_layer = dashboard_editor_confirmation_layer_id(3, 7, kind);
+        let child_binding = NavigationViewportBinding {
+            viewport,
+            owner: child,
+            base_layer: child_layer,
+        };
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), parent_binding, None),
+                parent
+            );
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+
+        for _ in 0..3 {
+            ctx.run_ui(viewport_raw_input(viewport), |ui| {
+                egui::Window::new("Dashboard confirmation")
+                    .id(child_layer.id)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Owned confirmation");
+                    });
+            })
+            .drop_without_applying_deltas();
+        }
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                child
+            );
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), parent_binding, None),
+                NavigationOwner::Blocked
+            );
+            let stale = NavigationViewportBinding {
+                owner: NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance: 3,
+                    confirmation_instance: 6,
+                    kind,
+                },
+                ..child_binding
+            };
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), stale, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_native_binding_is_admissible_only_in_its_viewport() {
+        let viewport = egui::ViewportId::from_hash_of("mkmacro owned viewport test");
+        let owner = NavigationOwner::MkMacro { instance: 17 };
+        let binding = NavigationViewportBinding {
+            viewport,
+            owner,
+            base_layer: egui::LayerId::background(),
+        };
+        let ctx = egui::Context::default();
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), binding, None),
+                owner
+            );
+        })
+        .drop_without_applying_deltas();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), binding, None),
+                NavigationOwner::Blocked,
+            );
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]

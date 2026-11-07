@@ -21,13 +21,23 @@ pub(super) fn cancel(state: &mut FolderCompareState) {
 }
 
 /// Returns true only after the complete draft has validated and been applied.
-pub(super) fn show(ctx: &egui::Context, state: &mut FolderCompareState) -> bool {
+pub(super) fn window_id() -> egui::Id {
+    egui::Id::new("Folder Rules")
+}
+
+pub(super) fn show(
+    ctx: &egui::Context,
+    state: &mut FolderCompareState,
+    input_allowed: bool,
+) -> bool {
     if !state.folder_rules_open {
         return false;
     }
     let mut applied = false;
     let mut open_window = true;
     egui::Window::new("Folder Rules")
+        .id(window_id())
+        .enabled(input_allowed)
         .collapsible(false)
         .resizable(true)
         .max_width(ctx.content_rect().width().max(1.0))
@@ -35,7 +45,7 @@ pub(super) fn show(ctx: &egui::Context, state: &mut FolderCompareState) -> bool 
         .show_utility(
             ctx,
             "diff-folder-rules",
-            egui::Id::new("Folder Rules"),
+            window_id(),
             Some(&mut open_window),
             crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
                 crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
@@ -168,9 +178,7 @@ pub(super) fn show(ctx: &egui::Context, state: &mut FolderCompareState) -> bool 
                 ui.horizontal_wrapped(|ui| {
                     let apply_button =
                         ui.add_enabled(validation.is_ok(), egui::Button::new("Apply + Rescan"));
-                    if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary).clicked()
-                        && state.apply_draft().is_ok()
-                    {
+                    if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary).clicked() {
                         state.folder_rules_cancel_snapshot = None;
                         state.folder_rules_open = false;
                         applied = true;
@@ -181,7 +189,7 @@ pub(super) fn show(ctx: &egui::Context, state: &mut FolderCompareState) -> bool 
                 });
             },
         );
-    if !open_window && state.folder_rules_open {
+    if input_allowed && !open_window && state.folder_rules_open {
         cancel(state);
     }
     applied

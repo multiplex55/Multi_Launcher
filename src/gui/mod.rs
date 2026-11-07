@@ -5,12 +5,16 @@ mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
 mod batch_rename_dialog;
+mod utility_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
+mod programmer_inspector_dialog;
+mod explorer_tabs_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
+mod calendar_window_host;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
 mod color_pick;
@@ -30,8 +34,11 @@ mod duplicate_finder_dialog;
 pub mod duplicate_finder_smoke;
 mod event_channel;
 mod fav_dialog;
+mod file_lock_dialog;
 mod file_search_dialog;
+mod file_search_window_host;
 pub mod file_search_preview_dialog;
+mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
 pub(crate) mod hotfolder_dialog;
@@ -84,6 +91,7 @@ mod query_history;
 mod query_observation;
 mod radial_actions;
 mod radial_editor;
+mod recording_dialog;
 mod regex_tester_dialog;
 mod render;
 mod screen_draw_restore;
@@ -93,6 +101,8 @@ pub(crate) mod screenshot_countdown;
 mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
+mod settings_window_host;
+mod mouse_form_host;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod snippet_prompt_dialog;
@@ -115,6 +125,8 @@ pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod utility_dialog_size;
+mod utility_host;
+mod utility_window_geometry;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
@@ -167,10 +179,14 @@ pub(crate) use data_recovery_dialog::{
 pub use diff_dialog::DiffDialogState;
 pub use duplicate_finder_dialog::DuplicateFinderDialogState;
 pub use fav_dialog::FavDialog;
+pub(crate) use file_lock_dialog::{
+    FileLockDialogEffect, FileLockDialogState, FileLockRevealRequest,
+};
 pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
+pub(crate) use folder_size_dialog::{FolderSizeDialogEffect, FolderSizeDialogState};
 pub use hash_generator_dialog::HashGeneratorDialogState;
 pub use image_compare_dialog::ImageCompareDialogState;
 pub use image_panel::ImagePanel;
@@ -753,6 +769,8 @@ pub enum Panel {
     ZipExtractorDialog,
     RegexTesterDialog,
     CalculationPadDialog,
+    ProgrammerInspectorDialog,
+    ExplorerTabsDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
     MarkdownStudioDialog,
@@ -778,7 +796,10 @@ pub enum Panel {
     TableUtilityDialog,
     ImageCompareDialog,
     DuplicateFinderDialog,
+    FolderSizeDialog,
+    FileLockDialog,
     ActivityDialog,
+    RecordingDialog,
 }
 
 impl Panel {
@@ -822,6 +843,8 @@ impl Panel {
             Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
+            Self::ProgrammerInspectorDialog => "Programmer Inspector",
+            Self::ExplorerTabsDialog => "Explorer Tabs",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
             Self::MarkdownStudioDialog => "Markdown Studio",
@@ -831,7 +854,10 @@ impl Panel {
             Self::TableUtilityDialog => "Table Utility",
             Self::ImageCompareDialog => "Image Comparison",
             Self::DuplicateFinderDialog => "Duplicate Finder",
+            Self::FolderSizeDialog => "Folder Size",
+            Self::FileLockDialog => "File Lock Inspector",
             Self::ActivityDialog => "Activity",
+            Self::RecordingDialog => "Screen Recorder",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -892,6 +918,8 @@ struct PanelStates {
     zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
+    programmer_inspector_dialog: bool,
+    explorer_tabs_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
     markdown_studio_dialog: bool,
@@ -901,7 +929,10 @@ struct PanelStates {
     table_utility_dialog: bool,
     image_compare_dialog: bool,
     duplicate_finder_dialog: bool,
+    folder_size_dialog: bool,
+    file_lock_dialog: bool,
     activity_dialog: bool,
+    recording_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1028,6 +1059,8 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    pub(crate) recording_controller: crate::recording::RecordingController,
+    pub(crate) recording_dialog: recording_dialog::RecordingDialogState,
     pub(crate) coordinate_tool: coordinate_tool::CoordinateToolGui,
     coordinate_capture_parking: Option<coordinate_tool::CoordinatePickParking>,
     coordinate_capture_generation: u64,
@@ -1058,6 +1091,8 @@ pub struct LauncherApp {
     pub(crate) test_sequence_context_capture_forbidden: bool,
     #[cfg(test)]
     pub(crate) test_sequence_context_capture_calls: usize,
+    #[cfg(test)]
+    test_sequence_platform: Option<command_host::tests::AppPastePlatform>,
     pub usage: HashMap<String, u32>,
     pub(crate) target_repair_usage_generation: Arc<AtomicU64>,
     pub(crate) target_repair_usage_barrier: Arc<Mutex<()>>,
@@ -1069,6 +1104,9 @@ pub struct LauncherApp {
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
+    settings_window_host: settings_window_host::SettingsWindowHost,
+    mouse_settings_host: mouse_form_host::MouseSettingsHost,
+    mouse_gesture_settings_host: mouse_form_host::GestureSettingsHost,
     pub show_plugins: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
@@ -1080,6 +1118,7 @@ pub struct LauncherApp {
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
+    pub(crate) pending_programmer_inspector_preference: Option<crate::settings::ProgrammerInspectorPreferences>,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -1204,7 +1243,11 @@ pub struct LauncherApp {
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
+    snippet_window_host: utility_window_host::SnippetWindowHost,
+    snippet_preview_editor_session: Option<u64>,
+    sequence_prompt_editor_session: Option<u64>,
     paste_sequence_dialog: PasteSequenceDialog,
+    paste_sequence_host: utility_window_host::PasteSequenceWindowHost,
     pub hash_generator_dialog: HashGeneratorDialogState,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
@@ -1213,17 +1256,21 @@ pub struct LauncherApp {
     macro_prompt_broker: Arc<crate::mkmacro::PromptBroker>,
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
+    mouse_gestures_host: mouse_form_host::MouseGesturesHost,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
     mouse_settings_dialog: MouseSettingsDialog,
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
     file_search_dialog: FileSearchDialogState,
+    file_search_host: file_search_window_host::FileSearchWindowHost,
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
+    batch_rename_host: utility_window_host::BatchRenameWindowHost,
     batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
     search_replace_dialog: SearchReplaceDialogState,
+    search_replace_host: utility_window_host::SearchReplaceWindowHost,
     replace_search_coordinator: Option<crate::search_replace::SearchCoordinator>,
     replace_preview_worker: Option<ReplacementPreviewWorker>,
     replace_executor_worker: Option<crate::replace_executor::ReplaceExecutorWorker>,
@@ -1258,14 +1305,25 @@ pub struct LauncherApp {
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
+    clipboard_history_host: utility_window_host::ClipboardHistoryWindowHost,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
+    clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost,
+    #[cfg(test)]
+    clipboard_modify_test_service: Option<utility_window_host::ClipboardModifyTestService>,
     pub json_utility_dialog: JsonUtilityDialogState,
+    json_utility_host: utility_window_host::JsonUtilityWindowHost,
+    #[cfg(test)]
+    json_utility_test_clipboard: Option<Arc<crate::clipboard_modify::clipboard::fake::FakeClipboardBackend>>,
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
+    pub(crate) programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
+    programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
+    explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog,
+    explorer_tabs_host: explorer_tabs_dialog::ExplorerTabsWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
@@ -1273,6 +1331,8 @@ pub struct LauncherApp {
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
     pub(crate) duplicate_finder_dialog: DuplicateFinderDialogState,
+    pub(crate) folder_size_dialog: FolderSizeDialogState,
+    pub(crate) file_lock_dialog: FileLockDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -1290,6 +1350,17 @@ pub struct LauncherApp {
     calendar_popover: CalendarPopover,
     calendar_event_editor: CalendarEventEditor,
     calendar_event_details: CalendarEventDetails,
+    calendar_popover_host: calendar_window_host::CalendarWindowHost<
+        CalendarPopover, calendar_popover::CalendarPopoverHostActions,
+    >,
+    calendar_editor_host: calendar_window_host::CalendarWindowHost<
+        CalendarEventEditor, calendar_event_editor::CalendarEditorHostActions,
+    >,
+    calendar_details_host: calendar_window_host::CalendarWindowHost<
+        CalendarEventDetails, calendar_event_details::CalendarDetailsHostActions,
+    >,
+    #[cfg(test)]
+    calendar_events_path_override: Option<String>,
     panel_stack: Vec<Panel>,
     panel_states: PanelStates,
     pinned_panels: Vec<Panel>,
@@ -1408,7 +1479,6 @@ struct PendingShowQueryFocus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QueryFocusOrdinaryContext {
-    notes_dialog_open: bool,
     note_panel_layers: std::collections::HashSet<egui::LayerId>,
     ordinary_panel_layers: std::collections::HashSet<egui::LayerId>,
 }
@@ -1992,6 +2062,9 @@ impl LauncherApp {
     }
 
     fn open_settings_dialog(&mut self) {
+        if self.show_settings {
+            self.settings_window_host.request_focus();
+        }
         if !self.show_settings && !self.settings_save_pending() {
             match Settings::load(&self.settings_path) {
                 Ok(settings) => {
@@ -2076,6 +2149,7 @@ impl LauncherApp {
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.mouse_gesture_settings_dialog.open();
+        self.mouse_gesture_settings_host.request_focus();
     }
 
     pub(crate) fn open_mouse_settings_dialog(&mut self) {
@@ -2083,6 +2157,15 @@ impl LauncherApp {
             let preferences = self.coordinate_tool.preferences().clone();
             self.mouse_settings_dialog.open(&preferences);
         }
+        self.mouse_settings_host.request_focus();
+    }
+
+    pub(crate) fn mouse_settings_has_root_presentation(&self) -> bool {
+        self.panel_has_root_presentation(Panel::MouseSettingsDialog)
+    }
+
+    pub(crate) fn mouse_gesture_settings_has_root_presentation(&self) -> bool {
+        self.panel_has_root_presentation(Panel::MouseGestureSettingsDialog)
     }
 
     pub(crate) fn is_mouse_settings_dialog_open(&self) -> bool {
@@ -2125,10 +2208,28 @@ impl LauncherApp {
     }
 
     pub fn open_clipboard_modify_dialog(&mut self) {
+        self.open_clipboard_modify_section(ClipboardModifyDialogSection::Modify);
+    }
+
+    pub(crate) fn open_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
+        self.load_clipboard_modify_section(section);
+        self.focus_panel(Panel::ClipboardModifyDialog);
+    }
+
+    fn load_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
+        #[cfg(test)]
+        if let Some(service) = &self.clipboard_modify_test_service {
+            self.clipboard_modify_dialog.open_section(section, service);
+            return;
+        }
         self.clipboard_modify_dialog.open_section(
-            ClipboardModifyDialogSection::Modify,
+            section,
             &crate::clipboard_modify::runtime::clipboard_service(),
         );
+    }
+
+    pub(crate) fn clipboard_modify_has_root_presentation(&self) -> bool {
+        self.clipboard_modify_host.root_layer().is_some()
     }
 
     pub fn open_clipboard_modify_config_file(&mut self) {
@@ -2306,6 +2407,7 @@ impl LauncherApp {
     }
 
     fn end_batch_rename_session(&mut self) {
+        self.batch_rename_host.retire(&self.egui_ctx);
         if let Some(coordinator) = self.batch_rename_coordinator.as_ref() {
             coordinator.cancel_operation();
         }
@@ -2562,6 +2664,7 @@ impl LauncherApp {
     }
 
     fn end_search_replace_session(&mut self) {
+        self.search_replace_host.retire(&self.egui_ctx);
         self.search_replace_dialog.end_session(
             self.replace_search_coordinator.as_ref(),
             self.replace_executor_worker.as_ref(),
@@ -2593,17 +2696,34 @@ impl LauncherApp {
         self.replace_operation_pending = false;
     }
 
-    pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
+    pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self, ctx: &egui::Context) {
         if self.file_search_dialog.ui_preferences_dirty {
-            self.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(
-                self.file_search_dialog.ui_preferences.clone(),
-            ));
+            self.handle_file_search_ui_command(
+                FileSearchUiCommand::PersistPreferences(
+                    self.file_search_dialog.ui_preferences.clone(),
+                ),
+                ctx,
+            );
         }
     }
 
-    pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
+    pub(crate) fn handle_file_search_ui_command(
+        &mut self,
+        command: FileSearchUiCommand,
+        ctx: &egui::Context,
+    ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
+            FileSearchUiCommand::OpenFolderSize(path) => {
+                if ctx.viewport_id() == egui::ViewportId::ROOT {
+                    self.folder_size_dialog.stage_prefill(ctx, path);
+                }
+            }
+            FileSearchUiCommand::InspectFileUsers(path) => {
+                if ctx.viewport_id() == egui::ViewportId::ROOT {
+                    self.file_lock_dialog.stage_prefill(ctx, path);
+                }
+            }
             FileSearchUiCommand::PersistPreferences(preferences) => {
                 match crate::settings::Settings::update(&self.settings_path, |settings| {
                     let mut cfg = settings
@@ -2620,10 +2740,14 @@ impl LauncherApp {
                 }) {
                     Ok(settings) => {
                         if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
-                            match serde_json::from_value(value.clone()) {
+                            match serde_json::from_value::<crate::file_search::settings::FileSearchSettings>(value.clone()) {
                                 Ok(committed) => {
-                                    self.file_search_dialog.ui_preferences_dirty = false;
-                                    self.apply_file_search_settings(committed);
+                                    // View preferences must not replace the executor
+                                    // or cancel its current search.
+                                    self.file_search_dialog.settings.ui_preferences =
+                                        committed.ui_preferences.clone();
+                                    self.file_search_dialog
+                                        .set_ui_preferences(committed.ui_preferences);
                                     self.settings_editor
                                         .set_plugin_setting_value("file_search", value);
                                 }
@@ -3174,10 +3298,13 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
+        plugins.set_explorer_tabs_root(data_root.clone());
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
         let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         calculation_pad_dialog
             .initialize_recovery_preference(settings.calculation_pad_remember_source);
+        let mut programmer_inspector_dialog = programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        programmer_inspector_dialog.initialize_preferences(settings.programmer_inspector);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
         let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
@@ -3573,6 +3700,11 @@ impl LauncherApp {
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
         let activity_center = crate::activity::ActivityCenter::new();
+        let recording_repaint_ctx = ctx.clone();
+        let recording_controller = crate::recording::RecordingController::new(
+            Arc::new(crate::recording::WindowsRecordingBackend),
+            move || recording_repaint_ctx.request_repaint_of(egui::ViewportId::ROOT),
+        );
         crate::mkmacro::runtime::attach_activity_center(activity_center.clone());
         #[cfg(test)]
         let hotfolder_runtime = match init_policy {
@@ -3638,6 +3770,8 @@ impl LauncherApp {
                 controller.set_recovery_bridge(Arc::clone(&screen_draw_recovery_bridge));
                 controller
             },
+            recording_controller,
+            recording_dialog: recording_dialog::RecordingDialogState::default(),
             coordinate_tool: coordinate_tool::CoordinateToolGui::new(
                 settings_path.clone(),
                 settings.coordinate_tool.clone(),
@@ -3667,6 +3801,8 @@ impl LauncherApp {
             test_sequence_context_capture_forbidden: false,
             #[cfg(test)]
             test_sequence_context_capture_calls: 0,
+            #[cfg(test)]
+            test_sequence_platform: None,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             target_repair_usage_generation: Arc::new(AtomicU64::new(0)),
             target_repair_usage_barrier: Arc::new(Mutex::new(())),
@@ -3676,6 +3812,9 @@ impl LauncherApp {
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
+            settings_window_host: Default::default(),
+            mouse_settings_host: Default::default(),
+            mouse_gesture_settings_host: Default::default(),
             show_plugins: false,
             actions_path,
             editor: ActionsEditor::default(),
@@ -3687,6 +3826,7 @@ impl LauncherApp {
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
             pending_calculation_pad_recovery_preference: None,
+            pending_programmer_inspector_preference: None,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),
@@ -3800,7 +3940,11 @@ impl LauncherApp {
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
+            snippet_window_host: Default::default(),
+            snippet_preview_editor_session: None,
+            sequence_prompt_editor_session: None,
             paste_sequence_dialog: PasteSequenceDialog::default(),
+            paste_sequence_host: utility_window_host::PasteSequenceWindowHost::default(),
             hash_generator_dialog: HashGeneratorDialogState::default(),
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
@@ -3809,16 +3953,20 @@ impl LauncherApp {
             macro_prompt_broker: crate::mkmacro::production_prompt_broker(),
             macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi::new(ctx),
             mouse_gestures_dialog: MgGesturesDialog::default(),
+            mouse_gestures_host: Default::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
             mouse_settings_dialog: MouseSettingsDialog::default(),
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
             file_search_dialog: FileSearchDialogState::from_settings(file_search_settings.clone()),
+            file_search_host: Default::default(),
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             batch_rename_dialog: BatchRenameDialogState::default(),
+            batch_rename_host: Default::default(),
             batch_rename_coordinator: None,
             search_replace_dialog: SearchReplaceDialogState::default(),
+            search_replace_host: Default::default(),
             replace_search_coordinator: None,
             replace_preview_worker: None,
             replace_executor_worker: None,
@@ -3854,14 +4002,25 @@ impl LauncherApp {
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
+            clipboard_history_host: Default::default(),
             clipboard_modify_runtime,
             clipboard_modify_dialog: ClipboardModifyDialogState::default(),
+            clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost::default(),
+            #[cfg(test)]
+            clipboard_modify_test_service: None,
             json_utility_dialog: JsonUtilityDialogState::default(),
+            json_utility_host: utility_window_host::JsonUtilityWindowHost::default(),
+            #[cfg(test)]
+            json_utility_test_clipboard: None,
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
             archive_session,
             regex_tester_dialog,
             calculation_pad_dialog,
+            programmer_inspector_dialog,
+            programmer_inspector_host: Default::default(),
+            explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog::new(data_root.clone()),
+            explorer_tabs_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
             markdown_studio_dialog,
@@ -3871,6 +4030,11 @@ impl LauncherApp {
             ),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
             duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
+            folder_size_dialog: FolderSizeDialogState::new_with_activity_center(
+                ctx,
+                activity_center.clone(),
+            ),
+            file_lock_dialog: FileLockDialogState::new(ctx),
             activity_center: activity_center.clone(),
             activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
@@ -3889,6 +4053,11 @@ impl LauncherApp {
             calendar_popover: CalendarPopover::default(),
             calendar_event_editor: CalendarEventEditor::default(),
             calendar_event_details: CalendarEventDetails::default(),
+            calendar_popover_host: calendar_window_host::CalendarWindowHost::default(),
+            calendar_editor_host: calendar_window_host::CalendarWindowHost::default(),
+            calendar_details_host: calendar_window_host::CalendarWindowHost::default(),
+            #[cfg(test)]
+            calendar_events_path_override: None,
             panel_stack: Vec::new(),
             panel_states: PanelStates::default(),
             pinned_panels: settings.pinned_panels.clone(),
@@ -4542,6 +4711,14 @@ impl LauncherApp {
         visible: Option<bool>,
         restore: Option<bool>,
     ) -> u64 {
+        let visible = if visible == Some(false)
+            && self.egui_ctx.embed_viewports()
+            && self.recording_controller.has_active_job()
+        {
+            Some(true)
+        } else {
+            visible
+        };
         let revision = self
             .visibility_revision
             .request(|| {
@@ -4562,6 +4739,11 @@ impl LauncherApp {
     pub(crate) fn toggle_launcher_visibility(&self) -> bool {
         self.visibility_revision
             .request(|| {
+                if self.egui_ctx.embed_viewports() && self.recording_controller.has_active_job() {
+                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.restore_flag.store(true, Ordering::SeqCst);
+                    return true;
+                }
                 let next = !self.visible_flag.load(Ordering::SeqCst);
                 self.visible_flag.store(next, Ordering::SeqCst);
                 next
@@ -4577,7 +4759,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 64] = [
+    const TRACKED_PANELS: [Panel; 69] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4616,6 +4798,8 @@ impl LauncherApp {
         Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
+        Panel::ProgrammerInspectorDialog,
+        Panel::ExplorerTabsDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
         Panel::MarkdownStudioDialog,
@@ -4641,7 +4825,10 @@ impl LauncherApp {
         Panel::RadialEditor,
         Panel::ImageCompareDialog,
         Panel::DuplicateFinderDialog,
+        Panel::FolderSizeDialog,
+        Panel::FileLockDialog,
         Panel::ActivityDialog,
+        Panel::RecordingDialog,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -4684,6 +4871,8 @@ impl LauncherApp {
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open,
+            Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.open,
@@ -4693,7 +4882,10 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open,
             Panel::ImageCompareDialog => self.image_compare_dialog.open,
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open,
+            Panel::FolderSizeDialog => self.folder_size_dialog.open,
+            Panel::FileLockDialog => self.file_lock_dialog.open,
             Panel::ActivityDialog => self.activity_dialog.open,
+            Panel::RecordingDialog => self.recording_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -4724,6 +4916,65 @@ impl LauncherApp {
                 .iter()
                 .copied()
                 .any(|panel| self.is_panel_open(panel))
+    }
+
+    fn panel_has_root_presentation(&self, panel: Panel) -> bool {
+        match panel {
+            Panel::Settings => self.settings_window_host.root_layer().is_some(),
+            Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
+            Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
+            Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
+            Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer().is_some(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer().is_some(),
+            Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
+            Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer().is_some(),
+            Panel::ImageCompareDialog => self.image_compare_dialog.root_layer().is_some(),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer().is_some(),
+            Panel::FolderSizeDialog => self.folder_size_dialog.root_layer().is_some(),
+            Panel::FileLockDialog => self.file_lock_dialog.root_layer().is_some(),
+            Panel::RecordingDialog => self.recording_dialog.root_layer().is_some(),
+            Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer().is_some(),
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.calendar_panel_root_layer(panel).is_some()
+            },
+            Panel::XmlToolkitDialog => {
+                self.xml_toolkit_dialog.root_layer().is_some()
+                    || self.xml_toolkit_dialog.needs_viewport_bootstrap()
+            },
+            Panel::RegexTesterDialog => {
+                self.regex_tester_dialog.root_layer().is_some()
+                    || self.regex_tester_dialog.needs_viewport_bootstrap()
+            },
+            Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
+            Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
+            Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
+            Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
+            Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
+            Panel::MouseGesturesDialog => self.mouse_gestures_host
+                .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
+            Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
+            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(mouse_form_host::GESTURE_SETTINGS).is_some(),
+            Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
+            Panel::MarkdownStudioDialog => !self.markdown_studio_dialog.is_popped_out(),
+            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some(),
+            Panel::NotePanel => self
+                .note_panels
+                .iter()
+                .any(|note| note.host_layer_if_root().is_some()),
+            _ => true,
+        }
+    }
+
+    fn any_root_panel_open(&self) -> bool {
+        self.pin_list_open
+            || self.ocr_surface_visible()
+            || self.diff_dialog.host_layer_if_root().is_some()
+            || Self::TRACKED_PANELS
+                .iter()
+                .copied()
+                .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
     }
 
     pub fn unregister_all_hotkeys(&self) {
@@ -4759,6 +5010,78 @@ impl LauncherApp {
         self.screenshot_use_editor
     }
 
+    fn close_snippet_editor_session(&mut self) {
+        self.snippet_window_host.retire(&self.egui_ctx);
+        self.snippet_dialog.end_session();
+        self.panel_states.snippet_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::SnippetDialog);
+        if self.snippet_preview_editor_session.take().is_some() && self.snippet_prompt_dialog.is_preview_only() {
+            let _ = self.cancel_snippet_prompt();
+        }
+    }
+
+    fn hosted_snippet_preview_active(&self) -> bool {
+        self.snippet_dialog.open
+            && self.snippet_preview_editor_session == Some(self.snippet_dialog.host_session_epoch())
+            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_dialog.is_preview_only()
+    }
+
+    fn snippet_prompt_has_root_presentation(&self) -> bool {
+        self.snippet_prompt_dialog.is_open()
+            && (!self.hosted_snippet_preview_active() || self.snippet_window_host.root_layer().is_some())
+            && (!self.hosted_sequence_prompt_active() || self.paste_sequence_host.root_layer().is_some())
+    }
+
+    fn hosted_sequence_prompt_active(&self) -> bool {
+        self.paste_sequence_dialog.open
+            && self.paste_sequence_host.is_popped_out()
+            && self.sequence_prompt_editor_session == Some(self.paste_sequence_dialog.host_session_epoch())
+            && self.snippet_prompt_dialog.is_sequence_preflight()
+    }
+
+    fn snippet_prompt_has_host_companion(&self) -> bool {
+        self.hosted_snippet_preview_active() || self.hosted_sequence_prompt_active()
+    }
+
+    fn close_clipboard_history_session(&mut self) {
+        self.clipboard_history_host.retire(&self.egui_ctx);
+        self.clipboard_dialog.open = false;
+        self.panel_states.clipboard_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::ClipboardDialog);
+    }
+
+    fn close_clipboard_modify_session(&mut self) {
+        self.clipboard_modify_host.retire(&self.egui_ctx);
+        if self.clipboard_modify_dialog.open {
+            self.clipboard_modify_dialog.open = false;
+            self.clipboard_modify_dialog.cleanup_after_close();
+        }
+        self.panel_states.clipboard_modify_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != Panel::ClipboardModifyDialog);
+    }
+
+    fn close_front_dialog_from_root_input(&mut self) -> bool {
+        if !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && self.panel_stack.iter().rev()
+                .find(|panel| self.panel_has_root_presentation(**panel))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+        {
+            // These tools stage keyboard close in their exact owner pass.
+            return false;
+        }
+        self.close_front_dialog()
+    }
+
+    fn close_json_utility_session(&mut self) {
+        self.json_utility_host.retire(&self.egui_ctx);
+        self.json_utility_dialog.close();
+        self.panel_states.json_utility_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::JsonUtilityDialog);
+    }
+
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     pub fn close_front_dialog(&mut self) -> bool {
@@ -4770,18 +5093,34 @@ impl LauncherApp {
             self.close_ocr_surface();
             return true;
         }
-        if self.panel_stack.last() == Some(&Panel::Editor) && self.editor.repair_dialog_is_open() {
+        let Some(panel_index) = self
+            .panel_stack
+            .iter()
+            .rposition(|panel| self.panel_has_root_presentation(*panel))
+        else {
+            return false;
+        };
+        let panel = self.panel_stack[panel_index];
+        if panel == Panel::Editor && self.editor.repair_dialog_is_open() {
             self.editor.retire_repair_dialog();
             return true;
         }
-        let panel = match self.panel_stack.pop() {
-            Some(p) => p,
-            None => return false,
-        };
         if self.pinned_panels.contains(&panel) {
-            self.panel_stack.push(panel);
             return false;
         }
+        if (panel == Panel::Settings
+            && !self.settings_native_ui_owner_current(&self.egui_ctx, true))
+            || (matches!(panel, Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog)
+                && !self.mouse_form_root_close_allowed(&self.egui_ctx, panel))
+            || (panel == Panel::MouseGesturesDialog
+                && !self.mouse_gestures_root_close_allowed(&self.egui_ctx))
+            || (panel == Panel::FileSearchDialog
+                && (!self.file_search_native_ui_owner_current(&self.egui_ctx, true)
+                    || egui::Popup::is_any_open(&self.egui_ctx)))
+        {
+            return false;
+        }
+        self.panel_stack.remove(panel_index);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.request_close();
             self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
@@ -4821,7 +5160,25 @@ impl LauncherApp {
             }
             return true;
         }
-        self.retire_settings_navigation_for_panel(panel);
+        if panel == Panel::FolderSizeDialog {
+            self.folder_size_dialog.request_close(&self.egui_ctx);
+            self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            if self.folder_size_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::FileLockDialog {
+            self.file_lock_dialog.request_close(&self.egui_ctx);
+            self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
+            if self.file_lock_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if !matches!(panel, Panel::Settings | Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog) {
+            self.retire_settings_navigation_for_panel(panel);
+        }
         match panel {
             Panel::AliasDialog => {
                 self.alias_dialog.open = false;
@@ -4852,7 +5209,7 @@ impl LauncherApp {
                 self.panel_states.help_window = false;
             }
             Panel::TimerDialog => {
-                self.timer_dialog.open = false;
+                self.timer_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.timer_dialog = false;
             }
             Panel::CompletionDialog => {
@@ -4864,12 +5221,10 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.end_session();
-                self.panel_states.snippet_dialog = false;
+                self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
-                self.paste_sequence_dialog.end_session();
-                self.panel_states.paste_sequence_dialog = false;
+                self.close_paste_sequence_dialog();
             }
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.end_session();
@@ -4883,21 +5238,21 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
-                self.mkmacro_dialog.action_editor.cancel();
-                self.mkmacro_dialog.open = false;
-                self.panel_states.mkmacro_dialog = false;
+                self.mkmacro_dialog.request_close();
+                self.panel_stack.insert(panel_index, Panel::MkMacroDialog);
+                self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::MouseGesturesDialog => {
-                self.mouse_gestures_dialog.open = false;
-                self.panel_states.mouse_gestures_dialog = false;
+                self.mouse_gestures_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::MouseGestureSettingsDialog => {
-                self.mouse_gesture_settings_dialog.open = false;
-                self.panel_states.mouse_gesture_settings_dialog = false;
+                self.mouse_gesture_settings_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::MouseSettingsDialog => {
-                self.mouse_settings_dialog.open = false;
-                self.panel_states.mouse_settings_dialog = false;
+                self.mouse_settings_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::ThemeSettingsDialog => {
                 self.close_theme_settings_dialog();
@@ -4912,8 +5267,8 @@ impl LauncherApp {
                 self.panel_states.fav_dialog = false;
             }
             Panel::FileSearchDialog => {
-                self.file_search_dialog.open = false;
-                self.panel_states.file_search_dialog = false;
+                self.file_search_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::BatchRenameDialog => {
                 self.end_batch_rename_session();
@@ -4936,16 +5291,29 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut note_panel) = self.note_panels.pop() {
+                let note_index = self
+                    .note_panels
+                    .iter()
+                    .rposition(|note| {
+                        note.host_layer_if_root().is_some()
+                            && note.owns_keyboard_layer(&self.egui_ctx)
+                    })
+                    .or_else(|| {
+                        self.note_panels
+                            .iter()
+                            .rposition(|note| note.host_layer_if_root().is_some())
+                    });
+                if let Some(index) = note_index {
+                    let mut note_panel = self.note_panels.remove(index);
                     note_panel.request_close(self);
                     if note_panel.open {
-                        self.note_panels.push(note_panel);
-                        self.panel_stack.push(Panel::NotePanel);
+                        self.note_panels.insert(index, note_panel);
                     }
                 }
                 self.panel_states.note_panel = !self.note_panels.is_empty();
                 if self.panel_states.note_panel && !self.panel_stack.contains(&Panel::NotePanel) {
-                    self.panel_stack.push(Panel::NotePanel);
+                    self.panel_stack
+                        .insert(panel_index.min(self.panel_stack.len()), Panel::NotePanel);
                 }
             }
             Panel::ImagePanel => {
@@ -4969,20 +5337,17 @@ impl LauncherApp {
                 self.panel_states.todo_view_dialog = false;
             }
             Panel::ClipboardDialog => {
-                self.clipboard_dialog.open = false;
-                self.panel_states.clipboard_dialog = false;
+                self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
-                self.clipboard_modify_dialog.open = false;
-                self.clipboard_modify_dialog.cleanup_after_close();
-                self.panel_states.clipboard_modify_dialog = false;
+                self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
                 self.qr_dialog.close();
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.open = false;
+                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5005,28 +5370,38 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session();
+                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.close();
+                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
-                self.image_compare_dialog.close();
+                self.image_compare_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.close();
+                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
+            }
+            Panel::FolderSizeDialog => {
+                self.folder_size_dialog.request_close(&self.egui_ctx);
+                self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            }
+            Panel::FileLockDialog => {
+                self.file_lock_dialog.request_close(&self.egui_ctx);
+                self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
             }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
             }
+            Panel::RecordingDialog => self.close_recording_setup(),
+            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.close();
-                self.panel_states.json_utility_dialog = false;
+                self.close_json_utility_session();
             }
             Panel::ZipExtractorDialog => {
                 self.close_zip_extractor_dialog();
@@ -5056,17 +5431,8 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
-            Panel::CalendarPopover => {
-                self.calendar_popover_open = false;
-                self.panel_states.calendar_popover = false;
-            }
-            Panel::CalendarEventEditor => {
-                self.calendar_editor_open = false;
-                self.panel_states.calendar_event_editor = false;
-            }
-            Panel::CalendarEventDetails => {
-                self.calendar_details_open = false;
-                self.panel_states.calendar_event_details = false;
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.close_calendar_panel_host(panel);
             }
             Panel::Editor => {
                 self.editor.retire_repair_dialog();
@@ -5074,8 +5440,9 @@ impl LauncherApp {
                 self.panel_states.editor = false;
             }
             Panel::Settings => {
-                self.show_settings = false;
-                self.panel_states.settings = false;
+                self.settings_window_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, Panel::Settings);
+                self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::Plugins => {
                 self.show_plugins = false;
@@ -5107,13 +5474,22 @@ impl LauncherApp {
     }
 
     pub(crate) fn close_paste_sequence_dialog(&mut self) {
+        let retain_prompt = self.sequence_prompt_editor_session.take().is_some()
+            && self.snippet_prompt_dialog.is_sequence_preflight();
+        let autostart = retain_prompt && self.paste_sequence_dialog.take_autostart_when_ready();
+        self.paste_sequence_host.retire(&self.egui_ctx);
         self.paste_sequence_dialog.end_session();
         self.panel_states.paste_sequence_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != Panel::PasteSequenceDialog);
+        if retain_prompt {
+            self.paste_sequence_dialog.set_autostart_when_ready(autostart);
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn close_zip_extractor_dialog(&mut self) {
+        self.zip_extractor_dialog.retire_host(&self.egui_ctx);
         self.zip_extractor_dialog.clear_presentation();
         #[cfg(windows)]
         self.archive_session.close();
@@ -5154,7 +5530,7 @@ impl LauncherApp {
                 self.panel_states.help_window = false;
             }
             Panel::TimerDialog => {
-                self.timer_dialog.open = false;
+                self.timer_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.timer_dialog = false;
             }
             Panel::CompletionDialog => {
@@ -5166,12 +5542,10 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.end_session();
-                self.panel_states.snippet_dialog = false;
+                self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
-                self.paste_sequence_dialog.end_session();
-                self.panel_states.paste_sequence_dialog = false;
+                self.close_paste_sequence_dialog();
             }
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.end_session();
@@ -5185,20 +5559,23 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
-                self.mkmacro_dialog.action_editor.cancel();
-                self.mkmacro_dialog.open = false;
+                self.mkmacro_dialog.force_close(&self.egui_ctx);
                 self.panel_states.mkmacro_dialog = false;
             }
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
+                self.mouse_gestures_dialog.reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
+                self.mouse_gestures_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 self.panel_states.mouse_gestures_dialog = false;
             }
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
+                self.mouse_gesture_settings_host.retire(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
             Panel::MouseSettingsDialog => {
                 self.mouse_settings_dialog.open = false;
+                self.mouse_settings_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
                 self.panel_states.mouse_settings_dialog = false;
             }
             Panel::HotkeyDirectoryDialog => {
@@ -5215,6 +5592,7 @@ impl LauncherApp {
             }
             Panel::FileSearchDialog => {
                 self.file_search_dialog.open = false;
+                self.file_search_host.retire(&self.egui_ctx);
                 self.panel_states.file_search_dialog = false;
             }
             Panel::BatchRenameDialog => {
@@ -5271,20 +5649,17 @@ impl LauncherApp {
                 self.panel_states.todo_view_dialog = false;
             }
             Panel::ClipboardDialog => {
-                self.clipboard_dialog.open = false;
-                self.panel_states.clipboard_dialog = false;
+                self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
-                self.clipboard_modify_dialog.open = false;
-                self.clipboard_modify_dialog.cleanup_after_close();
-                self.panel_states.clipboard_modify_dialog = false;
+                self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
                 self.qr_dialog.close();
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.open = false;
+                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5304,28 +5679,38 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session();
+                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.close();
+                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
-                self.image_compare_dialog.close();
+                self.image_compare_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.close();
+                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
+            }
+            Panel::FolderSizeDialog => {
+                self.folder_size_dialog.request_close(&self.egui_ctx);
+                self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            }
+            Panel::FileLockDialog => {
+                self.file_lock_dialog.request_close(&self.egui_ctx);
+                self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
             }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
             }
+            Panel::RecordingDialog => self.close_recording_setup(),
+            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.close();
-                self.panel_states.json_utility_dialog = false;
+                self.close_json_utility_session();
             }
             Panel::ZipExtractorDialog => {
                 self.close_zip_extractor_dialog();
@@ -5355,17 +5740,8 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
-            Panel::CalendarPopover => {
-                self.calendar_popover_open = false;
-                self.panel_states.calendar_popover = false;
-            }
-            Panel::CalendarEventEditor => {
-                self.calendar_editor_open = false;
-                self.panel_states.calendar_event_editor = false;
-            }
-            Panel::CalendarEventDetails => {
-                self.calendar_details_open = false;
-                self.panel_states.calendar_event_details = false;
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.close_calendar_panel_host(panel);
             }
             Panel::Editor => {
                 self.editor.retire_repair_dialog();
@@ -5373,6 +5749,7 @@ impl LauncherApp {
                 self.panel_states.editor = false;
             }
             Panel::Settings => {
+                self.settings_window_host.retire(&self.egui_ctx);
                 self.show_settings = false;
                 self.panel_states.settings = false;
             }
@@ -5415,6 +5792,14 @@ impl LauncherApp {
             if !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
+        } else if panel == Panel::FolderSizeDialog && self.folder_size_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else if panel == Panel::FileLockDialog && self.file_lock_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
         } else {
             self.panel_stack.retain(|p| *p != panel);
         }
@@ -5429,21 +5814,33 @@ impl LauncherApp {
             Panel::AddBookmarkDialog => self.add_bookmark_dialog.open = true,
             Panel::HelpOverlay => self.help_window.overlay_open = true,
             Panel::HelpWindow => self.help_window.open = true,
-            Panel::TimerDialog => self.timer_dialog.open = true,
+            Panel::TimerDialog => self.timer_dialog.ensure_open(),
             Panel::CompletionDialog => self.completion_dialog.open = true,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.ensure_open(),
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
             Panel::PasteSequenceDialog => {
-                let context = self.paste_sequence_invocation_context_for_open();
-                self.paste_sequence_dialog.open_with_context(context);
+                if !self.paste_sequence_dialog.open
+                    && !self.paste_sequence_dialog.is_suspended_for_playback()
+                {
+                    let context = self.paste_sequence_invocation_context_for_open();
+                    self.paste_sequence_dialog.open_with_context(context);
+                }
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
-            Panel::MkMacroDialog => self.mkmacro_dialog.open(),
-            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
+            Panel::MkMacroDialog => {
+                if !self.mkmacro_dialog.open {
+                    self.mkmacro_dialog.open();
+                }
+            }
+            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open(),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
-            Panel::MouseSettingsDialog => self.open_mouse_settings_dialog(),
+            Panel::MouseSettingsDialog => {
+                if !self.mouse_settings_dialog.open {
+                    self.open_mouse_settings_dialog();
+                }
+            }
             Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open = true,
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.ensure_open(),
@@ -5465,10 +5862,14 @@ impl LauncherApp {
             Panel::TodoDialog => self.todo_dialog.ensure_open(),
             Panel::TodoViewDialog => self.todo_view_dialog.ensure_open(),
             Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
-            Panel::ClipboardModifyDialog => self
-                .clipboard_modify_dialog
-                .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
+            Panel::ClipboardModifyDialog => {
+                if !self.clipboard_modify_dialog.open {
+                    self.load_clipboard_modify_section(ClipboardModifyDialogSection::Modify);
+                }
+            }
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
                 self.zip_extractor_dialog
@@ -5486,11 +5887,22 @@ impl LauncherApp {
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.ensure_open(),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.ensure_open(),
-            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
-            Panel::TableUtilityDialog => self.table_utility_dialog.open(),
+            Panel::XmlToolkitDialog => {
+                if !self.xml_toolkit_dialog.open {
+                    self.xml_toolkit_dialog.open();
+                }
+            }
+            Panel::TableUtilityDialog => {
+                if !self.table_utility_dialog.open {
+                    self.table_utility_dialog.open();
+                }
+            }
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
+            Panel::FolderSizeDialog => self.folder_size_dialog.open(),
+            Panel::FileLockDialog => self.file_lock_dialog.ensure_open(),
             Panel::ActivityDialog => self.activity_dialog.open(),
+            Panel::RecordingDialog => self.recording_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => {
@@ -5504,11 +5916,31 @@ impl LauncherApp {
                     .open(crate::commands::DataDialogFocus::Overview);
             }
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
-            Panel::CalendarPopover => self.calendar_popover_open = true,
-            Panel::CalendarEventEditor => self.calendar_editor_open = true,
-            Panel::CalendarEventDetails => self.calendar_details_open = true,
+            Panel::CalendarPopover => {
+                if !self.calendar_popover_open {
+                    self.calendar_popover.begin_host_session();
+                    self.calendar_popover_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_popover_open = true;
+                }
+            }
+            Panel::CalendarEventEditor => {
+                if !self.calendar_editor_open {
+                    self.calendar_editor_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_editor_open = true;
+                }
+            }
+            Panel::CalendarEventDetails => {
+                if !self.calendar_details_open {
+                    self.calendar_details_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_details_open = true;
+                }
+            },
             Panel::Editor => self.show_editor = true,
-            Panel::Settings => self.open_settings_dialog(),
+            Panel::Settings => {
+                if !self.show_settings {
+                    self.open_settings_dialog();
+                }
+            }
             Panel::Plugins => self.show_plugins = true,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
@@ -5527,13 +5959,121 @@ impl LauncherApp {
         }
     }
 
+    fn request_explorer_tabs_focus(&mut self) {
+        if self.explorer_tabs_host.root_layer().is_some()
+            && self.egui_ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())
+            && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
+                != self.explorer_tabs_host.root_layer()
+        {
+            self.egui_ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        self.explorer_tabs_host.request_focus();
+    }
+
     pub(crate) fn focus_panel(&mut self, panel: Panel) {
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
+            if let Some(layer) = self.calculation_pad_dialog.host_layer_if_root() {
+                self.egui_ctx.move_to_top(layer);
+            }
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
+        } else if panel == Panel::NotesDialog {
+            self.notes_dialog.open();
+        } else if panel == Panel::Settings {
+            self.open_settings_dialog();
+        } else if panel == Panel::MkMacroDialog {
+            self.mkmacro_dialog.open();
+        } else if panel == Panel::FileSearchDialog {
+            if !self.file_search_dialog.open {
+                self.file_search_dialog.open();
+            }
+            self.file_search_host.request_focus();
+        } else if panel == Panel::SnippetDialog {
+            self.snippet_dialog.ensure_open();
+            self.snippet_window_host.request_focus();
+        } else if panel == Panel::PasteSequenceDialog {
+            let context = self.paste_sequence_invocation_context_for_open();
+            self.paste_sequence_dialog.open_with_context(context);
+            self.paste_sequence_host.request_focus();
+        } else if panel == Panel::ClipboardDialog {
+            self.clipboard_dialog.ensure_open();
+            self.clipboard_history_host.request_focus();
+        } else if panel == Panel::ClipboardModifyDialog {
+            self.ensure_open(panel);
+            self.clipboard_modify_host.request_focus();
+        } else if matches!(panel, Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) {
+            self.ensure_open(panel);
+            match panel {
+                Panel::CalendarPopover => self.calendar_popover_host.request_focus(),
+                Panel::CalendarEventEditor => self.calendar_editor_host.request_focus(),
+                Panel::CalendarEventDetails => self.calendar_details_host.request_focus(),
+                _ => unreachable!(),
+            }
+        } else if panel == Panel::TimerDialog {
+            self.timer_dialog.ensure_open();
+            self.timer_dialog.request_host_focus();
+        } else if panel == Panel::ImageCompareDialog {
+            self.image_compare_dialog.open();
+            self.image_compare_dialog.request_host_focus();
+        } else if panel == Panel::DuplicateFinderDialog {
+            self.duplicate_finder_dialog.open();
+            self.duplicate_finder_dialog.request_host_focus();
+        } else if panel == Panel::FolderSizeDialog {
+            self.folder_size_dialog.open();
+            self.folder_size_dialog.request_host_focus();
+        } else if panel == Panel::FileLockDialog {
+            self.file_lock_dialog.ensure_open();
+            self.file_lock_dialog.request_host_focus();
+        } else if panel == Panel::RecordingDialog {
+            self.recording_dialog.open();
+            self.recording_dialog.request_host_focus();
+        } else if panel == Panel::ZipExtractorDialog {
+            self.ensure_open(panel);
+            self.zip_extractor_dialog.request_host_focus();
+        } else if panel == Panel::TableUtilityDialog {
+            self.table_utility_dialog.open();
+        } else if panel == Panel::XmlToolkitDialog {
+            self.xml_toolkit_dialog.open();
+        } else if panel == Panel::RegexTesterDialog {
+            self.regex_tester_dialog.open();
+        } else if panel == Panel::ProgrammerInspectorDialog {
+            self.programmer_inspector_dialog.open();
+            if let Some(pad_layer) = self.calculation_pad_dialog.host_layer_if_root()
+                && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
+                    == Some(pad_layer)
+                && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())
+            {
+                self.egui_ctx
+                    .memory_mut(|memory| memory.surrender_focus(focused));
+            }
+            self.programmer_inspector_host.request_focus();
+        } else if panel == Panel::ExplorerTabsDialog {
+            self.explorer_tabs_dialog.open();
+            self.request_explorer_tabs_focus();
+        } else if panel == Panel::JsonUtilityDialog {
+            if !self.json_utility_dialog.open {
+                self.json_utility_dialog.reopen_existing();
+            }
+            self.json_utility_host.request_focus();
+        } else if panel == Panel::BatchRenameDialog {
+            self.batch_rename_dialog.open();
+            self.batch_rename_host.request_focus();
+        } else if panel == Panel::SearchReplaceDialog {
+            if !self.search_replace_dialog.open {
+                self.ensure_open(panel);
+            }
+            self.search_replace_host.request_focus();
+        } else if panel == Panel::MouseGesturesDialog {
+            self.mouse_gestures_dialog.open();
+            self.mouse_gestures_host.request_focus();
+        } else if panel == Panel::MouseSettingsDialog {
+            self.open_mouse_settings_dialog();
+        } else if panel == Panel::MouseGestureSettingsDialog {
+            self.open_mouse_gesture_settings_dialog();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
         } else if panel == Panel::MarkdownStudioDialog {
@@ -5655,6 +6195,8 @@ impl LauncherApp {
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
+        check!(programmer_inspector_dialog, Panel::ProgrammerInspectorDialog);
+        check!(explorer_tabs_dialog, Panel::ExplorerTabsDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
         check!(markdown_studio_dialog, Panel::MarkdownStudioDialog);
@@ -5664,6 +6206,8 @@ impl LauncherApp {
         check!(table_utility_dialog, Panel::TableUtilityDialog);
         check!(image_compare_dialog, Panel::ImageCompareDialog);
         check!(duplicate_finder_dialog, Panel::DuplicateFinderDialog);
+        check!(folder_size_dialog, Panel::FolderSizeDialog);
+        check!(file_lock_dialog, Panel::FileLockDialog);
         check!(activity_dialog, Panel::ActivityDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
@@ -5706,6 +6250,13 @@ impl LauncherApp {
         self.screen_draw_controller
             .set_recovery_bridge(Arc::clone(&bridge));
         self.screen_draw_recovery_bridge = bridge;
+    }
+
+    pub fn install_recording_stop_hotkey_bridge(
+        &mut self,
+        bridge: Arc<crate::recording::RecordingStopHotkeyBridge>,
+    ) {
+        self.recording_controller.attach_stop_hotkey_bridge(&bridge);
     }
 
     /// Returns the app-owned observed event receiver. `try_recv` and
@@ -5809,6 +6360,13 @@ impl LauncherApp {
         self.update_panel_stack();
     }
 
+    fn open_note_panel_from_link(&mut self, slug: &str) -> bool {
+        self.open_note_panel(slug, None);
+        self.note_panels
+            .last()
+            .is_some_and(|panel| panel.host_layer_if_root().is_some())
+    }
+
     pub fn push_note_panel(&mut self, panel: NotePanel) {
         self.note_panels.push(panel);
         self.update_panel_stack();
@@ -5871,11 +6429,113 @@ impl LauncherApp {
         }
     }
 
+    fn calendar_host_spec(panel: Panel) -> calendar_window_host::CalendarHostSpec {
+        let (title, key, viewport, width, height, minimum) = match panel {
+            Panel::CalendarPopover => (
+                "Calendar",
+                "calendar",
+                "calendar_viewport",
+                480.0,
+                400.0,
+                egui::vec2(320.0, 250.0),
+            ),
+            Panel::CalendarEventEditor => (
+                "Calendar Event",
+                "calendar-event-editor",
+                "calendar_event_editor_viewport",
+                470.0,
+                530.0,
+                egui::vec2(320.0, 320.0),
+            ),
+            Panel::CalendarEventDetails => (
+                "Event Details",
+                "calendar-event-details",
+                "calendar_event_details_viewport",
+                390.0,
+                330.0,
+                egui::vec2(300.0, 220.0),
+            ),
+            _ => unreachable!("only Calendar panels have a Calendar host spec"),
+        };
+        calendar_window_host::CalendarHostSpec {
+            title,
+            key,
+            viewport: egui::ViewportId::from_hash_of(viewport),
+            layer: jump_mode::ui::root_window_layer_id(title),
+            size: egui::vec2(width, height),
+            minimum,
+        }
+    }
+
+    fn calendar_panel_root_layer(&self, panel: Panel) -> Option<egui::LayerId> {
+        let spec = Self::calendar_host_spec(panel);
+        match panel {
+            Panel::CalendarPopover => self
+                .calendar_popover_host
+                .root_layer(self.calendar_popover_open, &spec),
+            Panel::CalendarEventEditor => self
+                .calendar_editor_host
+                .root_layer(self.calendar_editor_open, &spec),
+            Panel::CalendarEventDetails => self
+                .calendar_details_host
+                .root_layer(self.calendar_details_open, &spec),
+            _ => unreachable!(),
+        }
+    }
+
+    fn close_calendar_panel_host(&mut self, panel: Panel) {
+        let spec = Self::calendar_host_spec(panel);
+        match panel {
+            Panel::CalendarPopover => {
+                self.calendar_popover_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_popover.host_session_epoch(),
+                );
+                self.calendar_popover_open = false;
+                self.panel_states.calendar_popover = false;
+            }
+            Panel::CalendarEventEditor => {
+                self.calendar_editor_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_event_editor.host_session_epoch(),
+                );
+                self.calendar_editor_open = false;
+                self.panel_states.calendar_event_editor = false;
+            }
+            Panel::CalendarEventDetails => {
+                self.calendar_details_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_event_details.host_session_epoch(),
+                );
+                self.calendar_details_open = false;
+                self.panel_states.calendar_event_details = false;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn calendar_event_store_path(&self) -> &str {
+        #[cfg(test)]
+        if let Some(path) = self.calendar_events_path_override.as_deref() {
+            return path;
+        }
+        crate::plugins::calendar::CALENDAR_EVENTS_FILE
+    }
+
     pub fn open_calendar_popover(&mut self, date: Option<NaiveDate>) {
         let today = chrono::Local::now().naive_local().date();
         self.calendar_selected_date = Some(date.unwrap_or(today));
         self.calendar_selected_event = None;
+        if !self.calendar_popover_open {
+            self.calendar_popover_host
+                .initialize(utility_host::UtilityPresentation::Docked);
+        }
+        self.calendar_popover.begin_host_session();
         self.calendar_popover_open = true;
+        self.focus_panel(Panel::CalendarPopover);
     }
 
     pub fn open_calendar_editor(
@@ -5886,6 +6546,25 @@ impl LauncherApp {
             chrono::NaiveDateTime,
         )>,
     ) {
+        self.open_calendar_editor_from(
+            event,
+            split_scope,
+            utility_host::UtilityPresentation::Docked,
+        );
+    }
+
+    fn open_calendar_editor_from(
+        &mut self,
+        event: Option<crate::plugins::calendar::CalendarEvent>,
+        split_scope: Option<(
+            crate::gui::calendar_event_details::RecurrenceScope,
+            chrono::NaiveDateTime,
+        )>,
+        presentation: utility_host::UtilityPresentation,
+    ) {
+        if !self.calendar_editor_open {
+            self.calendar_editor_host.initialize(presentation);
+        }
         if let Some(event) = event {
             self.calendar_event_editor.open(Some(event), split_scope);
         } else {
@@ -5895,11 +6574,33 @@ impl LauncherApp {
             self.calendar_event_editor.open_new(date);
         }
         self.calendar_editor_open = true;
+        self.focus_panel(Panel::CalendarEventEditor);
+    }
+
+    fn open_calendar_details_from(
+        &mut self,
+        instance: crate::plugins::calendar::EventInstance,
+        presentation: utility_host::UtilityPresentation,
+    ) {
+        if !self.calendar_details_open {
+            self.calendar_details_host.initialize(presentation);
+        }
+        self.calendar_event_details.open(instance);
+        self.calendar_details_open = true;
+        self.focus_panel(Panel::CalendarEventDetails);
     }
 
     pub(crate) fn prepare_calendar_event_at(
         &mut self,
         instant_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<String, String> {
+        self.prepare_calendar_event_from(instant_utc, utility_host::UtilityPresentation::Docked)
+    }
+
+    fn prepare_calendar_event_from(
+        &mut self,
+        instant_utc: chrono::DateTime<chrono::Utc>,
+        presentation: utility_host::UtilityPresentation,
     ) -> Result<String, String> {
         if self.calendar_editor_open {
             return Err("The Calendar Event editor is already open.".into());
@@ -5912,6 +6613,8 @@ impl LauncherApp {
             );
         }
         self.calendar_event_editor.open_new_at(local)?;
+        self.calendar_editor_host.initialize(presentation);
+        self.calendar_editor_open = true;
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);
         Ok(format!(
@@ -6061,7 +6764,8 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             WatchEvent::Actions
             | WatchEvent::IndexReady
             | WatchEvent::Folders
-            | WatchEvent::Bookmarks => {
+            | WatchEvent::Bookmarks
+            | WatchEvent::RecordingStopGeneration(_) => {
                 return Some(ev.into());
             }
             WatchEvent::Dashboard(_)
@@ -6117,7 +6821,8 @@ pub fn recv_test_event_timeout(rx: &EventReceiver, timeout: Duration) -> Option<
             | WatchEvent::Folders
             | WatchEvent::Bookmarks
             | WatchEvent::ScreenDrawRecover(_)
-            | WatchEvent::ScreenDrawEmergency(_) => {
+            | WatchEvent::ScreenDrawEmergency(_)
+            | WatchEvent::RecordingStopGeneration(_) => {
                 return Some(event.into());
             }
             _ if Instant::now() < deadline => {}
@@ -6369,6 +7074,8 @@ mod tests {
             (Panel::CpuListDialog, "CPU Usage"),
             (Panel::CalculationPadDialog, "Calculation Pad"),
             (Panel::DateTimeStudioDialog, "Date & Time Studio"),
+            (Panel::FolderSizeDialog, "Folder Size"),
+            (Panel::FileLockDialog, "File Lock Inspector"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }
@@ -7847,7 +8554,7 @@ mod tests {
         std::fs::write(&blocker, "unchanged").unwrap();
         app.settings_path = blocker.join("settings.json").to_string_lossy().into_owned();
 
-        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate));
+        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate), &ctx);
 
         assert_eq!(app.file_search_dialog.ui_preferences, committed_preferences);
         assert_eq!(

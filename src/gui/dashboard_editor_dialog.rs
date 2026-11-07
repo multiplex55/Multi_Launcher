@@ -6,6 +6,11 @@ use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, Dest
 use crate::gui::jump_mode::ui::DashboardEditorConfirmationKind;
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::gui::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+    presentation_button,
+};
+use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
@@ -13,6 +18,41 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
+
+const DASHBOARD_EDITOR_VIEWPORT_KEY: &str = "dashboard-editor";
+const DASHBOARD_EDITOR_BODY_ID: &str = "dashboard-editor-body";
+const DASHBOARD_EDITOR_NATIVE_TITLE: &str = "Dashboard Editor";
+const DASHBOARD_EDITOR_DEFAULT_SIZE: egui::Vec2 = egui::vec2(980.0, 720.0);
+const DASHBOARD_EDITOR_MINIMUM_SIZE: egui::Vec2 = egui::vec2(640.0, 420.0);
+
+fn dashboard_editor_viewport_id(owner_instance: u64) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of((DASHBOARD_EDITOR_VIEWPORT_KEY, owner_instance))
+}
+
+fn dashboard_editor_native_title(owner_instance: u64) -> String {
+    format!("{DASHBOARD_EDITOR_NATIVE_TITLE} — {owner_instance}")
+}
+
+fn dashboard_editor_viewport_builder(owner_instance: u64) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(dashboard_editor_native_title(owner_instance))
+        .with_inner_size(DASHBOARD_EDITOR_DEFAULT_SIZE)
+        .with_min_inner_size(DASHBOARD_EDITOR_MINIMUM_SIZE)
+        .with_resizable(true)
+        .with_visible(true)
+}
+
+fn dashboard_editor_native_identity(
+    host: HostIdentity,
+    owner_instance: u64,
+) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY).ok()?,
+        viewport_id: dashboard_editor_viewport_id(owner_instance),
+        owner_generation: owner_instance,
+        host_generation: host.generation,
+    })
+}
 
 #[derive(Default)]
 struct SlotCoverage {
@@ -32,6 +72,7 @@ enum SplitDirection {
     Vertical,
 }
 
+#[derive(Clone)]
 struct DashboardEditorDraftSnapshot {
     config: DashboardConfig,
     error: Option<String>,
@@ -53,6 +94,10 @@ struct DashboardEditorDraftSnapshot {
     slot_presentations: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentation>,
     presentation_base: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentationBase>,
     next_presentation_id: u64,
+    slot_tokens: Vec<u64>,
+    next_slot_token: u64,
+    next_confirmation_instance: u64,
+    target_generation: u64,
 }
 
 impl DashboardEditorDraftSnapshot {
@@ -78,6 +123,10 @@ impl DashboardEditorDraftSnapshot {
             slot_presentations: dialog.slot_presentations.clone(),
             presentation_base: dialog.presentation_base.clone(),
             next_presentation_id: dialog.next_presentation_id,
+            slot_tokens: dialog.slot_tokens.clone(),
+            next_slot_token: dialog.next_slot_token,
+            next_confirmation_instance: dialog.next_confirmation_instance,
+            target_generation: dialog.target_generation,
         }
     }
 
@@ -102,6 +151,10 @@ impl DashboardEditorDraftSnapshot {
         dialog.slot_presentations = self.slot_presentations;
         dialog.presentation_base = self.presentation_base;
         dialog.next_presentation_id = self.next_presentation_id;
+        dialog.slot_tokens = self.slot_tokens;
+        dialog.next_slot_token = self.next_slot_token;
+        dialog.next_confirmation_instance = self.next_confirmation_instance;
+        dialog.target_generation = self.target_generation;
     }
 }
 
@@ -126,6 +179,47 @@ pub(crate) struct DashboardEditorCompletion {
     pub(crate) dashboard_saved: bool,
     pub(crate) presentation_error: Option<String>,
     pub(crate) editor_open: bool,
+    pub(crate) show_root: bool,
+}
+
+struct DashboardEditorHostFrame {
+    root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    owner_instance: u64,
+    target_generation: u64,
+    dashboard_path: String,
+    owner_viewport: egui::ViewportId,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_pass_accepted: bool,
+    callback_observed: bool,
+    callback_class: egui::ViewportClass,
+    native_viewport: Option<egui::ViewportInfo>,
+    embedded_root_layer: Option<egui::LayerId>,
+    embedded_root_focused_id: Option<egui::Id>,
+    host_request: Option<UtilityPresentation>,
+    close_requested: bool,
+    os_close_requested: bool,
+    focus_host: bool,
+    draft_checkpoint: Option<DashboardEditorDraftSnapshot>,
+    native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
+    native_jump_frame: Option<u64>,
+}
+
+fn has_dashboard_editor_input_event(ctx: &egui::Context) -> bool {
+    use egui::Event;
+    ctx.input(|input| {
+        input.raw.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Key { pressed: true, .. }
+                    | Event::Text(_)
+                    | Event::Paste(_)
+                    | Event::PointerButton { .. }
+                    | Event::PointerMoved(_)
+                    | Event::MouseWheel { .. }
+            )
+        })
+    })
 }
 
 fn register_editor_target(
@@ -163,6 +257,14 @@ fn register_editor_target_at_order(
 
 pub struct DashboardEditorDialog {
     pub open: bool,
+    host_state: UtilityHostState,
+    owner_instance: u64,
+    show_root_after_host_change: bool,
+    pending_host_frame: Option<DashboardEditorHostFrame>,
+    retained_host_checkpoint: Option<(ViewportPassProvenance, DashboardEditorDraftSnapshot)>,
+    native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
+    native_jump_frame: Option<u64>,
+    pending_launcher_close: bool,
     path: String,
     config: DashboardConfig,
     error: Option<String>,
@@ -197,12 +299,24 @@ pub struct DashboardEditorDialog {
     test_scroll_metrics: Option<(egui::Id, f32)>,
     #[cfg(test)]
     test_grid_rows_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    test_host_button: Option<(egui::Id, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_save_button: Option<(egui::Id, egui::Rect, egui::Rect, bool)>,
 }
 
 impl Default for DashboardEditorDialog {
     fn default() -> Self {
         Self {
             open: false,
+            host_state: UtilityHostState::docked(),
+            owner_instance: 0,
+            show_root_after_host_change: false,
+            pending_host_frame: None,
+            retained_host_checkpoint: None,
+            native_jump_mode: Default::default(),
+            native_jump_frame: None,
+            pending_launcher_close: false,
             path: "dashboard.json".into(),
             config: DashboardConfig::default(),
             error: None,
@@ -236,6 +350,10 @@ impl Default for DashboardEditorDialog {
             test_scroll_metrics: None,
             #[cfg(test)]
             test_grid_rows_response: None,
+            #[cfg(test)]
+            test_host_button: None,
+            #[cfg(test)]
+            test_save_button: None,
         }
     }
 }
@@ -251,7 +369,131 @@ impl DashboardEditorDialog {
         dialog
     }
 
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == UtilityPresentation::Popout
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        (self.open && self.is_popped_out())
+            || self.host_state.bootstrap_pending()
+            || self.pending_host_frame.is_some()
+    }
+
+    pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        match self.host_state.presentation() {
+            UtilityPresentation::Docked => {
+                crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor.layer_id()
+            }
+            UtilityPresentation::Popout => self.host_state.embedded_root_layer(),
+        }
+    }
+
+    pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        let Some(layer) = self.host_layer_if_root() else {
+            return false;
+        };
+        if ctx.viewport_id() != egui::ViewportId::ROOT
+            || !ctx.input(|input| input.focused)
+            || egui::Popup::is_any_open(ctx)
+        {
+            return false;
+        }
+
+        let confirmation_layer =
+            self.jump_mode_pending_confirmation_identity()
+                .map(|(instance, kind)| {
+                    crate::gui::jump_mode::ui::dashboard_editor_confirmation_layer_id(
+                        self.owner_instance,
+                        instance,
+                        kind,
+                    )
+                });
+        let visible = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+        let owns_visible_layer = visible == Some(layer)
+            || confirmation_layer.is_some_and(|confirmation| visible == Some(confirmation));
+        let owns_modal = confirmation_layer.is_some_and(|confirmation| {
+            ctx.memory(|memory| memory.top_modal_layer()) == Some(confirmation)
+        });
+        owns_visible_layer
+            && (ctx.memory(|memory| memory.top_modal_layer().is_none()) || owns_modal)
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
+                focused == layer
+                    || Some(focused) == confirmation_layer
+                    || focused.order != egui::Order::Middle
+            })
+    }
+
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_state.request_focus();
+    }
+
+    pub(crate) fn request_close(&mut self) {
+        if self.open {
+            self.pending_launcher_close = true;
+        }
+    }
+
+    pub(crate) fn force_close(&mut self, ctx: &egui::Context) {
+        let identity =
+            dashboard_editor_native_identity(self.host_state.identity(), self.owner_instance);
+        self.open = false;
+        if let Some(identity) = identity {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host_state.retire_to_docked();
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
+        self.pending_host_frame = None;
+        self.pending_root_effects = None;
+        self.retained_host_checkpoint = None;
+        self.pending_launcher_close = false;
+        self.show_root_after_host_change = false;
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pop_out(&mut self) {
+        self.open = true;
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_viewport_id(&self) -> egui::ViewportId {
+        dashboard_editor_viewport_id(self.owner_instance)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> (egui::Id, egui::Rect, egui::Rect, bool) {
+        self.test_host_button
+            .expect("host presentation button was rendered")
+    }
+
+    #[cfg(test)]
+    fn test_save_button(&self) -> (egui::Id, egui::Rect, egui::Rect, bool) {
+        self.test_save_button.expect("Save button was rendered")
+    }
+
     pub fn open(&mut self, path: &str, registry: &WidgetRegistry) {
+        if self.open && self.path == path {
+            if self.is_popped_out() {
+                self.request_host_focus();
+            }
+            return;
+        }
+        if self.path != path {
+            self.pending_host_frame = None;
+            self.pending_root_effects = None;
+            self.retained_host_checkpoint = None;
+            self.pending_launcher_close = false;
+        }
         self.path = path.to_string();
         self.reload(registry);
         self.open = true;
@@ -414,6 +656,7 @@ impl DashboardEditorDialog {
             dashboard_saved,
             presentation_error,
             editor_open: self.open,
+            show_root: false,
         })
     }
 
@@ -668,6 +911,47 @@ impl DashboardEditorDialog {
         native_confirmation_owner: bool,
         first_ui_pass: bool,
     ) -> bool {
+        let mut host_request = None;
+        self.ui_with_jump_mode_inner(
+            ctx,
+            registry,
+            settings_ctx,
+            require_confirm_destructive,
+            parent_instance,
+            jump_scope,
+            confirmation_scope,
+            native_ui_owner,
+            native_confirmation_owner,
+            first_ui_pass,
+            None,
+            UtilityPresentation::Docked,
+            &mut host_request,
+            false,
+            false,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ui_with_jump_mode_inner(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        settings_ctx: WidgetSettingsContext<'_>,
+        require_confirm_destructive: bool,
+        parent_instance: Option<u64>,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        native_confirmation_owner: bool,
+        first_ui_pass: bool,
+        mut body_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+        host_request: &mut Option<UtilityPresentation>,
+        host_control_allowed: bool,
+        show_host_control: bool,
+        root_provenance: Option<ViewportPassProvenance>,
+    ) -> bool {
         if !self.open {
             return false;
         }
@@ -677,6 +961,8 @@ impl DashboardEditorDialog {
         #[cfg(test)]
         {
             self.test_grid_rows_response = None;
+            self.test_host_button = None;
+            self.test_save_button = None;
         }
         let mut save_requested = false;
         let mut presentation_updates = Vec::new();
@@ -689,16 +975,44 @@ impl DashboardEditorDialog {
         let mut child_cancelled = false;
         let mut reset_result = ConfirmationResult::None;
         let mut confirmation_opened_this_pass = false;
-        egui::Window::new("Dashboard Editor")
-
-            .resizable(true)
-            .show_utility(ctx, "dashboard-editor", egui::Id::new("Dashboard Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
-                authorized_visible_pass = native_ui_owner
-                    && first_ui_pass
-                    && ui.is_visible()
-                    && !ui.is_sizing_pass();
-                if !authorized_visible_pass {
-                    draft_snapshot = Some(DashboardEditorDraftSnapshot::capture(self));
+        let mut draw_body = |ui: &mut egui::Ui| {
+            authorized_visible_pass =
+                native_ui_owner && first_ui_pass && ui.is_visible() && !ui.is_sizing_pass();
+            if !authorized_visible_pass {
+                draft_snapshot = Some(DashboardEditorDraftSnapshot::capture(self));
+            }
+            ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new(DASHBOARD_EDITOR_BODY_ID)),
+                    |ui| {
+                if show_host_control {
+                    ui.horizontal(|ui| {
+                        let (response, requested) = presentation_button(
+                            ui,
+                            presentation,
+                            host_control_allowed,
+                        );
+                        register_editor_target(
+                            jump_scope,
+                            ui,
+                            &response,
+                            "host/presentation",
+                            "Move Dashboard Editor",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_host_button = Some((
+                                response.id,
+                                response.rect,
+                                ui.clip_rect(),
+                                host_control_allowed && ui.is_enabled(),
+                            ));
+                        }
+                        if response.clicked() && host_control_allowed {
+                            *host_request = Some(requested);
+                        }
+                    });
                 }
                 let _scroll_output = egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.set_max_width(ui.available_width().min(900.0));
@@ -816,6 +1130,15 @@ impl DashboardEditorDialog {
                                 response,
                                 ButtonEmphasis::Primary,
                             );
+                            #[cfg(test)]
+                            if ui.is_visible() && !ui.is_sizing_pass() {
+                                self.test_save_button = Some((
+                                    response.id,
+                                    response.rect,
+                                    ui.clip_rect(),
+                                    authorized_visible_pass && response.enabled(),
+                                ));
+                            }
                             register_editor_target(jump_scope, ui, &response, "save", "Save dashboard", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
                             if response.clicked() && authorized_visible_pass {
                                 save_requested = true;
@@ -1181,7 +1504,27 @@ impl DashboardEditorDialog {
                             .max(0.0),
                     ));
                 }
-            });
+                    },
+                );
+        };
+        if let Some(ui) = body_ui.as_deref_mut() {
+            draw_body(ui);
+        } else {
+            let _ = egui::Window::new("Dashboard Editor")
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    "dashboard-editor",
+                    egui::Id::new("Dashboard Editor"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    ),
+                    draw_body,
+                );
+        }
         if let Some(snapshot) = draft_snapshot {
             snapshot.restore(self);
         }
@@ -1228,9 +1571,11 @@ impl DashboardEditorDialog {
             && !ctx.will_discard()
             && (save_requested || !presentation_updates.is_empty() || close_requested)
         {
+            let root_pass = root_provenance
+                .unwrap_or_else(|| ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT));
             self.pending_root_effects = Some(PendingDashboardEditorEffects {
-                root_frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                root_pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                root_frame_nr: root_pass.frame_nr,
+                root_pass_nr: root_pass.pass_nr,
                 target_generation: self.target_generation,
                 dashboard_path: self.path.clone(),
                 presentation_updates,
@@ -1239,6 +1584,721 @@ impl DashboardEditorDialog {
             });
         }
         false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn show_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        settings_ctx: WidgetSettingsContext<'_>,
+        require_confirm_destructive: bool,
+        owner_instance: u64,
+        first_ui_pass: bool,
+        root_visible: bool,
+        application_input_allowed: bool,
+        root_input_allowed: bool,
+        root_native_ui_owner: bool,
+        root_confirmation_owner: bool,
+        jump_mode_enabled: bool,
+        root_confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
+        if self.owner_instance != owner_instance {
+            if self.is_popped_out() {
+                if let Some(identity) = dashboard_editor_native_identity(
+                    self.host_state.identity(),
+                    self.owner_instance,
+                ) {
+                    crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+                self.host_state.request_focus();
+            }
+            self.pending_host_frame = None;
+            self.pending_root_effects = None;
+            self.retained_host_checkpoint = None;
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+        }
+        self.owner_instance = owner_instance;
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+
+        let same_frame_checkpoint = self
+            .retained_host_checkpoint
+            .as_ref()
+            .filter(|(pass, _)| pass.frame_nr == root_pass.frame_nr)
+            .cloned();
+        let mut draft_checkpoint = if let Some((checkpoint_pass, checkpoint)) =
+            same_frame_checkpoint
+        {
+            if root_pass.pass_nr > checkpoint_pass.pass_nr {
+                checkpoint.clone().restore(self);
+            }
+            Some(checkpoint)
+        } else {
+            if let Some((previous_pass, previous_checkpoint)) = self.retained_host_checkpoint.take()
+                && !previous_pass.was_retained(ctx)
+            {
+                previous_checkpoint.restore(self);
+                self.property_identity_store.clear();
+                self.native_combo_anchors.clear();
+            }
+            None
+        };
+
+        if self.pending_root_effects.as_ref().is_some_and(|effects| {
+            effects.root_frame_nr != root_pass.frame_nr || effects.root_pass_nr != root_pass.pass_nr
+        }) {
+            self.pending_root_effects = None;
+        }
+
+        let host = self.host_state.identity();
+        let mut callback_observed = false;
+        let mut callback_class = egui::ViewportClass::Root;
+        let mut observed_owner_viewport = egui::ViewportId::ROOT;
+        let mut owner_pass = None;
+        let mut owner_pass_accepted = false;
+        let mut native_viewport = None;
+        let mut embedded_root_layer = None;
+        let mut embedded_root_focused_id = None;
+        let mut host_request = None;
+        let mut close_requested = self.pending_launcher_close;
+        let mut os_close_requested = false;
+        let mut focus_host = false;
+        let mut native_jump_mode = std::mem::take(&mut self.native_jump_mode);
+        let mut native_jump_frame = self.native_jump_frame.take();
+
+        match host.host {
+            UtilityPresentation::Docked => {
+                if self.open && (root_visible || self.host_state.bootstrap_pending()) {
+                    callback_observed = true;
+                    callback_class = egui::ViewportClass::Root;
+                    observed_owner_viewport = egui::ViewportId::ROOT;
+                    let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+                    owner_pass = Some(pass);
+                    owner_pass_accepted = first_ui_pass && !ctx.will_discard();
+                    if draft_checkpoint.is_none()
+                        && owner_pass_accepted
+                        && has_dashboard_editor_input_event(ctx)
+                    {
+                        draft_checkpoint = Some(DashboardEditorDraftSnapshot::capture(self));
+                    }
+                    let confirmation_open =
+                        self.jump_mode_pending_confirmation_identity().is_some();
+                    let keyboard_close = owner_pass_accepted
+                        && root_input_allowed
+                        && root_native_ui_owner
+                        && !confirmation_open
+                        && native_jump_mode.active_session().is_none()
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    close_requested |= keyboard_close;
+                    let owner_current = owner_pass_accepted
+                        && root_input_allowed
+                        && root_native_ui_owner
+                        && !close_requested;
+                    focus_host = self.host_state.focus_pending() && owner_current;
+                    let _ = self.ui_with_jump_mode_inner(
+                        ctx,
+                        registry,
+                        settings_ctx,
+                        require_confirm_destructive,
+                        Some(owner_instance),
+                        settings_ctx.jump_mode_scope,
+                        root_confirmation_scope,
+                        owner_current,
+                        root_confirmation_owner && owner_pass_accepted,
+                        owner_pass_accepted,
+                        None,
+                        UtilityPresentation::Docked,
+                        &mut host_request,
+                        owner_current && !egui::Popup::is_any_open(ctx),
+                        true,
+                        Some(root_pass),
+                    );
+                    if let Some(layer) =
+                        crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor.layer_id()
+                    {
+                        embedded_root_layer = Some(layer);
+                        embedded_root_focused_id = ctx.memory(|memory| memory.focused());
+                    }
+                }
+            }
+            UtilityPresentation::Popout => {
+                let viewport_id = dashboard_editor_viewport_id(owner_instance);
+                let viewport_builder = dashboard_editor_viewport_builder(owner_instance);
+                let focus_pending = self.host_state.focus_pending();
+                let native_anchors = std::cell::RefCell::new(Vec::new());
+                native_jump_mode.set_enabled(jump_mode_enabled);
+                ctx.show_viewport_immediate(viewport_id, viewport_builder, |child, class| {
+                    callback_observed = true;
+                    callback_class = class;
+                    let child_ctx = child.ctx().clone();
+                    let independent = class == egui::ViewportClass::Immediate
+                        && child_ctx.viewport_id() == viewport_id;
+                    observed_owner_viewport = if independent {
+                        viewport_id
+                    } else {
+                        egui::ViewportId::ROOT
+                    };
+                    let current_owner_pass =
+                        ViewportPassProvenance::current(&child_ctx, child_ctx.viewport_id());
+                    owner_pass = Some(current_owner_pass);
+                    let pass_accepted = first_ui_pass
+                        && child.current_pass_index() == 0
+                        && !ctx.will_discard()
+                        && !child_ctx.will_discard();
+                    owner_pass_accepted = pass_accepted;
+                    if independent {
+                        native_viewport = Some(child.input(|input| input.viewport().clone()));
+                    }
+
+                    let visible_body =
+                        independent || (child.is_visible() && !child.is_sizing_pass());
+                    let focused = child_ctx.input(|input| input.focused);
+                    let modal_open =
+                        child_ctx.memory(|memory| memory.top_modal_layer().is_some());
+                    let popup_open = egui::Popup::is_any_open(&child_ctx);
+                    let expected_layer = if independent {
+                        egui::LayerId::background()
+                    } else {
+                        child.layer_id()
+                    };
+                    let editor_binding = crate::gui::jump_mode::ui::NavigationViewportBinding {
+                        viewport: viewport_id,
+                        owner: crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                            kind: crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
+                            instance: owner_instance,
+                        },
+                        base_layer: egui::LayerId::background(),
+                    };
+
+                    let mut native_scope = None;
+                    let mut native_confirmation_scope = None;
+                    let native_owner_current;
+                    let mut native_confirmation_current = false;
+                    let confirmation_identity =
+                        self.jump_mode_pending_confirmation_identity();
+                    let mut active_binding = editor_binding;
+                    if independent {
+                        let frame_number = child_ctx.cumulative_frame_nr();
+                        if native_jump_frame != Some(frame_number) {
+                            native_jump_mode.begin_frame();
+                            native_jump_frame = Some(frame_number);
+                        }
+                        let confirmation_binding = confirmation_identity
+                            .map(|(confirmation_instance, kind)| {
+                                crate::gui::jump_mode::ui::NavigationViewportBinding {
+                                    viewport: viewport_id,
+                                    owner: crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
+                                        parent_instance: owner_instance,
+                                        confirmation_instance,
+                                        kind,
+                                    },
+                                    base_layer: crate::gui::jump_mode::ui::dashboard_editor_confirmation_layer_id(
+                                        owner_instance,
+                                        confirmation_instance,
+                                        kind,
+                                    ),
+                                }
+                            })
+                            .filter(|binding| {
+                                crate::gui::jump_mode::ui::visible_top_middle_layer(&child_ctx)
+                                    == Some(binding.base_layer)
+                            });
+                        active_binding = confirmation_binding.unwrap_or(editor_binding);
+                        let navigation_owner = native_jump_mode.update_navigation_owner_for_viewport(
+                            &child_ctx,
+                            active_binding,
+                            application_input_allowed,
+                        );
+                        let jump_owner_current = navigation_owner == active_binding.owner
+                            && native_jump_mode.frame_navigation_owner() == active_binding.owner
+                            && jump_mode_enabled;
+                        native_jump_mode.handle_viewport_input(
+                            &child_ctx,
+                            jump_owner_current,
+                            pass_accepted,
+                            viewport_id,
+                        );
+                        let combo_current = popup_open
+                            && self.native_combo_popup_is_current(
+                                &child_ctx,
+                                egui::LayerId::background(),
+                            );
+                        let focus_layer_current =
+                            crate::gui::jump_mode::ui::focused_response_layer(&child_ctx)
+                                .is_none_or(|layer| {
+                                    layer == expected_layer
+                                        || (combo_current && layer.order == egui::Order::Foreground)
+                                });
+                        native_owner_current = pass_accepted
+                            && application_input_allowed
+                            && visible_body
+                            && focused
+                            && !modal_open
+                            && crate::gui::jump_mode::ui::visible_top_middle_layer(&child_ctx)
+                                .is_none()
+                            && (!popup_open || combo_current)
+                            && active_binding == editor_binding
+                            && focus_layer_current;
+                        native_confirmation_current = pass_accepted
+                            && application_input_allowed
+                            && visible_body
+                            && focused
+                            && !modal_open
+                            && confirmation_binding.is_some_and(|binding| {
+                                binding == active_binding
+                                    && crate::gui::jump_mode::ui::visible_top_middle_layer(
+                                        &child_ctx,
+                                    ) == Some(binding.base_layer)
+                                    && crate::gui::jump_mode::ui::focused_response_layer(
+                                        &child_ctx,
+                                    )
+                                    .is_none_or(|layer| {
+                                        layer == binding.base_layer
+                                            || layer == egui::LayerId::background()
+                                            || layer.order != egui::Order::Middle
+                                    })
+                            });
+                        native_jump_mode.begin_ui_pass();
+                        if native_owner_current && jump_mode_enabled && jump_owner_current {
+                            native_scope = native_jump_mode.scope_for_viewport_binding(
+                                crate::gui::jump_mode::SurfaceId::dialog(
+                                    "dashboard-editor",
+                                    owner_instance,
+                                ),
+                                crate::gui::jump_mode::TargetGeneration(self.target_generation),
+                                DASHBOARD_EDITOR_VIEWPORT_KEY,
+                                editor_binding,
+                            );
+                        }
+                        if native_confirmation_current
+                            && jump_mode_enabled
+                            && jump_owner_current
+                            && let (Some(binding), Some((confirmation_instance, kind))) =
+                                (confirmation_binding, confirmation_identity)
+                        {
+                            native_confirmation_scope = native_jump_mode.scope_for_viewport_binding(
+                                crate::gui::jump_mode::SurfaceId::popup(
+                                    kind.surface_kind(),
+                                    confirmation_instance,
+                                    crate::gui::jump_mode::SurfaceId::dialog(
+                                        "dashboard-editor",
+                                        owner_instance,
+                                    ),
+                                ),
+                                crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                                kind.surface_kind(),
+                                binding,
+                            );
+                        }
+                        let confirmation_open =
+                            self.jump_mode_pending_confirmation_identity().is_some();
+                        if native_owner_current
+                            && !confirmation_open
+                            && !popup_open
+                            && native_jump_mode.active_session().is_none()
+                        {
+                            close_requested |= child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                    || input.consume_key(
+                                        egui::Modifiers::COMMAND,
+                                        egui::Key::W,
+                                    )
+                            });
+                        }
+                        os_close_requested = pass_accepted
+                            && child.input(|input| input.viewport().close_requested());
+                        focus_host = focus_pending
+                            && application_input_allowed
+                            && independent
+                            && visible_body
+                            && !modal_open
+                            && (crate::gui::jump_mode::ui::visible_top_middle_layer(&child_ctx)
+                                .is_none()
+                                || confirmation_binding.is_some());
+                    } else {
+                        let known_combo = popup_open
+                            && self.native_combo_popup_is_current(&child_ctx, expected_layer);
+                        let root_owner_current = pass_accepted
+                            && root_input_allowed
+                            && root_native_ui_owner
+                            && visible_body
+                            && focused
+                            && crate::gui::jump_mode::ui::focused_response_layer(&child_ctx)
+                                .is_none_or(|layer| {
+                                    layer == expected_layer
+                                        || (known_combo && layer.order == egui::Order::Foreground)
+                                });
+                        native_owner_current = root_owner_current;
+                        let confirmation_open =
+                            self.jump_mode_pending_confirmation_identity().is_some();
+                        if root_owner_current
+                            && !confirmation_open
+                            && !popup_open
+                            && native_jump_mode.active_session().is_none()
+                        {
+                            close_requested |= child_ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                    || input.consume_key(
+                                        egui::Modifiers::COMMAND,
+                                        egui::Key::W,
+                                    )
+                            });
+                        }
+                        focus_host = focus_pending && root_owner_current && !modal_open;
+                        if child_ctx.viewport_id() == egui::ViewportId::ROOT && pass_accepted {
+                            embedded_root_layer = Some(child.layer_id());
+                            embedded_root_focused_id =
+                                child_ctx.memory(|memory| memory.focused());
+                        }
+                    }
+
+                    let body_owner = if independent {
+                        native_owner_current && !close_requested && !os_close_requested
+                    } else {
+                        native_owner_current && !close_requested
+                    };
+                    let confirmation_owner = if independent {
+                        native_confirmation_current && !close_requested && !os_close_requested
+                    } else {
+                        root_confirmation_owner && pass_accepted && !close_requested
+                    };
+                    let host_controls_allowed = body_owner
+                        && !modal_open
+                        && (!popup_open
+                            || (independent
+                                && self.native_combo_popup_is_current(
+                                    &child_ctx,
+                                    egui::LayerId::background(),
+                                )));
+
+                    if independent {
+                        if draft_checkpoint.is_none()
+                            && pass_accepted
+                            && has_dashboard_editor_input_event(&child_ctx)
+                        {
+                            draft_checkpoint =
+                                Some(DashboardEditorDraftSnapshot::capture(self));
+                        }
+                        let mut child_settings = settings_ctx
+                            .with_jump_mode_scope(native_scope.as_ref());
+                        child_settings.native_combo_anchors = Some(&native_anchors);
+                        egui::CentralPanel::default().show(child, |ui| {
+                            let _ = self.ui_with_jump_mode_inner(
+                                &child_ctx,
+                                registry,
+                                child_settings,
+                                require_confirm_destructive,
+                                Some(owner_instance),
+                                native_scope.as_ref(),
+                                native_confirmation_scope.as_ref(),
+                                body_owner,
+                                confirmation_owner,
+                                pass_accepted,
+                                Some(ui),
+                                UtilityPresentation::Popout,
+                                &mut host_request,
+                                host_controls_allowed,
+                                true,
+                                Some(root_pass),
+                            );
+                        });
+                        native_jump_mode.finish_ui_pass();
+                        let after_owner = native_jump_mode.update_navigation_owner_for_viewport(
+                            &child_ctx,
+                            active_binding,
+                            application_input_allowed,
+                        );
+                        if native_jump_mode.prepare_pass_for_viewport(
+                            &child_ctx,
+                            active_binding,
+                            after_owner,
+                            application_input_allowed,
+                        ) {
+                            crate::gui::jump_mode::paint::paint(
+                                &child_ctx,
+                                &native_jump_mode,
+                            );
+                        }
+                        if !child_ctx.will_discard() {
+                            native_jump_mode.complete_frame_for_viewport(
+                                &child_ctx,
+                                active_binding,
+                                after_owner,
+                                application_input_allowed,
+                            );
+                        }
+                    } else {
+                        if draft_checkpoint.is_none()
+                            && pass_accepted
+                            && has_dashboard_editor_input_event(&child_ctx)
+                        {
+                            draft_checkpoint = Some(DashboardEditorDraftSnapshot::capture(self));
+                        }
+                        let mut root_settings =
+                            settings_ctx.with_jump_mode_scope(settings_ctx.jump_mode_scope);
+                        root_settings.native_combo_anchors = Some(&native_anchors);
+                        let _ = self.ui_with_jump_mode_inner(
+                            &child_ctx,
+                            registry,
+                            root_settings,
+                            require_confirm_destructive,
+                            Some(owner_instance),
+                            settings_ctx.jump_mode_scope,
+                            root_confirmation_scope,
+                            body_owner,
+                            confirmation_owner,
+                            pass_accepted,
+                            Some(child),
+                            UtilityPresentation::Popout,
+                            &mut host_request,
+                            host_controls_allowed,
+                            true,
+                            Some(root_pass),
+                        );
+                    }
+                });
+                self.native_combo_anchors = native_anchors.into_inner();
+            }
+        }
+
+        if callback_observed {
+            if self
+                .retained_host_checkpoint
+                .as_ref()
+                .is_none_or(|(pass, _)| pass.frame_nr != root_pass.frame_nr)
+                && let Some(checkpoint) = draft_checkpoint.as_ref()
+            {
+                self.retained_host_checkpoint = Some((root_pass, checkpoint.clone()));
+            }
+            self.pending_host_frame = Some(DashboardEditorHostFrame {
+                root_pass,
+                host,
+                owner_instance,
+                target_generation: self.target_generation,
+                dashboard_path: self.path.clone(),
+                owner_viewport: observed_owner_viewport,
+                owner_pass,
+                owner_pass_accepted,
+                callback_observed,
+                callback_class,
+                native_viewport,
+                embedded_root_layer,
+                embedded_root_focused_id,
+                host_request,
+                close_requested,
+                os_close_requested,
+                focus_host,
+                draft_checkpoint,
+                native_jump_mode,
+                native_jump_frame,
+            });
+        } else {
+            self.native_jump_mode = native_jump_mode;
+            self.native_jump_frame = native_jump_frame;
+        }
+    }
+
+    pub(crate) fn on_host_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        active_dashboard_path: &str,
+    ) -> DashboardEditorCompletion {
+        let Some(mut frame) = self.pending_host_frame.take() else {
+            return DashboardEditorCompletion {
+                dashboard_saved: false,
+                presentation_error: None,
+                editor_open: self.open,
+                show_root: self.take_show_root_after_host_change(),
+            };
+        };
+        let owner_pass_retained = frame.callback_observed
+            && frame.owner_pass_accepted
+            && frame.owner_pass.is_some_and(|pass| {
+                pass.viewport_id == frame.owner_viewport && pass.was_retained(ctx)
+            });
+        let same_owner = frame.owner_instance == self.owner_instance
+            && frame.dashboard_path == self.path
+            && frame.target_generation == self.target_generation
+            && active_dashboard_path == frame.dashboard_path
+            && frame.host == self.host_state.identity();
+        if !frame.root_pass.was_retained(ctx)
+            || frame.host != self.host_state.identity()
+            || frame.owner_instance != self.owner_instance
+            || frame.target_generation != self.target_generation
+            || frame.dashboard_path != self.path
+            || active_dashboard_path != frame.dashboard_path
+            || !owner_pass_retained
+        {
+            if same_owner && let Some(checkpoint) = frame.draft_checkpoint.take() {
+                checkpoint.restore(self);
+                self.property_identity_store.clear();
+                self.native_combo_anchors.clear();
+            }
+            if frame.os_close_requested {
+                ctx.send_viewport_cmd_to(
+                    dashboard_editor_viewport_id(frame.owner_instance),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            if self.pending_root_effects.as_ref().is_some_and(|effects| {
+                effects.root_frame_nr == frame.root_pass.frame_nr
+                    && effects.root_pass_nr == frame.root_pass.pass_nr
+            }) {
+                self.pending_root_effects = None;
+            }
+            if self
+                .retained_host_checkpoint
+                .as_ref()
+                .is_some_and(|(pass, _)| pass.frame_nr == frame.root_pass.frame_nr)
+            {
+                self.retained_host_checkpoint = None;
+            }
+            frame.native_jump_mode.cancel_all();
+            self.native_jump_mode = frame.native_jump_mode;
+            self.native_jump_frame = None;
+            return DashboardEditorCompletion {
+                dashboard_saved: false,
+                presentation_error: None,
+                editor_open: self.open,
+                show_root: false,
+            };
+        }
+
+        if self
+            .retained_host_checkpoint
+            .as_ref()
+            .is_some_and(|(pass, _)| pass.frame_nr == frame.root_pass.frame_nr)
+        {
+            self.retained_host_checkpoint = None;
+        }
+        if frame.os_close_requested {
+            ctx.send_viewport_cmd_to(
+                dashboard_editor_viewport_id(frame.owner_instance),
+                egui::ViewportCommand::CancelClose,
+            );
+        }
+        self.host_state.complete_bootstrap(
+            frame.host,
+            frame.embedded_root_layer,
+            frame.embedded_root_focused_id,
+        );
+        self.native_jump_mode = std::mem::take(&mut frame.native_jump_mode);
+        self.native_jump_frame = frame.native_jump_frame;
+        if frame.focus_host {
+            if frame.callback_class == egui::ViewportClass::Immediate {
+                ctx.send_viewport_cmd_to(
+                    dashboard_editor_viewport_id(frame.owner_instance),
+                    egui::ViewportCommand::Focus,
+                );
+            } else if let Some(layer) = frame.embedded_root_layer {
+                ctx.move_to_top(layer);
+            }
+            self.host_state.complete_focus(frame.host);
+        }
+
+        if frame.close_requested || frame.os_close_requested {
+            match self.pending_root_effects.as_mut() {
+                Some(effects)
+                    if effects.root_frame_nr == frame.root_pass.frame_nr
+                        && effects.root_pass_nr == frame.root_pass.pass_nr
+                        && effects.target_generation == frame.target_generation
+                        && effects.dashboard_path == frame.dashboard_path =>
+                {
+                    effects.close_requested = true;
+                }
+                _ => {
+                    self.pending_root_effects = Some(PendingDashboardEditorEffects {
+                        root_frame_nr: frame.root_pass.frame_nr,
+                        root_pass_nr: frame.root_pass.pass_nr,
+                        target_generation: frame.target_generation,
+                        dashboard_path: frame.dashboard_path.clone(),
+                        presentation_updates: Vec::new(),
+                        close_requested: true,
+                        save_config: None,
+                    });
+                }
+            }
+        }
+
+        let mut completion = self
+            .on_ui_frame_complete(ctx, registry, active_dashboard_path)
+            .unwrap_or(DashboardEditorCompletion {
+                dashboard_saved: false,
+                presentation_error: None,
+                editor_open: self.open,
+                show_root: false,
+            });
+        let native_identity = dashboard_editor_native_identity(frame.host, frame.owner_instance);
+        let closing = !self.open;
+        if let (Some(identity), Some(viewport_info)) =
+            (native_identity, frame.native_viewport.as_ref())
+            && frame.callback_class == egui::ViewportClass::Immediate
+            && !closing
+            && frame.host_request != Some(UtilityPresentation::Docked)
+        {
+            crate::gui::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                frame.callback_class,
+                true,
+                &dashboard_editor_native_title(frame.owner_instance),
+                identity,
+                viewport_info,
+                DASHBOARD_EDITOR_DEFAULT_SIZE,
+                Some(DASHBOARD_EDITOR_MINIMUM_SIZE),
+                None,
+            );
+        }
+
+        self.pending_launcher_close = false;
+        if !self.open {
+            if let Some(identity) = native_identity {
+                crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+            }
+            self.host_state.retire_to_docked();
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            self.show_root_after_host_change = false;
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        } else if let Some(requested) = frame.host_request
+            && requested != self.host_state.presentation()
+        {
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = native_identity {
+                    crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+            }
+            if self.host_state.transition(requested) {
+                self.native_jump_mode.cancel_all();
+                self.native_jump_frame = None;
+                if requested == UtilityPresentation::Docked {
+                    self.show_root_after_host_change = true;
+                    if let Some(layer) = self.host_layer_if_root() {
+                        ctx.move_to_top(layer);
+                    }
+                }
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                if requested == UtilityPresentation::Popout {
+                    ctx.request_repaint_of(dashboard_editor_viewport_id(frame.owner_instance));
+                }
+            }
+        }
+        completion.editor_open = self.open;
+        completion.show_root = self.take_show_root_after_host_change();
+        completion
     }
 
     fn clamp_all_slots(&mut self) {
@@ -2321,6 +3381,164 @@ impl DashboardEditorDialog {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    fn dashboard_host_frame(
+        dialog: &mut DashboardEditorDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        root_visible: bool,
+        root_input_allowed: bool,
+    ) -> DashboardEditorCompletion {
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            let registry = WidgetRegistry::with_defaults();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 760.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    dialog.show_with_host(
+                        ui.ctx(),
+                        &registry,
+                        WidgetSettingsContext::empty(),
+                        false,
+                        77,
+                        ui.ctx().current_pass_index() == 0,
+                        root_visible,
+                        true,
+                        root_input_allowed,
+                        root_input_allowed,
+                        false,
+                        false,
+                        None,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            let active_path = dialog.path.clone();
+            dialog.on_host_frame_complete(ctx, &registry, &active_path)
+        })
+    }
+
+    fn pointer_events(point: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(point),
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn dashboard_editor_visible_host_buttons_pop_out_and_dock_the_same_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dashboard.json");
+        let registry = WidgetRegistry::with_defaults();
+        let invalid_document = b"{broken";
+        std::fs::write(&path, invalid_document).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.open(&path, &registry);
+        dialog.config.grid.rows = 7;
+        let original_config = dialog.config.clone();
+        let original_selection = dialog.selected_slot;
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+
+        for _ in 0..3 {
+            dashboard_host_frame(&mut dialog, &ctx, Vec::new(), true, true);
+        }
+        // The first draw initializes slot identities for the fallback draft.
+        let original_target_generation = dialog.target_generation;
+        let (_, button, clip, enabled) = dialog.test_host_button();
+        assert!(enabled);
+        assert!(clip.contains_rect(button));
+        for pressed in [true, false] {
+            dashboard_host_frame(
+                &mut dialog,
+                &ctx,
+                pointer_events(button.center(), pressed),
+                true,
+                true,
+            );
+        }
+        assert_eq!(
+            dialog.host_state.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(dialog.config, original_config);
+        assert_eq!(dialog.selected_slot, original_selection);
+
+        for _ in 0..3 {
+            dashboard_host_frame(&mut dialog, &ctx, Vec::new(), false, false);
+        }
+        assert_eq!(
+            dialog.host_state.presentation(),
+            UtilityPresentation::Popout
+        );
+        let (_, _, child_clip, child_enabled) = dialog.test_host_button();
+        assert!(
+            child_enabled,
+            "the native editor remains interactive with ROOT hidden"
+        );
+        assert!(child_clip.is_positive());
+        let (_, save_button, save_clip, save_enabled) = dialog.test_save_button();
+        assert!(save_enabled, "Save is enabled for the pending draft");
+        assert!(save_clip.contains_rect(save_button));
+        let viewport_id = dialog.test_viewport_id();
+        for pressed in [true, false] {
+            super::super::render::with_immediate_viewport_test_events_for(
+                viewport_id,
+                pointer_events(save_button.center(), pressed),
+                || dashboard_host_frame(&mut dialog, &ctx, Vec::new(), false, false),
+            );
+        }
+        assert!(dialog.open, "a rejected Save must keep the editor open");
+        assert_eq!(
+            dialog.config.grid.rows, 7,
+            "a failed Save retains the draft"
+        );
+        assert!(
+            dialog
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Failed to save"))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), invalid_document);
+
+        for _ in 0..3 {
+            dashboard_host_frame(&mut dialog, &ctx, Vec::new(), false, false);
+        }
+        let (_, child_button, child_clip, child_enabled) = dialog.test_host_button();
+        assert!(child_enabled);
+        assert!(child_clip.contains_rect(child_button));
+        let mut dock_show_root = false;
+        for pressed in [true, false] {
+            let completion = super::super::render::with_immediate_viewport_test_events_for(
+                viewport_id,
+                pointer_events(child_button.center(), pressed),
+                || dashboard_host_frame(&mut dialog, &ctx, Vec::new(), false, false),
+            );
+            dock_show_root = completion.show_root;
+        }
+        assert_eq!(
+            dialog.host_state.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(dock_show_root);
+        assert!(dialog.open);
+        assert_eq!(dialog.config, original_config);
+        assert_eq!(dialog.selected_slot, original_selection);
+        assert_eq!(dialog.target_generation, original_target_generation);
+    }
 
     #[test]
     fn corrupt_document_stays_read_only_when_editor_save_is_attempted() {

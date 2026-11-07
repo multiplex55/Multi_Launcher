@@ -331,6 +331,9 @@ impl XmlFileWorker {
 #[derive(Default)]
 struct UiIntents {
     close: bool,
+    host_request: Option<super::utility_host::UtilityPresentation>,
+    confirm_overwrite: Option<u64>,
+    cancel_overwrite: Option<u64>,
     edit_source: bool,
     clear_source: bool,
     paste_clipboard: bool,
@@ -345,11 +348,42 @@ struct UiIntents {
     xpath: crate::gui::xml_toolkit_xpath::XmlToolkitXPathIntents,
 }
 
+struct XmlHostDraft {
+    source: String,
+    tab: XmlToolkitTab,
+    tree: crate::gui::xml_toolkit_tree::XmlToolkitTreeViewState,
+    xpath: crate::gui::xml_toolkit_xpath::XmlToolkitXPathViewState,
+}
+struct XmlHostFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    generation: u64,
+    draft: Option<XmlHostDraft>,
+    intents: UiIntents,
+    schema: Option<crate::gui::xml_toolkit_schema::XmlToolkitSchemaIntent>,
+    native: bool,
+    viewport_info: Option<egui::ViewportInfo>,
+    focus: bool,
+    copies: Vec<String>,
+}
+
 /// One resizable XML utility window and its single live asynchronous session.
 /// The source text and view drafts survive a close/reopen cycle; the COM
 /// session does not. Worker owners remain here until shutdown completes.
 pub struct XmlToolkitDialogState {
     pub open: bool,
+    host_state: super::utility_host::UtilityHostState,
+    host_staging: bool,
+    host_first: bool,
+    host_pinned: bool,
+    native_close_pending: bool,
+    host_owner: Option<super::utility_host::ViewportPassProvenance>,
+    host_native: bool,
+    host_viewport_info: Option<egui::ViewportInfo>,
+    host_copies: Vec<String>,
+    host_intents: Option<UiIntents>,
+    host_pending: Option<XmlHostFrame>,
     source: String,
     session: SessionLifecycle,
     file_worker: Option<XmlFileWorker>,
@@ -372,6 +406,8 @@ pub struct XmlToolkitDialogState {
     schema_path_draft: Option<PathBuf>,
     activity_center: Option<crate::activity::ActivityCenter>,
     #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     overwrite_button_rects: [egui::Rect; 2],
 }
 
@@ -389,6 +425,17 @@ impl XmlToolkitDialogState {
     pub fn with_clipboard(clipboard: Arc<dyn ClipboardBackend>) -> Self {
         Self {
             open: false,
+            host_state: super::utility_host::UtilityHostState::popped_out(),
+            host_staging: false,
+            host_first: false,
+            host_pinned: false,
+            native_close_pending: false,
+            host_owner: None,
+            host_native: false,
+            host_viewport_info: None,
+            host_copies: Vec::new(),
+            host_intents: None,
+            host_pending: None,
             source: String::new(),
             session: SessionLifecycle::Idle,
             file_worker: None,
@@ -411,6 +458,8 @@ impl XmlToolkitDialogState {
             schema_path_draft: None,
             activity_center: None,
             #[cfg(test)]
+            host_button: None,
+            #[cfg(test)]
             overwrite_button_rects: [egui::Rect::NOTHING; 2],
         }
     }
@@ -419,6 +468,7 @@ impl XmlToolkitDialogState {
     /// current editor/session and never read the clipboard implicitly.
     pub fn open(&mut self) {
         if !self.open {
+            self.host_state = super::utility_host::UtilityHostState::popped_out();
             self.open = true;
             self.dialog_generation = self.dialog_generation.wrapping_add(1);
             self.native_jump_mode.cancel_all();
@@ -448,6 +498,7 @@ impl XmlToolkitDialogState {
         self.open = false;
         self.focus_viewport = false;
         self.bootstrap_pending = false;
+        self.native_close_pending = false;
         self.dialog_generation = self.dialog_generation.wrapping_add(1);
         self.source_generation = self.source_generation.wrapping_add(1);
         self.accepted_source_generation = None;
@@ -482,6 +533,32 @@ impl XmlToolkitDialogState {
         self.sync_views(&SessionSnapshot::default());
     }
 
+    /// Retire the editor session and close the associated native viewport.
+    pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        let identity = crate::gui::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse("xml-toolkit")
+                .expect("stable XML utility key"),
+            viewport_id: viewport_id(),
+            owner_generation: self.dialog_generation,
+            host_generation: self.host_state.identity().generation,
+        };
+        crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+        ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+        self.host_pending = None;
+        self.end_session();
+        self.host_state.retire_to_docked();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.host_button
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_session_epoch(&self) -> u64 {
+        self.dialog_generation
+    }
+
     pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
         self.open && self.bootstrap_pending
     }
@@ -502,6 +579,7 @@ impl XmlToolkitDialogState {
             true,
             root_native_allowed,
             false,
+            &mut None,
         );
     }
 
@@ -513,10 +591,10 @@ impl XmlToolkitDialogState {
     }
 
     pub(crate) fn root_navigation_instance(&self, current: Option<u64>) -> Option<u64> {
-        current.filter(|instance| self.observed_presentation != Some((*instance, true)))
+        self.root_layer().and(current)
     }
 
-    pub(crate) fn show_with_jump_mode(
+    fn show_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
         root_scope: Option<&JumpModeScope>,
@@ -525,9 +603,12 @@ impl XmlToolkitDialogState {
         application_input_allowed: bool,
         root_native_application_allowed: bool,
         jump_mode_enabled: bool,
+        draft: &mut Option<XmlHostDraft>,
     ) {
-        self.poll_file_worker();
-        self.poll_session(ctx);
+        if !self.host_staging {
+            self.poll_file_worker();
+            self.poll_session(ctx);
+        }
         if !self.open {
             crate::gui::utility_dialog_size::close_native_utility_size_window(
                 ctx,
@@ -550,20 +631,40 @@ impl XmlToolkitDialogState {
             |child, class| {
                 viewport_seen = true;
                 let independent = class == egui::ViewportClass::Immediate;
-                let first_pass = child.current_pass_index() == 0;
+                let first_pass =
+                    child.current_pass_index() == 0 && (!self.host_staging || self.host_first);
+                if self.host_staging {
+                    if first_pass {
+                        *draft = self.host_draft(child.ctx());
+                        self.host_native = independent;
+                        self.host_owner =
+                            Some(super::utility_host::ViewportPassProvenance::current(
+                                child.ctx(),
+                                child.ctx().viewport_id(),
+                            ));
+                    } else if let Some(draft) = draft.take() {
+                        self.restore_host_draft(draft);
+                    }
+                }
                 let presentation = (self.dialog_generation, independent);
                 if self.observed_presentation != Some(presentation) {
                     self.observed_presentation = Some(presentation);
                     self.native_jump_mode.cancel_all();
                     self.native_jump_frame = None;
                 }
-                if independent && focus {
+                if independent && focus && !self.host_staging {
                     child.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                if first_pass {
+                if first_pass && !self.host_staging {
                     self.bootstrap_pending = false;
                 }
                 let child_ctx = child.ctx().clone();
+                let output_start = self
+                    .host_staging
+                    .then(|| child_ctx.output(|output| output.commands.len()));
+                if self.host_staging && first_pass && independent {
+                    self.host_viewport_info = Some(child.input(|input| input.viewport().clone()));
+                }
                 self.ensure_session_start(&child_ctx);
                 if independent {
                     let close = self.show_immediate_viewport(
@@ -651,18 +752,36 @@ impl XmlToolkitDialogState {
                                 })
                             },
                         );
-                    if root_parent_current {
+                    if root_parent_current && !self.host_staging {
                         self.open = open;
                     }
                     if root_parent_current && !open && first_pass {
                         intents.close = true;
                     }
                 }
+                if let Some(start) = output_start {
+                    self.host_copies.extend(child_ctx.output_mut(|output| {
+                        let mut copies = Vec::new();
+                        for command in output.commands.split_off(start) {
+                            match command {
+                                egui::OutputCommand::CopyText(text) => copies.push(text),
+                                other => output.commands.push(other),
+                            }
+                        }
+                        copies
+                    }));
+                }
             },
         );
-        self.focus_viewport = false;
+        if !self.host_staging {
+            self.focus_viewport = false;
+        }
         if viewport_seen {
-            self.process_intents(ctx, intents);
+            if self.host_staging {
+                self.host_intents = Some(intents);
+            } else {
+                self.process_intents(ctx, intents);
+            }
         }
         if !self.open {
             crate::gui::utility_dialog_size::close_native_utility_size_window(
@@ -670,9 +789,299 @@ impl XmlToolkitDialogState {
                 crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
             );
         }
-        self.poll_file_worker();
-        self.poll_session(ctx);
+        if !self.host_staging {
+            self.poll_file_worker();
+            self.poll_session(ctx);
+        }
         self.request_repaint_if_pending(ctx);
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        (self.open
+            && self.host_state.presentation() == super::utility_host::UtilityPresentation::Popout)
+            || self.host_pending.is_some()
+            || self.needs_viewport_bootstrap()
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host_state.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self
+                    .observed_presentation
+                    .is_some_and(|(_, native)| !native)))
+        .then(xml_toolkit_embedded_layer_id)
+    }
+    pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) {
+        if self.open {
+            self.poll_file_worker();
+            self.poll_session(ctx);
+            self.request_repaint_if_pending(ctx);
+        } else {
+            self.poll_closed_background(ctx);
+        }
+    }
+
+    fn host_draft(&self, ctx: &egui::Context) -> Option<XmlHostDraft> {
+        // Tree and XPath can consume a queued reveal during an input-free pass.
+        // The source editor only needs rollback when a pass receives input.
+        (matches!(self.tab, XmlToolkitTab::Tree | XmlToolkitTab::XPath)
+            || ctx.input(|input| !input.events.is_empty()))
+        .then(|| XmlHostDraft {
+            source: self.source.clone(),
+            tab: self.tab,
+            tree: self.tree.clone(),
+            xpath: self.xpath.clone(),
+        })
+    }
+
+    fn restore_host_draft(&mut self, draft: XmlHostDraft) {
+        self.source = draft.source;
+        self.tab = draft.tab;
+        self.tree = draft.tree;
+        self.xpath = draft.xpath;
+    }
+
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        parent_instance: Option<u64>,
+        root_owner: NavigationOwner,
+        application_input_allowed: bool,
+        root_native_application_allowed: bool,
+        jump_mode_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        if let Some(draft) = self.host_pending.take().and_then(|previous| previous.draft) {
+            self.restore_host_draft(draft);
+        }
+        if !self.open {
+            return;
+        }
+        self.ensure_session_start(ctx);
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let host = self.host_state.identity();
+        let mut draft = None;
+        let replay_scope = (!first)
+            .then(|| root_scope.map(JumpModeScope::registration_only))
+            .flatten();
+        let root_scope = replay_scope.as_ref().or(root_scope);
+        let focus = self.focus_viewport;
+        self.host_staging = true;
+        #[cfg(test)]
+        {
+            self.host_button = None;
+        }
+        self.host_first = first;
+        self.host_pinned = pinned;
+        if pinned {
+            self.native_close_pending = false;
+        }
+        self.host_owner = None;
+        self.host_native = false;
+        self.host_viewport_info = None;
+        self.host_copies.clear();
+        self.host_intents = None;
+        if host.host == UtilityPresentation::Popout {
+            self.show_with_jump_mode(
+                ctx,
+                root_scope,
+                parent_instance,
+                root_owner,
+                application_input_allowed,
+                root_native_application_allowed,
+                jump_mode_enabled,
+                &mut draft,
+            );
+        } else if root_visible {
+            if first {
+                draft = self.host_draft(ctx);
+            }
+            self.host_owner = Some(root);
+            let parent = self.jump_mode_pending_overwrite_identity().is_none()
+                && root_native_application_allowed
+                && matches!(
+                    root_owner,
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::XmlToolkit,
+                        ..
+                    }
+                );
+            let confirmation = root_native_application_allowed
+                && matches!(root_owner, NavigationOwner::XmlOverwriteConfirmation { .. });
+            let mut intents = UiIntents::default();
+            if first && parent && !pinned {
+                intents.close = Self::consume_overwrite_cancel_shortcut(ctx);
+            }
+            let output_start = ctx.output(|output| output.commands.len());
+            let mut open = self.open;
+            egui::Window::new("XML Toolkit")
+                .id(egui::Id::new("xml_toolkit_embedded_window"))
+                .collapsible(false)
+                .resizable(true)
+                .default_size(egui::vec2(1120.0, 760.0))
+                .min_size(egui::vec2(480.0, 340.0))
+                .show_utility(
+                    ctx,
+                    "xml-toolkit",
+                    egui::Id::new("xml_toolkit_embedded_window"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(1120.0, 760.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(480.0, 340.0)),
+                    |ui| {
+                        ui.add_enabled_ui(parent, |ui| {
+                            self.show_body(
+                                ui,
+                                ctx,
+                                first && parent && ui.is_visible() && !ui.is_sizing_pass(),
+                                parent,
+                                root_scope.filter(|_| parent),
+                                &mut intents,
+                                parent_instance,
+                                root_owner,
+                                confirmation,
+                                root_scope.filter(|_| confirmation),
+                            )
+                        });
+                    },
+                );
+            intents.close |= first && parent && !open && !pinned;
+            self.host_copies.extend(ctx.output_mut(|output| {
+                let mut copies = Vec::new();
+                for command in output.commands.split_off(output_start) {
+                    match command {
+                        egui::OutputCommand::CopyText(text) => copies.push(text),
+                        other => output.commands.push(other),
+                    }
+                }
+                copies
+            }));
+            self.host_intents = Some(intents);
+        }
+        self.host_staging = false;
+        let schema = self.schema.take_intent();
+        if let (Some(owner), Some(mut intents)) = (self.host_owner.take(), self.host_intents.take())
+        {
+            if pinned {
+                intents.close = false;
+            }
+            if first && !ctx.will_discard() {
+                self.host_pending = Some(XmlHostFrame {
+                    root,
+                    owner,
+                    host,
+                    generation: self.dialog_generation,
+                    draft,
+                    intents,
+                    schema,
+                    native: self.host_native,
+                    viewport_info: self.host_viewport_info.take(),
+                    focus,
+                    copies: std::mem::take(&mut self.host_copies),
+                });
+                return;
+            }
+        }
+        if let Some(draft) = draft {
+            self.restore_host_draft(draft);
+        }
+    }
+    /// Returns (closed, show_root) after exact root and owner passes survive.
+    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> (bool, bool) {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            return (false, false);
+        };
+        if !self.open
+            || frame.generation != self.dialog_generation
+            || frame.host != self.host_state.identity()
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+        {
+            if self.open
+                && frame.generation == self.dialog_generation
+                && let Some(draft) = frame.draft
+            {
+                self.restore_host_draft(draft);
+            }
+            return (false, false);
+        }
+        if frame.intents.close || (frame.native && self.native_close_pending && !self.host_pinned) {
+            self.end_session_with_host(ctx);
+            return (true, false);
+        }
+        let requested = frame.intents.host_request;
+        let identity = frame.native.then_some(
+            crate::gui::utility_window_geometry::NativeViewportIdentity {
+                key: crate::settings::UtilityToolKey::parse("xml-toolkit")
+                    .expect("stable XML utility key"),
+                viewport_id: viewport_id(),
+                owner_generation: self.dialog_generation,
+                host_generation: frame.host.generation,
+            },
+        );
+        if let (Some(identity), Some(info)) = (identity, frame.viewport_info.as_ref()) {
+            crate::gui::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                "XML Toolkit",
+                identity,
+                info,
+                egui::vec2(1120.0, 760.0),
+                Some(egui::vec2(480.0, 340.0)),
+                None,
+            );
+        }
+        if frame.focus {
+            if frame.native {
+                ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+            } else {
+                ctx.move_to_top(xml_toolkit_embedded_layer_id());
+            }
+        }
+        self.focus_viewport = false;
+        self.bootstrap_pending = false;
+        for text in frame.copies {
+            if let Err(error) = self.clipboard.write_text(&text) {
+                self.feedback = Some(Err(format!("Could not copy XML: {error}")));
+            }
+        }
+        #[cfg(windows)]
+        let hwnd = crate::gui::utility_dialog_size::utility_picker_hwnd(ctx, identity);
+        #[cfg(not(windows))]
+        let hwnd = None;
+        self.process_host_intents(ctx, frame.intents, frame.schema, hwnd, true);
+        let show_root = requested == Some(UtilityPresentation::Docked);
+        if let Some(requested) = requested
+            && self.host_state.transition(requested)
+        {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            self.observed_presentation = None;
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = identity {
+                    crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+                }
+                self.focus_viewport = true;
+            } else {
+                self.focus_viewport = true;
+                self.bootstrap_pending = true;
+            }
+            ctx.request_repaint();
+        }
+        (!self.open, show_root)
     }
 
     fn show_immediate_viewport(
@@ -731,12 +1140,9 @@ impl XmlToolkitDialogState {
             navigation_owner == binding.owner
                 && self.native_jump_mode.frame_navigation_owner() == binding.owner
         });
-        self.native_jump_mode.handle_viewport_input(
-            &ctx,
-            jump_owner_current,
-            ctx.current_pass_index() == 0,
-            viewport,
-        );
+        let first_pass = ctx.current_pass_index() == 0 && (!self.host_staging || self.host_first);
+        self.native_jump_mode
+            .handle_viewport_input(&ctx, jump_owner_current, first_pass, viewport);
 
         let visible_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx);
         let confirmation_layer = confirmation_identity.map(|confirmation| {
@@ -761,11 +1167,13 @@ impl XmlToolkitDialogState {
             && !popup_open
             && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
                 .is_none_or(|layer| expected_layer == layer);
-        let first_pass = ctx.current_pass_index() == 0;
         let parent_owner_current = native_owner_current && confirmation_identity.is_none();
         let confirmation_owner_current = native_owner_current && confirmation_identity.is_some();
-        let native_close_requested =
-            first_pass && child.input(|input| input.viewport().close_requested());
+        let native_close_requested = child.input(|input| input.viewport().close_requested());
+        if self.host_staging && native_close_requested {
+            child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.native_close_pending = !self.host_pinned;
+        }
         let keyboard_close = first_pass
             && parent_owner_current
             && !popup_open
@@ -774,13 +1182,20 @@ impl XmlToolkitDialogState {
                     || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
             });
         if first_pass && confirmation_owner_current && !popup_open {
-            self.consume_overwrite_cancel_shortcut(&ctx);
+            if Self::consume_overwrite_cancel_shortcut(&ctx) {
+                intents.cancel_overwrite = confirmation_identity;
+            }
         }
-        let close = native_close_requested || keyboard_close;
+        let close = keyboard_close
+            || if self.host_staging {
+                self.native_close_pending && !self.host_pinned
+            } else {
+                first_pass && native_close_requested
+            };
         if close {
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
-        } else {
+        } else if !self.host_staging {
             crate::gui::utility_dialog_size::apply_native_utility_size_restore(
                 child,
                 class,
@@ -821,12 +1236,16 @@ impl XmlToolkitDialogState {
         } else {
             None
         };
+        let replay_scope = (!first_pass)
+            .then(|| scope.as_ref().map(JumpModeScope::registration_only))
+            .flatten();
+        let scope = replay_scope.as_ref().or(scope.as_ref());
         let (parent_scope, confirmation_scope) = match binding.map(|binding| binding.owner) {
             Some(NavigationOwner::Dialog {
                 kind: NavigationDialogKind::XmlToolkit,
                 ..
-            }) => (scope.as_ref(), None),
-            Some(NavigationOwner::XmlOverwriteConfirmation { .. }) => (None, scope.as_ref()),
+            }) => (scope, None),
+            Some(NavigationOwner::XmlOverwriteConfirmation { .. }) => (None, scope),
             _ => (None, None),
         };
         if !parent_owner_current && !confirmation_owner_current {
@@ -876,7 +1295,7 @@ impl XmlToolkitDialogState {
         } else if !ctx.will_discard() {
             self.native_jump_mode.cancel_all();
         }
-        if close {
+        if close && !self.host_staging {
             child.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         close
@@ -910,13 +1329,11 @@ impl XmlToolkitDialogState {
         }
     }
 
-    fn consume_overwrite_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|input| {
+    fn consume_overwrite_cancel_shortcut(ctx: &egui::Context) -> bool {
+        ctx.input_mut(|input| {
             input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                 || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-        }) {
-            self.cancel_pending_overwrite();
-        }
+        })
     }
 
     fn cancel_pending_overwrite(&mut self) {
@@ -938,6 +1355,32 @@ impl XmlToolkitDialogState {
         confirmation_scope: Option<&JumpModeScope>,
     ) {
         let mut targets = XmlJumpTargets::new(scope);
+        if self.host_staging {
+            let (response, requested) = super::utility_host::presentation_button(
+                ui,
+                self.host_state.presentation(),
+                process_actions,
+            );
+            #[cfg(test)]
+            {
+                self.host_button = Some((response.rect, ui.clip_rect(), response.enabled()));
+            }
+            targets.button(
+                ui,
+                &response,
+                "chrome/host",
+                if self.host_state.presentation()
+                    == super::utility_host::UtilityPresentation::Docked
+                {
+                    "Pop Out"
+                } else {
+                    "Dock"
+                },
+            );
+            if response.clicked() && process_actions && !ctx.will_discard() {
+                intents.host_request = Some(requested);
+            }
+        }
         let snapshot = self.current_snapshot();
         self.tree.sync(&snapshot);
         self.xpath.sync(&snapshot);
@@ -1142,6 +1585,7 @@ impl XmlToolkitDialogState {
             confirmation_scope,
             confirmation_owner_current,
             parent_instance.unwrap_or(self.dialog_generation),
+            intents,
         );
 
         if self
@@ -1153,8 +1597,15 @@ impl XmlToolkitDialogState {
         }
     }
 
+    #[cfg(test)]
     fn show_overwrite_confirmation(&mut self, ctx: &egui::Context, _process_actions: bool) {
-        self.show_overwrite_confirmation_scoped(ctx, None, false, self.dialog_generation);
+        self.show_overwrite_confirmation_scoped(
+            ctx,
+            None,
+            false,
+            self.dialog_generation,
+            &mut UiIntents::default(),
+        );
     }
 
     fn show_overwrite_confirmation_scoped(
@@ -1163,6 +1614,7 @@ impl XmlToolkitDialogState {
         scope: Option<&JumpModeScope>,
         confirmation_owner_current: bool,
         parent_instance: u64,
+        intents: &mut UiIntents,
     ) {
         let Some((confirmation_instance, path)) = self
             .pending_save
@@ -1177,9 +1629,11 @@ impl XmlToolkitDialogState {
         let mut replace_clicked = false;
         let mut cancel_clicked = false;
         let mut targets = XmlJumpTargets::new(scope);
-        let first_pass = ctx.current_pass_index() == 0;
+        let first_pass = ctx.current_pass_index() == 0 && (!self.host_staging || self.host_first);
         if first_pass && confirmation_owner_current {
-            self.consume_overwrite_cancel_shortcut(ctx);
+            if Self::consume_overwrite_cancel_shortcut(ctx) {
+                intents.cancel_overwrite = Some(confirmation_instance);
+            }
         }
         #[cfg(test)]
         let mut button_rects = [egui::Rect::NOTHING; 2];
@@ -1197,6 +1651,37 @@ impl XmlToolkitDialogState {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.add_enabled_ui(confirmation_owner_current, |ui| {
+                    if self.host_staging {
+                        let allowed = confirmation_owner_current
+                            && first_pass
+                            && ui.is_visible()
+                            && !ui.is_sizing_pass();
+                        let (response, requested) = super::utility_host::presentation_button(
+                            ui,
+                            self.host_state.presentation(),
+                            allowed,
+                        );
+                        #[cfg(test)]
+                        {
+                            self.host_button =
+                                Some((response.rect, ui.clip_rect(), response.enabled()));
+                        }
+                        targets.button(
+                            ui,
+                            &response,
+                            "overwrite/host",
+                            if self.host_state.presentation()
+                                == super::utility_host::UtilityPresentation::Docked
+                            {
+                                "Pop Out"
+                            } else {
+                                "Dock"
+                            },
+                        );
+                        if response.clicked() && allowed && !ctx.will_discard() {
+                            intents.host_request = Some(requested);
+                        }
+                    }
                     ui.label(format!("{} already exists.", path.display()));
                     ui.label("Replace it with the selected UTF-8 XML payload?");
                     ui.separator();
@@ -1231,9 +1716,9 @@ impl XmlToolkitDialogState {
             self.overwrite_button_rects = button_rects;
         }
         if replace_clicked {
-            self.confirm_overwrite(ctx);
+            intents.confirm_overwrite = Some(confirmation_instance);
         } else if (cancel_clicked || !open) && confirmation_owner_current && first_pass {
-            self.cancel_pending_overwrite();
+            intents.cancel_overwrite = Some(confirmation_instance);
         }
     }
 
@@ -1305,28 +1790,57 @@ impl XmlToolkitDialogState {
     }
 
     fn process_intents(&mut self, ctx: &egui::Context, intents: UiIntents) {
+        let schema = self.schema.take_intent();
+        self.process_host_intents(ctx, intents, schema, None, false);
+    }
+
+    fn process_host_intents(
+        &mut self,
+        ctx: &egui::Context,
+        intents: UiIntents,
+        schema_intent: Option<crate::gui::xml_toolkit_schema::XmlToolkitSchemaIntent>,
+        owner_hwnd: Option<usize>,
+        require_owned: bool,
+    ) {
         if intents.close {
             self.end_session();
             return;
         }
-
-        if intents.open_xml
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("XML document", &["xml", "xsl", "xslt"])
-                .pick_file()
+        if intents.cancel_overwrite == self.jump_mode_pending_overwrite_identity()
+            && intents.cancel_overwrite.is_some()
         {
-            self.request_load(ctx, path);
+            self.cancel_pending_overwrite();
+        } else if intents.confirm_overwrite == self.jump_mode_pending_overwrite_identity()
+            && intents.confirm_overwrite.is_some()
+        {
+            self.confirm_overwrite(ctx);
         }
 
-        let schema_intent = self.schema.take_intent();
+        if intents.open_xml {
+            match Self::owned_file_dialog(owner_hwnd, require_owned) {
+                Ok(dialog) => {
+                    if let Some(path) = dialog
+                        .add_filter("XML document", &["xml", "xsl", "xslt"])
+                        .pick_file()
+                    {
+                        self.request_load(ctx, path);
+                    }
+                }
+                Err(error) => self.feedback = Some(Err(error)),
+            }
+        }
         if matches!(
             schema_intent,
             Some(crate::gui::xml_toolkit_schema::XmlToolkitSchemaIntent::ChooseSchema)
-        ) && let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML Schema", &["xsd"])
-            .pick_file()
-        {
-            self.select_schema(path);
+        ) {
+            match Self::owned_file_dialog(owner_hwnd, require_owned) {
+                Ok(dialog) => {
+                    if let Some(path) = dialog.add_filter("XML Schema", &["xsd"]).pick_file() {
+                        self.select_schema(path);
+                    }
+                }
+                Err(error) => self.feedback = Some(Err(error)),
+            }
         }
 
         let mut replacement = None;
@@ -1381,11 +1895,18 @@ impl XmlToolkitDialogState {
             }
         }
         if intents.save_source {
-            self.choose_save_path(ctx, Arc::<str>::from(self.source.as_str()));
+            self.choose_save_path(
+                ctx,
+                Arc::<str>::from(self.source.as_str()),
+                owner_hwnd,
+                require_owned,
+            );
         }
         if intents.save_output {
             match self.current_output_text() {
-                Ok(output) => self.choose_save_path(ctx, Arc::<str>::from(output)),
+                Ok(output) => {
+                    self.choose_save_path(ctx, Arc::<str>::from(output), owner_hwnd, require_owned)
+                }
                 Err(error) => self.feedback = Some(Err(error)),
             }
         }
@@ -1580,11 +2101,40 @@ impl XmlToolkitDialogState {
         }
     }
 
-    fn choose_save_path(&mut self, ctx: &egui::Context, payload: Arc<str>) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML document", &["xml"])
-            .save_file()
-        else {
+    fn owned_file_dialog(
+        owner_hwnd: Option<usize>,
+        require_owned: bool,
+    ) -> Result<rfd::FileDialog, String> {
+        #[cfg(target_os = "windows")]
+        {
+            if require_owned {
+                let hwnd = owner_hwnd
+                    .and_then(|value| std::num::NonZeroIsize::new(value as isize))
+                    .ok_or_else(|| {
+                        "The XML Toolkit window is not ready to own the file picker.".to_owned()
+                    })?;
+                return Ok(rfd::FileDialog::new()
+                    .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+            }
+        }
+        let _ = (owner_hwnd, require_owned);
+        Ok(rfd::FileDialog::new())
+    }
+    fn choose_save_path(
+        &mut self,
+        ctx: &egui::Context,
+        payload: Arc<str>,
+        owner_hwnd: Option<usize>,
+        require_owned: bool,
+    ) {
+        let dialog = match Self::owned_file_dialog(owner_hwnd, require_owned) {
+            Ok(dialog) => dialog,
+            Err(error) => {
+                self.feedback = Some(Err(error));
+                return;
+            }
+        };
+        let Some(path) = dialog.add_filter("XML document", &["xml"]).save_file() else {
             return;
         };
         self.submit_save(ctx, path, payload, false);
@@ -2212,6 +2762,33 @@ fn xml_toolkit_embedded_layer_id() -> egui::LayerId {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_move_keeps_session_and_frozen_overwrite_identity() {
+        let mut dialog = super::XmlToolkitDialogState::default();
+        dialog.open();
+        dialog.source = "<root/>".into();
+        let generation = dialog.host_session_epoch();
+        dialog.pending_save = Some(super::PendingSave {
+            id: 7,
+            dialog_generation: generation,
+            path: std::path::PathBuf::from("test.xml"),
+            payload: std::sync::Arc::from("<frozen/>"),
+            needs_confirmation: true,
+        });
+        assert!(
+            dialog
+                .host_state
+                .transition(super::super::utility_host::UtilityPresentation::Docked)
+        );
+        assert_eq!(dialog.host_session_epoch(), generation);
+        assert_eq!(dialog.source, "<root/>");
+        assert_eq!(dialog.jump_mode_pending_overwrite_identity(), Some(7));
+        assert_eq!(
+            dialog.pending_save.as_ref().unwrap().payload.as_ref(),
+            "<frozen/>"
+        );
+    }
+
     use super::*;
     use crate::clipboard_modify::clipboard::ClipboardError;
     use std::sync::Mutex;

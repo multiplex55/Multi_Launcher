@@ -1,10 +1,45 @@
-//! Save-dialog glue only; report construction lives in `crate::diff`.
+//! Save-dialog glue only. Report construction lives in `crate::diff`.
+use super::effects::{PickerOwner, ViewEffect};
 use crate::diff::folder_export::{FolderExportFormat, FolderExportSnapshot};
 use crate::diff::model::{FolderCompareState, TextViewModel};
 use crate::diff::text_export::{TextExportFormat, TextExportSnapshot};
 use eframe::egui;
 
-pub(super) fn folder_menu(ui: &mut egui::Ui, state: &FolderCompareState) {
+enum Report {
+    Folder(FolderExportSnapshot, FolderExportFormat),
+    Text(TextExportSnapshot, TextExportFormat),
+}
+
+pub(super) struct ExportRequest {
+    extension: &'static str,
+    file_stem: &'static str,
+    report: Report,
+}
+
+impl ExportRequest {
+    pub(super) fn save(self, owner: PickerOwner) -> Result<(), String> {
+        let picker = owner.dialog().map_err(str::to_owned)?;
+        let Some(path) = picker
+            .add_filter(self.extension, &[self.extension])
+            .set_file_name(format!("{}.{}", self.file_stem, self.extension))
+            .save_file()
+        else {
+            return Ok(());
+        };
+        let contents = match self.report {
+            Report::Folder(snapshot, format) => snapshot.render(format),
+            Report::Text(snapshot, format) => snapshot.render(format),
+        };
+        std::fs::write(&path, contents)
+            .map_err(|error| format!("Could not export {}: {error}", path.display()))
+    }
+}
+
+pub(super) fn folder_menu(
+    ui: &mut egui::Ui,
+    state: &FolderCompareState,
+    effects: &mut Vec<ViewEffect>,
+) {
     ui.menu_button("Export…", |ui| {
         for (label, format, extension) in [
             ("CSV", FolderExportFormat::Csv, "csv"),
@@ -13,46 +48,36 @@ pub(super) fn folder_menu(ui: &mut egui::Ui, state: &FolderCompareState) {
         ] {
             ui.menu_button(label, |ui| {
                 if ui.button("Complete model").clicked() {
-                    save_folder(state, format, extension, false);
+                    let snapshot = FolderExportSnapshot::complete(&state.model);
+                    effects.push(ViewEffect::Export(ExportRequest {
+                        extension,
+                        file_stem: "folder-comparison",
+                        report: Report::Folder(snapshot, format),
+                    }));
                     ui.close();
                 }
                 if ui.button("Current filter").clicked() {
-                    save_folder(state, format, extension, true);
+                    let snapshot = FolderExportSnapshot::filtered(
+                        &state.model,
+                        state.display_filter.clone(),
+                        &state.path_filter,
+                        state.sort.descending,
+                    );
+                    effects.push(ViewEffect::Export(ExportRequest {
+                        extension,
+                        file_stem: "folder-comparison",
+                        report: Report::Folder(snapshot, format),
+                    }));
                     ui.close();
                 }
             });
         }
     });
 }
-fn save_folder(
-    state: &FolderCompareState,
-    format: FolderExportFormat,
-    extension: &str,
-    filtered: bool,
-) {
-    // Clone all scalar metadata before opening the native (blocking) dialog.
-    let snapshot = if filtered {
-        FolderExportSnapshot::filtered(
-            &state.model,
-            state.display_filter.clone(),
-            &state.path_filter,
-            state.sort.descending,
-        )
-    } else {
-        FolderExportSnapshot::complete(&state.model)
-    };
-    if let Some(path) = rfd::FileDialog::new()
-        .add_filter(extension, &[extension])
-        .set_file_name(format!("folder-comparison.{extension}"))
-        .save_file()
-        && let Err(e) = std::fs::write(&path, snapshot.render(format))
-    {
-        tracing::error!("could not export {}: {e}", path.display());
-    }
-}
-pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel) {
+
+pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel, effects: &mut Vec<ViewEffect>) {
     ui.menu_button("Export…", |ui| {
-        for (label, format, ext) in [
+        for (label, format, extension) in [
             ("Unified diff", TextExportFormat::UnifiedDiff, "diff"),
             ("Summary", TextExportFormat::PlainTextSummary, "txt"),
             (
@@ -76,14 +101,11 @@ pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel) {
                     model.left.source(),
                     model.right.source(),
                 );
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter(ext, &[ext])
-                    .set_file_name(format!("comparison.{ext}"))
-                    .save_file()
-                    && let Err(e) = std::fs::write(&path, snapshot.render(format))
-                {
-                    tracing::error!("could not export {}: {e}", path.display());
-                }
+                effects.push(ViewEffect::Export(ExportRequest {
+                    extension,
+                    file_stem: "comparison",
+                    report: Report::Text(snapshot, format),
+                }));
                 ui.close();
             }
         }

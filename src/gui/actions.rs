@@ -417,6 +417,10 @@ impl LauncherApp {
     }
 
     pub(crate) fn begin_crop_screenshot(&mut self) {
+        if let Some(reason) = self.recording_capture_conflict() {
+            self.report_error_message("crop.screenshot", reason);
+            return;
+        }
         if let Err(error) = self.ensure_no_coordinate_pick() {
             self.report_error_message("crop.screenshot", error);
             return;

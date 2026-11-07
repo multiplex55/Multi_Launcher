@@ -1,5 +1,6 @@
 //! Explicit native document identity and replacement/close transitions.
 
+use super::codec::{DiagramFileDocument, DiagramFileDocumentRef};
 use super::layout::{DiagramLayoutError, layout_positions};
 use super::persistence::{
     DiagramDocumentStore, DiagramPersistenceError, LoadedDiagramDocument, MermaidFile,
@@ -7,6 +8,11 @@ use super::persistence::{
 };
 use super::session::{DiagramSession, DiagramSessionError, GraphOperation};
 use super::templates::{DiagramTemplate, DiagramTemplateError};
+use super::visual::{
+    VisualDiagramDocument, VisualDocumentError, VisualOperation, VisualScene,
+    VisualTransactionOutcome,
+};
+use super::visual_templates::VisualAuthoringTemplate;
 use crate::common::atomic_file::save_atomic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,11 +20,19 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingDiagramTransition {
     New,
+    NewVisual,
     Open(PathBuf),
     ImportMermaid(MermaidFile),
     CopySource(DiagramSourceCopy),
     ApplyTemplate(DiagramTemplate),
+    ApplyVisualTemplate(VisualAuthoringTemplate),
     Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagramAuthoringKind {
+    Mermaid,
+    Visual,
 }
 
 /// A bounded exact Mermaid source copied into an untitled Diagram document.
@@ -99,6 +113,8 @@ pub enum DiagramDocumentError {
     SaveAsRequired,
     PendingTransitionExists,
     NoPendingTransition,
+    WrongAuthoringKind,
+    Visual(VisualDocumentError),
     Session(DiagramSessionError),
     Persistence(DiagramPersistenceError),
     MermaidImport(MermaidImportError),
@@ -117,6 +133,10 @@ impl std::fmt::Display for DiagramDocumentError {
             Self::NoPendingTransition => {
                 formatter.write_str("there is no pending diagram transition")
             }
+            Self::WrongAuthoringKind => {
+                formatter.write_str("this operation is not available for the active document kind")
+            }
+            Self::Visual(error) => error.fmt(formatter),
             Self::Session(error) => error.fmt(formatter),
             Self::Persistence(error) => error.fmt(formatter),
             Self::MermaidImport(error) => error.fmt(formatter),
@@ -130,6 +150,7 @@ impl std::error::Error for DiagramDocumentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Session(error) => Some(error),
+            Self::Visual(error) => Some(error),
             Self::Persistence(error) => Some(error),
             Self::MermaidImport(error) => Some(error),
             Self::Template(error) => Some(error),
@@ -169,29 +190,59 @@ impl From<DiagramLayoutError> for DiagramDocumentError {
     }
 }
 
+impl From<VisualDocumentError> for DiagramDocumentError {
+    fn from(error: VisualDocumentError) -> Self {
+        Self::Visual(error)
+    }
+}
+
+enum ActivePayload {
+    Mermaid {
+        session: DiagramSession,
+        source_copy_origin: Option<DiagramSourceCopyOrigin>,
+    },
+    Visual(VisualDiagramDocument),
+}
+
+enum SavedBaseline {
+    Mermaid(super::session::SavedContentSnapshot),
+    Visual(VisualScene),
+}
+
 struct ActiveDocument {
-    session: DiagramSession,
+    payload: ActivePayload,
     path: Option<PathBuf>,
     disk_digest: Option<[u8; 32]>,
-    source_copy_origin: Option<DiagramSourceCopyOrigin>,
 }
 
 impl ActiveDocument {
-    fn blank() -> Self {
+    fn blank(kind: DiagramAuthoringKind) -> Self {
+        let payload = match kind {
+            DiagramAuthoringKind::Mermaid => ActivePayload::Mermaid {
+                session: DiagramSession::new(),
+                source_copy_origin: None,
+            },
+            DiagramAuthoringKind::Visual => ActivePayload::Visual(VisualDiagramDocument::new()),
+        };
         Self {
-            session: DiagramSession::new(),
+            payload,
             path: None,
             disk_digest: None,
-            source_copy_origin: None,
         }
     }
 
     fn loaded(loaded: LoadedDiagramDocument, path: PathBuf) -> Self {
+        let payload = match loaded.document {
+            DiagramFileDocument::Mermaid(session) => ActivePayload::Mermaid {
+                session,
+                source_copy_origin: None,
+            },
+            DiagramFileDocument::Visual(visual) => ActivePayload::Visual(visual),
+        };
         Self {
-            session: loaded.session,
+            payload,
             path: Some(path),
             disk_digest: Some(loaded.disk_digest),
-            source_copy_origin: None,
         }
     }
 
@@ -200,10 +251,81 @@ impl ActiveDocument {
         source_copy_origin: Option<DiagramSourceCopyOrigin>,
     ) -> Self {
         Self {
-            session,
+            payload: ActivePayload::Mermaid {
+                session,
+                source_copy_origin,
+            },
             path: None,
             disk_digest: None,
-            source_copy_origin,
+        }
+    }
+
+    fn untitled_visual(visual: VisualDiagramDocument) -> Self {
+        Self { payload: ActivePayload::Visual(visual), path: None, disk_digest: None }
+    }
+
+    fn authoring_kind(&self) -> DiagramAuthoringKind {
+        match &self.payload {
+            ActivePayload::Mermaid { .. } => DiagramAuthoringKind::Mermaid,
+            ActivePayload::Visual(_) => DiagramAuthoringKind::Visual,
+        }
+    }
+
+    fn session(&self) -> Option<&DiagramSession> {
+        match &self.payload {
+            ActivePayload::Mermaid { session, .. } => Some(session),
+            ActivePayload::Visual(_) => None,
+        }
+    }
+
+    fn session_mut(&mut self) -> Option<&mut DiagramSession> {
+        match &mut self.payload {
+            ActivePayload::Mermaid { session, .. } => Some(session),
+            ActivePayload::Visual(_) => None,
+        }
+    }
+
+    fn source_copy_origin(&self) -> Option<&DiagramSourceCopyOrigin> {
+        match &self.payload {
+            ActivePayload::Mermaid {
+                source_copy_origin, ..
+            } => source_copy_origin.as_ref(),
+            ActivePayload::Visual(_) => None,
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        match &self.payload {
+            ActivePayload::Mermaid { session, .. } => session.is_dirty(),
+            ActivePayload::Visual(visual) => visual.is_dirty(),
+        }
+    }
+
+    fn file_document(&self) -> DiagramFileDocumentRef<'_> {
+        match &self.payload {
+            ActivePayload::Mermaid { session, .. } => DiagramFileDocumentRef::Mermaid(session),
+            ActivePayload::Visual(visual) => DiagramFileDocumentRef::Visual(visual),
+        }
+    }
+
+    fn saved_baseline(&self) -> SavedBaseline {
+        match &self.payload {
+            ActivePayload::Mermaid { session, .. } => {
+                SavedBaseline::Mermaid(session.capture_saved_content())
+            }
+            ActivePayload::Visual(visual) => SavedBaseline::Visual(visual.capture_saved_content()),
+        }
+    }
+
+    fn acknowledge_saved(&mut self, saved: SavedBaseline) {
+        match (&mut self.payload, saved) {
+            (ActivePayload::Mermaid { session, .. }, SavedBaseline::Mermaid(saved)) => {
+                session.acknowledge_saved_content(&saved);
+            }
+            (ActivePayload::Visual(visual), SavedBaseline::Visual(saved)) => {
+                visual.acknowledge_saved_content(&saved);
+            }
+            _ => unreachable!("saved baseline matches active document kind"),
         }
     }
 }
@@ -228,13 +350,74 @@ impl DiagramDocumentController {
     pub fn new() -> Self {
         Self {
             store: DiagramDocumentStore,
-            active: Some(ActiveDocument::blank()),
+            active: Some(ActiveDocument::blank(DiagramAuthoringKind::Mermaid)),
             pending: None,
         }
     }
 
     pub fn session(&self) -> Option<&DiagramSession> {
-        self.active.as_ref().map(|active| &active.session)
+        self.active.as_ref().and_then(ActiveDocument::session)
+    }
+
+    pub fn has_active_document(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub fn authoring_kind(&self) -> Option<DiagramAuthoringKind> {
+        self.active.as_ref().map(ActiveDocument::authoring_kind)
+    }
+
+    pub fn visual_label(&self) -> Option<&str> {
+        match &self.active.as_ref()?.payload {
+            ActivePayload::Visual(visual) => visual.scene().label(),
+            ActivePayload::Mermaid { .. } => None,
+        }
+    }
+
+    pub fn visual_revision(&self) -> Option<u64> {
+        match &self.active.as_ref()?.payload {
+            ActivePayload::Visual(visual) => Some(visual.revision()),
+            ActivePayload::Mermaid { .. } => None,
+        }
+    }
+
+    pub fn visual_scene(&self) -> Option<&VisualScene> {
+        match &self.active.as_ref()?.payload {
+            ActivePayload::Visual(visual) => Some(visual.scene()),
+            ActivePayload::Mermaid { .. } => None,
+        }
+    }
+
+    pub fn apply_visual_transaction(
+        &mut self,
+        operations: &[VisualOperation],
+    ) -> Result<VisualTransactionOutcome, DiagramDocumentError> {
+        if self.pending.is_some() {
+            return Err(DiagramDocumentError::PendingTransitionExists);
+        }
+        match self.active.as_mut().map(|active| &mut active.payload) {
+            Some(ActivePayload::Visual(visual)) => visual
+                .apply_transaction(operations)
+                .map_err(DiagramDocumentError::Visual),
+            Some(ActivePayload::Mermaid { .. }) => Err(DiagramDocumentError::WrongAuthoringKind),
+            None => Err(DiagramDocumentError::NoActiveDocument),
+        }
+    }
+
+    pub fn replace_visual_label(
+        &mut self,
+        label: impl Into<String>,
+    ) -> Result<bool, DiagramDocumentError> {
+        if self.pending.is_some() {
+            return Err(DiagramDocumentError::PendingTransitionExists);
+        }
+        match self.active.as_mut().map(|active| &mut active.payload) {
+            Some(ActivePayload::Visual(visual)) => visual
+                .replace_label(label)
+                .map_err(DiagramDocumentError::Visual),
+            Some(ActivePayload::Mermaid { .. }) => Err(DiagramDocumentError::WrongAuthoringKind),
+            None => Err(DiagramDocumentError::NoActiveDocument),
+        }
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -250,7 +433,7 @@ impl DiagramDocumentController {
     pub fn source_copy_origin(&self) -> Option<&DiagramSourceCopyOrigin> {
         self.active
             .as_ref()
-            .and_then(|active| active.source_copy_origin.as_ref())
+            .and_then(ActiveDocument::source_copy_origin)
     }
 
     pub fn pending_source_copy_origin(&self) -> Option<&DiagramSourceCopyOrigin> {
@@ -261,7 +444,7 @@ impl DiagramDocumentController {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.session().is_some_and(DiagramSession::is_dirty)
+        self.active.as_ref().is_some_and(ActiveDocument::is_dirty)
     }
 
     pub fn pending_transition(&self) -> Option<&PendingDiagramTransition> {
@@ -269,11 +452,27 @@ impl DiagramDocumentController {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.pending.is_none() && self.session().is_some_and(DiagramSession::can_undo)
+        self.pending.is_none()
+            && (self.session().is_some_and(DiagramSession::can_undo)
+                || self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| match &active.payload {
+                        ActivePayload::Visual(visual) => visual.can_undo(),
+                        ActivePayload::Mermaid { .. } => false,
+                    }))
     }
 
     pub fn can_redo(&self) -> bool {
-        self.pending.is_none() && self.session().is_some_and(DiagramSession::can_redo)
+        self.pending.is_none()
+            && (self.session().is_some_and(DiagramSession::can_redo)
+                || self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| match &active.payload {
+                        ActivePayload::Visual(visual) => visual.can_redo(),
+                        ActivePayload::Mermaid { .. } => false,
+                    }))
     }
 
     pub fn replace_source(
@@ -295,11 +494,25 @@ impl DiagramDocumentController {
     }
 
     pub fn undo(&mut self) -> Result<bool, DiagramDocumentError> {
-        self.ensure_editable()?.undo().map_err(Into::into)
+        if self.pending.is_some() {
+            return Err(DiagramDocumentError::PendingTransitionExists);
+        }
+        match self.active.as_mut().map(|active| &mut active.payload) {
+            Some(ActivePayload::Mermaid { session, .. }) => session.undo().map_err(Into::into),
+            Some(ActivePayload::Visual(visual)) => visual.undo().map_err(Into::into),
+            None => Err(DiagramDocumentError::NoActiveDocument),
+        }
     }
 
     pub fn redo(&mut self) -> Result<bool, DiagramDocumentError> {
-        self.ensure_editable()?.redo().map_err(Into::into)
+        if self.pending.is_some() {
+            return Err(DiagramDocumentError::PendingTransitionExists);
+        }
+        match self.active.as_mut().map(|active| &mut active.payload) {
+            Some(ActivePayload::Mermaid { session, .. }) => session.redo().map_err(Into::into),
+            Some(ActivePayload::Visual(visual)) => visual.redo().map_err(Into::into),
+            None => Err(DiagramDocumentError::NoActiveDocument),
+        }
     }
 
     /// Applies deterministic positions as one guarded, undoable session edit.
@@ -323,13 +536,27 @@ impl DiagramDocumentController {
     }
 
     /// Save As refuses occupied paths and publishes the new path/digest and
-    /// saved-content acknowledgement only after the atomic write succeeds.
+    /// saved-content acknowledgement only after no-clobber publication succeeds.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), DiagramDocumentError> {
-        self.save_as_with_writer(path.as_ref(), save_atomic)
+        self.save_as_with_hook(path.as_ref(), |_| Ok(()))
     }
 
     pub fn request_new(&mut self) -> Result<TransitionOutcome, DiagramDocumentError> {
-        let requested = PendingDiagramTransition::New;
+        self.request_new_kind(DiagramAuthoringKind::Mermaid)
+    }
+
+    pub fn request_new_visual(&mut self) -> Result<TransitionOutcome, DiagramDocumentError> {
+        self.request_new_kind(DiagramAuthoringKind::Visual)
+    }
+
+    fn request_new_kind(
+        &mut self,
+        kind: DiagramAuthoringKind,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = match kind {
+            DiagramAuthoringKind::Mermaid => PendingDiagramTransition::New,
+            DiagramAuthoringKind::Visual => PendingDiagramTransition::NewVisual,
+        };
         if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
             return Ok(outcome);
         }
@@ -337,7 +564,7 @@ impl DiagramDocumentController {
             self.pending = Some(requested);
             return Ok(TransitionOutcome::DecisionRequired);
         }
-        self.active = Some(ActiveDocument::blank());
+        self.active = Some(ActiveDocument::blank(kind));
         Ok(TransitionOutcome::Applied)
     }
 
@@ -421,6 +648,24 @@ impl DiagramDocumentController {
         Ok(TransitionOutcome::Applied)
     }
 
+    /// Request a fresh visual starter through the existing dirty-document decision.
+    pub fn request_visual_template(
+        &mut self,
+        template: VisualAuthoringTemplate,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::ApplyVisualTemplate(template);
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
+            return Ok(outcome);
+        }
+        let candidate = template.create_document()?;
+        if self.is_dirty() {
+            self.pending = Some(requested);
+            return Ok(TransitionOutcome::DecisionRequired);
+        }
+        self.active = Some(ActiveDocument::untitled_visual(candidate));
+        Ok(TransitionOutcome::Applied)
+    }
+
     pub fn request_close(&mut self) -> Result<TransitionOutcome, DiagramDocumentError> {
         let requested = PendingDiagramTransition::Close;
         if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
@@ -453,19 +698,28 @@ impl DiagramDocumentController {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<TransitionOutcome, DiagramDocumentError> {
-        self.resolve_pending_save_as_with_writer(path.as_ref(), save_atomic)
+        self.resolve_pending_save_as_with_hook(path.as_ref(), |_| Ok(()))
     }
 
-    fn resolve_pending_save_as_with_writer(
+    #[cfg(test)]
+    fn resolve_pending_save_as_after_stage_sync(
         &mut self,
         path: &Path,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        self.resolve_pending_save_as_with_hook(path, after_stage_sync)
+    }
+
+    fn resolve_pending_save_as_with_hook(
+        &mut self,
+        path: &Path,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> Result<TransitionOutcome, DiagramDocumentError> {
         let pending = self
             .pending
             .clone()
             .ok_or(DiagramDocumentError::NoPendingTransition)?;
-        self.save_as_with_writer(path, writer)?;
+        self.save_as_with_hook(path, after_stage_sync)?;
         self.apply_pending(pending)
     }
 
@@ -497,7 +751,10 @@ impl DiagramDocumentController {
     ) -> Result<TransitionOutcome, DiagramDocumentError> {
         match pending {
             PendingDiagramTransition::New => {
-                self.active = Some(ActiveDocument::blank());
+                self.active = Some(ActiveDocument::blank(DiagramAuthoringKind::Mermaid));
+            }
+            PendingDiagramTransition::NewVisual => {
+                self.active = Some(ActiveDocument::blank(DiagramAuthoringKind::Visual));
             }
             PendingDiagramTransition::Close => {
                 self.active = None;
@@ -520,6 +777,9 @@ impl DiagramDocumentController {
             PendingDiagramTransition::ApplyTemplate(template) => {
                 self.active = Some(ActiveDocument::untitled(template.create_session()?, None));
             }
+            PendingDiagramTransition::ApplyVisualTemplate(template) => {
+                self.active = Some(ActiveDocument::untitled_visual(template.create_document()?));
+            }
         }
         self.pending = None;
         Ok(TransitionOutcome::Applied)
@@ -540,37 +800,49 @@ impl DiagramDocumentController {
         let expected_digest = active
             .disk_digest
             .ok_or(DiagramDocumentError::SaveAsRequired)?;
-        let saved = active.session.capture_saved_content();
-        let disk_digest =
-            self.store
-                .save_existing_with_writer(path, expected_digest, &active.session, writer)?;
+        let saved = active.saved_baseline();
+        let disk_digest = self.store.save_document_existing_with_writer(
+            path,
+            expected_digest,
+            active.file_document(),
+            writer,
+        )?;
         let active = self
             .active
             .as_mut()
             .ok_or(DiagramDocumentError::NoActiveDocument)?;
-        active.session.acknowledge_saved_content(&saved);
+        active.acknowledge_saved(saved);
         active.disk_digest = Some(disk_digest);
         Ok(())
     }
 
-    fn save_as_with_writer(
+    #[cfg(test)]
+    fn save_as_after_stage_sync(
         &mut self,
         path: &Path,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> Result<(), DiagramDocumentError> {
+        self.save_as_with_hook(path, after_stage_sync)
+    }
+
+    fn save_as_with_hook(
+        &mut self,
+        path: &Path,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> Result<(), DiagramDocumentError> {
         let active = self
             .active
             .as_ref()
             .ok_or(DiagramDocumentError::NoActiveDocument)?;
-        let saved = active.session.capture_saved_content();
-        let disk_digest = self
-            .store
-            .save_as_with_writer(path, &active.session, writer)?;
+        let saved = active.saved_baseline();
+        let disk_digest =
+            self.store
+                .save_document_as(path, active.file_document(), after_stage_sync)?;
         let active = self
             .active
             .as_mut()
             .ok_or(DiagramDocumentError::NoActiveDocument)?;
-        active.session.acknowledge_saved_content(&saved);
+        active.acknowledge_saved(saved);
         active.path = Some(path.to_path_buf());
         active.disk_digest = Some(disk_digest);
         Ok(())
@@ -580,10 +852,12 @@ impl DiagramDocumentController {
         if self.pending.is_some() {
             return Err(DiagramDocumentError::PendingTransitionExists);
         }
-        self.active
-            .as_mut()
-            .map(|active| &mut active.session)
-            .ok_or(DiagramDocumentError::NoActiveDocument)
+        match self.active.as_mut() {
+            Some(active) => active
+                .session_mut()
+                .ok_or(DiagramDocumentError::WrongAuthoringKind),
+            None => Err(DiagramDocumentError::NoActiveDocument),
+        }
     }
 
     fn repeat_or_reject_pending(
@@ -601,17 +875,24 @@ impl DiagramDocumentController {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
+        DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
         DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
     };
     use crate::diagram::{
-        DiagramPersistenceError, DiagramSession, DiagramSessionError, DiagramTemplate,
-        DiskConflictKind, FlowDirection, GraphOperation, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile,
-        MermaidImportError, NodeId, NodePosition, Position, PreviewState,
+        DEFAULT_LAYER_ID, DiagramPersistenceError, DiagramSession, DiagramSessionError,
+        DiagramTemplate, DiskConflictKind, FlowDirection, GraphOperation,
+        MAX_DIAGRAM_DOCUMENT_BYTES, MAX_VISUAL_DOCUMENT_TITLE_BYTES, MermaidFile,
+        MermaidImportError, NodeId, NodePosition, Position, PreviewState, VisualObjectDraft,
+        VisualObjectKind, VisualOperation, VisualPrimitiveShape, VisualStyle, VisualTransform,
     };
     use std::fs;
+    use crate::diagram::VisualAuthoringTemplate;
+    use std::io::Write;
+    use std::path::Path;
 
     const SUPPORTED: &str = "flowchart LR\nA[\"Alpha\"]\nB[\"Beta\"]\nA --> B\n";
+
+    const FROZEN_V1_INVALID_DRAFT: &str = r#"{"format_version":1,"current":{"draft":"%% 保存された日本語\r\nflowchart TD\r\nA -->\r\n","last_good":{"source":"flowchart TD\r\nA[\"Anchor\"]\r\n","graph":{"direction":"TopDown","nodes":[{"id":"A","label":"Anchor","shape":"Rectangle","position":{"x":20.0,"y":-5.0},"group":null}],"edges":[],"groups":[],"next_edge_id":1}}},"revision":2,"next_edge_id":1,"undo_len":2,"history":[{"before":{"draft":"","last_good":{"source":"","graph":{"direction":"TopDown","nodes":[],"edges":[],"groups":[],"next_edge_id":1}}},"after":{"draft":"flowchart TD\r\nA[\"Anchor\"]\r\n","last_good":{"source":"flowchart TD\r\nA[\"Anchor\"]\r\n","graph":{"direction":"TopDown","nodes":[{"id":"A","label":"Anchor","shape":"Rectangle","position":{"x":20.0,"y":-5.0},"group":null}],"edges":[],"groups":[],"next_edge_id":1}}}},{"before":{"draft":"flowchart TD\r\nA[\"Anchor\"]\r\n","last_good":{"source":"flowchart TD\r\nA[\"Anchor\"]\r\n","graph":{"direction":"TopDown","nodes":[{"id":"A","label":"Anchor","shape":"Rectangle","position":{"x":20.0,"y":-5.0},"group":null}],"edges":[],"groups":[],"next_edge_id":1}}},"after":{"draft":"%% 保存された日本語\r\nflowchart TD\r\nA -->\r\n","last_good":{"source":"flowchart TD\r\nA[\"Anchor\"]\r\n","graph":{"direction":"TopDown","nodes":[{"id":"A","label":"Anchor","shape":"Rectangle","position":{"x":20.0,"y":-5.0},"group":null}],"edges":[],"groups":[],"next_edge_id":1}}}}]}"#;
 
     #[test]
     fn diagram_document_reopen_preserves_unsupported_draft_last_good_layout_ids_and_history() {
@@ -769,9 +1050,9 @@ mod tests {
         ));
         let mut save_count = 0;
         save_then_close
-            .resolve_pending_save_as_with_writer(&saved_on_close, |path, bytes| {
+            .resolve_pending_save_as_after_stage_sync(&saved_on_close, |_path| {
                 save_count += 1;
-                crate::common::atomic_file::save_atomic(path, bytes)
+                Ok(())
             })
             .unwrap();
         assert_eq!(save_count, 1, "Save As plus Close must publish once");
@@ -798,7 +1079,7 @@ mod tests {
         ));
         let mut no_pending_writes = 0;
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&intended, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&intended, |_path| {
                 no_pending_writes += 1;
                 Ok(())
             }),
@@ -831,7 +1112,7 @@ mod tests {
         assert_eq!(controller.session().unwrap().draft(), draft);
         assert!(controller.is_dirty());
 
-        let failure = controller.resolve_pending_save_as_with_writer(&intended, |_path, _bytes| {
+        let failure = controller.resolve_pending_save_as_after_stage_sync(&intended, |_path| {
             anyhow::bail!("injected publication failure")
         });
         assert!(matches!(
@@ -960,9 +1241,9 @@ mod tests {
         let mut save_count = 0;
         assert!(
             current
-                .resolve_pending_save_as_with_writer(&saved_as_current_path, |path, bytes| {
+                .resolve_pending_save_as_after_stage_sync(&saved_as_current_path, |_path| {
                     save_count += 1;
-                    crate::common::atomic_file::save_atomic(path, bytes)
+                    Ok(())
                 })
                 .is_err()
         );
@@ -1101,7 +1382,7 @@ mod tests {
         let pending = controller.pending_transition().cloned();
 
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&save_as_path, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                 anyhow::bail!("injected Save As failure")
             }),
             Err(DiagramDocumentError::Persistence(
@@ -1280,6 +1561,104 @@ mod tests {
     }
 
     #[test]
+    fn visual_authoring_template_dirty_replacement_cancels_or_discards_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_path = directory.path().join("before-visual-template.mld");
+        let mut controller = DiagramDocumentController::new();
+        controller
+            .replace_source("flowchart TD\nOld[\"Current\"]\n")
+            .unwrap();
+        controller.save_as(&native_path).unwrap();
+        controller
+            .replace_source("flowchart TD\nOld[\"Edited current\"]\n")
+            .unwrap();
+        let original = controller.session().unwrap().draft().to_owned();
+        let revision = controller.session().unwrap().revision();
+        let undo_depth = controller.session().unwrap().undo_depth();
+
+        assert_eq!(
+            controller
+                .request_visual_template(VisualAuthoringTemplate::Architecture)
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyVisualTemplate(
+                VisualAuthoringTemplate::Architecture
+            ))
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert_eq!(controller.session().unwrap().revision(), revision);
+        assert_eq!(controller.session().unwrap().undo_depth(), undo_depth);
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        assert!(controller.is_dirty());
+
+        assert_eq!(
+            controller
+                .request_visual_template(VisualAuthoringTemplate::Architecture)
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        let old_disk = std::fs::read(&native_path).unwrap();
+        assert!(
+            controller
+                .resolve_pending_with_writer(TransitionDecision::Save, |_, _| Err(anyhow::anyhow!(
+                    "injected save failure"
+                )))
+                .is_err()
+        );
+        assert!(matches!(
+            controller.pending_transition(),
+            Some(PendingDiagramTransition::ApplyVisualTemplate(
+                VisualAuthoringTemplate::Architecture
+            ))
+        ));
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        assert_eq!(std::fs::read(&native_path).unwrap(), old_disk);
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            controller.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert!(controller.session().is_none());
+        assert_eq!(controller.visual_label(), Some("Architecture starter"));
+        assert_eq!(controller.path(), None);
+        assert!(controller.is_dirty());
+        let starter = controller.visual_scene().unwrap().clone();
+        controller.replace_visual_label("Edited starter").unwrap();
+        assert!(controller.undo().unwrap());
+        assert_eq!(controller.visual_scene().unwrap(), &starter);
+        assert!(controller.redo().unwrap());
+        let edited = controller.visual_scene().unwrap().clone();
+        let starter_path = directory.path().join("starter.mld");
+        controller.save_as(&starter_path).unwrap();
+        assert!(!controller.is_dirty());
+        assert_eq!(std::fs::read(&native_path).unwrap(), old_disk);
+        assert_eq!(
+            controller.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            controller.request_open(&starter_path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.visual_scene().unwrap(), &edited);
+    }
+
+    #[test]
     fn diagram_document_dirty_template_replacement_cancels_or_discards_once() {
         let directory = tempfile::tempdir().unwrap();
         let native_path = directory.path().join("before-template.native");
@@ -1414,7 +1793,7 @@ mod tests {
         fs::write(&import_path, reread_source.as_bytes()).unwrap();
 
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&save_as_path, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                 anyhow::bail!("injected Save As failure")
             }),
             Err(DiagramDocumentError::Persistence(
@@ -1434,9 +1813,9 @@ mod tests {
         let mut writes = 0;
         assert_eq!(
             controller
-                .resolve_pending_save_as_with_writer(&save_as_path, |path, bytes| {
+                .resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                     writes += 1;
-                    crate::common::atomic_file::save_atomic(path, bytes)
+                    Ok(())
                 })
                 .unwrap(),
             TransitionOutcome::Applied
@@ -1478,5 +1857,392 @@ mod tests {
         assert_eq!(controller.session().unwrap().draft(), SUPPORTED);
         assert!(controller.is_dirty());
         assert_eq!(controller.pending_transition(), pending.as_ref());
+    }
+
+    #[test]
+    fn diagram_document_frozen_v1_invalid_draft_reopens_exactly_without_rewriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("frozen-v1.mld");
+        fs::write(&path, FROZEN_V1_INVALID_DRAFT).unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        assert_eq!(
+            controller.request_open(&path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        let session = controller.session().unwrap();
+        assert_eq!(
+            session.draft(),
+            "%% 保存された日本語\r\nflowchart TD\r\nA -->\r\n"
+        );
+        assert_eq!(
+            session.last_good_source(),
+            Some("flowchart TD\r\nA[\"Anchor\"]\r\n")
+        );
+        assert_eq!(session.revision(), 2);
+        assert_eq!(session.next_edge_id(), 1);
+        assert_eq!(session.undo_depth(), 2);
+        let graph = session.preview_graph().unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].position.x, 20.0);
+        assert_eq!(graph.nodes[0].position.y, -5.0);
+        assert!(!controller.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), FROZEN_V1_INVALID_DRAFT.as_bytes());
+
+        assert!(controller.undo().unwrap());
+        assert_eq!(
+            controller.session().unwrap().draft(),
+            "flowchart TD\r\nA[\"Anchor\"]\r\n"
+        );
+        assert!(controller.redo().unwrap());
+        assert_eq!(
+            controller.session().unwrap().draft(),
+            "%% 保存された日本語\r\nflowchart TD\r\nA -->\r\n"
+        );
+        assert!(!controller.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), FROZEN_V1_INVALID_DRAFT.as_bytes());
+    }
+
+    #[test]
+    fn diagram_document_visual_save_reopen_and_cancel_keep_visual_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visual.mld");
+        let mut controller = DiagramDocumentController::new();
+        assert_eq!(
+            controller.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            controller.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert!(controller.has_active_document());
+        assert!(controller.session().is_none());
+        assert!(
+            controller
+                .replace_visual_label("Release map — 交付計画")
+                .unwrap()
+        );
+        assert_eq!(controller.visual_revision(), Some(1));
+        assert!(controller.is_dirty());
+        controller.save_as(&path).unwrap();
+        assert!(!controller.is_dirty());
+        let saved_bytes = fs::read(&path).unwrap();
+        let saved_wire: serde_json::Value = serde_json::from_slice(&saved_bytes).unwrap();
+        assert_eq!(saved_wire["format_version"], 3);
+        assert_eq!(saved_wire["authoring_kind"], "visual");
+        assert_eq!(
+            saved_wire["current"]["objects"][0]["kind"]["text"],
+            "Release map — 交付計画"
+        );
+
+        let mut reopened = DiagramDocumentController::new();
+        assert_eq!(
+            reopened.request_open(&path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            reopened.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert!(reopened.session().is_none());
+        assert_eq!(reopened.visual_label(), Some("Release map — 交付計画"));
+        assert_eq!(reopened.visual_revision(), Some(1));
+        assert!(!reopened.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), saved_bytes);
+
+        reopened
+            .replace_visual_label("Unsaved visual edit")
+            .unwrap();
+        let digest = reopened.disk_digest();
+        assert_eq!(
+            reopened.request_new().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            reopened
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(
+            reopened.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert_eq!(reopened.path(), Some(path.as_path()));
+        assert_eq!(reopened.disk_digest(), digest);
+        assert_eq!(reopened.visual_label(), Some("Unsaved visual edit"));
+        assert!(reopened.is_dirty());
+    }
+
+    #[test]
+    fn diagram_document_visual_save_as_never_overwrites_late_destination() {
+        fn create_late_sentinel(path: &Path) -> anyhow::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            file.write_all(b"late destination owner")?;
+            file.sync_all()?;
+            Ok(())
+        }
+
+        fn assert_no_stage_files(directory: &Path) {
+            assert!(fs::read_dir(directory).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".diagram-copy-")
+            }));
+        }
+
+        fn dirty_visual(path: &Path) -> DiagramDocumentController {
+            let mut controller = DiagramDocumentController::new();
+            assert_eq!(
+                controller.request_new_visual().unwrap(),
+                TransitionOutcome::Applied
+            );
+            controller.replace_visual_label("Saved baseline").unwrap();
+            controller.save_as(path).unwrap();
+            controller
+                .replace_visual_label("Unsaved visual edit")
+                .unwrap();
+            controller
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let direct_original = directory.path().join("direct-original.mld");
+        let direct_destination = directory.path().join("direct-late.mld");
+        let mut direct = dirty_visual(&direct_original);
+        let direct_original_bytes = fs::read(&direct_original).unwrap();
+        let direct_digest = direct.disk_digest();
+        let direct_scene = direct.visual_scene().unwrap().clone();
+        let direct_revision = direct.visual_revision();
+        let direct_can_undo = direct.can_undo();
+        let direct_can_redo = direct.can_redo();
+        assert!(direct.is_dirty());
+        assert!(direct_can_undo);
+
+        assert!(matches!(
+            direct.save_as_after_stage_sync(&direct_destination, create_late_sentinel),
+            Err(super::DiagramDocumentError::Persistence(
+                DiagramPersistenceError::OccupiedPath(path)
+            )) if path == direct_destination
+        ));
+        assert_eq!(fs::read(&direct_original).unwrap(), direct_original_bytes);
+        assert_eq!(
+            fs::read(&direct_destination).unwrap(),
+            b"late destination owner"
+        );
+        assert_eq!(direct.path(), Some(direct_original.as_path()));
+        assert_eq!(direct.disk_digest(), direct_digest);
+        assert_eq!(direct.visual_scene(), Some(&direct_scene));
+        assert_eq!(direct.visual_revision(), direct_revision);
+        assert!(direct.is_dirty());
+        assert_eq!(direct.can_undo(), direct_can_undo);
+        assert_eq!(direct.can_redo(), direct_can_redo);
+        assert_eq!(direct.pending_transition(), None);
+        assert_eq!(direct.authoring_kind(), Some(DiagramAuthoringKind::Visual));
+        assert_no_stage_files(directory.path());
+
+        let pending_original = directory.path().join("pending-original.mld");
+        let pending_destination = directory.path().join("pending-late.mld");
+        let mut pending = dirty_visual(&pending_original);
+        let pending_original_bytes = fs::read(&pending_original).unwrap();
+        let pending_digest = pending.disk_digest();
+        let pending_scene = pending.visual_scene().unwrap().clone();
+        let pending_revision = pending.visual_revision();
+        let pending_can_undo = pending.can_undo();
+        let pending_can_redo = pending.can_redo();
+        assert_eq!(
+            pending.request_close().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+
+        assert!(matches!(
+            pending.resolve_pending_save_as_after_stage_sync(
+                &pending_destination,
+                create_late_sentinel
+            ),
+            Err(super::DiagramDocumentError::Persistence(
+                DiagramPersistenceError::OccupiedPath(path)
+            )) if path == pending_destination
+        ));
+        assert_eq!(fs::read(&pending_original).unwrap(), pending_original_bytes);
+        assert_eq!(
+            fs::read(&pending_destination).unwrap(),
+            b"late destination owner"
+        );
+        assert_eq!(pending.path(), Some(pending_original.as_path()));
+        assert_eq!(pending.disk_digest(), pending_digest);
+        assert_eq!(pending.visual_scene(), Some(&pending_scene));
+        assert_eq!(pending.visual_revision(), pending_revision);
+        assert!(pending.is_dirty());
+        assert_eq!(
+            pending.pending_transition(),
+            Some(&PendingDiagramTransition::Close)
+        );
+        assert_eq!(pending.authoring_kind(), Some(DiagramAuthoringKind::Visual));
+        assert_no_stage_files(directory.path());
+
+        pending.resolve_pending(TransitionDecision::Cancel).unwrap();
+        assert_eq!(pending.can_undo(), pending_can_undo);
+        assert_eq!(pending.can_redo(), pending_can_redo);
+        assert!(pending.is_dirty());
+    }
+
+    #[test]
+    fn diagram_document_visual_scene_save_reopen_undo_and_branch_keep_allocator_monotonic() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visual-scene.mld");
+        let mut original = DiagramDocumentController::new();
+        original.request_new_visual().unwrap();
+        let first = original
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Diamond,
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        assert!(original.is_dirty());
+        original.save_as(&path).unwrap();
+        assert!(!original.is_dirty());
+
+        let mut reopened = DiagramDocumentController::new();
+        assert_eq!(
+            reopened.request_open(&path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(reopened.visual_scene().unwrap().objects.len(), 2);
+        assert!(reopened.can_undo());
+        assert!(!reopened.is_dirty());
+        assert!(reopened.undo().unwrap());
+        assert!(reopened.is_dirty());
+        assert!(reopened.can_redo());
+        assert!(reopened.redo().unwrap());
+        assert!(!reopened.is_dirty());
+        assert!(reopened.undo().unwrap());
+        let next = reopened
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Circle,
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        assert_eq!(next.get(), first.get() + 1);
+        assert!(!reopened.can_redo());
+        assert_eq!(reopened.visual_scene().unwrap().objects.len(), 2);
+    }
+
+    #[test]
+    fn diagram_document_opening_frozen_visual_v2_does_not_rewrite_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-visual.mld");
+        let frozen = br#"{"format_version":2,"authoring_kind":"visual","revision":7,"title":"Old visual title"}"#;
+        fs::write(&path, frozen).unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        assert_eq!(
+            controller.request_open(&path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.visual_label(), Some("Old visual title"));
+        assert_eq!(controller.visual_revision(), Some(7));
+        assert!(!controller.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), frozen);
+    }
+
+    #[test]
+    fn diagram_document_failed_visual_save_does_not_replace_or_acknowledge_active_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visual.mld");
+        let mut controller = DiagramDocumentController::new();
+        controller.request_new_visual().unwrap();
+        controller.save_as(&path).unwrap();
+        controller.replace_visual_label("Needs save").unwrap();
+        controller
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Ellipse,
+                },
+            })])
+            .unwrap();
+        let expected_scene = controller.visual_scene().unwrap().clone();
+        assert_eq!(
+            controller.request_new().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+
+        assert!(matches!(
+            controller.resolve_pending_with_writer(TransitionDecision::Save, |_path, _bytes| {
+                anyhow::bail!("injected visual save failure")
+            }),
+            Err(DiagramDocumentError::Persistence(
+                DiagramPersistenceError::AtomicWrite { .. }
+            ))
+        ));
+        assert_eq!(
+            controller.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert_eq!(controller.visual_label(), Some("Needs save"));
+        assert_eq!(controller.visual_scene(), Some(&expected_scene));
+        assert_eq!(controller.path(), Some(path.as_path()));
+        assert!(controller.is_dirty());
+        assert_eq!(
+            controller.pending_transition(),
+            Some(&PendingDiagramTransition::New)
+        );
+    }
+
+    #[test]
+    fn diagram_document_rejects_malformed_visual_candidate_without_mutating_mermaid() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("malformed-visual.mld");
+        let malformed = serde_json::json!({
+            "format_version": 2,
+            "authoring_kind": "visual",
+            "revision": 4,
+            "title": "x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1),
+        });
+        fs::write(&path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        controller
+            .replace_source("flowchart TD\nKeep this draft\n")
+            .unwrap();
+        let digest = controller.disk_digest();
+        assert!(matches!(
+            controller.request_open(&path),
+            Err(DiagramDocumentError::Persistence(
+                DiagramPersistenceError::Codec {
+                    operation: "decode",
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(
+            controller.authoring_kind(),
+            Some(DiagramAuthoringKind::Mermaid)
+        );
+        assert_eq!(
+            controller.session().unwrap().draft(),
+            "flowchart TD\nKeep this draft\n"
+        );
+        assert_eq!(controller.disk_digest(), digest);
+        assert!(controller.is_dirty());
+        assert_eq!(controller.pending_transition(), None);
     }
 }

@@ -11,7 +11,7 @@ use crate::gui::theme::widgets::{
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct MouseSettingsDialog {
     pub(crate) open: bool,
     baseline: CoordinateToolPreferences,
@@ -23,6 +23,35 @@ pub(crate) struct MouseSettingsDialog {
     last_scroll_max_offset_y: f32,
     #[cfg(test)]
     last_cancel_response: Option<egui::Response>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MouseSettingsUiActions {
+    pub(crate) host_request: Option<bool>,
+    effects: Vec<MouseSettingsEffect>,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+#[derive(Clone)]
+enum MouseSettingsEffect {
+    Apply {
+        baseline: CoordinateToolPreferences,
+        draft: CoordinateToolPreferences,
+    },
+    Cancel,
+    Close,
+    Click(bool),
+    Crosshair(bool),
+    Halo(bool),
+    Zoom(bool),
+    Hud(bool),
+}
+
+impl MouseSettingsUiActions {
+    pub(crate) fn request_close(&mut self) {
+        self.effects.push(MouseSettingsEffect::Close);
+    }
 }
 
 fn register_mouse_settings_target(
@@ -91,6 +120,83 @@ fn mouse_settings_catalog_control_id(identity: &str) -> Option<&'static str> {
 }
 
 impl MouseSettingsDialog {
+    fn perform_or_stage(
+        &mut self,
+        adapter: &mut CoordinateToolGui,
+        actions: &mut Option<MouseSettingsUiActions>,
+        effect: MouseSettingsEffect,
+    ) {
+        if let Some(actions) = actions {
+            actions.effects.push(effect);
+        } else {
+            self.perform_effect(adapter, effect);
+        }
+    }
+
+    fn perform_effect(&mut self, adapter: &mut CoordinateToolGui, effect: MouseSettingsEffect) {
+        let result = match effect {
+            MouseSettingsEffect::Apply { baseline, draft } => {
+                if self.baseline != baseline || self.draft != draft {
+                    return;
+                }
+                self.apply_to(adapter)
+            }
+            MouseSettingsEffect::Cancel => {
+                self.cancel_draft(adapter.preferences());
+                Ok(())
+            }
+            MouseSettingsEffect::Close => {
+                self.open = false;
+                Ok(())
+            }
+            MouseSettingsEffect::Click(enabled)
+                if adapter.runtime_state().click_enabled() != enabled =>
+            {
+                adapter
+                    .execute(&CoordinateToolCommand::SetClickEnabled(enabled))
+                    .map(|_| ())
+            }
+            MouseSettingsEffect::Crosshair(enabled)
+                if adapter.runtime_state().crosshair_enabled() != enabled =>
+            {
+                adapter
+                    .execute(&CoordinateToolCommand::SetCrosshairEnabled(enabled))
+                    .map(|_| ())
+            }
+            MouseSettingsEffect::Halo(enabled)
+                if adapter.runtime_state().halo_enabled() != enabled =>
+            {
+                adapter.set_halo_enabled(enabled)
+            }
+            MouseSettingsEffect::Zoom(enabled)
+                if adapter.runtime_state().zoom_enabled() != enabled =>
+            {
+                adapter.set_zoom_enabled(enabled)
+            }
+            MouseSettingsEffect::Hud(enabled)
+                if adapter.runtime_state().hud_enabled() != enabled =>
+            {
+                adapter
+                    .execute(&CoordinateToolCommand::SetHudEnabled(enabled))
+                    .map(|_| ())
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            self.last_error = Some(error);
+        }
+    }
+
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        adapter: &mut CoordinateToolGui,
+        actions: MouseSettingsUiActions,
+    ) {
+        for effect in actions.effects {
+            self.perform_effect(adapter, effect);
+        }
+    }
+
     pub(crate) fn open(&mut self, current: &CoordinateToolPreferences) {
         if !self.open {
             self.reset_from(current);
@@ -188,6 +294,30 @@ impl MouseSettingsDialog {
         let _ = self.show_ui_with_jump_mode(ctx, adapter, scope, native_ui_owner, first_ui_pass);
     }
 
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        adapter: &mut CoordinateToolGui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        is_popout: bool,
+    ) -> MouseSettingsUiActions {
+        let mut actions = Some(MouseSettingsUiActions::default());
+        self.show_ui_inner(
+            ctx,
+            adapter,
+            scope,
+            native_ui_owner,
+            first_ui_pass,
+            child_ui,
+            Some(is_popout),
+            &mut actions,
+        );
+        actions.unwrap_or_default()
+    }
+
     fn show_ui_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
@@ -195,6 +325,29 @@ impl MouseSettingsDialog {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         native_ui_owner: bool,
         first_ui_pass: bool,
+    ) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
+        self.show_ui_inner(
+            ctx,
+            adapter,
+            scope,
+            native_ui_owner,
+            first_ui_pass,
+            None,
+            None,
+            &mut None,
+        )
+    }
+
+    fn show_ui_inner(
+        &mut self,
+        ctx: &egui::Context,
+        adapter: &mut CoordinateToolGui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        host_presentation: Option<bool>,
+        actions: &mut Option<MouseSettingsUiActions>,
     ) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
         if !self.open {
             return None;
@@ -230,14 +383,26 @@ impl MouseSettingsDialog {
         let mut cancel_requested = false;
         #[cfg(test)]
         let mut cancel_response = None;
-        let output = egui::Window::new("Mouse Settings")
-
-            .resizable(true)
-            .default_width(420.0)
-            .max_width((ctx.content_rect().width() - 16.0).max(240.0))
-            .show_utility(ctx, "mouse-settings", egui::Id::new("Mouse Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(420.0), egui::Vec2::ZERO, [None, None]).with_max_width((ctx.content_rect().width() - 16.0).max(240.0)), |ui| {
-                authorized_owner_pass &= ui.is_visible() && !ui.is_sizing_pass();
-                ui.add_enabled_ui(native_ui_owner, |ui| {
+        let mut draw_body = |ui: &mut egui::Ui| {
+            authorized_owner_pass &= ui.is_visible() && !ui.is_sizing_pass();
+            ui.add_enabled_ui(native_ui_owner, |ui| {
+                    if let Some(is_popout) = host_presentation {
+                        let current = if is_popout {
+                            super::utility_host::UtilityPresentation::Popout
+                        } else {
+                            super::utility_host::UtilityPresentation::Docked
+                        };
+                        let (response, requested) = super::utility_host::presentation_button(
+                            ui, current, authorized_owner_pass,
+                        );
+                        if let Some(actions) = actions {
+                            #[cfg(test)]
+                            { actions.host_button = Some((response.rect, ui.clip_rect(), response.enabled())); }
+                            if response.clicked() && authorized_owner_pass && !ctx.will_discard() {
+                                actions.host_request = Some(requested == super::utility_host::UtilityPresentation::Popout);
+                            }
+                        }
+                    }
                     egui::ScrollArea::vertical()
                         .id_salt("mouse_settings_form")
                         .max_height(ui.available_height().max(1.0))
@@ -295,10 +460,8 @@ impl MouseSettingsDialog {
                         );
                         if click_enabled_response.changed()
                             && authorized_owner_pass
-                            && let Err(error) =
-                                adapter.execute(&CoordinateToolCommand::SetClickEnabled(click_enabled))
                         {
-                            self.last_error = Some(error);
+                            self.perform_or_stage(adapter, actions, MouseSettingsEffect::Click(click_enabled));
                         }
                         let click_status = adapter.effects_status().click().clone();
                         semantic_status(
@@ -464,11 +627,8 @@ impl MouseSettingsDialog {
                         );
                         if crosshair_enabled_response.changed()
                             && authorized_owner_pass
-                            && let Err(error) = adapter.execute(
-                                &CoordinateToolCommand::SetCrosshairEnabled(crosshair_enabled),
-                            )
                         {
-                            self.last_error = Some(error);
+                            self.perform_or_stage(adapter, actions, MouseSettingsEffect::Crosshair(crosshair_enabled));
                         }
 
                         let mut crosshair_rgb = [
@@ -627,9 +787,8 @@ impl MouseSettingsDialog {
                         );
                         if halo_enabled_response.changed()
                             && authorized_owner_pass
-                            && let Err(error) = adapter.set_halo_enabled(halo_enabled)
                         {
-                            self.last_error = Some(error);
+                            self.perform_or_stage(adapter, actions, MouseSettingsEffect::Halo(halo_enabled));
                         }
                         let halo_status = effect_status.halo();
                         semantic_status(
@@ -770,9 +929,8 @@ impl MouseSettingsDialog {
                         );
                         if zoom_enabled_response.changed()
                             && authorized_owner_pass
-                            && let Err(error) = adapter.set_zoom_enabled(zoom_enabled)
                         {
-                            self.last_error = Some(error);
+                            self.perform_or_stage(adapter, actions, MouseSettingsEffect::Zoom(zoom_enabled));
                         }
                         let zoom_status = effect_status.zoom();
                         semantic_status(
@@ -976,10 +1134,8 @@ impl MouseSettingsDialog {
                         );
                         if hud_enabled_response.changed()
                             && authorized_owner_pass
-                            && let Err(error) =
-                                adapter.execute(&CoordinateToolCommand::SetHudEnabled(hud_enabled))
                         {
-                            self.last_error = Some(error);
+                            self.perform_or_stage(adapter, actions, MouseSettingsEffect::Hud(hud_enabled));
                         }
 
                         ui.horizontal_wrapped(|ui| {
@@ -1120,9 +1276,12 @@ impl MouseSettingsDialog {
                             if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary)
                                 .clicked()
                                 && authorized_owner_pass
-                                && let Err(error) = self.apply_to(adapter)
                             {
-                                self.last_error = Some(error);
+                                let effect = MouseSettingsEffect::Apply {
+                                    baseline: self.baseline.clone(),
+                                    draft: self.draft.clone(),
+                                };
+                                self.perform_or_stage(adapter, actions, effect);
                             }
                             let cancel = ui.button("Cancel");
                             #[cfg(test)]
@@ -1145,11 +1304,45 @@ impl MouseSettingsDialog {
                         })
                 })
                 .inner
-            });
+        };
+        let mut draw_host_body = |ui: &mut egui::Ui| {
+            if host_presentation.is_some() {
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new("mouse_settings_host_body")),
+                    |ui| draw_body(ui),
+                )
+                .inner
+            } else {
+                draw_body(ui)
+            }
+        };
+        let scroll_output = if let Some(ui) = child_ui {
+            Some(draw_host_body(ui))
+        } else {
+            egui::Window::new("Mouse Settings")
+                .resizable(true)
+                .default_width(420.0)
+                .max_width((ctx.content_rect().width() - 16.0).max(240.0))
+                .show_utility(
+                    ctx,
+                    "mouse-settings",
+                    egui::Id::new("Mouse Settings"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(420.0),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_max_width((ctx.content_rect().width() - 16.0).max(240.0)),
+                    |ui| draw_host_body(ui),
+                )
+                .and_then(|window| window.inner)
+        };
         if authorized_owner_pass {
-            self.open = open;
             if cancel_requested {
-                self.cancel_draft(adapter.preferences());
+                self.perform_or_stage(adapter, actions, MouseSettingsEffect::Cancel);
+            } else if !open {
+                self.perform_or_stage(adapter, actions, MouseSettingsEffect::Close);
             }
         } else {
             self.draft = draft_before_ui;
@@ -1161,7 +1354,6 @@ impl MouseSettingsDialog {
         {
             scope.discard_registered_targets();
         }
-        let scroll_output = output.and_then(|window| window.inner);
         #[cfg(test)]
         {
             self.last_cancel_response = cancel_response;
@@ -1302,6 +1494,85 @@ mod tests {
         CoordinateRuntimeFactory, CoordinateSample, CoordinateSampler, CoordinateSurfaceBackend,
         PhysicalPoint,
     };
+
+    fn hosted_mouse_frame(
+        ctx: &egui::Context,
+        dialog: &mut MouseSettingsDialog,
+        adapter: &mut CoordinateToolGui,
+        events: Vec<egui::Event>,
+    ) -> MouseSettingsUiActions {
+        let mut actions = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                actions = Some(dialog.ui_with_host(
+                    ui.ctx(),
+                    adapter,
+                    None,
+                    true,
+                    ui.current_pass_index() == 0,
+                    None,
+                    false,
+                ));
+            },
+        );
+        output.drop_without_applying_deltas();
+        actions.expect("Mouse Settings host frame")
+    }
+
+    #[test]
+    fn mouse_settings_visible_host_button_stages_without_applying_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut adapter = CoordinateToolGui::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            CoordinateToolPreferences::default(),
+        );
+        let mut dialog = MouseSettingsDialog::default();
+        dialog.open(adapter.preferences());
+        dialog.draft.crosshair.center_gap = 128;
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut actions = MouseSettingsUiActions::default();
+        for _ in 0..3 {
+            actions = hosted_mouse_frame(&ctx, &mut dialog, &mut adapter, Vec::new());
+        }
+        let (rect, clip, enabled) = actions.host_button.expect("Pop Out control");
+        assert!(enabled && clip.contains_rect(rect));
+        for pressed in [true, false] {
+            actions = hosted_mouse_frame(
+                &ctx,
+                &mut dialog,
+                &mut adapter,
+                vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(actions.host_request, Some(true));
+        assert_eq!(dialog.draft.crosshair.center_gap, 128);
+        assert_eq!(
+            adapter.preferences().crosshair.center_gap,
+            CoordinateToolPreferences::default().crosshair.center_gap
+        );
+    }
 
     struct TestSampler;
 

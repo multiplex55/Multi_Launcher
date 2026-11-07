@@ -5,9 +5,9 @@ use crate::commands::handlers::{
     handle_file_search, handle_hash_generator, handle_headless_gui_with_history_query,
     handle_hotfolder, handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture,
     handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
-    handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_search_replace,
-    handle_simple_dialog, handle_snippet_run, handle_table_utility, handle_todo,
-    handle_xml_toolkit, handle_zip_extractor,
+    handle_query, handle_radial, handle_recording, handle_screen_draw, handle_screenshot,
+    handle_search_replace, handle_simple_dialog, handle_snippet_run, handle_table_utility,
+    handle_todo, handle_xml_toolkit, handle_zip_extractor,
 };
 
 #[derive(Debug, Default)]
@@ -66,6 +66,7 @@ impl CommandBus {
                 handle_screenshot(host, command, invocation, captured_history_query)
             }
             Command::Pinboard(command) => handle_pinboard(host, command),
+            Command::Recording(command) => handle_recording(host, *command),
             Command::ScreenDraw(command) => handle_screen_draw(host, command),
             Command::CoordinateTool(command) => handle_coordinate_tool(host, command),
             Command::ClipboardModify(command) => Ok(handle_clipboard_modify_with_history_query(
@@ -78,6 +79,9 @@ impl CommandBus {
             Command::PasteSequence(command) => {
                 handle_paste_sequence(host, *command, invocation.source)
             }
+            Command::ExplorerTabs(command) => host.stage_explorer_tabs(*command, invocation.source)
+                .map(|()| CommandOutcome::default())
+                .map_err(|error| CommandError::new("explorer_tabs", error).with_gui_failure_policy()),
             Command::Storage(
                 super::StorageCommand::SnippetRun(_) | super::StorageCommand::InvalidSnippetRun,
             ) => handle_snippet_run(host, invocation, captured_history_query),
@@ -146,6 +150,7 @@ mod tests {
         diff_calls: usize,
         screenshot_calls: usize,
         pinboard_calls: Vec<&'static str>,
+        recording_calls: Vec<crate::commands::RecordingCommand>,
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         coordinate_tool_calls: Vec<CoordinateToolCommand>,
         mouse_settings_calls: usize,
@@ -418,6 +423,15 @@ mod tests {
             command: crate::commands::ScreenDrawCommand,
         ) -> Result<(), String> {
             self.screen_draw_calls.push(command);
+            Ok(())
+        }
+    }
+    impl crate::commands::RecordingCommandHost for FakeHost {
+        fn execute_recording_command(
+            &mut self,
+            command: crate::commands::RecordingCommand,
+        ) -> Result<(), String> {
+            self.recording_calls.push(command);
             Ok(())
         }
     }

@@ -37,6 +37,20 @@ impl SettingsEditor {
         } else {
             String::new()
         };
+        let recording_stop_hotkey = settings.recording_stop_hotkey.clone().unwrap_or_default();
+        let recording_stop_hotkey_enabled = settings.recording_stop_hotkey.is_some();
+        let recording_stop_hotkey_valid = if recording_stop_hotkey_enabled {
+            parse_hotkey(&recording_stop_hotkey).is_some()
+                && parse_hotkey(&recording_stop_hotkey)
+                    .is_none_or(|hotkey| hotkey.key != crate::hotkey::Key::Escape)
+        } else {
+            true
+        };
+        let last_valid_recording_stop_hotkey = if recording_stop_hotkey_valid {
+            recording_stop_hotkey.clone()
+        } else {
+            String::new()
+        };
         let follow_mouse = settings.follow_mouse;
         let (static_enabled, _, _) = Self::normalized_static_settings(
             follow_mouse,
@@ -45,6 +59,7 @@ impl SettingsEditor {
             settings.static_size.unwrap_or((400, 220)),
         );
         let mut s = Self {
+            hosted_actions: None,
             search_catalog: super::catalog::SettingsCatalog::default(),
             catalog_plugin_revision: None,
             settings_search_query: String::new(),
@@ -79,6 +94,10 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
+            recording_stop_hotkey_enabled,
+            recording_stop_hotkey,
+            recording_stop_hotkey_valid,
+            last_valid_recording_stop_hotkey,
             radial_enabled: settings.radial.enabled,
             radial_shared_tap_hold: settings.radial.shared_tap_hold,
             radial_hold_threshold_ms: settings.radial.hold_threshold_ms,
@@ -114,6 +133,7 @@ impl SettingsEditor {
             note_confirm_discard_unsaved_changes: settings.note_confirm_discard_unsaved_changes,
             note_always_overwrite: settings.note_always_overwrite,
             calculation_pad_remember_source: settings.calculation_pad_remember_source,
+            programmer_inspector: settings.programmer_inspector,
             note_images_as_links: settings.note_images_as_links,
             note_show_details: settings.note_show_details,
             note_more_limit: settings.note_more_limit,
@@ -301,6 +321,13 @@ impl SettingsEditor {
             } else {
                 Some(self.help_hotkey.clone())
             },
+            recording_stop_hotkey: if !self.recording_stop_hotkey_enabled
+                || self.recording_stop_hotkey.trim().is_empty()
+            {
+                None
+            } else {
+                Some(self.recording_stop_hotkey.clone())
+            },
             index_paths: current.index_paths.clone(),
             max_indexed_items: current.max_indexed_items,
             plugin_dirs: current.plugin_dirs.clone(),
@@ -322,6 +349,7 @@ impl SettingsEditor {
             note_confirm_discard_unsaved_changes: self.note_confirm_discard_unsaved_changes,
             note_always_overwrite: self.note_always_overwrite,
             calculation_pad_remember_source: self.calculation_pad_remember_source,
+            programmer_inspector: self.programmer_inspector,
             note_images_as_links: self.note_images_as_links,
             note_show_details: self.note_show_details,
             note_more_limit: self.note_more_limit,
@@ -438,6 +466,35 @@ mod tests {
     use crate::settings::Settings;
 
     #[test]
+    fn recording_stop_shortcut_round_trips_and_can_be_disabled() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.recording_stop_hotkey, None);
+        let editor = SettingsEditor::from_settings(&settings);
+        assert!(!editor.recording_stop_hotkey_enabled);
+        let default_saved = editor.to_settings(&settings).unwrap();
+        assert_eq!(default_saved.recording_stop_hotkey, None);
+
+        settings.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let mut editor = SettingsEditor::from_settings(&settings);
+        assert!(editor.recording_stop_hotkey_enabled);
+        assert_eq!(editor.recording_stop_hotkey, "Ctrl+Shift+F10");
+        assert_eq!(
+            editor.to_settings(&settings).unwrap().recording_stop_hotkey,
+            settings.recording_stop_hotkey
+        );
+
+        editor.recording_stop_hotkey_enabled = false;
+        assert_eq!(
+            editor.to_settings(&settings).unwrap().recording_stop_hotkey,
+            None
+        );
+
+        editor.recording_stop_hotkey_enabled = true;
+        editor.recording_stop_hotkey = "Ctrl+Escape".into();
+        assert!(editor.validate_before_save().is_err());
+    }
+
+    #[test]
     fn calculation_pad_recovery_preference_round_trips_through_the_editor() {
         let mut settings = Settings::default();
         assert!(!settings.calculation_pad_remember_source);
@@ -452,12 +509,30 @@ mod tests {
 
     #[test]
     fn utility_dialog_size_selection_is_session_only_and_save_preserves_latest_sizes() {
-        use crate::settings::utility_dialog_sizes::{PreferredWindowSize, UtilityToolKey};
+        use crate::settings::utility_dialog_sizes::{
+            NativeWindowGeometry, PreferredWindowSize, SavedWindowPosition, UtilityToolKey,
+        };
 
         let key = UtilityToolKey::parse("diff").unwrap();
         let size = PreferredWindowSize::new(700.0, 510.0).unwrap();
+        let old_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -100.0).unwrap(),
+            PreferredWindowSize::new(760.0, 520.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let latest_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1920.0, -120.0).unwrap(),
+            PreferredWindowSize::new(920.0, 700.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
         let mut stale_draft = Settings::default();
         stale_draft.utility_dialog_sizes.set(key, size).unwrap();
+        stale_draft
+            .utility_dialog_sizes
+            .set_native_geometry(key, old_geometry)
+            .unwrap();
         let mut editor = SettingsEditor::from_settings(&stale_draft);
         assert_eq!(
             editor.utility_dialog_size_selected_tool,
@@ -466,6 +541,21 @@ mod tests {
         editor.utility_dialog_size_selected_tool = Some(key);
 
         let mut latest = stale_draft.clone();
+        latest
+            .utility_dialog_sizes
+            .set(key, PreferredWindowSize::new(840.0, 620.0).unwrap())
+            .unwrap();
+        latest
+            .utility_dialog_sizes
+            .set_native_geometry(key, latest_geometry)
+            .unwrap();
+        let saved = editor.to_settings(&latest).unwrap();
+        assert_eq!(saved.utility_dialog_sizes, latest.utility_dialog_sizes);
+        assert_eq!(
+            saved.utility_dialog_sizes.native_geometry(key),
+            Some(latest_geometry)
+        );
+
         latest.utility_dialog_sizes.reset(key).unwrap();
         let saved = editor.to_settings(&latest).unwrap();
         assert_eq!(saved.utility_dialog_sizes, latest.utility_dialog_sizes);
@@ -474,6 +564,7 @@ mod tests {
             crate::settings::UtilitySizePreference::Reset,
             "a stale editor draft cannot restore its older preferred size"
         );
+        assert_eq!(saved.utility_dialog_sizes.native_geometry(key), None);
     }
 
     #[test]

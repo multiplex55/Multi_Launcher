@@ -42,6 +42,10 @@ pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::gui::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+};
+use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
     MkWindowMatcher, NormalizationConfig, repair_ids, validate_document,
@@ -55,6 +59,129 @@ use visual_capture_workflow::SharedVisualOverlayController;
 pub enum DirtyDecision {
     KeepEditing,
     Discard,
+}
+
+const MKMACRO_VIEWPORT_KEY: &str = "mkmacro-editor";
+const MKMACRO_BODY_ID: &str = "mkmacro-editor-body";
+const MKMACRO_NATIVE_TITLE: &str = "Mouse/Keyboard Macros";
+
+fn mkmacro_viewport_id(owner_instance: u64) -> eframe::egui::ViewportId {
+    eframe::egui::ViewportId::from_hash_of((MKMACRO_VIEWPORT_KEY, owner_instance))
+}
+
+fn mkmacro_native_title(owner_instance: u64) -> String {
+    format!("{MKMACRO_NATIVE_TITLE} — {owner_instance}")
+}
+
+fn mkmacro_viewport_builder(owner_instance: u64) -> eframe::egui::ViewportBuilder {
+    eframe::egui::ViewportBuilder::default()
+        .with_title(mkmacro_native_title(owner_instance))
+        .with_inner_size(eframe::egui::vec2(920.0, 620.0))
+        .with_min_inner_size(eframe::egui::vec2(680.0, 420.0))
+        .with_resizable(true)
+}
+
+fn mkmacro_close_prompt_id(owner_instance: u64) -> eframe::egui::Id {
+    eframe::egui::Id::new(("mkmacro_close_prompt", owner_instance))
+}
+
+fn mkmacro_close_prompt_layer(owner_instance: u64) -> eframe::egui::LayerId {
+    eframe::egui::LayerId::new(
+        eframe::egui::Order::Middle,
+        mkmacro_close_prompt_id(owner_instance),
+    )
+}
+
+fn mkmacro_recording_annotation_id(owner_instance: u64) -> eframe::egui::Id {
+    eframe::egui::Id::new(("mkmacro_recording_annotation", owner_instance))
+}
+
+fn has_draft_input_event(ctx: &eframe::egui::Context) -> bool {
+    use eframe::egui::Event;
+    ctx.input(|input| {
+        input.raw.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Key { pressed: true, .. }
+                    | Event::Text(_)
+                    | Event::Paste(_)
+                    | Event::PointerButton { .. }
+            )
+        })
+    })
+}
+
+fn surrender_mkmacro_focus(ctx: &eframe::egui::Context, layer: eframe::egui::LayerId) {
+    if ctx.viewport_id() != eframe::egui::ViewportId::ROOT {
+        return;
+    }
+    if let Some(focused) = ctx.memory(|memory| memory.focused())
+        && ctx
+            .read_response(focused)
+            .is_some_and(|response| response.layer_id == layer)
+    {
+        ctx.memory_mut(|memory| memory.surrender_focus(focused));
+    }
+}
+
+fn mkmacro_owned_layers(owner_instance: u64) -> [eframe::egui::LayerId; 16] {
+    use eframe::egui::{Id, LayerId, Order};
+    [
+        Id::new("mkmacro_main_window"),
+        Id::new("mkmacro_package_modal"),
+        Id::new(Some("Action Editor")),
+        Id::new(Some("Window Picker")),
+        Id::new("mkmacro_recording_review"),
+        mkmacro_recording_annotation_id(owner_instance),
+        Id::new("mkmacro_step_search"),
+        Id::new("mkmacro_crop_reference_image"),
+        Id::new("mkmacro_crop_overwrite_confirmation"),
+        Id::new(Some("Add Action")),
+        Id::new(Some("Choose Program or Launcher Query")),
+        Id::new(Some("Choose Launcher Command Suggestion")),
+        Id::new(Some("Confirm destructive action")),
+        Id::new(Some("Save captured reference image")),
+        Id::new(Some("Reference image already exists")),
+        mkmacro_close_prompt_id(owner_instance),
+    ]
+    .map(|id| LayerId::new(Order::Middle, id))
+}
+
+fn mkmacro_surface_owns_input(
+    ctx: &eframe::egui::Context,
+    viewport: eframe::egui::ViewportId,
+    base_layer: eframe::egui::LayerId,
+    owner_instance: u64,
+) -> bool {
+    if ctx.viewport_id() != viewport || !ctx.input(|input| input.focused) {
+        return false;
+    }
+    let visible_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+    let focused_layer = crate::gui::jump_mode::ui::focused_response_layer(ctx);
+    let modal_layer = ctx.memory(|memory| memory.top_modal_layer());
+    let owned_layers = mkmacro_owned_layers(owner_instance);
+    let layer_is_owned =
+        |layer: eframe::egui::LayerId| layer == base_layer || owned_layers.contains(&layer);
+    let visible_is_owned = if base_layer == eframe::egui::LayerId::background() {
+        visible_layer.is_none_or(layer_is_owned)
+    } else {
+        visible_layer.is_some_and(layer_is_owned)
+    };
+    let focused_is_owned = focused_layer.is_none_or(layer_is_owned);
+    let modal_is_owned = modal_layer.is_none_or(layer_is_owned);
+    visible_is_owned && focused_is_owned && modal_is_owned
+}
+
+fn mkmacro_native_identity(
+    host: HostIdentity,
+    owner_instance: u64,
+) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse("mkmacro").ok()?,
+        viewport_id: mkmacro_viewport_id(owner_instance),
+        owner_generation: owner_instance,
+        host_generation: host.generation,
+    })
 }
 
 #[cfg(test)]
@@ -262,6 +389,24 @@ impl FirstStepRowGeometry {
 
 pub struct MkMacroDialog {
     pub open: bool,
+    host_state: UtilityHostState,
+    owner_instance: u64,
+    show_root_after_host_change: bool,
+    pending_host_frame: Option<MkMacroHostFrame>,
+    retained_host_checkpoint: Option<(u64, u64, MkMacroDraftCheckpoint)>,
+    active_host: Option<HostIdentity>,
+    native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
+    native_jump_frame: Option<u64>,
+    defer_host_effects: bool,
+    pending_host_effects: Vec<MkMacroHostAction>,
+    pending_recording_target_publish: bool,
+    pending_recording_review_drain: bool,
+    picker_owner: Option<(eframe::egui::Context, Option<NativeViewportIdentity>)>,
+    host_input_allowed: bool,
+    host_controls_allowed: bool,
+    pending_host_presentation: Option<UtilityPresentation>,
+    pending_launcher_close: bool,
+    close_prompt_open: bool,
     pub store: Arc<MkMacroStore>,
     pub authoring_context: MkMacroAuthoringContext,
     /// Authoritative client keeping the dialog-wide native overlay service alive.
@@ -311,15 +456,22 @@ pub struct MkMacroDialog {
     /// opening it paused an actively recording session.
     pub recording_annotation_open: bool,
     pub recording_annotation_text: String,
+    recording_annotation_target: Option<u64>,
     pub annotation_pause_owned: bool,
     /// Process-local capture review. It never participates in draft dirty tracking or persistence.
     pub recording_review: Option<recording_review::RecordingReviewSession>,
     #[cfg(test)]
     recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
     #[cfg(test)]
+    runtime_test: Option<Arc<crate::mkmacro::MacroRuntime>>,
+    #[cfg(test)]
     next_recording_preview_test_ticket: u64,
     #[cfg(test)]
     last_main_window_rect: Option<eframe::egui::Rect>,
+    #[cfg(test)]
+    test_host_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    test_run_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
     #[cfg(test)]
     last_first_step_row_geometry: Option<FirstStepRowGeometry>,
     #[cfg(test)]
@@ -351,6 +503,215 @@ pub struct MkMacroDialog {
     pub(crate) mkmacro_properties_preferences: crate::settings::MkMacroPropertiesPreferences,
     pending_mkmacro_properties_preferences: Option<crate::settings::MkMacroPropertiesPreferences>,
     package_ui: package_ui::PackageUiState,
+}
+
+#[derive(Default)]
+struct MkMacroHostEffects {
+    host_request: Option<UtilityPresentation>,
+    close_requested: bool,
+    focus_host: bool,
+    actions: Vec<MkMacroHostAction>,
+}
+
+struct MkMacroHostFrame {
+    root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    owner_instance: u64,
+    owner_context: eframe::egui::Context,
+    owner_viewport: eframe::egui::ViewportId,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_pass_accepted: bool,
+    callback_observed: bool,
+    callback_class: eframe::egui::ViewportClass,
+    native_viewport: Option<eframe::egui::ViewportInfo>,
+    embedded_root_layer: Option<eframe::egui::LayerId>,
+    embedded_root_focused_id: Option<eframe::egui::Id>,
+    owner_modal_layer: Option<eframe::egui::LayerId>,
+    os_close_requested: bool,
+    body_close_requested: bool,
+    draft_checkpoint: Option<MkMacroDraftCheckpoint>,
+    effects: MkMacroHostEffects,
+    native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
+    native_jump_frame: Option<u64>,
+}
+
+#[derive(Clone)]
+struct MkMacroDraftCheckpoint {
+    draft: MkMacroDocument,
+    revision_document: MkMacroDocument,
+    baseline: Arc<MkMacroDocument>,
+    draft_revision: u64,
+    dirty: bool,
+    conflict: bool,
+    selected_macro_id: Option<u64>,
+    selection: Selection,
+    step_instance_generations: HashMap<(u64, u64), u64>,
+    next_step_instance_generation: u64,
+    recording_insert_undo: Vec<RecordingInsertTransaction>,
+    recording_insert_redo: Vec<RecordingInsertTransaction>,
+    preferences: crate::settings::MkMacroPropertiesPreferences,
+    pending_preferences: Option<crate::settings::MkMacroPropertiesPreferences>,
+    pending_recording_target_publish: bool,
+    pending_recording_review_drain: bool,
+    close_prompt_open: bool,
+    recording_annotation_open: bool,
+    recording_annotation_text: String,
+    recording_annotation_target: Option<u64>,
+    annotation_pause_owned: bool,
+    package_ui: package_ui::PackageUiState,
+    editor_state: editor_operations::EditorState,
+}
+
+impl MkMacroDraftCheckpoint {
+    fn capture(dialog: &MkMacroDialog) -> Self {
+        Self {
+            draft: dialog.draft.clone(),
+            revision_document: dialog.revision_document.clone(),
+            baseline: dialog.baseline.clone(),
+            draft_revision: dialog.draft_revision,
+            dirty: dialog.dirty,
+            conflict: dialog.conflict,
+            selected_macro_id: dialog.selected_macro_id,
+            selection: dialog.selection.clone(),
+            step_instance_generations: dialog.step_instance_generations.clone(),
+            next_step_instance_generation: dialog.next_step_instance_generation,
+            recording_insert_undo: dialog.recording_insert_undo.clone(),
+            recording_insert_redo: dialog.recording_insert_redo.clone(),
+            preferences: dialog.mkmacro_properties_preferences.clone(),
+            pending_preferences: dialog.pending_mkmacro_properties_preferences.clone(),
+            pending_recording_target_publish: dialog.pending_recording_target_publish,
+            pending_recording_review_drain: dialog.pending_recording_review_drain,
+            close_prompt_open: dialog.close_prompt_open,
+            recording_annotation_open: dialog.recording_annotation_open,
+            recording_annotation_text: dialog.recording_annotation_text.clone(),
+            recording_annotation_target: dialog.recording_annotation_target,
+            annotation_pause_owned: dialog.annotation_pause_owned,
+            package_ui: dialog.package_ui.clone(),
+            editor_state: dialog.editor_state.clone(),
+        }
+    }
+
+    fn restore(self, dialog: &mut MkMacroDialog) {
+        dialog.draft = self.draft;
+        dialog.revision_document = self.revision_document;
+        dialog.baseline = self.baseline;
+        dialog.draft_revision = self.draft_revision;
+        dialog.dirty = self.dirty;
+        dialog.conflict = self.conflict;
+        dialog.selected_macro_id = self.selected_macro_id;
+        dialog.selection = self.selection;
+        dialog.step_instance_generations = self.step_instance_generations;
+        dialog.next_step_instance_generation = self.next_step_instance_generation;
+        dialog.recording_insert_undo = self.recording_insert_undo;
+        dialog.recording_insert_redo = self.recording_insert_redo;
+        dialog.mkmacro_properties_preferences = self.preferences;
+        dialog.pending_mkmacro_properties_preferences = self.pending_preferences;
+        dialog.pending_recording_target_publish = self.pending_recording_target_publish;
+        dialog.pending_recording_review_drain = self.pending_recording_review_drain;
+        dialog.close_prompt_open = self.close_prompt_open;
+        dialog.recording_annotation_open = self.recording_annotation_open;
+        dialog.recording_annotation_text = self.recording_annotation_text;
+        dialog.recording_annotation_target = self.recording_annotation_target;
+        dialog.annotation_pause_owned = self.annotation_pause_owned;
+        dialog.package_ui = self.package_ui;
+        dialog.editor_state = self.editor_state;
+        *dialog.recording_target_cache.borrow_mut() = None;
+    }
+}
+
+#[derive(Clone)]
+struct MkMacroHostAction {
+    host: HostIdentity,
+    draft_revision: u64,
+    macro_id: Option<u64>,
+    step_ids: Vec<u64>,
+    action: MkMacroHostActionKind,
+}
+
+#[derive(Clone)]
+enum MkMacroHostActionKind {
+    Save,
+    Run {
+        debug: bool,
+        selection: RunSelection,
+    },
+    Playback {
+        command: PlaybackCommand,
+        run_id: u64,
+        expected_state: crate::mkmacro::RuntimeState,
+    },
+    Recorder {
+        command: RecorderCommand,
+        target: crate::mkmacro::RecordingTarget,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+    },
+    Review {
+        command: ReviewCommand,
+        target: crate::mkmacro::RecordingTarget,
+        selected_range: bool,
+    },
+    AnnotationBegin {
+        macro_id: Option<u64>,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+    },
+    AnnotationFinish {
+        macro_id: Option<u64>,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+        commit: bool,
+        text: String,
+    },
+    ActionPicker(action_editor::NativeFilePickerIntent),
+    FinishActionEditor {
+        generation: u64,
+        action: action_editor::ActionEditorFinish,
+    },
+    Package(package_ui::PackageHostAction),
+    CloseDecision(MkMacroCloseChoice),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RunSelection {
+    Whole,
+    From(u64),
+    Selected,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PlaybackCommand {
+    Pause,
+    Resume,
+    Stop,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RecorderCommand {
+    Record,
+    Pause,
+    Resume,
+    Marker,
+    StopForReview,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ReviewCommand {
+    StopPreview,
+    Preview,
+    Apply,
+    Cancel,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MkMacroCloseChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+pub(crate) struct MkMacroHostCompletion {
+    pub(crate) closed: bool,
+    pub(crate) show_root: bool,
+    pub(crate) persisted_preferences: Option<crate::settings::MkMacroPropertiesPreferences>,
+    pub(crate) notices: Vec<String>,
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -4641,7 +5002,7 @@ mod tests {
     fn real_runtime_dialog() -> (
         tempfile::TempDir,
         MkMacroDialog,
-        MacroRuntime,
+        Arc<MacroRuntime>,
         Arc<crate::mkmacro::executor::fake::FakeBackend>,
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -4701,10 +5062,216 @@ mod tests {
             })
             .unwrap();
         let store = Arc::new(store);
-        let dialog = MkMacroDialog::new(store.clone());
+        let mut dialog = MkMacroDialog::new(store.clone());
         let fake = Arc::new(crate::mkmacro::executor::fake::FakeBackend::default());
-        let runtime = MacroRuntime::new(store, fake.clone().backends());
+        let runtime = Arc::new(MacroRuntime::new(store, fake.clone().backends()));
+        dialog.set_runtime_for_test(runtime.clone());
         (directory, dialog, runtime, fake)
+    }
+
+    fn render_host_frame(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen: eframe::egui::Rect,
+        root_visible: bool,
+        events: Vec<eframe::egui::Event>,
+        discard: bool,
+    ) {
+        let mut input = layout_input(screen, 1.0);
+        let child = dialog.is_popped_out().then(|| dialog.test_viewport_id());
+        let child_events = if child.is_some() {
+            events
+        } else {
+            input.events = events;
+            Vec::new()
+        };
+        dialog.test_host_button = None;
+        dialog.test_run_button = None;
+        let draw = || {
+            ctx.run_ui(input, |ui| {
+                let first_pass = ui.current_pass_index() == 0;
+                dialog.show_with_host(
+                    ui.ctx(),
+                    None,
+                    first_pass,
+                    true,
+                    root_visible,
+                    root_visible,
+                    true,
+                    77,
+                    false,
+                );
+                if discard && first_pass {
+                    ui.ctx().request_discard("discard the MkMacro click");
+                }
+            })
+        };
+        let output = super::super::render::with_immediate_viewport_renderer(ctx, || {
+            if let Some(viewport) = child {
+                super::super::render::with_immediate_viewport_test_events_for(
+                    viewport,
+                    child_events,
+                    draw,
+                )
+            } else {
+                draw()
+            }
+        });
+        dialog.on_host_frame_complete(ctx);
+        output.drop_without_applying_deltas();
+    }
+
+    fn click_host_button(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen: eframe::egui::Rect,
+        root_visible: bool,
+        run: bool,
+        discard_release: bool,
+    ) {
+        for _ in 0..3 {
+            render_host_frame(ctx, dialog, screen, root_visible, Vec::new(), false);
+        }
+        let (rect, clip, enabled) = if run {
+            dialog.test_run_button.expect("Run response")
+        } else {
+            dialog.test_host_button.expect("Dock or Pop Out response")
+        };
+        assert!(
+            enabled && clip.contains_rect(rect),
+            "the real button is visible and enabled"
+        );
+        click_host_position(
+            ctx,
+            dialog,
+            screen,
+            root_visible,
+            rect.center(),
+            discard_release,
+        );
+    }
+
+    fn click_host_position(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen: eframe::egui::Rect,
+        root_visible: bool,
+        pos: eframe::egui::Pos2,
+        discard_release: bool,
+    ) {
+        use eframe::egui::{Event, Modifiers, PointerButton};
+
+        for pressed in [true, false] {
+            let events = vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ];
+            render_host_frame(
+                ctx,
+                dialog,
+                screen,
+                root_visible,
+                events,
+                discard_release && !pressed,
+            );
+        }
+    }
+
+    #[test]
+    fn mkmacro_visible_pop_out_and_dock_run_same_macro_once() {
+        use eframe::egui::{self, vec2};
+
+        let (_directory, mut dialog, runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        dialog.selected_macro_mut().unwrap().description = "unsaved edit".into();
+        dialog.mark_dirty();
+        dialog.selection.ids.insert(11);
+        let previous_run_id = runtime.snapshot().run_id;
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        assert!(dialog.is_popped_out());
+        assert!(dialog.dirty);
+        assert!(dialog.selection.ids.contains(&11));
+        assert!(dialog.store.snapshot().macros[0].description.is_empty());
+
+        click_host_button(&ctx, &mut dialog, screen, false, true, true);
+        assert_eq!(runtime.snapshot().run_id, previous_run_id);
+        assert!(dialog.dirty);
+        assert!(dialog.store.snapshot().macros[0].description.is_empty());
+
+        click_host_button(&ctx, &mut dialog, screen, false, true, false);
+        let started = wait_for_terminal_after(&runtime, previous_run_id);
+        assert_eq!(started.macro_id, Some(1));
+        assert_eq!(started.state, RuntimeState::Completed);
+        assert_eq!(started.run_id, previous_run_id + 1);
+        assert_eq!(
+            dialog.store.snapshot().macros[0].description,
+            "unsaved edit"
+        );
+
+        click_host_button(&ctx, &mut dialog, screen, false, false, false);
+        assert!(!dialog.is_popped_out());
+        assert_eq!(dialog.selected_macro_id, Some(1));
+        assert!(dialog.selection.ids.contains(&11));
+        assert_eq!(runtime.snapshot().run_id, started.run_id);
+    }
+
+    #[test]
+    fn mkmacro_detached_action_editor_finishes_only_on_retained_clicks() {
+        use eframe::egui::{self, vec2};
+
+        let (_directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        assert!(dialog.is_popped_out());
+
+        let original = dialog.selected_macro().unwrap().steps[0].clone();
+        dialog.action_editor.begin_edit_in_macro(Some(1), &original);
+        dialog.action_editor.draft.as_mut().unwrap().delay_after_ms = 125;
+
+        for (apply, discard) in [(true, true), (true, false), (false, true), (false, false)] {
+            if !apply && dialog.action_editor.draft.is_none() {
+                let step = dialog.selected_macro().unwrap().steps[0].clone();
+                dialog.action_editor.begin_edit_in_macro(Some(1), &step);
+                dialog.action_editor.draft.as_mut().unwrap().delay_after_ms = 250;
+            }
+            for _ in 0..3 {
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+            }
+            let (rect, clip) = action_editor::finish_button_geometry(&dialog.action_editor, apply)
+                .expect("Action Editor footer button was rendered");
+            assert!(clip.contains_rect(rect));
+            click_host_position(&ctx, &mut dialog, screen, false, rect.center(), discard);
+            assert_eq!(
+                dialog.action_editor.draft.is_some(),
+                discard,
+                "apply={apply}, discard={discard}"
+            );
+            let delay = dialog.selected_macro().unwrap().steps[0].delay_after_ms;
+            assert_eq!(
+                delay,
+                if apply && discard {
+                    original.delay_after_ms
+                } else {
+                    125
+                }
+            );
+        }
     }
 
     #[test]
@@ -5904,6 +6471,24 @@ impl MkMacroDialog {
         }
         Self {
             open: false,
+            host_state: UtilityHostState::docked(),
+            owner_instance: 0,
+            show_root_after_host_change: false,
+            pending_host_frame: None,
+            retained_host_checkpoint: None,
+            active_host: None,
+            native_jump_mode: Default::default(),
+            native_jump_frame: None,
+            defer_host_effects: false,
+            pending_host_effects: Vec::new(),
+            pending_recording_target_publish: false,
+            pending_recording_review_drain: false,
+            picker_owner: None,
+            host_input_allowed: false,
+            host_controls_allowed: false,
+            pending_host_presentation: None,
+            pending_launcher_close: false,
+            close_prompt_open: false,
             draft: (*baseline).clone(),
             draft_revision: 0,
             revision_document: (*baseline).clone(),
@@ -5948,14 +6533,21 @@ impl MkMacroDialog {
             ui_notices: VecDeque::new(),
             recording_annotation_open: false,
             recording_annotation_text: String::new(),
+            recording_annotation_target: None,
             annotation_pause_owned: false,
             recording_review: None,
             #[cfg(test)]
             recording_preview_test_facade: None,
             #[cfg(test)]
+            runtime_test: None,
+            #[cfg(test)]
             next_recording_preview_test_ticket: 1,
             #[cfg(test)]
             last_main_window_rect: None,
+            #[cfg(test)]
+            test_host_button: None,
+            #[cfg(test)]
+            test_run_button: None,
             #[cfg(test)]
             last_first_step_row_geometry: None,
             #[cfg(test)]
@@ -5987,10 +6579,1326 @@ impl MkMacroDialog {
         }
     }
     pub fn open(&mut self) {
+        if self.open && self.is_popped_out() {
+            self.request_host_focus();
+            return;
+        }
         self.sync_external();
         self.refresh_environment();
         self.open = true;
         self.publish_recording_target();
+    }
+
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == UtilityPresentation::Popout
+    }
+
+    pub(crate) fn host_layer_if_root(&self) -> Option<eframe::egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        match self.host_state.presentation() {
+            UtilityPresentation::Docked => {
+                Some(crate::gui::jump_mode::ui::mkmacro_dialog_layer_id())
+            }
+            UtilityPresentation::Popout => self.host_state.embedded_root_layer(),
+        }
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        (self.open && self.is_popped_out())
+            || self.host_state.bootstrap_pending()
+            || self.pending_host_frame.is_some()
+    }
+
+    pub(crate) fn owns_root_input(&self, ctx: &eframe::egui::Context) -> bool {
+        self.open
+            && self.host_layer_if_root().is_some_and(|layer| {
+                mkmacro_surface_owns_input(
+                    ctx,
+                    eframe::egui::ViewportId::ROOT,
+                    layer,
+                    self.owner_instance,
+                )
+            })
+    }
+
+    pub(crate) fn request_close(&mut self) {
+        if self.open {
+            self.pending_launcher_close = true;
+        }
+    }
+
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_state.request_focus();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pop_out(&mut self) {
+        self.open = true;
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_viewport_id(&self) -> eframe::egui::ViewportId {
+        mkmacro_viewport_id(self.owner_instance)
+    }
+
+    pub(super) fn host_child_input_allowed(&self) -> bool {
+        !self.defer_host_effects || self.host_input_allowed
+    }
+
+    pub(crate) fn force_close(&mut self, ctx: &eframe::egui::Context) {
+        let identity = mkmacro_native_identity(self.host_state.identity(), self.owner_instance);
+        self.defer_host_effects = false;
+        self.open = false;
+        self.close_children();
+        if let Some(identity) = identity {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, eframe::egui::ViewportCommand::Close);
+        }
+        self.host_state.retire_to_docked();
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
+        self.pending_host_frame = None;
+        self.pending_host_effects.clear();
+        self.pending_launcher_close = false;
+        self.pending_recording_target_publish = false;
+        self.pending_recording_review_drain = false;
+        self.retained_host_checkpoint = None;
+        ctx.request_repaint_of(eframe::egui::ViewportId::ROOT);
+    }
+
+    pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    pub(crate) fn show_with_host(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        root_jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        first_ui_pass: bool,
+        application_input_allowed: bool,
+        root_visible: bool,
+        root_input_allowed: bool,
+        close_shortcut_allowed: bool,
+        owner_instance: u64,
+        jump_mode_enabled: bool,
+    ) {
+        use eframe::egui;
+
+        self.owner_instance = owner_instance;
+        self.defer_host_effects = true;
+        self.host_input_allowed = false;
+        self.pending_host_effects.clear();
+        self.pending_host_frame = None;
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let retained_checkpoint = self
+            .retained_host_checkpoint
+            .as_ref()
+            .filter(|(frame, _, _)| *frame == root_pass.frame_nr)
+            .map(|(frame, first_pass, checkpoint)| (*frame, *first_pass, checkpoint.clone()));
+        let mut draft_checkpoint = retained_checkpoint
+            .as_ref()
+            .map(|(_, _, checkpoint)| checkpoint.clone());
+        if let Some((_, first_pass, checkpoint)) = retained_checkpoint
+            && root_pass.pass_nr > first_pass
+        {
+            checkpoint.restore(self);
+        }
+        if self
+            .retained_host_checkpoint
+            .as_ref()
+            .is_some_and(|(frame, _, _)| *frame != root_pass.frame_nr)
+        {
+            self.retained_host_checkpoint = None;
+        }
+        let host = self.host_state.identity();
+        let mut native_jump_mode = std::mem::take(&mut self.native_jump_mode);
+        let mut native_jump_frame = self.native_jump_frame.take();
+        let mut callback_observed = false;
+        let mut callback_class = egui::ViewportClass::Root;
+        let mut owner_context = ctx.clone();
+        let mut owner_viewport = egui::ViewportId::ROOT;
+        let mut owner_pass = None;
+        let mut owner_pass_accepted = false;
+        let mut native_viewport = None;
+        let mut embedded_root_layer = None;
+        let mut embedded_root_focused_id = None;
+        let mut owner_modal_layer = None;
+        let mut close_requested = self.pending_launcher_close;
+        let mut os_close_requested = false;
+        let mut focus_host = false;
+
+        match host.host {
+            UtilityPresentation::Docked => {
+                if self.open && (root_visible || self.host_state.bootstrap_pending()) {
+                    let mut window_open = true;
+                    let layer = crate::gui::jump_mode::ui::mkmacro_dialog_layer_id();
+                    let output = self.show_main_window_host(
+                        ctx,
+                        &mut window_open,
+                        root_jump_scope.as_ref(),
+                        first_ui_pass,
+                        root_input_allowed,
+                        close_shortcut_allowed,
+                        &mut callback_observed,
+                        &mut callback_class,
+                        &mut owner_pass,
+                        &mut owner_pass_accepted,
+                        &mut owner_modal_layer,
+                        &mut draft_checkpoint,
+                        &mut close_requested,
+                    );
+                    if output.is_some() && !window_open && owner_pass_accepted {
+                        close_requested = true;
+                    }
+                    if callback_observed {
+                        embedded_root_layer = Some(layer);
+                        embedded_root_focused_id = ctx.memory(|memory| memory.focused());
+                    }
+                }
+            }
+            UtilityPresentation::Popout => {
+                let viewport_id = mkmacro_viewport_id(owner_instance);
+                let viewport_builder = mkmacro_viewport_builder(owner_instance);
+                let focused_pending = self.host_state.focus_pending();
+                let nested_owner_open = self.jump_mode_unsupported_nested_owner_open();
+                let jump_generation = self.jump_mode_target_generation();
+                native_jump_mode.set_enabled(jump_mode_enabled);
+                ctx.show_viewport_immediate(viewport_id, viewport_builder, |child, class| {
+                    callback_observed = true;
+                    callback_class = class;
+                    let child_ctx = child.ctx().clone();
+                    owner_context = child_ctx.clone();
+                    let independent = class == egui::ViewportClass::Immediate
+                        && child_ctx.viewport_id() == viewport_id;
+                    owner_viewport = if independent {
+                        viewport_id
+                    } else {
+                        egui::ViewportId::ROOT
+                    };
+                    let pass = ViewportPassProvenance::current(&child_ctx, child_ctx.viewport_id());
+                    owner_pass = Some(pass);
+                    let pass_authorized = first_ui_pass
+                        && child.current_pass_index() == 0
+                        && !ctx.will_discard()
+                        && !child_ctx.will_discard();
+                    owner_pass_accepted = pass_authorized;
+                    if independent {
+                        native_viewport = Some(child.input(|input| input.viewport().clone()));
+                    }
+                    let visible_body =
+                        independent || (child.is_visible() && !child.is_sizing_pass());
+                    let modal_open = child_ctx.memory(|memory| memory.top_modal_layer().is_some());
+                    let popup_open = egui::Popup::is_any_open(&child_ctx);
+                    let expected_layer = if independent {
+                        egui::LayerId::background()
+                    } else {
+                        child.layer_id()
+                    };
+                    let owner_current = if independent {
+                        application_input_allowed
+                            && mkmacro_surface_owns_input(
+                                &child_ctx,
+                                viewport_id,
+                                expected_layer,
+                                owner_instance,
+                            )
+                    } else {
+                        root_input_allowed
+                            && mkmacro_surface_owns_input(
+                                &child_ctx,
+                                egui::ViewportId::ROOT,
+                                expected_layer,
+                                owner_instance,
+                            )
+                    };
+                    if !independent && !owner_current {
+                        surrender_mkmacro_focus(&child_ctx, expected_layer);
+                    }
+
+                    let binding = independent.then_some(
+                        crate::gui::jump_mode::ui::NavigationViewportBinding {
+                            viewport: viewport_id,
+                            owner: crate::gui::jump_mode::ui::NavigationOwner::MkMacro {
+                                instance: owner_instance,
+                            },
+                            base_layer: egui::LayerId::background(),
+                        },
+                    );
+                    if independent {
+                        let frame_number = child_ctx.cumulative_frame_nr();
+                        if native_jump_frame != Some(frame_number) {
+                            native_jump_mode.begin_frame();
+                            native_jump_frame = Some(frame_number);
+                        }
+                    }
+                    let navigation_owner = binding.map_or(
+                        crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+                        |binding| {
+                            native_jump_mode.update_navigation_owner_for_viewport(
+                                &child_ctx,
+                                binding,
+                                application_input_allowed && jump_mode_enabled,
+                            )
+                        },
+                    );
+                    let jump_owner_current = binding.is_some_and(|binding| {
+                        navigation_owner == binding.owner
+                            && native_jump_mode.frame_navigation_owner() == binding.owner
+                    });
+                    if independent {
+                        native_jump_mode.handle_viewport_input(
+                            &child_ctx,
+                            jump_owner_current,
+                            pass_authorized,
+                            viewport_id,
+                        );
+                    }
+
+                    let keyboard_owner = close_shortcut_allowed
+                        && owner_current
+                        && (independent || root_input_allowed)
+                        && !nested_owner_open
+                        && native_jump_mode.active_session().is_none();
+                    let keyboard_close = pass_authorized
+                        && keyboard_owner
+                        && child_ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    if keyboard_close {
+                        close_requested = true;
+                    }
+                    os_close_requested = independent
+                        && pass_authorized
+                        && child.input(|input| input.viewport().close_requested());
+                    focus_host = focused_pending && pass_authorized && visible_body && !modal_open;
+                    owner_modal_layer = child_ctx.memory(|memory| memory.top_modal_layer());
+
+                    let surface_input_allowed = pass_authorized && owner_current && visible_body;
+                    let body_allowed = surface_input_allowed
+                        && !modal_open
+                        && !popup_open
+                        && !close_requested
+                        && !os_close_requested;
+                    let host_controls_allowed = body_allowed
+                        && !modal_open
+                        && !popup_open
+                        && self.action_editor.draft.is_none()
+                        && !step_table::table_modal_open(self);
+                    if surface_input_allowed && owner_current && has_draft_input_event(&child_ctx) {
+                        draft_checkpoint = Some(MkMacroDraftCheckpoint::capture(self));
+                    }
+
+                    if independent {
+                        native_jump_mode.begin_ui_pass();
+                        let native_scope = if jump_owner_current {
+                            binding.and_then(|binding| {
+                                native_jump_mode.scope_for_viewport_binding(
+                                    crate::gui::jump_mode::SurfaceId::dialog(
+                                        "mkmacro",
+                                        owner_instance,
+                                    ),
+                                    jump_generation,
+                                    "mkmacro",
+                                    binding,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        egui::CentralPanel::default().show(child, |ui| {
+                            self.render_host_body(
+                                ui,
+                                &child_ctx,
+                                native_scope.as_ref(),
+                                body_allowed,
+                                host_controls_allowed,
+                                surface_input_allowed,
+                            );
+                        });
+                        native_jump_mode.finish_ui_pass();
+                        let after_owner = binding.map_or(
+                            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+                            |binding| {
+                                native_jump_mode.update_navigation_owner_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    application_input_allowed && jump_mode_enabled,
+                                )
+                            },
+                        );
+                        if let Some(binding) = binding {
+                            if native_jump_mode.prepare_pass_for_viewport(
+                                &child_ctx,
+                                binding,
+                                after_owner,
+                                application_input_allowed,
+                            ) {
+                                crate::gui::jump_mode::paint::paint(&child_ctx, &native_jump_mode);
+                            }
+                            if !child_ctx.will_discard() {
+                                native_jump_mode.complete_frame_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    after_owner,
+                                    application_input_allowed,
+                                );
+                            }
+                        }
+                    } else {
+                        let root_scope = root_jump_scope.as_ref();
+                        self.render_host_body(
+                            child,
+                            &child_ctx,
+                            root_scope,
+                            body_allowed,
+                            host_controls_allowed,
+                            surface_input_allowed,
+                        );
+                        if child_ctx.viewport_id() == egui::ViewportId::ROOT {
+                            embedded_root_layer = Some(child.layer_id());
+                            embedded_root_focused_id = child_ctx.memory(|memory| memory.focused());
+                        }
+                    }
+                });
+            }
+        }
+
+        if callback_observed {
+            if self.retained_host_checkpoint.is_none()
+                && let Some(checkpoint) = draft_checkpoint.as_ref()
+            {
+                self.retained_host_checkpoint =
+                    Some((root_pass.frame_nr, root_pass.pass_nr, checkpoint.clone()));
+            }
+            let effects = MkMacroHostEffects {
+                host_request: self.pending_host_presentation.take(),
+                close_requested,
+                focus_host,
+                actions: std::mem::take(&mut self.pending_host_effects),
+            };
+            self.pending_host_frame = Some(MkMacroHostFrame {
+                root_pass,
+                host,
+                owner_instance,
+                owner_context,
+                owner_viewport,
+                owner_pass,
+                owner_pass_accepted,
+                callback_observed,
+                callback_class,
+                native_viewport,
+                embedded_root_layer,
+                embedded_root_focused_id,
+                owner_modal_layer,
+                os_close_requested,
+                body_close_requested: false,
+                draft_checkpoint: draft_checkpoint.clone(),
+                effects,
+                native_jump_mode,
+                native_jump_frame,
+            });
+        } else {
+            self.native_jump_mode = native_jump_mode;
+            self.native_jump_frame = native_jump_frame;
+        }
+        self.host_input_allowed = false;
+        self.host_controls_allowed = false;
+    }
+
+    pub(crate) fn on_host_frame_complete(
+        &mut self,
+        ctx: &eframe::egui::Context,
+    ) -> MkMacroHostCompletion {
+        use eframe::egui;
+
+        let Some(mut frame) = self.pending_host_frame.take() else {
+            self.defer_host_effects = false;
+            self.host_input_allowed = false;
+            self.host_controls_allowed = false;
+            return MkMacroHostCompletion {
+                closed: false,
+                show_root: self.take_show_root_after_host_change(),
+                persisted_preferences: None,
+                notices: Vec::new(),
+            };
+        };
+        let owner_pass_retained = frame.callback_observed
+            && frame.owner_pass_accepted
+            && frame.owner_pass.is_some_and(|pass| {
+                pass.viewport_id == frame.owner_viewport && pass.was_retained(ctx)
+            });
+        if !frame.root_pass.was_retained(ctx)
+            || frame.host != self.host_state.identity()
+            || frame.owner_instance != self.owner_instance
+            || !owner_pass_retained
+        {
+            if let Some(checkpoint) = frame.draft_checkpoint.take() {
+                checkpoint.restore(self);
+            }
+            if frame.os_close_requested {
+                ctx.send_viewport_cmd_to(
+                    mkmacro_viewport_id(frame.owner_instance),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            self.defer_host_effects = false;
+            self.host_input_allowed = false;
+            self.host_controls_allowed = false;
+            return MkMacroHostCompletion {
+                closed: false,
+                show_root: false,
+                persisted_preferences: None,
+                notices: Vec::new(),
+            };
+        }
+
+        if self
+            .retained_host_checkpoint
+            .as_ref()
+            .is_some_and(|(root_frame, _, _)| *root_frame == frame.root_pass.frame_nr)
+        {
+            self.retained_host_checkpoint = None;
+        }
+        self.pending_launcher_close = false;
+
+        if frame.os_close_requested {
+            ctx.send_viewport_cmd_to(
+                mkmacro_viewport_id(frame.owner_instance),
+                egui::ViewportCommand::CancelClose,
+            );
+        }
+        self.host_state.complete_bootstrap(
+            frame.host,
+            frame.embedded_root_layer,
+            frame.embedded_root_focused_id,
+        );
+        self.native_jump_mode = std::mem::take(&mut frame.native_jump_mode);
+        self.native_jump_frame = frame.native_jump_frame;
+        if frame.effects.focus_host {
+            if frame.callback_class == egui::ViewportClass::Immediate {
+                ctx.send_viewport_cmd_to(
+                    mkmacro_viewport_id(frame.owner_instance),
+                    egui::ViewportCommand::Focus,
+                );
+            } else if let Some(layer) = frame.embedded_root_layer {
+                ctx.move_to_top(layer);
+            }
+            self.host_state.complete_focus(frame.host);
+        }
+        let native_identity = mkmacro_native_identity(frame.host, frame.owner_instance);
+        let is_closing =
+            frame.effects.close_requested || frame.os_close_requested || frame.body_close_requested;
+        if let (Some(identity), Some(viewport_info)) =
+            (native_identity, frame.native_viewport.as_ref())
+            && frame.callback_class == egui::ViewportClass::Immediate
+            && !is_closing
+            && frame.effects.host_request != Some(UtilityPresentation::Docked)
+        {
+            crate::gui::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                frame.callback_class,
+                true,
+                &mkmacro_native_title(frame.owner_instance),
+                identity,
+                viewport_info,
+                egui::vec2(920.0, 620.0),
+                Some(egui::vec2(680.0, 420.0)),
+                None,
+            );
+        }
+
+        self.defer_host_effects = false;
+        self.sync_external();
+        if self.pending_recording_target_publish {
+            self.pending_recording_target_publish = false;
+            self.publish_recording_target_now();
+        }
+        if self.pending_recording_review_drain {
+            self.pending_recording_review_drain = false;
+            self.drain_pending_recording_reviews_now();
+        }
+        self.picker_owner = Some((
+            frame.owner_context.clone(),
+            (frame.callback_class == egui::ViewportClass::Immediate)
+                .then_some(native_identity)
+                .flatten(),
+        ));
+
+        if is_closing {
+            if frame.os_close_requested {
+                ctx.send_viewport_cmd_to(
+                    mkmacro_viewport_id(frame.owner_instance),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            if self.dirty {
+                self.close_prompt_open = true;
+            } else {
+                self.finish_host_close(ctx, frame.host, frame.owner_instance);
+            }
+        }
+
+        let mut closed = !self.open;
+        if self.open && !is_closing {
+            for action in frame.effects.actions.drain(..) {
+                if !self.host_action_is_current(&action, frame.host, frame.owner_instance) {
+                    continue;
+                }
+                if self.complete_host_action(ctx, action) {
+                    closed = true;
+                    break;
+                }
+            }
+            if self.open
+                && !closed
+                && let Some(requested) = frame.effects.host_request
+                && requested != self.host_state.presentation()
+            {
+                if requested == UtilityPresentation::Docked {
+                    if let Some(identity) = native_identity {
+                        crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                            ctx, identity,
+                        );
+                    }
+                    ctx.send_viewport_cmd_to(
+                        mkmacro_viewport_id(frame.owner_instance),
+                        egui::ViewportCommand::Close,
+                    );
+                }
+                if self.host_state.transition(requested) {
+                    self.native_jump_mode.cancel_all();
+                    self.native_jump_frame = None;
+                    if requested == UtilityPresentation::Docked {
+                        self.show_root_after_host_change = true;
+                        if let Some(layer) = self.host_layer_if_root() {
+                            ctx.move_to_top(layer);
+                        }
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    if requested == UtilityPresentation::Popout {
+                        ctx.request_repaint_of(mkmacro_viewport_id(frame.owner_instance));
+                    }
+                }
+            }
+        }
+
+        self.host_input_allowed = false;
+        self.host_controls_allowed = false;
+        self.picker_owner = None;
+        let persisted_preferences = self.take_macro_properties_preferences_for_persist();
+        let mut notices = Vec::new();
+        while let Some(notice) = self.take_ui_notice() {
+            notices.push(notice);
+        }
+        let show_root = self.take_show_root_after_host_change();
+        MkMacroHostCompletion {
+            closed,
+            show_root,
+            persisted_preferences,
+            notices,
+        }
+    }
+
+    fn show_main_window_host(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        open: &mut bool,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        first_ui_pass: bool,
+        root_input_allowed: bool,
+        close_shortcut_allowed: bool,
+        callback_observed: &mut bool,
+        callback_class: &mut eframe::egui::ViewportClass,
+        owner_pass: &mut Option<ViewportPassProvenance>,
+        owner_pass_accepted: &mut bool,
+        owner_modal_layer: &mut Option<eframe::egui::LayerId>,
+        draft_checkpoint: &mut Option<MkMacroDraftCheckpoint>,
+        close_requested: &mut bool,
+    ) -> Option<eframe::egui::InnerResponse<Option<()>>> {
+        use eframe::egui;
+
+        let viewport_size = ctx.viewport_rect().size();
+        let max_size = [viewport_size.x.max(1.0), viewport_size.y.max(1.0)];
+        let default_size = [920.0_f32.min(max_size[0]), 620.0_f32.min(max_size[1])];
+        let min_size = [680.0_f32.min(max_size[0]), 420.0_f32.min(max_size[1])];
+        let id = egui::Id::new("mkmacro_main_window");
+        let window = egui::Window::new(MKMACRO_NATIVE_TITLE)
+            .id(id)
+            .enabled(root_input_allowed)
+            .collapsible(false)
+            .default_size(default_size)
+            .min_size(min_size)
+            .max_size(max_size)
+            .resizable(true);
+        let output = window.show_utility(
+            ctx,
+            "mkmacro",
+            id,
+            Some(open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(
+                    default_size,
+                )),
+                egui::Vec2::ZERO,
+                [None, None],
+            )
+            .with_minimum(egui::Vec2::from(min_size))
+            .with_maximum(egui::Vec2::from(max_size)),
+            |ui| {
+                *callback_observed = true;
+                *callback_class = egui::ViewportClass::Root;
+                let pass = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+                *owner_pass = Some(pass);
+                let pass_authorized = first_ui_pass
+                    && ui.current_pass_index() == 0
+                    && !ctx.will_discard()
+                    && !ui.ctx().will_discard();
+                *owner_pass_accepted = pass_authorized;
+                *owner_modal_layer = ui.ctx().memory(|memory| memory.top_modal_layer());
+                let visible_body = ui.is_visible() && !ui.is_sizing_pass();
+                let focused = ui.ctx().input(|input| input.focused);
+                let modal_open = ui.ctx().memory(|memory| memory.top_modal_layer().is_some());
+                let popup_open = egui::Popup::is_any_open(ui.ctx());
+                let expected_layer = crate::gui::jump_mode::ui::mkmacro_dialog_layer_id();
+                let root_owner_current = root_input_allowed
+                    && mkmacro_surface_owns_input(
+                        ui.ctx(),
+                        egui::ViewportId::ROOT,
+                        expected_layer,
+                        self.owner_instance,
+                    );
+                let nested_owner_open =
+                    self.jump_mode_unsupported_nested_owner_open() || self.close_prompt_open;
+                if close_shortcut_allowed
+                    && pass_authorized
+                    && root_owner_current
+                    && !nested_owner_open
+                    && ui.ctx().input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    })
+                {
+                    *close_requested = true;
+                }
+                let body_allowed = pass_authorized
+                    && root_input_allowed
+                    && focused
+                    && visible_body
+                    && !modal_open
+                    && !popup_open
+                    && !*close_requested;
+                let surface_input_allowed = pass_authorized
+                    && root_input_allowed
+                    && root_owner_current
+                    && focused
+                    && visible_body;
+                let host_controls_allowed = body_allowed
+                    && self.action_editor.draft.is_none()
+                    && !step_table::table_modal_open(self);
+                if surface_input_allowed
+                    && root_owner_current
+                    && has_draft_input_event(ui.ctx())
+                    && draft_checkpoint.is_none()
+                {
+                    *draft_checkpoint = Some(MkMacroDraftCheckpoint::capture(self));
+                }
+                self.render_host_body(
+                    ui,
+                    &ui.ctx().clone(),
+                    jump_mode_scope,
+                    body_allowed,
+                    host_controls_allowed,
+                    surface_input_allowed,
+                );
+            },
+        );
+        #[cfg(test)]
+        {
+            self.last_main_window_rect = output.as_ref().map(|output| output.response.rect);
+        }
+        output
+    }
+
+    fn show_close_prompt(&mut self, ctx: &eframe::egui::Context, host_input_allowed: bool) {
+        if !self.close_prompt_open {
+            return;
+        }
+        let mut choice = None;
+        let mut open = true;
+        eframe::egui::Window::new("Unsaved MkMacro changes")
+            .id(mkmacro_close_prompt_id(self.owner_instance))
+            .enabled(host_input_allowed)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Save changes to this macro document before closing?");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(host_input_allowed, eframe::egui::Button::new("Save"))
+                        .clicked()
+                    {
+                        choice = Some(MkMacroCloseChoice::Save);
+                    }
+                    if ui
+                        .add_enabled(host_input_allowed, eframe::egui::Button::new("Discard"))
+                        .clicked()
+                    {
+                        choice = Some(MkMacroCloseChoice::Discard);
+                    }
+                    if ui
+                        .add_enabled(host_input_allowed, eframe::egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        choice = Some(MkMacroCloseChoice::Cancel);
+                    }
+                });
+            });
+        if host_input_allowed
+            && ctx.input_mut(|input| {
+                input.consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::Escape)
+            })
+        {
+            choice = Some(MkMacroCloseChoice::Cancel);
+        }
+        if host_input_allowed && let Some(choice) = choice {
+            self.stage_host_action(MkMacroHostActionKind::CloseDecision(choice));
+        } else if host_input_allowed && !open {
+            self.stage_host_action(MkMacroHostActionKind::CloseDecision(
+                MkMacroCloseChoice::Cancel,
+            ));
+        }
+    }
+
+    fn render_host_body(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        ctx: &eframe::egui::Context,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        body_allowed: bool,
+        host_controls_allowed: bool,
+        surface_input_allowed: bool,
+    ) {
+        self.host_input_allowed = surface_input_allowed;
+        self.host_controls_allowed = host_controls_allowed;
+        ui.scope_builder(
+            eframe::egui::UiBuilder::new().id(eframe::egui::Id::new((
+                MKMACRO_BODY_ID,
+                self.owner_instance,
+            ))),
+            |ui| {
+                ui.add_enabled_ui(body_allowed, |ui| {
+                    let _ = self.show_contents_with_table_viewport(ui, jump_scope);
+                });
+            },
+        );
+        self.show_close_prompt(ctx, surface_input_allowed);
+    }
+
+    fn stage_host_action(&mut self, action: MkMacroHostActionKind) {
+        let macro_id = self.selected_macro_id;
+        let step_ids = self
+            .selected_macro()
+            .map(|macro_| {
+                macro_
+                    .steps
+                    .iter()
+                    .filter_map(|step| self.selection.ids.contains(&step.id).then_some(step.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.pending_host_effects.push(MkMacroHostAction {
+            host: self.host_state.identity(),
+            draft_revision: self.draft_revision,
+            macro_id,
+            step_ids,
+            action,
+        });
+    }
+
+    fn stage_host_presentation(&mut self, presentation: UtilityPresentation) {
+        self.pending_host_presentation = Some(presentation);
+    }
+
+    fn stage_host_toolbar_action(&mut self, action: MkMacroHostActionKind) {
+        self.stage_host_action(action);
+    }
+
+    pub(super) fn stage_host_playback_action(&mut self, command: PlaybackCommand) {
+        let Some(snapshot) = self.host_runtime_snapshot() else {
+            return;
+        };
+        self.pending_host_effects.push(MkMacroHostAction {
+            host: self.host_state.identity(),
+            draft_revision: self.draft_revision,
+            macro_id: snapshot.macro_id,
+            step_ids: Vec::new(),
+            action: MkMacroHostActionKind::Playback {
+                command,
+                run_id: snapshot.run_id,
+                expected_state: snapshot.state,
+            },
+        });
+    }
+
+    pub(super) fn stage_host_recorder_action(
+        &mut self,
+        command: RecorderCommand,
+        target: crate::mkmacro::RecordingTarget,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+    ) {
+        self.pending_host_effects.push(MkMacroHostAction {
+            host: self.host_state.identity(),
+            draft_revision: self.draft_revision,
+            macro_id: Some(target.macro_id),
+            step_ids: Vec::new(),
+            action: MkMacroHostActionKind::Recorder {
+                command,
+                target,
+                expected_state,
+            },
+        });
+    }
+
+    pub(super) fn stage_host_review_action(
+        &mut self,
+        command: ReviewCommand,
+        target: crate::mkmacro::RecordingTarget,
+        selected_range: bool,
+    ) {
+        self.pending_host_effects.push(MkMacroHostAction {
+            host: self.host_state.identity(),
+            draft_revision: self.draft_revision,
+            macro_id: Some(target.macro_id),
+            step_ids: Vec::new(),
+            action: MkMacroHostActionKind::Review {
+                command,
+                target,
+                selected_range,
+            },
+        });
+    }
+
+    pub(super) fn stage_host_annotation_begin(
+        &mut self,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+        macro_id: Option<u64>,
+    ) {
+        self.stage_host_action(MkMacroHostActionKind::AnnotationBegin {
+            macro_id,
+            expected_state,
+        });
+    }
+
+    pub(super) fn stage_host_annotation_finish(
+        &mut self,
+        commit: bool,
+        text: String,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+        macro_id: Option<u64>,
+    ) {
+        self.stage_host_action(MkMacroHostActionKind::AnnotationFinish {
+            macro_id,
+            expected_state,
+            commit,
+            text,
+        });
+    }
+
+    fn host_action_is_current(
+        &self,
+        action: &MkMacroHostAction,
+        host: HostIdentity,
+        owner_instance: u64,
+    ) -> bool {
+        if action.host != host
+            || host != self.host_state.identity()
+            || owner_instance != self.owner_instance
+        {
+            return false;
+        }
+        if !matches!(
+            &action.action,
+            MkMacroHostActionKind::Playback { .. }
+                | MkMacroHostActionKind::Recorder { .. }
+                | MkMacroHostActionKind::CloseDecision(_)
+        ) && action.draft_revision != self.draft_revision
+        {
+            return false;
+        }
+        match &action.action {
+            MkMacroHostActionKind::CloseDecision(_) => true,
+            MkMacroHostActionKind::Playback {
+                run_id,
+                expected_state,
+                ..
+            } => self.host_runtime_snapshot().is_some_and(|snapshot| {
+                snapshot.run_id == *run_id
+                    && snapshot.state == *expected_state
+                    && action.macro_id == snapshot.macro_id
+            }),
+            MkMacroHostActionKind::Recorder {
+                target,
+                expected_state,
+                ..
+            } => {
+                if *expected_state == crate::mkmacro::RecorderRuntimeState::Idle {
+                    action.macro_id == self.selected_macro_id
+                        && self.recording_target() == Some(*target)
+                } else {
+                    crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
+                        snapshot.state == *expected_state
+                            && snapshot.macro_id == Some(target.macro_id)
+                    })
+                }
+            }
+            MkMacroHostActionKind::Review { target, .. } => self
+                .recording_review
+                .as_ref()
+                .is_some_and(|review| review.effective_target() == *target),
+            MkMacroHostActionKind::AnnotationBegin {
+                macro_id,
+                expected_state,
+            } => crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
+                snapshot.state == *expected_state
+                    && snapshot.macro_id == *macro_id
+                    && macro_id.is_some()
+            }),
+            MkMacroHostActionKind::AnnotationFinish {
+                macro_id,
+                expected_state,
+                ..
+            } => {
+                if matches!(
+                    *expected_state,
+                    crate::mkmacro::RecorderRuntimeState::Idle
+                        | crate::mkmacro::RecorderRuntimeState::Stopping
+                ) {
+                    self.recording_annotation_open && self.recording_annotation_target == *macro_id
+                } else {
+                    crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
+                        snapshot.state == *expected_state && snapshot.macro_id == *macro_id
+                    })
+                }
+            }
+            MkMacroHostActionKind::ActionPicker(intent) => {
+                action_editor::native_file_picker_is_current(self, intent)
+            }
+            MkMacroHostActionKind::FinishActionEditor { generation, .. } => {
+                self.action_editor.draft.is_some()
+                    && self.action_editor.draft_generation == *generation
+            }
+            MkMacroHostActionKind::Package(package_action) => {
+                package_ui::host_action_is_current(self, package_action)
+            }
+            _ => {
+                if action.macro_id != self.selected_macro_id {
+                    return false;
+                }
+                let current_step_ids = self
+                    .selected_macro()
+                    .map(|macro_| {
+                        macro_
+                            .steps
+                            .iter()
+                            .filter_map(|step| {
+                                self.selection.ids.contains(&step.id).then_some(step.id)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                action.step_ids == current_step_ids
+            }
+        }
+    }
+
+    fn complete_host_action(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        action: MkMacroHostAction,
+    ) -> bool {
+        let result = match action.action {
+            MkMacroHostActionKind::Save => self.save().map(|_| false),
+            MkMacroHostActionKind::Run { debug, selection } => {
+                let command = match selection {
+                    RunSelection::Whole => self.prepare_execution_checked().map(|id| {
+                        if debug {
+                            crate::mkmacro::runtime::RuntimeCommand::DebugRun(id)
+                        } else {
+                            crate::mkmacro::runtime::RuntimeCommand::Run(id)
+                        }
+                    }),
+                    RunSelection::From(step_id) => {
+                        self.prepare_from_step(step_id).map(|(id, step)| {
+                            if debug {
+                                crate::mkmacro::runtime::RuntimeCommand::DebugRunFrom(id, step)
+                            } else {
+                                crate::mkmacro::runtime::RuntimeCommand::RunFrom(id, step)
+                            }
+                        })
+                    }
+                    RunSelection::Selected => self.prepare_selected_steps().map(|(id, steps)| {
+                        if debug {
+                            crate::mkmacro::runtime::RuntimeCommand::DebugRunSelection(id, steps)
+                        } else {
+                            crate::mkmacro::runtime::RuntimeCommand::RunSelection(id, steps)
+                        }
+                    }),
+                };
+                command.and_then(|command| self.submit_host_runtime_command(command).map(|_| false))
+            }
+            MkMacroHostActionKind::Playback {
+                command,
+                run_id,
+                expected_state,
+            } => {
+                let still_current = self.host_runtime_snapshot().is_some_and(|snapshot| {
+                    snapshot.run_id == run_id && snapshot.state == expected_state
+                });
+                if !still_current {
+                    Ok(false)
+                } else {
+                    let command = match command {
+                        PlaybackCommand::Pause => crate::mkmacro::runtime::RuntimeCommand::Pause,
+                        PlaybackCommand::Resume => crate::mkmacro::runtime::RuntimeCommand::Resume,
+                        PlaybackCommand::Stop => crate::mkmacro::runtime::RuntimeCommand::Stop,
+                    };
+                    self.submit_host_runtime_command(command).map(|_| false)
+                }
+            }
+            MkMacroHostActionKind::Recorder {
+                command,
+                target,
+                expected_state,
+            } => self
+                .complete_recorder_action(command, target, expected_state)
+                .map(|_| false),
+            MkMacroHostActionKind::Review {
+                command,
+                target,
+                selected_range,
+            } => self.complete_review_action(command, target, selected_range),
+            MkMacroHostActionKind::AnnotationBegin { .. } => {
+                self.begin_recording_annotation().map(|_| false)
+            }
+            MkMacroHostActionKind::AnnotationFinish { commit, text, .. } => {
+                self.recording_annotation_text = text;
+                self.finish_recording_annotation(commit).map(|_| false)
+            }
+            MkMacroHostActionKind::ActionPicker(intent) => {
+                action_editor::complete_native_file_picker(ctx, self, intent).map(|_| false)
+            }
+            MkMacroHostActionKind::FinishActionEditor { action, .. } => {
+                action_editor::complete_finish(self, action);
+                Ok(false)
+            }
+            MkMacroHostActionKind::Package(package_action) => {
+                package_ui::complete_host_action(self, package_action).map(|_| false)
+            }
+            MkMacroHostActionKind::CloseDecision(choice) => {
+                return self.complete_close_choice(ctx, choice);
+            }
+        };
+        if let Err(error) = result {
+            self.command_error = Some(error.to_string());
+        }
+        false
+    }
+
+    fn complete_review_action(
+        &mut self,
+        command: ReviewCommand,
+        target: crate::mkmacro::RecordingTarget,
+        selected_range: bool,
+    ) -> anyhow::Result<bool> {
+        match command {
+            ReviewCommand::StopPreview => {
+                self.stop_owned_recording_preview();
+                Ok(false)
+            }
+            ReviewCommand::Preview => {
+                self.preview_recording_review(selected_range)?;
+                Ok(false)
+            }
+            ReviewCommand::Apply => {
+                self.apply_recording_review().map_err(anyhow::Error::msg)?;
+                Ok(false)
+            }
+            ReviewCommand::Cancel => {
+                self.cancel_recording_review();
+                let _ = target;
+                Ok(false)
+            }
+        }
+    }
+
+    fn complete_close_choice(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        choice: MkMacroCloseChoice,
+    ) -> bool {
+        match choice {
+            MkMacroCloseChoice::Cancel => {
+                self.close_prompt_open = false;
+                false
+            }
+            MkMacroCloseChoice::Save => match self.save() {
+                Ok(()) => {
+                    self.finish_host_close(ctx, self.host_state.identity(), self.owner_instance);
+                    true
+                }
+                Err(error) => {
+                    self.command_error = Some(error.to_string());
+                    false
+                }
+            },
+            MkMacroCloseChoice::Discard => {
+                self.close_with_decision(DirtyDecision::Discard);
+                self.finish_host_close(ctx, self.host_state.identity(), self.owner_instance);
+                true
+            }
+        }
+    }
+
+    fn finish_host_close(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        host: HostIdentity,
+        owner_instance: u64,
+    ) {
+        let identity = mkmacro_native_identity(host, owner_instance);
+        if self.open {
+            if self.dirty {
+                let _ = self.close_with_decision(DirtyDecision::Discard);
+            } else {
+                self.open = false;
+                self.set_selected_macro(None);
+            }
+        }
+        self.close_children();
+        self.open = false;
+        self.close_prompt_open = false;
+        if let Some(identity) = identity {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, eframe::egui::ViewportCommand::Close);
+        }
+        self.host_state.retire_to_docked();
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
+        self.publish_recording_target_now();
+        ctx.request_repaint_of(eframe::egui::ViewportId::ROOT);
+    }
+
+    fn submit_host_runtime_command(
+        &self,
+        command: crate::mkmacro::runtime::RuntimeCommand,
+    ) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if let Some(runtime) = &self.runtime_test {
+            return match runtime.command(command) {
+                crate::mkmacro::CommandResult::Accepted => Ok(()),
+                result => anyhow::bail!("{result:?}"),
+            };
+        }
+        match command {
+            crate::mkmacro::runtime::RuntimeCommand::Run(id) => {
+                crate::mkmacro::runtime::run_with_source(
+                    id,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::RunFrom(id, step) => {
+                crate::mkmacro::runtime::run_from_with_source(
+                    id,
+                    step,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::RunSelection(id, steps) => {
+                crate::mkmacro::runtime::run_selection_with_source(
+                    id,
+                    steps,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::DebugRun(id) => {
+                crate::mkmacro::runtime::debug_run_with_source(
+                    id,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::DebugRunFrom(id, step) => {
+                crate::mkmacro::runtime::debug_run_from_with_source(
+                    id,
+                    step,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::DebugRunSelection(id, steps) => {
+                crate::mkmacro::runtime::debug_run_selection_with_source(
+                    id,
+                    steps,
+                    crate::mkmacro::InvocationSource::MacroDialog,
+                )
+            }
+            crate::mkmacro::runtime::RuntimeCommand::Pause => crate::mkmacro::runtime::pause(),
+            crate::mkmacro::runtime::RuntimeCommand::Resume => crate::mkmacro::runtime::resume(),
+            crate::mkmacro::runtime::RuntimeCommand::Stop => crate::mkmacro::runtime::stop(),
+            other => anyhow::bail!("Unsupported host runtime command: {other:?}"),
+        }
+    }
+
+    pub(super) fn host_runtime_snapshot(&self) -> Option<Arc<crate::mkmacro::RuntimeSnapshot>> {
+        #[cfg(test)]
+        if let Some(runtime) = &self.runtime_test {
+            return Some(runtime.snapshot());
+        }
+        crate::mkmacro::runtime::snapshot()
+    }
+
+    fn complete_recorder_action(
+        &mut self,
+        command: RecorderCommand,
+        target: crate::mkmacro::RecordingTarget,
+        expected_state: crate::mkmacro::RecorderRuntimeState,
+    ) -> anyhow::Result<()> {
+        use crate::mkmacro::RecorderRuntimeState as State;
+        let recorder = crate::mkmacro::runtime::recorder_snapshot();
+        let current_state = if crate::mkmacro::runtime::record_stop_pending() {
+            State::Stopping
+        } else {
+            recorder
+                .as_ref()
+                .map_or(State::Idle, |snapshot| snapshot.state)
+        };
+        if current_state != expected_state
+            || (expected_state == State::Idle && self.recording_target() != Some(target))
+            || (expected_state != State::Idle
+                && recorder.as_ref().and_then(|snapshot| snapshot.macro_id)
+                    != Some(target.macro_id))
+        {
+            anyhow::bail!(
+                "The recorder state or selected macro changed before the command was accepted"
+            );
+        }
+        match command {
+            RecorderCommand::Record => crate::mkmacro::runtime::record_target(
+                target,
+                NormalizationConfig::from(&self.draft.settings.recorder),
+            ),
+            RecorderCommand::Pause => crate::mkmacro::runtime::record_pause(),
+            RecorderCommand::Resume => crate::mkmacro::runtime::record_resume(),
+            RecorderCommand::Marker => crate::mkmacro::runtime::record_marker(),
+            RecorderCommand::StopForReview => {
+                crate::mkmacro::runtime::request_record_stop_for_review().map(|_| ())
+            }
+        }
     }
 
     pub fn take_ui_notice(&mut self) -> Option<String> {
@@ -6473,6 +8381,14 @@ impl MkMacroDialog {
     }
 
     pub fn drain_pending_recording_reviews(&mut self) {
+        if self.defer_host_effects {
+            self.pending_recording_review_drain = true;
+            return;
+        }
+        self.drain_pending_recording_reviews_now();
+    }
+
+    fn drain_pending_recording_reviews_now(&mut self) {
         for result in crate::mkmacro::runtime::take_pending_recordings() {
             if let Err(error) = self.open_recording_review(result) {
                 self.command_error = Some(error);
@@ -6486,15 +8402,19 @@ impl MkMacroDialog {
     }
 
     pub fn begin_recording_annotation(&mut self) -> anyhow::Result<()> {
-        let state = crate::mkmacro::runtime::recorder_snapshot()
-            .map(|snapshot| snapshot.state)
-            .unwrap_or(crate::mkmacro::RecorderRuntimeState::Idle);
+        let snapshot = crate::mkmacro::runtime::recorder_snapshot()
+            .ok_or_else(|| anyhow::anyhow!("No active recording is available to annotate"))?;
+        let state = snapshot.state;
+        let macro_id = snapshot
+            .macro_id
+            .ok_or_else(|| anyhow::anyhow!("The active recording has no macro target"))?;
         let pause_owned = annotation_pause_ownership(state)?;
         crate::mkmacro::runtime::set_recording_annotation_active(true);
         self.annotation_pause_owned = match pause_owned {
             true => {
                 if let Err(error) = crate::mkmacro::runtime::record_pause() {
                     crate::mkmacro::runtime::set_recording_annotation_active(false);
+                    self.recording_annotation_target = None;
                     return Err(error);
                 }
                 true
@@ -6503,6 +8423,7 @@ impl MkMacroDialog {
         };
         self.recording_annotation_text.clear();
         self.recording_annotation_open = true;
+        self.recording_annotation_target = Some(macro_id);
         Ok(())
     }
 
@@ -6518,6 +8439,7 @@ impl MkMacroDialog {
         };
         self.recording_annotation_open = false;
         self.recording_annotation_text.clear();
+        self.recording_annotation_target = None;
         crate::mkmacro::runtime::set_recording_annotation_active(false);
         let resume = std::mem::take(&mut self.annotation_pause_owned);
         let resume_result = if should_resume_annotation_owned(
@@ -6652,6 +8574,11 @@ impl MkMacroDialog {
             runtime,
             recorder_state: crate::mkmacro::RecorderRuntimeState::Idle,
         });
+    }
+
+    #[cfg(test)]
+    fn set_runtime_for_test(&mut self, runtime: Arc<crate::mkmacro::MacroRuntime>) {
+        self.runtime_test = Some(runtime);
     }
 
     /// Applies the complete reviewed proposal as one atomic document mutation.
@@ -6894,7 +8821,15 @@ impl MkMacroDialog {
         });
         Some(target)
     }
-    fn publish_recording_target(&self) {
+    fn publish_recording_target(&mut self) {
+        if self.defer_host_effects {
+            self.pending_recording_target_publish = true;
+            return;
+        }
+        self.publish_recording_target_now();
+    }
+
+    fn publish_recording_target_now(&self) {
         crate::mkmacro::runtime::arm_recording(
             self.recording_target(),
             NormalizationConfig::from(&self.draft.settings.recorder),
@@ -7005,7 +8940,7 @@ impl MkMacroDialog {
         {
             return Some("Recording is active".into());
         }
-        if crate::mkmacro::runtime::snapshot().is_some_and(|s| {
+        if self.host_runtime_snapshot().is_some_and(|s| {
             matches!(
                 s.state,
                 crate::mkmacro::RuntimeState::Running
@@ -7101,45 +9036,32 @@ impl MkMacroDialog {
 
     pub fn run_selected_macro(&mut self) -> anyhow::Result<()> {
         let id = self.prepare_execution_checked()?;
-        crate::mkmacro::runtime::run_with_source(id, crate::mkmacro::InvocationSource::MacroDialog)
+        self.submit_host_runtime_command(crate::mkmacro::runtime::RuntimeCommand::Run(id))
     }
     pub fn run_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
         let (id, step) = self.prepare_from_step(original_step_id)?;
-        crate::mkmacro::runtime::run_from_with_source(
-            id,
-            step,
-            crate::mkmacro::InvocationSource::MacroDialog,
-        )
+        self.submit_host_runtime_command(crate::mkmacro::runtime::RuntimeCommand::RunFrom(id, step))
     }
     pub fn run_selected_steps(&mut self) -> anyhow::Result<()> {
         let (id, ids) = self.prepare_selected_steps()?;
-        crate::mkmacro::runtime::run_selection_with_source(
-            id,
-            ids,
-            crate::mkmacro::InvocationSource::MacroDialog,
-        )
+        self.submit_host_runtime_command(crate::mkmacro::runtime::RuntimeCommand::RunSelection(
+            id, ids,
+        ))
     }
     pub fn debug_selected_macro(&mut self) -> anyhow::Result<()> {
         let id = self.prepare_execution_checked()?;
-        crate::mkmacro::runtime::debug_run_with_source(
-            id,
-            crate::mkmacro::InvocationSource::MacroDialog,
-        )
+        self.submit_host_runtime_command(crate::mkmacro::runtime::RuntimeCommand::DebugRun(id))
     }
     pub fn debug_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
         let (id, step) = self.prepare_from_step(original_step_id)?;
-        crate::mkmacro::runtime::debug_run_from_with_source(
-            id,
-            step,
-            crate::mkmacro::InvocationSource::MacroDialog,
-        )
+        self.submit_host_runtime_command(crate::mkmacro::runtime::RuntimeCommand::DebugRunFrom(
+            id, step,
+        ))
     }
     pub fn debug_selected_steps(&mut self) -> anyhow::Result<()> {
         let (id, ids) = self.prepare_selected_steps()?;
-        crate::mkmacro::runtime::debug_run_selection_with_source(
-            id,
-            ids,
-            crate::mkmacro::InvocationSource::MacroDialog,
+        self.submit_host_runtime_command(
+            crate::mkmacro::runtime::RuntimeCommand::DebugRunSelection(id, ids),
         )
     }
 
@@ -7311,7 +9233,7 @@ impl MkMacroDialog {
         }
         search::shortcuts(ui.ctx(), self);
         self.publish_recording_target();
-        self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
+        self.observe_runtime_snapshot(self.host_runtime_snapshot());
         self.drain_pending_recording_reviews();
         let mut jump_visual_order = 0;
         toolbar::show_with_jump_mode(ui, self, jump_mode_scope, &mut jump_visual_order);

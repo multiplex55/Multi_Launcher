@@ -313,6 +313,7 @@ fn activation_key_is_held(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.key_down(egui::Key::Enter) || input.key_down(egui::Key::Space))
 }
 
+#[derive(Clone)]
 pub struct GestureRecorder {
     config: RecorderConfig,
     tracker: GestureTracker,
@@ -446,7 +447,7 @@ impl BindingEditor {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BindingDialog {
     open: bool,
     activation_key_release_required: bool,
@@ -519,6 +520,7 @@ impl MouseGesturesDraftSnapshot {
     }
 }
 
+#[derive(Clone)]
 pub struct MgGesturesDialog {
     pub open: bool,
     db: GestureDb,
@@ -542,16 +544,35 @@ pub struct MgGesturesDialog {
     #[cfg(test)]
     last_right_panel_scroll_area_id: Option<egui::Id>,
     #[cfg(test)]
+    last_canvas_rect: Option<(egui::Rect, bool)>,
+    #[cfg(test)]
     last_right_panel_scroll_max_offset_y: f32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PendingGestureDelete {
     idx: usize,
     token: u64,
     expected: GestureEntry,
     confirmation_instance: u64,
     activation_key_release_required: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct MouseGesturesUiActions {
+    pub(crate) host_request: Option<bool>,
+    save: bool,
+    close: bool,
+    copy: Option<String>,
+    validation_error: bool,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+impl MouseGesturesUiActions {
+    pub(crate) fn request_close(&mut self) {
+        self.close = true;
+    }
 }
 
 impl Default for MgGesturesDialog {
@@ -580,12 +601,19 @@ impl Default for MgGesturesDialog {
             #[cfg(test)]
             last_right_panel_scroll_area_id: None,
             #[cfg(test)]
+            last_canvas_rect: None,
+            #[cfg(test)]
             last_right_panel_scroll_max_offset_y: 0.0,
         }
     }
 }
 
 impl MgGesturesDialog {
+    #[cfg(test)]
+    pub(crate) fn test_canvas_rect(&self) -> Option<(egui::Rect, bool)> {
+        self.last_canvas_rect
+    }
+
     #[cfg(test)]
     pub(crate) fn test_right_panel_scroll_area_id(&self) -> Option<egui::Id> {
         self.last_right_panel_scroll_area_id
@@ -619,10 +647,26 @@ impl MgGesturesDialog {
         ctx: &egui::Context,
         root_visible: bool,
     ) {
-        if self.canvas_drag_active
-            && (!root_visible || !self.open || !ctx.input(|input| input.pointer.any_down()))
-        {
+        self.reconcile_canvas_drag_with_owner(ctx, root_visible);
+    }
+
+    pub(crate) fn reconcile_canvas_drag_with_owner(
+        &mut self,
+        ctx: &egui::Context,
+        owner_has_input: bool,
+    ) {
+        if !self.canvas_drag_active {
+            return;
+        }
+        let focused_owner = owner_has_input && self.open && ctx.input(|input| input.focused);
+        if !focused_owner {
             self.canvas_drag_active = false;
+            self.recorder.reset();
+        } else if !ctx.input(|input| input.pointer.any_down()) {
+            self.canvas_drag_active = false;
+            if !ctx.input(|input| input.pointer.any_released()) {
+                self.recorder.reset();
+            }
         }
     }
 
@@ -742,6 +786,13 @@ impl MgGesturesDialog {
     }
 
     pub fn open(&mut self) {
+        if self.open {
+            return;
+        }
+        self.reload();
+    }
+
+    fn reload(&mut self) {
         self.canvas_drag_active = false;
         self.reload_from(GESTURES_FILE);
         self.finish_opening();
@@ -1063,7 +1114,7 @@ impl MgGesturesDialog {
         self.pending_delete = None;
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
+    fn save(&mut self, app: &mut LauncherApp, focus_launcher: bool) {
         match self.commit_candidate_with(|candidate| {
             crate::mouse_gestures::db::replace_gestures(GESTURES_FILE, candidate)
         }) {
@@ -1073,7 +1124,9 @@ impl MgGesturesDialog {
                     crate::dashboard::data_cache::DashboardRefreshRequest::Gestures,
                 );
                 app.search();
-                app.focus_input();
+                if focus_launcher {
+                    app.focus_input();
+                }
             }
             Err(e) => {
                 app.report_error_message(
@@ -1290,6 +1343,7 @@ impl MgGesturesDialog {
         ctx: &egui::Context,
         app: &mut LauncherApp,
         save_now: &mut bool,
+        validation_error: &mut bool,
         parent_instance: u64,
         scope: Option<&JumpModeScope>,
         native_ui_owner: bool,
@@ -1642,10 +1696,7 @@ impl MgGesturesDialog {
                                 if editor.label.trim().is_empty()
                                     || (action_required && editor.action.trim().is_empty())
                                 {
-                                    app.report_error_message(
-                                        "ui operation",
-                                        "Label and action required",
-                                    );
+                                    *validation_error = true;
                                 } else {
                                     let action = if editor.kind == BindingKind::ToggleLauncher {
                                         String::new()
@@ -1722,8 +1773,86 @@ impl MgGesturesDialog {
         native_delete_owner: bool,
         first_ui_pass: bool,
     ) {
+        let actions = self.show_with_host_inner(
+            ctx,
+            app,
+            parent_instance,
+            scope,
+            native_parent_owner,
+            native_binding_owner,
+            native_delete_owner,
+            first_ui_pass,
+            None,
+            None,
+        );
+        if let Some(text) = self.complete_host_actions(app, actions, true) {
+            ctx.copy_text(text);
+        }
+    }
+
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        parent_instance: u64,
+        scope: Option<&JumpModeScope>,
+        native_parent_owner: bool,
+        native_binding_owner: bool,
+        native_delete_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        is_popout: bool,
+    ) -> MouseGesturesUiActions {
+        self.show_with_host_inner(
+            ctx,
+            app,
+            parent_instance,
+            scope,
+            native_parent_owner,
+            native_binding_owner,
+            native_delete_owner,
+            first_ui_pass,
+            child_ui,
+            Some(is_popout),
+        )
+    }
+
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        app: &mut LauncherApp,
+        actions: MouseGesturesUiActions,
+        focus_launcher: bool,
+    ) -> Option<String> {
+        if actions.validation_error {
+            app.report_error_message("ui operation", "Label and action required");
+        }
+        if actions.save {
+            self.save(app, focus_launcher);
+        }
+        if actions.close {
+            self.canvas_drag_active = false;
+            self.recorder.reset();
+            self.open = false;
+        }
+        actions.copy
+    }
+
+    fn show_with_host_inner(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        parent_instance: u64,
+        scope: Option<&JumpModeScope>,
+        native_parent_owner: bool,
+        native_binding_owner: bool,
+        native_delete_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        host_presentation: Option<bool>,
+    ) -> MouseGesturesUiActions {
+        let mut actions = MouseGesturesUiActions::default();
         if !self.open {
-            return;
+            return actions;
         }
         self.ensure_identity_tokens();
         let child_owner = self.jump_mode_child_owner(parent_instance);
@@ -1756,78 +1885,62 @@ impl MgGesturesDialog {
         let mut visual_order = 0;
         let mut main_combo_popup_ids = Vec::new();
 
-        egui::Window::new("Mouse Gestures")
-            .default_size(egui::vec2(720.0, 420.0))
-            .min_size(egui::vec2(520.0, 320.0))
-            .max_size(egui::vec2(980.0, 760.0))
-            .resizable(true)
-            .show_utility(
-                ctx,
-                "mouse-gestures",
-                egui::Id::new("Mouse Gestures"),
-                Some(&mut open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
-                        720.0, 420.0,
-                    )),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::vec2(520.0, 320.0))
-                .with_maximum(egui::vec2(980.0, 760.0)),
-                |ui| {
-                    ui.add_enabled_ui(parent_native, |ui| {
-                    if let Some(error) = self.load_error.clone() {
-                        semantic_status(ui, StatusTone::Error, "Gesture file", Some(&error));
-                        secondary_help(
-                            ui,
-                            "The existing gesture file is read-only until it loads successfully.",
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            let retry = ui.button("Retry");
-                            let retry = with_button_emphasis(ui, retry, ButtonEmphasis::Primary);
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &retry,
-                                "main/retry",
-                                "Retry loading gestures",
-                                TargetKind::Button,
-                                &mut visual_order,
-                            );
-                            if retry.clicked() && authorized_parent {
-                                self.open();
-                            }
-                            let close_response = ui.button("Close");
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &close_response,
-                                "main/close",
-                                "Close Mouse Gestures",
-                                TargetKind::Button,
-                                &mut visual_order,
-                            );
-                            close = close_response.clicked();
-                        });
-                        return;
+        let mut draw_body = |ui: &mut egui::Ui| {
+            ui.add_enabled_ui(parent_native, |ui| {
+                if let Some(popout) = host_presentation {
+                    let current = if popout {
+                        super::utility_host::UtilityPresentation::Popout
+                    } else {
+                        super::utility_host::UtilityPresentation::Docked
+                    };
+                    let (response, requested) = super::utility_host::presentation_button(
+                        ui,
+                        current,
+                        authorized_parent && !self.canvas_drag_active,
+                    );
+                    let _ = register_mouse_gesture_target(
+                        scope,
+                        ui,
+                        &response,
+                        "main/host",
+                        if popout { "Dock" } else { "Pop Out" },
+                        TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    #[cfg(test)]
+                    {
+                        actions.host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
                     }
-
+                    if response.clicked()
+                        && authorized_parent
+                        && !ctx.will_discard()
+                        && !self.canvas_drag_active
+                    {
+                        actions.host_request =
+                            Some(requested == super::utility_host::UtilityPresentation::Popout);
+                    }
+                }
+                if let Some(error) = self.load_error.clone() {
+                    semantic_status(ui, StatusTone::Error, "Gesture file", Some(&error));
+                    secondary_help(
+                        ui,
+                        "The existing gesture file is read-only until it loads successfully.",
+                    );
                     ui.horizontal_wrapped(|ui| {
-                        let add = ui.button("Add Gesture");
-                        let add = with_button_emphasis(ui, add, ButtonEmphasis::Primary);
+                        let retry = ui.button("Retry");
+                        let retry = with_button_emphasis(ui, retry, ButtonEmphasis::Primary);
                         let _ = register_mouse_gesture_target(
                             scope,
                             ui,
-                            &add,
-                            "main/add-gesture",
-                            "Add gesture",
+                            &retry,
+                            "main/retry",
+                            "Retry loading gestures",
                             TargetKind::Button,
                             &mut visual_order,
                         );
-                        if add.clicked() && authorized_parent {
-                            self.add_gesture();
-                            save_now = true;
+                        if retry.clicked() && authorized_parent {
+                            self.reload();
                         }
                         let close_response = ui.button("Close");
                         let _ = register_mouse_gesture_target(
@@ -1839,325 +1952,434 @@ impl MgGesturesDialog {
                             TargetKind::Button,
                             &mut visual_order,
                         );
-                        if close_response.clicked() {
-                            close = true;
-                        }
+                        close = close_response.clicked();
                     });
-                    ui.separator();
-                    let content_height = ui.available_height();
+                    return;
+                }
 
-                    ui.horizontal(|ui| {
-                        let left_width = (ui.available_width() * 0.42).clamp(260.0, 380.0);
-                        let (left_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(left_width, content_height),
-                            egui::Sense::hover(),
-                        );
-                        let mut left_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(left_rect)
-                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                        );
-                        let left_clip = left_rect.shrink(1.0);
-                        left_ui.set_clip_rect(left_clip);
-                        left_ui.set_min_width(left_width);
-                        left_ui.set_min_height(content_height);
-                        compact_section_heading(&mut left_ui, "Gestures", None);
-                        egui::ScrollArea::vertical()
-                            .id_salt("mg_gestures_list")
-                            .auto_shrink([false, false])
-                            .max_height(left_ui.available_height())
-                            .show(&mut left_ui, |ui| {
-                                ui.set_clip_rect(left_clip);
-                                let mut request_delete_idx = None;
-                                for idx in self.sorted_gesture_indices() {
-                                    let Some(token) = self.gesture_token(idx) else {
-                                        continue;
-                                    };
-                                    let selected = self.selected_idx == Some(idx);
-                                    let entry = &mut self.db.gestures[idx];
-                                    ui.scope_builder(
-                                        egui::UiBuilder::new().id(egui::Id::new((
-                                            "mg-gesture-row",
-                                            parent_instance,
-                                            token,
-                                        ))),
-                                        |ui| {
-                                            ui.horizontal_wrapped(|ui| {
-                                                let mut enabled = entry.enabled;
-                                                let checkbox = ui.checkbox(&mut enabled, "");
+                ui.horizontal_wrapped(|ui| {
+                    let add = ui.button("Add Gesture");
+                    let add = with_button_emphasis(ui, add, ButtonEmphasis::Primary);
+                    let _ = register_mouse_gesture_target(
+                        scope,
+                        ui,
+                        &add,
+                        "main/add-gesture",
+                        "Add gesture",
+                        TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if add.clicked() && authorized_parent {
+                        self.add_gesture();
+                        save_now = true;
+                    }
+                    let close_response = ui.button("Close");
+                    let _ = register_mouse_gesture_target(
+                        scope,
+                        ui,
+                        &close_response,
+                        "main/close",
+                        "Close Mouse Gestures",
+                        TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if close_response.clicked() {
+                        close = true;
+                    }
+                });
+                ui.separator();
+                let content_height = ui.available_height();
+
+                ui.horizontal(|ui| {
+                    let left_width = (ui.available_width() * 0.42).clamp(260.0, 380.0);
+                    let (left_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(left_width, content_height),
+                        egui::Sense::hover(),
+                    );
+                    let mut left_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(left_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    let left_clip = left_rect.shrink(1.0);
+                    left_ui.set_clip_rect(left_clip);
+                    left_ui.set_min_width(left_width);
+                    left_ui.set_min_height(content_height);
+                    compact_section_heading(&mut left_ui, "Gestures", None);
+                    egui::ScrollArea::vertical()
+                        .id_salt("mg_gestures_list")
+                        .auto_shrink([false, false])
+                        .max_height(left_ui.available_height())
+                        .show(&mut left_ui, |ui| {
+                            ui.set_clip_rect(left_clip);
+                            let mut request_delete_idx = None;
+                            for idx in self.sorted_gesture_indices() {
+                                let Some(token) = self.gesture_token(idx) else {
+                                    continue;
+                                };
+                                let selected = self.selected_idx == Some(idx);
+                                let entry = &mut self.db.gestures[idx];
+                                ui.scope_builder(
+                                    egui::UiBuilder::new().id(egui::Id::new((
+                                        "mg-gesture-row",
+                                        parent_instance,
+                                        token,
+                                    ))),
+                                    |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            let mut enabled = entry.enabled;
+                                            let checkbox = ui.checkbox(&mut enabled, "");
+                                            let _ = register_mouse_gesture_target(
+                                                scope,
+                                                ui,
+                                                &checkbox,
+                                                format!("gesture/{token}/enabled"),
+                                                "Gesture enabled",
+                                                TargetKind::Checkbox,
+                                                &mut visual_order,
+                                            );
+                                            if checkbox.changed() && authorized_parent {
+                                                entry.enabled = enabled;
+                                                save_now = true;
+                                            }
+                                            let select = ui.selectable_label(
+                                                selected,
+                                                format_gesture_label(entry),
+                                            );
+                                            let directive = register_mouse_gesture_target(
+                                                scope,
+                                                ui,
+                                                &select,
+                                                format!("gesture/{token}/select"),
+                                                "Gesture",
+                                                TargetKind::Action,
+                                                &mut visual_order,
+                                            );
+                                            if authorized_parent
+                                                && (select.clicked()
+                                                    || directive == Some(FocusDirective::Select))
+                                            {
+                                                if directive == Some(FocusDirective::Select) {
+                                                    select.request_focus();
+                                                }
+                                                self.selected_idx = Some(idx);
+                                                self.recorder.set_dir_mode(entry.dir_mode);
+                                                self.token_buffer = entry.tokens.clone();
+                                                self.binding_dialog.editor.reset();
+                                                self.binding_dialog.open = false;
+                                            }
+                                            let rename = ui.button("Rename");
+                                            let _ = register_mouse_gesture_target(
+                                                scope,
+                                                ui,
+                                                &rename,
+                                                format!("gesture/{token}/rename"),
+                                                "Rename gesture",
+                                                TargetKind::Button,
+                                                &mut visual_order,
+                                            );
+                                            if rename.clicked() && authorized_parent {
+                                                self.rename_idx = Some(idx);
+                                                self.rename_label = entry.label.clone();
+                                            }
+                                            let delete = ui.button("Delete");
+                                            let delete = with_button_emphasis(
+                                                ui,
+                                                delete,
+                                                ButtonEmphasis::Destructive,
+                                            );
+                                            let _ = register_mouse_gesture_target(
+                                                scope,
+                                                ui,
+                                                &delete,
+                                                format!("gesture/{token}/delete"),
+                                                "Delete gesture",
+                                                TargetKind::Button,
+                                                &mut visual_order,
+                                            );
+                                            if delete.clicked() && authorized_parent {
+                                                request_delete_idx = Some(idx);
+                                            }
+                                        });
+                                        if self.rename_idx == Some(idx) {
+                                            ui.group(|ui| {
+                                                compact_section_heading(ui, "Rename gesture", None);
+                                                let label = labeled_form_row(ui, "Label", |ui| {
+                                                    ui.add_sized(
+                                                        [ui.available_width(), 0.0],
+                                                        egui::TextEdit::singleline(
+                                                            &mut self.rename_label,
+                                                        ),
+                                                    )
+                                                });
                                                 let _ = register_mouse_gesture_target(
                                                     scope,
                                                     ui,
-                                                    &checkbox,
-                                                    format!("gesture/{token}/enabled"),
-                                                    "Gesture enabled",
-                                                    TargetKind::Checkbox,
+                                                    &label,
+                                                    format!("gesture/{token}/rename/label"),
+                                                    "Gesture label",
+                                                    TargetKind::TextEntry,
                                                     &mut visual_order,
                                                 );
-                                                if checkbox.changed() && authorized_parent {
-                                                    entry.enabled = enabled;
-                                                    save_now = true;
-                                                }
-                                                let select = ui.selectable_label(
-                                                    selected,
-                                                    format_gesture_label(entry),
-                                                );
-                                                let directive = register_mouse_gesture_target(
-                                                    scope,
-                                                    ui,
-                                                    &select,
-                                                    format!("gesture/{token}/select"),
-                                                    "Gesture",
-                                                    TargetKind::Action,
-                                                    &mut visual_order,
-                                                );
-                                                if authorized_parent
-                                                    && (select.clicked()
-                                                        || directive
-                                                            == Some(FocusDirective::Select))
-                                                {
-                                                    if directive == Some(FocusDirective::Select) {
-                                                        select.request_focus();
-                                                    }
-                                                    self.selected_idx = Some(idx);
-                                                    self.recorder.set_dir_mode(entry.dir_mode);
-                                                    self.token_buffer = entry.tokens.clone();
-                                                    self.binding_dialog.editor.reset();
-                                                    self.binding_dialog.open = false;
-                                                }
-                                                let rename = ui.button("Rename");
-                                                let _ = register_mouse_gesture_target(
-                                                    scope,
-                                                    ui,
-                                                    &rename,
-                                                    format!("gesture/{token}/rename"),
-                                                    "Rename gesture",
-                                                    TargetKind::Button,
-                                                    &mut visual_order,
-                                                );
-                                                if rename.clicked() && authorized_parent {
-                                                    self.rename_idx = Some(idx);
-                                                    self.rename_label = entry.label.clone();
-                                                }
-                                                let delete = ui.button("Delete");
-                                                let delete = with_button_emphasis(
-                                                    ui,
-                                                    delete,
-                                                    ButtonEmphasis::Destructive,
-                                                );
-                                                let _ = register_mouse_gesture_target(
-                                                    scope,
-                                                    ui,
-                                                    &delete,
-                                                    format!("gesture/{token}/delete"),
-                                                    "Delete gesture",
-                                                    TargetKind::Button,
-                                                    &mut visual_order,
-                                                );
-                                                if delete.clicked() && authorized_parent {
-                                                    request_delete_idx = Some(idx);
-                                                }
-                                            });
-                                            if self.rename_idx == Some(idx) {
-                                                ui.group(|ui| {
-                                                    compact_section_heading(
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let save = ui.button("Save");
+                                                    let save = with_button_emphasis(
                                                         ui,
-                                                        "Rename gesture",
-                                                        None,
+                                                        save,
+                                                        ButtonEmphasis::Primary,
                                                     );
-                                                    let label =
-                                                        labeled_form_row(ui, "Label", |ui| {
-                                                            ui.add_sized(
-                                                                [ui.available_width(), 0.0],
-                                                                egui::TextEdit::singleline(
-                                                                    &mut self.rename_label,
-                                                                ),
-                                                            )
-                                                        });
                                                     let _ = register_mouse_gesture_target(
                                                         scope,
                                                         ui,
-                                                        &label,
-                                                        format!("gesture/{token}/rename/label"),
-                                                        "Gesture label",
-                                                        TargetKind::TextEntry,
+                                                        &save,
+                                                        format!("gesture/{token}/rename/save"),
+                                                        "Save gesture label",
+                                                        TargetKind::Button,
                                                         &mut visual_order,
                                                     );
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        let save = ui.button("Save");
-                                                        let save = with_button_emphasis(
-                                                            ui,
-                                                            save,
-                                                            ButtonEmphasis::Primary,
-                                                        );
-                                                        let _ = register_mouse_gesture_target(
-                                                            scope,
-                                                            ui,
-                                                            &save,
-                                                            format!("gesture/{token}/rename/save"),
-                                                            "Save gesture label",
-                                                            TargetKind::Button,
-                                                            &mut visual_order,
-                                                        );
-                                                        if save.clicked()
-                                                            && authorized_parent
-                                                            && !self.rename_label.trim().is_empty()
-                                                        {
-                                                            entry.label = self
-                                                                .rename_label
-                                                                .trim()
-                                                                .to_string();
-                                                            self.rename_idx = None;
-                                                            save_now = true;
-                                                        }
-                                                        let cancel = ui.button("Cancel");
-                                                        let _ = register_mouse_gesture_target(
-                                                            scope,
-                                                            ui,
-                                                            &cancel,
-                                                            format!(
-                                                                "gesture/{token}/rename/cancel"
-                                                            ),
-                                                            "Cancel rename",
-                                                            TargetKind::Button,
-                                                            &mut visual_order,
-                                                        );
-                                                        if cancel.clicked() && authorized_parent {
-                                                            self.rename_idx = None;
-                                                        }
-                                                    });
+                                                    if save.clicked()
+                                                        && authorized_parent
+                                                        && !self.rename_label.trim().is_empty()
+                                                    {
+                                                        entry.label =
+                                                            self.rename_label.trim().to_string();
+                                                        self.rename_idx = None;
+                                                        save_now = true;
+                                                    }
+                                                    let cancel = ui.button("Cancel");
+                                                    let _ = register_mouse_gesture_target(
+                                                        scope,
+                                                        ui,
+                                                        &cancel,
+                                                        format!("gesture/{token}/rename/cancel"),
+                                                        "Cancel rename",
+                                                        TargetKind::Button,
+                                                        &mut visual_order,
+                                                    );
+                                                    if cancel.clicked() && authorized_parent {
+                                                        self.rename_idx = None;
+                                                    }
                                                 });
-                                            }
-                                        },
-                                    );
-                                    if let Some(idx) = request_delete_idx.take() {
-                                        let _ = self.queue_gesture_delete(
-                                            idx,
-                                            activation_key_is_held(ui.ctx()),
-                                        );
-                                    }
-                                }
-                            });
-                        ui.separator();
-
-                        let (right_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), content_height),
-                            egui::Sense::hover(),
-                        );
-                        let mut right_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(right_rect)
-                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                        );
-                        right_ui.set_min_height(content_height);
-                        right_ui.set_min_width(320.0);
-                        right_ui.set_clip_rect(right_rect.shrink(1.0));
-                        let _right_panel_scroll = egui::ScrollArea::both()
-                            .id_salt("mg_right_panel")
-                            .auto_shrink([false, false])
-                            .show(&mut right_ui, |ui| {
-                                let selected_native_identity =
-                                    self.selected_idx.and_then(|idx| self.gesture_token(idx));
-                                ui.push_id(
-                                    ("mg-selected-gesture-detail", selected_native_identity),
-                                    |ui| {
-                                        if let Some(idx) = self.selected_idx
-                                            && let Some(token) = self.gesture_token(idx)
-                                            && let Some(entry) = self.db.gestures.get_mut(idx)
-                                        {
-                                            let selected_scope = scope.map(|scope| {
-                                                scope.child_namespace(format!("gesture/{token}"))
                                             });
-                                            compact_section_heading(ui, "Recorder", None);
-                                            let combo_identity = "direction-mode";
-                                            let combo_popup_scope =
-                                                selected_scope.as_ref().map(|scope| {
-                                                    scope.combo_popup_scope(combo_identity)
-                                                });
-                                            let mut dir_mode = entry.dir_mode;
-                                            let combo =
-                                                labeled_form_row(ui, "Direction mode", |ui| {
-                                                    egui::ComboBox::from_id_salt((
-                                                        "mg_dir_mode",
-                                                        token,
-                                                    ))
-                                                    .selected_text(match dir_mode {
-                                                        DirMode::Four => "4-way",
-                                                        DirMode::Eight => "8-way",
-                                                    })
-                                                    .show_ui(ui, |ui| {
-                                                        for (mode, local_id, label) in [
-                                                            (DirMode::Four, "four", "4-way"),
-                                                            (DirMode::Eight, "eight", "8-way"),
-                                                        ] {
-                                                            let response = ui.selectable_value(
-                                                                &mut dir_mode,
-                                                                mode,
-                                                                label,
-                                                            );
-                                                            let _ = register_mouse_gesture_target(
-                                                                combo_popup_scope.as_ref(),
-                                                                ui,
-                                                                &response,
-                                                                format!("direction/{local_id}"),
-                                                                "Direction option",
-                                                                TargetKind::Selectable,
-                                                                &mut visual_order,
-                                                            );
-                                                        }
-                                                    })
-                                                    .response
-                                                });
-                                            main_combo_popup_ids
-                                                .push(egui::Popup::default_response_id(&combo));
+                                        }
+                                    },
+                                );
+                                if let Some(idx) = request_delete_idx.take() {
+                                    let _ = self.queue_gesture_delete(
+                                        idx,
+                                        activation_key_is_held(ui.ctx()),
+                                    );
+                                }
+                            }
+                        });
+                    ui.separator();
+
+                    let (right_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), content_height),
+                        egui::Sense::hover(),
+                    );
+                    let mut right_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(right_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    right_ui.set_min_height(content_height);
+                    right_ui.set_min_width(320.0);
+                    right_ui.set_clip_rect(right_rect.shrink(1.0));
+                    let _right_panel_scroll = egui::ScrollArea::both()
+                        .id_salt("mg_right_panel")
+                        .auto_shrink([false, false])
+                        .show(&mut right_ui, |ui| {
+                            let selected_native_identity =
+                                self.selected_idx.and_then(|idx| self.gesture_token(idx));
+                            ui.push_id(
+                                ("mg-selected-gesture-detail", selected_native_identity),
+                                |ui| {
+                                    if let Some(idx) = self.selected_idx
+                                        && let Some(token) = self.gesture_token(idx)
+                                        && let Some(entry) = self.db.gestures.get_mut(idx)
+                                    {
+                                        let selected_scope = scope.map(|scope| {
+                                            scope.child_namespace(format!("gesture/{token}"))
+                                        });
+                                        compact_section_heading(ui, "Recorder", None);
+                                        let combo_identity = "direction-mode";
+                                        let combo_popup_scope = selected_scope
+                                            .as_ref()
+                                            .map(|scope| scope.combo_popup_scope(combo_identity));
+                                        let mut dir_mode = entry.dir_mode;
+                                        let combo = labeled_form_row(ui, "Direction mode", |ui| {
+                                            egui::ComboBox::from_id_salt(("mg_dir_mode", token))
+                                                .selected_text(match dir_mode {
+                                                    DirMode::Four => "4-way",
+                                                    DirMode::Eight => "8-way",
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    for (mode, local_id, label) in [
+                                                        (DirMode::Four, "four", "4-way"),
+                                                        (DirMode::Eight, "eight", "8-way"),
+                                                    ] {
+                                                        let response = ui.selectable_value(
+                                                            &mut dir_mode,
+                                                            mode,
+                                                            label,
+                                                        );
+                                                        let _ = register_mouse_gesture_target(
+                                                            combo_popup_scope.as_ref(),
+                                                            ui,
+                                                            &response,
+                                                            format!("direction/{local_id}"),
+                                                            "Direction option",
+                                                            TargetKind::Selectable,
+                                                            &mut visual_order,
+                                                        );
+                                                    }
+                                                })
+                                                .response
+                                        });
+                                        main_combo_popup_ids
+                                            .push(egui::Popup::default_response_id(&combo));
+                                        let _ = register_mouse_gesture_target(
+                                            selected_scope.as_ref(),
+                                            ui,
+                                            &combo,
+                                            combo_identity,
+                                            "Direction mode",
+                                            TargetKind::ComboBox,
+                                            &mut visual_order,
+                                        );
+                                        if dir_mode != entry.dir_mode && authorized_parent {
+                                            entry.dir_mode = dir_mode;
+                                            self.recorder.set_dir_mode(dir_mode);
+                                            save_now = true;
+                                        }
+                                        ui.label(format!(
+                                            "Gesture tokens: {}",
+                                            if entry.tokens.trim().is_empty() {
+                                                "∅"
+                                            } else {
+                                                entry.tokens.as_str()
+                                            }
+                                        ));
+                                        let recorded_tokens = self.recorder.tokens_string();
+                                        ui.label(format!(
+                                            "Recorded tokens: {}",
+                                            if recorded_tokens.is_empty() {
+                                                "∅"
+                                            } else {
+                                                recorded_tokens.as_str()
+                                            }
+                                        ));
+                                        ui.horizontal_wrapped(|ui| {
+                                            let use_recording = ui.button("Use Recording");
+                                            let use_recording = with_button_emphasis(
+                                                ui,
+                                                use_recording,
+                                                ButtonEmphasis::Primary,
+                                            );
                                             let _ = register_mouse_gesture_target(
                                                 selected_scope.as_ref(),
                                                 ui,
-                                                &combo,
-                                                combo_identity,
-                                                "Direction mode",
-                                                TargetKind::ComboBox,
+                                                &use_recording,
+                                                "recording/use",
+                                                "Use recording",
+                                                TargetKind::Button,
                                                 &mut visual_order,
                                             );
-                                            if dir_mode != entry.dir_mode && authorized_parent {
-                                                entry.dir_mode = dir_mode;
-                                                self.recorder.set_dir_mode(dir_mode);
+                                            if use_recording.clicked() && authorized_parent {
+                                                let stroke = self.recorder.normalized_stroke();
+                                                apply_recording_to_entry(
+                                                    entry,
+                                                    &mut self.token_buffer,
+                                                    &recorded_tokens,
+                                                    stroke,
+                                                );
+                                                self.recorder.reset();
                                                 save_now = true;
                                             }
-                                            ui.label(format!(
-                                                "Gesture tokens: {}",
-                                                if entry.tokens.trim().is_empty() {
-                                                    "∅"
-                                                } else {
-                                                    entry.tokens.as_str()
-                                                }
-                                            ));
-                                            let recorded_tokens = self.recorder.tokens_string();
-                                            ui.label(format!(
-                                                "Recorded tokens: {}",
-                                                if recorded_tokens.is_empty() {
-                                                    "∅"
-                                                } else {
-                                                    recorded_tokens.as_str()
-                                                }
-                                            ));
-                                            ui.horizontal_wrapped(|ui| {
-                                                let use_recording = ui.button("Use Recording");
-                                                let use_recording = with_button_emphasis(
+                                            let clear_recording = ui.button("Clear Recording");
+                                            let _ = register_mouse_gesture_target(
+                                                selected_scope.as_ref(),
+                                                ui,
+                                                &clear_recording,
+                                                "recording/clear",
+                                                "Clear recording",
+                                                TargetKind::Button,
+                                                &mut visual_order,
+                                            );
+                                            if clear_recording.clicked() && authorized_parent {
+                                                self.recorder.reset();
+                                            }
+                                            if !entry.stroke.is_empty() {
+                                                let clear_saved = ui.button("Clear Saved");
+                                                let clear_saved = with_button_emphasis(
                                                     ui,
-                                                    use_recording,
-                                                    ButtonEmphasis::Primary,
+                                                    clear_saved,
+                                                    ButtonEmphasis::Destructive,
                                                 );
                                                 let _ = register_mouse_gesture_target(
                                                     selected_scope.as_ref(),
                                                     ui,
-                                                    &use_recording,
-                                                    "recording/use",
-                                                    "Use recording",
+                                                    &clear_saved,
+                                                    "recording/clear-saved",
+                                                    "Clear saved stroke",
                                                     TargetKind::Button,
                                                     &mut visual_order,
                                                 );
-                                                if use_recording.clicked() && authorized_parent {
+                                                if clear_saved.clicked() && authorized_parent {
+                                                    entry.stroke.clear();
+                                                    save_now = true;
+                                                }
+                                            }
+                                        });
+                                        let size =
+                                            egui::vec2(ui.available_width().max(320.0), 260.0);
+                                        let sense = if parent_native {
+                                            egui::Sense::drag()
+                                        } else {
+                                            egui::Sense::hover()
+                                        };
+                                        let (rect, response) = ui.allocate_exact_size(size, sense);
+                                        #[cfg(test)]
+                                        {
+                                            self.last_canvas_rect = Some((
+                                                response.interact_rect.intersect(ui.clip_rect()),
+                                                response.enabled() && response.sense.senses_drag(),
+                                            ));
+                                        }
+                                        let painter = ui.painter_at(rect);
+                                        painter.rect_stroke(
+                                            rect,
+                                            0.0,
+                                            egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
+                                            egui::StrokeKind::Middle,
+                                        );
+                                        if authorized_parent && response.drag_started() {
+                                            self.canvas_drag_active = true;
+                                            if authorized_parent {
+                                                if !entry.stroke.is_empty() {
+                                                    entry.stroke.clear();
+                                                    save_now = true;
+                                                }
+                                                self.recorder.reset();
+                                                if let Some(pos) = response.interact_pointer_pos() {
+                                                    self.recorder.push_point(pos);
+                                                }
+                                            }
+                                        }
+                                        if authorized_parent && response.dragged() {
+                                            self.canvas_drag_active = true;
+                                            if authorized_parent
+                                                && let Some(pos) = response.interact_pointer_pos()
+                                            {
+                                                self.recorder.push_point(pos);
+                                            }
+                                        }
+                                        if authorized_parent && response.drag_stopped() {
+                                            self.canvas_drag_active = false;
+                                            if authorized_parent {
+                                                let recorded_tokens = self.recorder.tokens_string();
+                                                if !recorded_tokens.is_empty() {
                                                     let stroke = self.recorder.normalized_stroke();
                                                     apply_recording_to_entry(
                                                         entry,
@@ -2165,216 +2387,137 @@ impl MgGesturesDialog {
                                                         &recorded_tokens,
                                                         stroke,
                                                     );
-                                                    self.recorder.reset();
                                                     save_now = true;
                                                 }
-                                                let clear_recording = ui.button("Clear Recording");
-                                                let _ = register_mouse_gesture_target(
-                                                    selected_scope.as_ref(),
-                                                    ui,
-                                                    &clear_recording,
-                                                    "recording/clear",
-                                                    "Clear recording",
-                                                    TargetKind::Button,
-                                                    &mut visual_order,
-                                                );
-                                                if clear_recording.clicked() && authorized_parent {
-                                                    self.recorder.reset();
-                                                }
-                                                if !entry.stroke.is_empty() {
-                                                    let clear_saved = ui.button("Clear Saved");
-                                                    let clear_saved = with_button_emphasis(
-                                                        ui,
-                                                        clear_saved,
-                                                        ButtonEmphasis::Destructive,
-                                                    );
-                                                    let _ = register_mouse_gesture_target(
-                                                        selected_scope.as_ref(),
-                                                        ui,
-                                                        &clear_saved,
-                                                        "recording/clear-saved",
-                                                        "Clear saved stroke",
-                                                        TargetKind::Button,
-                                                        &mut visual_order,
-                                                    );
-                                                    if clear_saved.clicked() && authorized_parent {
-                                                        entry.stroke.clear();
-                                                        save_now = true;
-                                                    }
-                                                }
-                                            });
-                                            let size =
-                                                egui::vec2(ui.available_width().max(320.0), 260.0);
-                                            let sense = if parent_native {
-                                                egui::Sense::drag()
-                                            } else {
-                                                egui::Sense::hover()
-                                            };
-                                            let (rect, response) =
-                                                ui.allocate_exact_size(size, sense);
-                                            let painter = ui.painter_at(rect);
-                                            painter.rect_stroke(
-                                                rect,
-                                                0.0,
-                                                egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
-                                                egui::StrokeKind::Middle,
-                                            );
-                                            if response.drag_started() {
-                                                self.canvas_drag_active = true;
-                                                if authorized_parent {
-                                                    if !entry.stroke.is_empty() {
-                                                        entry.stroke.clear();
-                                                        save_now = true;
-                                                    }
-                                                    self.recorder.reset();
-                                                    if let Some(pos) =
-                                                        response.interact_pointer_pos()
-                                                    {
-                                                        self.recorder.push_point(pos);
-                                                    }
-                                                }
+                                                self.recorder.reset();
                                             }
-                                            if response.dragged() {
-                                                self.canvas_drag_active = true;
-                                                if authorized_parent
-                                                    && let Some(pos) =
-                                                        response.interact_pointer_pos()
-                                                {
-                                                    self.recorder.push_point(pos);
-                                                }
-                                            }
-                                            if response.drag_stopped() {
-                                                self.canvas_drag_active = false;
-                                                if authorized_parent {
-                                                    let recorded_tokens =
-                                                        self.recorder.tokens_string();
-                                                    if !recorded_tokens.is_empty() {
-                                                        let stroke =
-                                                            self.recorder.normalized_stroke();
-                                                        apply_recording_to_entry(
-                                                            entry,
-                                                            &mut self.token_buffer,
-                                                            &recorded_tokens,
-                                                            stroke,
-                                                        );
-                                                        save_now = true;
-                                                    }
-                                                    self.recorder.reset();
-                                                }
-                                            }
-                                            if entry.stroke.len() >= 2 {
-                                                let points =
-                                                    stroke_points_in_rect(&entry.stroke, rect);
-                                                if points.len() >= 2 {
-                                                    painter.add(egui::Shape::line(
-                                                        points,
-                                                        egui::Stroke::new(
-                                                            2.0_f32,
-                                                            egui::Color32::from_gray(140),
-                                                        ),
-                                                    ));
-                                                }
-                                            }
-                                            if self.recorder.points().len() >= 2 {
+                                        }
+                                        if entry.stroke.len() >= 2 {
+                                            let points = stroke_points_in_rect(&entry.stroke, rect);
+                                            if points.len() >= 2 {
                                                 painter.add(egui::Shape::line(
-                                                    self.recorder.points().to_vec(),
+                                                    points,
                                                     egui::Stroke::new(
                                                         2.0_f32,
-                                                        egui::Color32::LIGHT_BLUE,
+                                                        egui::Color32::from_gray(140),
                                                     ),
                                                 ));
                                             }
-                                            ui.separator();
-                                            let token_response =
-                                                labeled_form_row(ui, "Tokens", |ui| {
-                                                    ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut self.token_buffer,
-                                                        )
-                                                        .id_salt(("mg_tokens", token)),
-                                                    )
-                                                });
+                                        }
+                                        if self.recorder.points().len() >= 2 {
+                                            painter.add(egui::Shape::line(
+                                                self.recorder.points().to_vec(),
+                                                egui::Stroke::new(
+                                                    2.0_f32,
+                                                    egui::Color32::LIGHT_BLUE,
+                                                ),
+                                            ));
+                                        }
+                                        ui.separator();
+                                        let token_response = labeled_form_row(ui, "Tokens", |ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut self.token_buffer)
+                                                    .id_salt(("mg_tokens", token)),
+                                            )
+                                        });
+                                        let _ = register_mouse_gesture_target(
+                                            selected_scope.as_ref(),
+                                            ui,
+                                            &token_response,
+                                            "tokens/input",
+                                            "Gesture tokens",
+                                            TargetKind::TextEntry,
+                                            &mut visual_order,
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            let import = ui.button("Import");
                                             let _ = register_mouse_gesture_target(
                                                 selected_scope.as_ref(),
                                                 ui,
-                                                &token_response,
-                                                "tokens/input",
-                                                "Gesture tokens",
-                                                TargetKind::TextEntry,
+                                                &import,
+                                                "tokens/import",
+                                                "Import tokens",
+                                                TargetKind::Button,
                                                 &mut visual_order,
                                             );
-                                            ui.horizontal_wrapped(|ui| {
-                                                let import = ui.button("Import");
-                                                let _ = register_mouse_gesture_target(
-                                                    selected_scope.as_ref(),
-                                                    ui,
-                                                    &import,
-                                                    "tokens/import",
-                                                    "Import tokens",
-                                                    TargetKind::Button,
-                                                    &mut visual_order,
-                                                );
-                                                if import.clicked() && authorized_parent {
-                                                    entry.tokens =
-                                                        self.token_buffer.trim().to_string();
-                                                    save_now = true;
-                                                }
-                                                let export = ui.button("Export");
-                                                let _ = register_mouse_gesture_target(
-                                                    selected_scope.as_ref(),
-                                                    ui,
-                                                    &export,
-                                                    "tokens/export",
-                                                    "Copy tokens",
-                                                    TargetKind::Button,
-                                                    &mut visual_order,
-                                                );
-                                                if export.clicked() && authorized_parent {
-                                                    self.token_buffer = entry.tokens.clone();
-                                                    ctx.output_mut(|output| {
-                                                        output.commands.push(
-                                                            egui::OutputCommand::CopyText(
-                                                                self.token_buffer.clone(),
-                                                            ),
-                                                        );
-                                                    });
-                                                }
-                                            });
-                                            ui.separator();
-                                            let binding_tokens = self.binding_tokens.get_mut(idx);
-                                            if let Some(binding_tokens) = binding_tokens {
-                                                Self::bindings_ui(
-                                                    &mut self.binding_dialog,
-                                                    ui,
-                                                    entry,
-                                                    idx,
-                                                    parent_instance,
-                                                    &mut save_now,
-                                                    selected_scope.as_ref(),
-                                                    authorized_parent,
-                                                    token,
-                                                    binding_tokens,
-                                                    &mut visual_order,
-                                                );
+                                            if import.clicked() && authorized_parent {
+                                                entry.tokens = self.token_buffer.trim().to_string();
+                                                save_now = true;
                                             }
-                                        } else {
-                                            secondary_help(ui, "Select a gesture to edit.");
+                                            let export = ui.button("Export");
+                                            let _ = register_mouse_gesture_target(
+                                                selected_scope.as_ref(),
+                                                ui,
+                                                &export,
+                                                "tokens/export",
+                                                "Copy tokens",
+                                                TargetKind::Button,
+                                                &mut visual_order,
+                                            );
+                                            if export.clicked() && authorized_parent {
+                                                self.token_buffer = entry.tokens.clone();
+                                                actions.copy = Some(self.token_buffer.clone());
+                                            }
+                                        });
+                                        ui.separator();
+                                        let binding_tokens = self.binding_tokens.get_mut(idx);
+                                        if let Some(binding_tokens) = binding_tokens {
+                                            Self::bindings_ui(
+                                                &mut self.binding_dialog,
+                                                ui,
+                                                entry,
+                                                idx,
+                                                parent_instance,
+                                                &mut save_now,
+                                                selected_scope.as_ref(),
+                                                authorized_parent,
+                                                token,
+                                                binding_tokens,
+                                                &mut visual_order,
+                                            );
                                         }
-                                    },
-                                );
-                            });
-                        #[cfg(test)]
-                        {
-                            self.last_right_panel_scroll_area_id = Some(_right_panel_scroll.id);
-                            self.last_right_panel_scroll_max_offset_y =
-                                (_right_panel_scroll.content_size.y
-                                    - _right_panel_scroll.inner_rect.height())
-                                .max(0.0);
-                        }
-                    });
+                                    } else {
+                                        secondary_help(ui, "Select a gesture to edit.");
+                                    }
+                                },
+                            );
+                        });
+                    #[cfg(test)]
+                    {
+                        self.last_right_panel_scroll_area_id = Some(_right_panel_scroll.id);
+                        self.last_right_panel_scroll_max_offset_y =
+                            (_right_panel_scroll.content_size.y
+                                - _right_panel_scroll.inner_rect.height())
+                            .max(0.0);
+                    }
                 });
-                },
-            );
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw_body(ui);
+        } else {
+            egui::Window::new("Mouse Gestures")
+                .default_size(egui::vec2(720.0, 420.0))
+                .min_size(egui::vec2(520.0, 320.0))
+                .max_size(egui::vec2(980.0, 760.0))
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    "mouse-gestures",
+                    egui::Id::new("Mouse Gestures"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(720.0, 420.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(520.0, 320.0))
+                    .with_maximum(egui::vec2(980.0, 760.0)),
+                    draw_body,
+                );
+        }
 
         self.main_combo_popup_ids = main_combo_popup_ids;
         if self.load_error.is_none() {
@@ -2382,6 +2525,7 @@ impl MgGesturesDialog {
                 ctx,
                 app,
                 &mut save_now,
+                &mut actions.validation_error,
                 parent_instance,
                 scope,
                 binding_native,
@@ -2417,16 +2561,11 @@ impl MgGesturesDialog {
                 _ => {}
             }
             if save_now && (authorized_parent || authorized_binding || authorized_delete) {
-                self.save(app);
+                actions.save = true;
             }
         }
-        if authorized_parent {
-            if close || !open {
-                self.canvas_drag_active = false;
-                self.open = false;
-            } else {
-                self.open = open;
-            }
+        if authorized_parent && (close || !open) {
+            actions.request_close();
         }
         self.ensure_identity_tokens();
         if let Some(snapshot) = rollback {
@@ -2455,6 +2594,7 @@ impl MgGesturesDialog {
         {
             pending.activation_key_release_required = false;
         }
+        actions
     }
 }
 
@@ -2489,6 +2629,22 @@ fn hotkey_directory_binding_is_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopening_live_editor_preserves_draft_and_child_identity() {
+        let mut dialog = MgGesturesDialog::default();
+        dialog.open_with_loaded_database(GestureDb::default());
+        dialog.add_gesture();
+        dialog.rename_label = "unsaved".into();
+        let token = dialog.gesture_tokens[0];
+        dialog.binding_dialog.open_new(0, 0, false);
+        let child = dialog.binding_dialog.instance;
+        dialog.open();
+        assert_eq!(dialog.rename_label, "unsaved");
+        assert_eq!(dialog.gesture_tokens[0], token);
+        assert!(dialog.binding_dialog.open);
+        assert_eq!(dialog.binding_dialog.instance, child);
+    }
 
     fn published_hotkey_binding(
         publication: u64,

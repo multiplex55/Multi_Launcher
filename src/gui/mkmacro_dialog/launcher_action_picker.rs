@@ -277,6 +277,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
         _ => "Choose Program or Launcher Query",
     };
     egui::Window::new(title)
+        .enabled(dialog.host_child_input_allowed())
         .collapsible(false)
         .default_width(680.0)
         .show_utility(

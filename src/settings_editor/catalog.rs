@@ -18,6 +18,8 @@ pub mod ids {
     pub const HOTKEY_QUIT_VALUE: &str = "hotkeys.quit.value";
     pub const HOTKEY_HELP_ENABLED: &str = "hotkeys.help.enabled";
     pub const HOTKEY_HELP_VALUE: &str = "hotkeys.help.value";
+    pub const HOTKEY_RECORDING_STOP_ENABLED: &str = "hotkeys.recording_stop.enabled";
+    pub const HOTKEY_RECORDING_STOP_VALUE: &str = "hotkeys.recording_stop.value";
     pub const PASTE_NEXT_ENABLED: &str = "paste.next.enabled";
     pub const PASTE_NEXT_HOTKEY: &str = "paste.next.hotkey";
     pub const PASTE_CANCEL_ENABLED: &str = "paste.cancel.enabled";
@@ -734,6 +736,23 @@ const SEEDS: &[Seed] = &[
         "Keyboard shortcut used to show launcher help.",
         &["help chord"],
         "Enable help hotkey first"
+    ),
+    seed!(
+        ids::HOTKEY_RECORDING_STOP_ENABLED,
+        Application,
+        S::Main(M::Hotkeys),
+        "Enable recording Stop & Save hotkey",
+        "Optional shortcut to stop and save the current recording.",
+        &["recording stop", "stop recording", "save recording"]
+    ),
+    seed!(
+        ids::HOTKEY_RECORDING_STOP_VALUE,
+        Application,
+        S::Main(M::Hotkeys),
+        "Recording Stop & Save hotkey",
+        "Keyboard shortcut that stops and saves the current recording.",
+        &["recording stop", "stop recording", "save recording"],
+        "Enable recording Stop & Save hotkey first"
     ),
     seed!(
         ids::PASTE_NEXT_ENABLED,
@@ -2567,6 +2586,8 @@ mod tests {
             "hotkeys.quit.value",
             "hotkeys.help.enabled",
             "hotkeys.help.value",
+            "hotkeys.recording_stop.enabled",
+            "hotkeys.recording_stop.value",
             "paste.next.enabled",
             "paste.next.hotkey",
             "paste.cancel.enabled",
