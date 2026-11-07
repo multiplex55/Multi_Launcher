@@ -16,6 +16,7 @@ struct InspectorDraft {
     model: ProgrammerInspector,
     target_width: IntegerWidth,
     target_signed: bool,
+    bit_grouping: u32,
     label_start: String,
     label_end: String,
     label_text: String,
@@ -35,6 +36,7 @@ impl Default for InspectorDraft {
             model: ProgrammerInspector::default(),
             target_width: IntegerWidth::Bits64,
             target_signed: false,
+            bit_grouping: 4,
             label_start: String::new(),
             label_end: String::new(),
             label_text: String::new(),
@@ -49,6 +51,77 @@ impl Default for InspectorDraft {
             comparison_selection_generation: None,
         }
     }
+}
+
+impl InspectorDraft {
+    fn target_mode(&self) -> IntegerMode {
+        if self.target_signed {
+            IntegerMode::signed(self.target_width)
+        } else {
+            IntegerMode::unsigned(self.target_width)
+        }
+    }
+
+    fn select_mode(&mut self, mode: IntegerMode) {
+        self.target_width = mode.width();
+        self.target_signed = mode.is_signed();
+        self.control_dirty = true;
+        match self.model.checked_cast(mode) {
+            Ok(()) => {
+                self.bit_grouping = self.bit_grouping.min(mode.width().bits());
+                self.feedback = None;
+            }
+            Err(error) => {
+                self.feedback = Some(format!(
+                    "Cannot convert to {}: {error:?}. Working value and mode are unchanged; use Reinterpret bits to apply the attempted mode.",
+                    mode.type_name()
+                ));
+            }
+        }
+    }
+
+    fn reinterpret_target(&mut self) {
+        let mode = self.target_mode();
+        self.model.reinterpret_bits(mode);
+        self.bit_grouping = self.bit_grouping.min(mode.width().bits());
+        self.feedback = None;
+        self.control_dirty = true;
+    }
+}
+
+fn bit_rows(width: u32, columns: usize, grouping: u32) -> Vec<Vec<u32>> {
+    let indices = (0..width).rev().collect::<Vec<_>>();
+    let columns = columns.max(1);
+    let grouping = grouping.max(1) as usize;
+    let row_size = if grouping <= columns {
+        (columns / grouping) * grouping
+    } else {
+        columns
+    };
+    indices.chunks(row_size).map(<[u32]>::to_vec).collect()
+}
+
+fn annotation_fragment(
+    row: &[(u32, egui::Rect)],
+    range: &std::ops::Range<u32>,
+) -> Option<egui::Rangef> {
+    let mut cells = row.iter().filter(|(index, _)| range.contains(index));
+    let (_, first) = cells.next()?;
+    let mut extent = egui::Rangef::new(first.left(), first.right());
+    for (_, rect) in cells {
+        extent.min = extent.min.min(rect.left());
+        extent.max = extent.max.max(rect.right());
+    }
+    Some(extent)
+}
+
+fn annotation_label(annotation: &crate::calculation_pad::InspectorAnnotation) -> String {
+    format!(
+        "{} [{}:{}]",
+        annotation.label,
+        annotation.range.end.saturating_sub(1),
+        annotation.range.start
+    )
 }
 #[derive(Default)]
 pub(crate) struct ProgrammerInspectorDialog {
@@ -198,6 +271,7 @@ impl ProgrammerInspectorDialog {
                 let mode = self.draft.model.value().mode();
                 self.draft.target_width = mode.width();
                 self.draft.target_signed = mode.is_signed();
+                self.draft.bit_grouping = self.draft.bit_grouping.min(mode.width().bits());
             }
             self.draft.generation = self.draft.generation.wrapping_add(1);
         }
@@ -307,8 +381,8 @@ impl ProgrammerInspectorDialog {
             if ctx.viewport_id() == egui::ViewportId::ROOT {
                 ui.style_mut().interaction.selectable_labels = false;
             }
-            let active =
-                owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
+            let interactive = owner && ui.is_visible() && !ui.is_sizing_pass();
+            let active = interactive && first && !ctx.will_discard();
             visible |= active;
             let (host, target) = super::utility_host::presentation_button(ui, presentation, owner);
             #[cfg(test)]
@@ -318,7 +392,7 @@ impl ProgrammerInspectorDialog {
             if active && host.clicked() {
                 request = Some(target);
             }
-            ui.add_enabled_ui(active, |ui| {
+            ui.add_enabled_ui(interactive, |ui| {
                 let model = &mut draft.model;
                 ui.horizontal_wrapped(|ui| {
                     ui.label(match model.adopted() {
@@ -363,6 +437,8 @@ impl ProgrammerInspectorDialog {
                                     || !draft.label_text.is_empty();
                                 draft.target_width = model.value().mode().width();
                                 draft.target_signed = model.value().mode().is_signed();
+                                draft.bit_grouping =
+                                    draft.bit_grouping.min(model.value().mode().width().bits());
                                 changed = true;
                             }
                             Err(error) => {
@@ -391,14 +467,18 @@ impl ProgrammerInspectorDialog {
                 if !ready {
                     ui.weak("Select an integer result and a current Pad insertion range.");
                 }
+                let active_mode = model.value().mode();
+                let mut requested_mode = None;
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Mode:");
+                    let pending = draft.target_mode() != active_mode;
                     for width in IntegerWidth::ALL {
-                        let response = ui.selectable_value(
-                            &mut draft.target_width,
-                            width,
-                            width.bits().to_string(),
-                        );
+                        let label = if pending && draft.target_width == width {
+                            format!("{}*", width.bits())
+                        } else {
+                            width.bits().to_string()
+                        };
+                        let response = ui.selectable_label(active_mode.width() == width, label);
                         #[cfg(test)]
                         test_controls.push((
                             format!("width-{}", width.bits()),
@@ -406,84 +486,135 @@ impl ProgrammerInspectorDialog {
                             ui.clip_rect(),
                             response.enabled(),
                         ));
-                        if response.changed() {
-                            changed = true;
-                            draft.control_dirty = true;
+                        if response.clicked() {
+                            requested_mode = Some(if draft.target_signed {
+                                IntegerMode::signed(width)
+                            } else {
+                                IntegerMode::unsigned(width)
+                            });
                         }
                     }
-                    if ui
-                        .selectable_value(&mut draft.target_signed, false, "Unsigned")
-                        .changed()
-                    {
-                        changed = true;
-                        draft.control_dirty = true;
-                    }
-                    let signed = ui.selectable_value(&mut draft.target_signed, true, "Signed");
-                    #[cfg(test)]
-                    test_controls.push((
-                        "signed".into(),
-                        signed.rect,
-                        ui.clip_rect(),
-                        signed.enabled(),
-                    ));
-                    if signed.changed() {
-                        changed = true;
-                        draft.control_dirty = true;
-                    }
-                    let mode = if draft.target_signed {
-                        IntegerMode::signed(draft.target_width)
-                    } else {
-                        IntegerMode::unsigned(draft.target_width)
-                    };
-                    let cast = ui.button("Checked cast");
-                    #[cfg(test)]
-                    test_controls.push((
-                        "checked-cast".into(),
-                        cast.rect,
-                        ui.clip_rect(),
-                        cast.enabled(),
-                    ));
-                    if cast.clicked() {
-                        match model.checked_cast(mode) {
-                            Ok(()) => changed = true,
-                            Err(error) => {
-                                draft.feedback = Some(format!("{error:?}"));
-                                changed = true;
-                            }
+                    for signedness in [false, true] {
+                        let label = if signedness { "Signed" } else { "Unsigned" };
+                        let label = if pending && draft.target_signed == signedness {
+                            format!("{label}*")
+                        } else {
+                            label.to_owned()
+                        };
+                        let response =
+                            ui.selectable_label(active_mode.is_signed() == signedness, label);
+                        #[cfg(test)]
+                        test_controls.push((
+                            if signedness { "signed" } else { "unsigned" }.into(),
+                            response.rect,
+                            ui.clip_rect(),
+                            response.enabled(),
+                        ));
+                        if response.clicked() {
+                            requested_mode = Some(if signedness {
+                                IntegerMode::signed(draft.target_width)
+                            } else {
+                                IntegerMode::unsigned(draft.target_width)
+                            });
                         }
                     }
-                    if ui.button("Reinterpret bits").clicked() {
-                        model.reinterpret_bits(mode);
+                });
+                if let Some(mode) = requested_mode {
+                    if mode != active_mode || mode != draft.target_mode() {
+                        draft.select_mode(mode);
+                        changed = true;
+                    }
+                }
+                let active_mode = draft.model.value().mode();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Working mode: {}", active_mode.type_name()));
+                    let pending = draft.target_mode() != active_mode;
+                    if pending {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "Pending target: {} (not applied)",
+                                draft.target_mode().type_name()
+                            ),
+                        );
+                    }
+                    let reinterpret =
+                        ui.add_enabled(pending, egui::Button::new("Reinterpret bits"));
+                    #[cfg(test)]
+                    test_controls.push((
+                        "reinterpret".into(),
+                        reinterpret.rect,
+                        ui.clip_rect(),
+                        reinterpret.enabled(),
+                    ));
+                    if reinterpret.clicked() {
+                        draft.reinterpret_target();
                         changed = true;
                     }
                 });
-                ui.label(format!(
-                    "Working mode: {}",
-                    model.value().mode().type_name()
-                ));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Bit grouping:");
+                    let width = draft.model.value().mode().width().bits();
+                    for group in [1, 2, 4, 8, 16, 32, 64, 128]
+                        .into_iter()
+                        .filter(|group| *group <= width)
+                    {
+                        let response =
+                            ui.selectable_label(draft.bit_grouping == group, group.to_string());
+                        #[cfg(test)]
+                        test_controls.push((
+                            format!("bit-group-{group}"),
+                            response.rect,
+                            ui.clip_rect(),
+                            response.enabled(),
+                        ));
+                        if response.clicked() && draft.bit_grouping != group {
+                            draft.bit_grouping = group;
+                            changed = true;
+                        }
+                    }
+                });
+                let model = &mut draft.model;
                 egui::ScrollArea::vertical()
                     .id_salt("inspector-bits")
                     .max_height(220.0)
                     .show(ui, |ui| {
-                        let columns = ((ui.available_width() / 70.0).floor() as usize).clamp(2, 8);
-                        egui::Grid::new("inspector-bit-grid")
-                            .num_columns(columns)
-                            .show(ui, |ui| {
-                                let width = model.value().mode().width().bits();
-                                for (position, index) in (0..width).rev().enumerate() {
+                        const GROUP_GAP: f32 = 6.0;
+                        let available = ui.available_width().max(1.0);
+                        let cell_width = available.min(58.0);
+                        let columns = ((available + ui.spacing().item_spacing.x)
+                            / (cell_width + 2.0 * ui.spacing().item_spacing.x + GROUP_GAP))
+                            .floor()
+                            .max(1.0) as usize;
+                        let width = model.value().mode().width().bits();
+                        for row in bit_rows(width, columns, draft.bit_grouping) {
+                            let mut cells = Vec::with_capacity(row.len());
+                            ui.horizontal(|ui| {
+                                for (position, index) in row.iter().copied().enumerate() {
+                                    if position > 0 && (index + 1) % draft.bit_grouping == 0 {
+                                        ui.add_space(GROUP_GAP);
+                                    }
                                     let bit = model.bit(index).unwrap_or(false);
-                                    let bit_response = ui.selectable_label(
-                                        bit,
-                                        format!("{index}: {}", u8::from(bit)),
-                                    );
+                                    let response = ui
+                                        .push_id(("inspector-bit", index), |ui| {
+                                            ui.add_sized(
+                                                [cell_width, 23.0],
+                                                egui::Button::selectable(
+                                                    bit,
+                                                    format!("{index}: {}", u8::from(bit)),
+                                                ),
+                                            )
+                                        })
+                                        .inner;
                                     #[cfg(test)]
                                     test_controls.push((
                                         format!("bit-{index}"),
-                                        bit_response.rect,
+                                        response.rect,
                                         ui.clip_rect(),
-                                        bit_response.enabled(),
+                                        response.enabled(),
                                     ));
-                                    if bit_response.clicked() {
+                                    cells.push((index, response.rect));
+                                    if response.clicked() {
                                         #[cfg(test)]
                                         {
                                             test_clicked_bit = Some(index);
@@ -491,11 +622,62 @@ impl ProgrammerInspectorDialog {
                                         let _ = model.toggle_bit(index);
                                         changed = true;
                                     }
-                                    if (position + 1) % columns == 0 {
-                                        ui.end_row();
-                                    }
                                 }
                             });
+                            for (lane, annotation) in model.annotations().iter().enumerate() {
+                                if !model.annotation_is_valid(annotation) {
+                                    continue;
+                                }
+                                let Some(span) = annotation_fragment(&cells, &annotation.range)
+                                else {
+                                    continue;
+                                };
+                                let color = [
+                                    egui::Color32::from_rgb(80, 165, 245),
+                                    egui::Color32::from_rgb(235, 150, 70),
+                                    egui::Color32::from_rgb(120, 195, 130),
+                                    egui::Color32::from_rgb(195, 135, 235),
+                                ][lane % 4];
+                                let galley = ui.painter().layout(
+                                    annotation_label(annotation),
+                                    egui::FontId::proportional(10.0),
+                                    color,
+                                    available,
+                                );
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(available, galley.size().y + 5.0),
+                                    egui::Sense::hover(),
+                                );
+                                let y = rect.top() + 2.0;
+                                let painter = ui.painter();
+                                painter.line_segment(
+                                    [egui::pos2(span.min, y), egui::pos2(span.max, y)],
+                                    egui::Stroke::new(1.5, color),
+                                );
+                                painter.line_segment(
+                                    [egui::pos2(span.min, y), egui::pos2(span.min, y + 3.0)],
+                                    egui::Stroke::new(1.5, color),
+                                );
+                                painter.line_segment(
+                                    [egui::pos2(span.max, y), egui::pos2(span.max, y + 3.0)],
+                                    egui::Stroke::new(1.5, color),
+                                );
+                                let label_x = span
+                                    .min
+                                    .min((rect.right() - galley.size().x).max(rect.left()));
+                                #[cfg(test)]
+                                test_controls.push((
+                                    "annotation-label".into(),
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(label_x, y + 3.0),
+                                        galley.size(),
+                                    ),
+                                    rect,
+                                    true,
+                                ));
+                                painter.galley(egui::pos2(label_x, y + 3.0), galley, color);
+                            }
+                        }
                     });
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("NOT").clicked() {
@@ -668,10 +850,8 @@ impl ProgrammerInspectorDialog {
                 for annotation in model.annotations().to_vec() {
                     ui.horizontal(|ui| {
                         ui.label(format!(
-                            "{}..{}: {}{}",
-                            annotation.range.start,
-                            annotation.range.end,
-                            annotation.label,
+                            "{}{}",
+                            annotation_label(&annotation),
                             if model.annotation_is_valid(&annotation) {
                                 ""
                             } else {
@@ -942,8 +1122,174 @@ impl ProgrammerInspectorDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calculation_pad::CalculationPadSession;
+    use crate::calculation_pad::{CalculationPadSession, TypedInteger};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn inspector_mode_selection_checks_and_preserves_pending_target() {
+        let mut draft = InspectorDraft::default();
+        let format = draft.model.format_options();
+        for width in IntegerWidth::ALL {
+            for signed in [false, true] {
+                let mode = if signed {
+                    IntegerMode::signed(width)
+                } else {
+                    IntegerMode::unsigned(width)
+                };
+                draft.select_mode(mode);
+                assert_eq!(draft.model.value().mode(), mode);
+                assert_eq!(draft.target_mode(), mode);
+                assert!(draft.feedback.is_none());
+                assert_eq!(
+                    bit_rows(width.bits(), 3, 4).iter().flatten().count(),
+                    width.bits() as usize
+                );
+            }
+        }
+        let wide = IntegerMode::unsigned(IntegerWidth::Bits128);
+        draft
+            .model
+            .set_value(TypedInteger::from_bit_pattern((1u128 << 127) | 255, wide).unwrap());
+        let before = draft.model.value();
+        let narrow = IntegerMode::unsigned(IntegerWidth::Bits8);
+        draft.select_mode(narrow);
+        assert_eq!(draft.model.value(), before);
+        assert_eq!(draft.target_mode(), narrow);
+        assert!(draft.feedback.as_ref().unwrap().contains("u8"));
+        draft.reinterpret_target();
+        assert_eq!(draft.model.value().bit_pattern(), 255);
+        let signed = IntegerMode::signed(IntegerWidth::Bits8);
+        draft.select_mode(signed);
+        assert_eq!(draft.model.value().mode(), narrow);
+        assert_eq!(draft.target_mode(), signed);
+        draft.reinterpret_target();
+        assert_eq!(draft.model.value().mode(), signed);
+        assert_eq!(draft.model.value().bit_pattern(), 255);
+        assert_eq!(draft.model.format_options(), format);
+    }
+
+    #[test]
+    fn inspector_group_rows_and_annotation_fragments_preserve_bit_indices() {
+        for width in IntegerWidth::ALL {
+            for columns in [1, 2, 5, 16] {
+                let indices: Vec<_> = bit_rows(width.bits(), columns, 4)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                assert_eq!(indices, (0..width.bits()).rev().collect::<Vec<_>>());
+            }
+        }
+        assert_eq!(bit_rows(16, 9, 4)[0], vec![15, 14, 13, 12, 11, 10, 9, 8]);
+        let cell = |index, x| {
+            (
+                index,
+                egui::Rect::from_min_size(egui::pos2(x, 0.0), egui::vec2(10.0, 10.0)),
+            )
+        };
+        let upper = [cell(7, 0.0), cell(6, 10.0), cell(5, 20.0), cell(4, 30.0)];
+        let lower = [cell(3, 0.0), cell(2, 10.0), cell(1, 20.0), cell(0, 30.0)];
+        assert_eq!(
+            annotation_fragment(&upper, &(2..7)),
+            Some(egui::Rangef::new(10.0, 40.0))
+        );
+        assert_eq!(
+            annotation_fragment(&lower, &(2..7)),
+            Some(egui::Rangef::new(0.0, 20.0))
+        );
+        assert!(annotation_fragment(&lower, &(4..8)).is_none());
+        let mut draft = InspectorDraft::default();
+        draft.select_mode(IntegerMode::unsigned(IntegerWidth::Bits16));
+        draft.model.set_annotation(0..8, "Status".into()).unwrap();
+        draft.model.set_annotation(4..12, "Overlap".into()).unwrap();
+        assert_eq!(
+            annotation_label(&draft.model.annotations()[0]),
+            "Status [7:0]"
+        );
+        draft.select_mode(IntegerMode::unsigned(IntegerWidth::Bits8));
+        assert_eq!(draft.model.annotations().len(), 2);
+        assert!(
+            draft
+                .model
+                .annotation_is_valid(&draft.model.annotations()[0])
+        );
+        assert!(
+            !draft
+                .model
+                .annotation_is_valid(&draft.model.annotations()[1])
+        );
+    }
+
+    #[test]
+    fn inspector_narrow_grid_renders_all_bits_and_keeps_long_low_label_in_row() {
+        let ctx = egui::Context::default();
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        for width in IntegerWidth::ALL {
+            dialog.draft.select_mode(IntegerMode::unsigned(width));
+            dialog.draft.bit_grouping = 4;
+            if width == IntegerWidth::Bits8 {
+                dialog
+                    .draft
+                    .model
+                    .set_annotation(0..2, "A long label at the low end of the bit grid".into())
+                    .unwrap();
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let runtime = InspectorRuntime {
+                    context: Arc::new(InspectorPadContext::default()),
+                    root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
+                    host: HostIdentity {
+                        host: UtilityPresentation::Docked,
+                        generation: 0,
+                    },
+                    pinned: false,
+                };
+                dialog.render_host(
+                    &ctx,
+                    &runtime,
+                    true,
+                    true,
+                    Some(ui),
+                    UtilityPresentation::Docked,
+                );
+            });
+            output.textures_delta.clear();
+            let bits: Vec<_> = dialog
+                .test_controls
+                .iter()
+                .filter(|(name, _, _, _)| {
+                    name.strip_prefix("bit-")
+                        .is_some_and(|suffix| suffix.parse::<u32>().is_ok())
+                })
+                .collect();
+            assert_eq!(bits.len(), width.bits() as usize);
+            assert!(
+                bits.iter()
+                    .any(|(name, _, _, _)| name == &format!("bit-{}", width.bits() - 1))
+            );
+            for (_, rect, clip, _) in bits {
+                assert!(
+                    rect.left() >= clip.left() && rect.right() <= clip.right(),
+                    "{rect:?} outside {clip:?}"
+                );
+            }
+            if width == IntegerWidth::Bits8 {
+                let (_, label, row, _) = dialog
+                    .test_controls
+                    .iter()
+                    .find(|(name, _, _, _)| name == "annotation-label")
+                    .unwrap();
+                assert!(row.contains_rect(*label), "{label:?} outside {row:?}");
+            }
+        }
+    }
 
     #[test]
     fn programmer_inspector_retains_private_draft_across_new_context_and_move() {
@@ -969,7 +1315,9 @@ mod tests {
         });
         let mut dialog = ProgrammerInspectorDialog::default();
         dialog.open();
+        dialog.draft.bit_grouping = 128;
         dialog.publish(Arc::clone(&old));
+        assert_eq!(dialog.draft.bit_grouping, 8);
         let mut draft = dialog.draft.clone();
         draft.model.toggle_bit(7).unwrap();
         draft.label_text = "unfinished".into();

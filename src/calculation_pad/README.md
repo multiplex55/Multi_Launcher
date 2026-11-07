@@ -234,9 +234,13 @@ Open **Inspect bits…** beside an exact integer result. Bit 0 is the least
 significant bit. The working bits and optional labels are private until you
 choose **Insert at Pad selection**; Undo restores the previous source in one
 step. If the selected result changes, dirty work remains visible and must be
-refreshed explicitly before insertion. A checked cast validates the numeric
-value; reinterpretation preserves the low bit pattern and zero-extends when
-widening. Copy provides decimal, binary, octal and hexadecimal, with optional
+refreshed explicitly before insertion. Selecting a width or signedness immediately
+checks whether the value fits. If it does not, the working value and mode remain
+unchanged; choose **Reinterpret bits** to apply the attempted mode using the low
+bit pattern (zero-extended when widening). **Bit grouping** changes only the
+transient grid layout. Named spans show inclusive bit numbers such as
+`Status [7:0]`; their input ranges use an exclusive end. Copy provides decimal,
+binary, octal and hexadecimal, with optional
 prefixes, width padding and digit grouping. Only these format preferences are
 saved; working bits, labels, expressions and comparison results are transient.
 

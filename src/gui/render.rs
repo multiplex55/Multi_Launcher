@@ -19843,7 +19843,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
-        for name in ["signed", "checked-cast"] {
+        for name in ["signed"] {
             let (control, clip, enabled) =
                 app.programmer_inspector_dialog.test_control(name).unwrap();
             assert!(enabled && clip.contains_rect(control));
