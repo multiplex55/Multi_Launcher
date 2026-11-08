@@ -4963,8 +4963,10 @@ impl LauncherApp {
                 .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(mouse_form_host::GESTURE_SETTINGS).is_some(),
-            Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
-            Panel::MarkdownStudioDialog => !self.markdown_studio_dialog.is_popped_out(),
+            Panel::NotesDialog => self.notes_dialog.host_layer_if_root().is_some(),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root().is_some(),
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root().is_some(),
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.owner_layer_if_root().is_some(),
             Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some(),
             Panel::NotePanel => self
                 .note_panels
@@ -4978,6 +4980,8 @@ impl LauncherApp {
         self.pin_list_open
             || self.ocr_surface_visible()
             || self.diff_dialog.host_layer_if_root().is_some()
+            || self.calculation_pad_dialog.examples_layer_if_root().is_some()
+            || self.diagram_studio_dialog.embedded_viewer_layer_if_root().is_some()
             || Self::TRACKED_PANELS
                 .iter()
                 .copied()

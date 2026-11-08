@@ -3466,6 +3466,16 @@ impl JumpModeUi {
         self.pending_focus_intent = None;
     }
 
+    /// Retire hint authority after a real query click survives the ROOT pass.
+    pub(crate) fn cancel_for_query_pointer_transfer(&mut self) {
+        self.navigation_epoch = self.navigation_epoch.next();
+        self.invalidated_session_key_fence
+            .extend(self.held_captured_keys.drain());
+        self.cancel_active_session();
+        self.pending_focus_intent = None;
+        self.last_completed_focus_handoff = None;
+    }
+
     pub(crate) fn cancel_all(&mut self) {
         self.navigation_epoch = self.navigation_epoch.next();
         self.cancel_active_session();

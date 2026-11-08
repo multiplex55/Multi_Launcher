@@ -71,6 +71,7 @@ pub enum SessionError {
     Edit(EditError),
     NoActiveDocument,
     SaveAsRequired,
+    RecoveryScratchRequired,
     PendingTransitionExists,
     NoPendingTransition,
     DocumentTooLarge { max_bytes: usize },
@@ -91,6 +92,9 @@ impl std::fmt::Display for SessionError {
             }
             Self::SaveAsRequired => {
                 formatter.write_str("save this untitled document with a name first")
+            }
+            Self::RecoveryScratchRequired => {
+                formatter.write_str("recovery close requires an unsaved scratch document")
             }
             Self::PendingTransitionExists => {
                 formatter.write_str("resolve the pending document transition first")
@@ -830,6 +834,20 @@ impl CalculationPadSession {
         self.current = None;
         self.history.clear();
         Ok(TransitionOutcome::Applied)
+    }
+
+    /// Retire an unbound scratch only after its recovery snapshot was saved.
+    pub(crate) fn close_recovered_scratch(&mut self) -> Result<(), SessionError> {
+        self.ensure_no_pending()?;
+        if self.current.is_none() {
+            return Err(SessionError::NoActiveDocument);
+        }
+        if self.is_saved() {
+            return Err(SessionError::RecoveryScratchRequired);
+        }
+        self.current = None;
+        self.history.clear();
+        Ok(())
     }
 
     pub fn resolve_pending(
@@ -1827,6 +1845,22 @@ mod tests {
         );
         assert_eq!(current.current_id(), Some(target_id));
         assert_eq!(current.source(), Some("target = 2"));
+    }
+
+    #[test]
+    fn recovery_scratch_close_rejects_saved_or_pending_documents() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("scratch").unwrap();
+        session.request_new().unwrap();
+        assert!(matches!(session.close_recovered_scratch(), Err(SessionError::PendingTransitionExists)));
+        session.resolve_pending(TransitionDecision::Cancel).unwrap();
+        session.save_as("bound").unwrap();
+        assert!(matches!(session.close_recovered_scratch(), Err(SessionError::RecoveryScratchRequired)));
+        assert_eq!(session.source(), Some("scratch"));
+        session.request_new().unwrap();
+        session.replace_source("recovered").unwrap();
+        session.close_recovered_scratch().unwrap();
+        assert_eq!(session.source(), None);
     }
 
     #[test]

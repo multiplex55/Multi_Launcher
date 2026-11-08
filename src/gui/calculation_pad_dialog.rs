@@ -1576,9 +1576,28 @@ impl CalculationPadDialog {
             self.host_close_requested = false;
             if self.open {
                 let recovery_before_close = self.recovery_snapshot();
-                self.apply_close_request();
+                let remembered_scratch = self.remember_source
+                    && !self.session.is_saved()
+                    && self.session.pending_transition().is_none()
+                    && recovery_before_close.is_some();
+                if remembered_scratch {
+                    match self.save_recovery_now(recovery_before_close.clone()) {
+                        Ok(()) => match self.session.close_recovered_scratch() {
+                            Ok(()) => {
+                                self.open = false;
+                                self.reset_transient_ui();
+                            }
+                            Err(error) => self.set_error(error),
+                        },
+                        Err(error) => self.set_recovery_error(error.to_string()),
+                    }
+                } else {
+                    self.apply_close_request();
+                }
                 if !self.open && self.session.source().is_none() {
-                    if let Err(error) = self.save_recovery_now(recovery_before_close) {
+                    if !remembered_scratch
+                        && let Err(error) = self.save_recovery_now(recovery_before_close)
+                    {
                         self.set_recovery_error(error.to_string());
                     }
                     self.recovery_attempted = false;
@@ -3576,6 +3595,57 @@ mod tests {
     }
 
     #[test]
+    fn remembered_scratch_close_saves_same_frame_edit_before_reopen() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.initialize_recovery_preference(true);
+        dialog.open();
+        dialog.test_replace_source("initial");
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.edited_source = Some("final λ\n42".into());
+        host.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, host);
+        assert!(!dialog.open);
+        assert_eq!(dialog.test_pending_transition(), None);
+        assert_eq!(dialog.recovery_writer.load().unwrap().unwrap().source, "final λ\n42");
+        dialog.open();
+        assert_eq!(dialog.test_source(), Some("final λ\n42"));
+    }
+
+    #[test]
+    fn remembered_scratch_failed_recovery_cancels_native_close() {
+        let (_directory, root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(1000.0, 760.0);
+        dialog.initialize_recovery_preference(true);
+        dialog.open();
+        dialog.test_replace_source("keep this draft");
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let popout_button = dialog.test_host_button_rect.unwrap();
+        click(&mut dialog, &ctx, size, popout_button.center());
+        for _ in 0..3 { immediate_viewport_frame(&mut dialog, &ctx, Vec::new()); }
+        let store = PadRecoveryStore::new(&root);
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        assert!(dialog.recovery_writer.flush().unwrap().is_empty());
+        match std::fs::remove_file(store.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove fixture recovery file: {error}"),
+        }
+        std::fs::create_dir(store.path()).unwrap();
+        super::super::render::with_immediate_viewport_test_close_request(
+            super::pad_viewport_id(), || immediate_viewport_frame(&mut dialog, &ctx, Vec::new()),
+        );
+        let commands = immediate_viewport_frame(&mut dialog, &ctx, Vec::new());
+        assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::CancelClose)));
+        assert!(dialog.open);
+        assert_eq!(dialog.test_source(), Some("keep this draft"));
+        assert_eq!(dialog.test_pending_transition(), None);
+        assert!(dialog.error.as_deref().is_some_and(|error| error.contains("recovery failed")));
+    }
+
+    #[test]
     fn save_and_close_follow_an_accepted_same_frame_source_edit() {
         let (_directory, _root, mut dialog) = fixture();
         dialog.initialize_recovery_preference(true);
@@ -3689,19 +3759,12 @@ mod tests {
         close.pass_accepted = true;
         close.close_requested = true;
         complete_host_effects(&mut dialog, &ctx, close);
-        assert_eq!(
-            dialog.test_pending_transition(),
-            Some(PendingTransition::Close)
-        );
-        accept_intent(
-            &mut dialog,
-            DialogIntent::Decision(TransitionDecision::Discard),
-        );
+        assert_eq!(dialog.test_pending_transition(), None);
         assert!(!dialog.open);
-        assert_eq!(dialog.recovery_writer.load().unwrap(), None);
+        assert_eq!(dialog.recovery_writer.load().unwrap().unwrap().source, "queued close discard draft");
 
         dialog.open();
-        assert_eq!(dialog.test_source(), Some(""));
+        assert_eq!(dialog.test_source(), Some("queued close discard draft"));
         dialog.test_replace_source("queued disable draft");
         dialog.schedule_recovery_snapshot(&ctx);
         dialog.apply_committed_recovery_preference(false).unwrap();
@@ -4176,6 +4239,7 @@ mod tests {
         dialog.test_open_document(saved_id);
         assert_eq!(dialog.test_source(), Some("amount = 4\namount * 2"));
         assert_eq!(dialog.session.current_name(), Some("Estimate"));
+        dialog.apply_committed_recovery_preference(true).unwrap();
 
         dialog.test_replace_source("amount = 9\namount * 2");
         let directory = PadDocumentStore::new(&root).directory().to_path_buf();

@@ -1000,6 +1000,7 @@ struct PendingRootEffects {
     owner_pass_accepted: bool,
     child_viewport_id: Option<egui::ViewportId>,
     viewport_callback_observed: bool,
+    embedded_root_layer: Option<egui::LayerId>,
     close_dialog: bool,
     close_viewport: bool,
     os_close_requested: bool,
@@ -1630,6 +1631,14 @@ impl DiagramStudioDialog {
             .then(|| diagram_host_layer("diagram-studio"))
     }
 
+    pub(super) fn owner_layer_if_root(&self) -> Option<egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        self.docked_owner_layer()
+            .or_else(|| self.owner_host.embedded_root_layer())
+    }
+
     pub(super) fn docked_owner_owns_root_input(&self, ctx: &egui::Context) -> bool {
         self.docked_owner_layer().is_some_and(|layer| {
             focused_on_layer(ctx, layer).is_some()
@@ -1736,6 +1745,8 @@ impl DiagramStudioDialog {
     }
 
     fn accept_close(&mut self) {
+        self.owner_host
+            .complete_bootstrap(self.owner_host.identity(), None, None);
         self.owner_generation = self.owner_generation.wrapping_add(1);
         self.open = false;
         self.close_pending = false;
@@ -1892,6 +1903,7 @@ impl DiagramStudioDialog {
         let mut owner_pass = None;
         let mut native_viewport = None;
         let mut owner_pass_accepted = false;
+        let mut embedded_owner_layer = None;
         let owner_generation = self.owner_generation;
         let owner_host = self.owner_host.identity();
         let mut change_host = false;
@@ -1915,6 +1927,9 @@ impl DiagramStudioDialog {
         let docked_close = host.show(ctx, owner_host.host, root_visible || self.close_pending, root_input_allowed, |child, class| {
             callback_class = class;
             let independent = class == egui::ViewportClass::Immediate;
+            if class == egui::ViewportClass::EmbeddedWindow {
+                embedded_owner_layer = Some(child.layer_id());
+            }
             if independent {
                 native_viewport = Some(child.input(|input| input.viewport().clone()));
             }
@@ -2254,6 +2269,7 @@ impl DiagramStudioDialog {
                 owner_pass_accepted,
                 child_viewport_id: child_pass_accepted.then_some(child_viewport_id).flatten(),
                 viewport_callback_observed,
+                embedded_root_layer: embedded_owner_layer,
                 close_dialog: close_requested && child_pass_accepted,
                 close_viewport: (close_requested || document_intent.is_some())
                     && child_pass_accepted
@@ -3078,6 +3094,10 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        if owner_pass_current && !effects.change_host && !effects.close_dialog {
+            self.owner_host
+                .complete_bootstrap(effects.host, effects.embedded_root_layer, None);
+        }
         finish_minimap_drag(
             &mut self.visual_editor_minimap_drag,
             &mut self.camera,
@@ -20867,6 +20887,11 @@ mod tests {
         for _ in 0..3 {
             embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), false);
         }
+
+        assert!(
+            dialog.owner_layer_if_root().is_some(),
+            "embedded owner is presented on ROOT"
+        );
 
         assert_ne!(viewer_viewport_id(), viewport_id());
         click_action_in_embedded_fallback(&mut dialog, &ctx, "open_viewer");

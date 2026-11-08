@@ -292,13 +292,22 @@ path = "tests/suites/pure.rs"
 inherits = "dev"
 debug = "line-tables-only"
 
-# Measured opt-in local iteration profile; canonical release stays unchanged.
+# Production settings for ordinary release builds; retain panic unwinding.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = "symbols"
+panic = "unwind"
+
+# Measured opt-in local iteration profile with its original unstripped symbols.
 [profile.iteration]
 inherits = "release"
 opt-level = 2
 codegen-units = 64
 lto = "off"
 incremental = true
+strip = "none"
 
 # Local lifecycle seam for hidden-root prompt viewport bootstrapping.
 [patch.crates-io]
