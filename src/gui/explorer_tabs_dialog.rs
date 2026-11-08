@@ -7,6 +7,7 @@ use crate::explorer_tabs::{
     FolderPath, SavedFolderList,
 };
 use crate::platform::app_data::AppDataRoot;
+use crate::plugins::folders::{self, SavedFoldersSnapshot};
 use eframe::egui;
 
 fn outcome_label(outcome: crate::explorer_tabs::OperationOutcome) -> &'static str {
@@ -100,6 +101,31 @@ enum Intent {
     DecisionDiscard,
     DecisionCancel,
     Reload,
+    OpenSavedFolders,
+    RefreshSavedFolders,
+    CloseSavedFolders,
+    SelectSavedFolder(u64, usize),
+}
+
+#[derive(Clone)]
+struct SavedFolderPicker {
+    incarnation: u64,
+    editor_incarnation: u64,
+    draft_generation: u64,
+    query: String,
+    snapshot: Option<SavedFoldersSnapshot>,
+    error: Option<String>,
+}
+
+fn saved_folder_matches(entry: &folders::FolderEntry, query: &str) -> bool {
+    entry.label.to_lowercase().contains(query)
+        || entry.path.to_lowercase().contains(query)
+        || entry
+            .alias
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(query)
 }
 #[derive(Clone, Copy)]
 enum Replacement {
@@ -118,6 +144,7 @@ pub(super) struct ExplorerTabsActions {
     pub close: bool,
     draft: Option<Draft>,
     expected_generation: u64,
+    picker: Option<SavedFolderPicker>,
     intent: Option<Intent>,
     copies: Vec<String>,
     ctx: egui::Context,
@@ -132,6 +159,9 @@ pub(super) struct ExplorerTabsDialog {
     root: AppDataRoot,
     store: Option<FolderListStore>,
     draft: Draft,
+    picker: Option<SavedFolderPicker>,
+    picker_incarnation: u64,
+    folders_path: String,
     replacement: Option<Replacement>,
     notice: Option<String>,
     pub job: ExplorerTabsJob,
@@ -166,6 +196,9 @@ impl ExplorerTabsDialog {
             root,
             store,
             draft: Draft::default(),
+            picker: None,
+            picker_incarnation: 0,
+            folders_path: folders::FOLDERS_FILE.to_owned(),
             replacement: None,
             notice,
             job: ExplorerTabsJob::default(),
@@ -202,6 +235,10 @@ impl ExplorerTabsDialog {
         self.draft.folders.clone()
     }
     #[cfg(test)]
+    pub fn test_saved_folders_path(&mut self, path: &std::path::Path) {
+        self.folders_path = path.to_string_lossy().into_owned();
+    }
+    #[cfg(test)]
     pub fn test_name(&self) -> &str {
         &self.draft.name
     }
@@ -230,8 +267,10 @@ impl ExplorerTabsDialog {
     pub fn finish_close(&mut self) {
         self.open = false;
         self.close_requested = false;
+        self.picker = None;
     }
     fn replace(&mut self, replacement: Replacement) -> bool {
+        self.picker = None;
         let next = self.draft.generation.wrapping_add(1);
         match replacement {
             Replacement::New => {
@@ -470,6 +509,7 @@ impl ExplorerTabsDialog {
         presentation: UtilityPresentation,
     ) -> ExplorerTabsActions {
         let mut draft = self.draft.clone();
+        let mut picker = self.picker.clone();
         let expected_generation = draft.generation;
         let mut changed = false;
         let mut intent = None;
@@ -720,6 +760,108 @@ impl ExplorerTabsDialog {
                     draft.next_row_id = draft.next_row_id.wrapping_add(1);
                     changed = true;
                 }
+                if observe!(
+                    ui,
+                    "add-saved-folder",
+                    ui.add_enabled(
+                        draft.folders.len() < 32,
+                        egui::Button::new("Add saved folder")
+                    )
+                )
+                .clicked()
+                    && allowed
+                {
+                    intent = Some(Intent::OpenSavedFolders);
+                }
+                if let Some(picker) = &mut picker {
+                    ui.separator();
+                    ui.label("Saved folders");
+                    observe!(
+                        ui,
+                        "saved-folder-search",
+                        ui.add(
+                            egui::TextEdit::singleline(&mut picker.query)
+                                .hint_text("Search label, alias or path")
+                                .char_limit(256)
+                        )
+                    );
+                    ui.horizontal(|ui| {
+                        if observe!(ui, "saved-folder-refresh", ui.button("Refresh")).clicked()
+                            && allowed
+                        {
+                            intent = Some(Intent::RefreshSavedFolders);
+                        }
+                        if observe!(ui, "saved-folder-cancel", ui.button("Cancel")).clicked()
+                            && allowed
+                        {
+                            intent = Some(Intent::CloseSavedFolders);
+                        }
+                    });
+                    if let Some(error) = &picker.error {
+                        ui.label(error);
+                    }
+                    if let Some(snapshot) = &picker.snapshot {
+                        let query = picker.query.to_lowercase();
+                        let matches: Vec<_> = snapshot
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, entry)| saved_folder_matches(entry, &query))
+                            .map(|(index, _)| index)
+                            .collect();
+                        egui::ScrollArea::vertical()
+                            .id_salt("saved-folders-picker")
+                            .max_height(180.0)
+                            .show_rows(
+                                ui,
+                                ui.spacing().interact_size.y + 2.0,
+                                matches.len(),
+                                |ui, rows| {
+                                    for row in rows {
+                                        ui.add_space(1.0);
+                                        let index = matches[row];
+                                        let entry = &snapshot.entries[index];
+                                        let label = format!(
+                                            "{}{} — {}",
+                                            entry.label.chars().take(64).collect::<String>(),
+                                            entry
+                                                .alias
+                                                .as_ref()
+                                                .map(|alias| format!(
+                                                    " ({})",
+                                                    alias.chars().take(32).collect::<String>()
+                                                ))
+                                                .unwrap_or_default(),
+                                            entry.path.chars().take(80).collect::<String>()
+                                        );
+                                        if observe!(
+                                            ui,
+                                            format!("saved-folder-{index}"),
+                                            ui.add_sized(
+                                                [
+                                                    ui.available_width(),
+                                                    ui.spacing().interact_size.y
+                                                ],
+                                                egui::Button::new(label).truncate()
+                                            )
+                                            .on_hover_text(&entry.path)
+                                        )
+                                        .clicked()
+                                            && allowed
+                                        {
+                                            intent = Some(Intent::SelectSavedFolder(
+                                                picker.incarnation,
+                                                index,
+                                            ));
+                                        }
+                                    }
+                                },
+                            );
+                        if matches.is_empty() {
+                            ui.label("No matching saved folders");
+                        }
+                    }
+                }
                 ui.horizontal_wrapped(|ui| {
                     if observe!(ui, "save", ui.button("Save list")).clicked() && allowed {
                         intent = Some(Intent::Save);
@@ -828,6 +970,7 @@ impl ExplorerTabsDialog {
             close: !runtime.pinned && (!window_open || self.close_requested),
             draft: changed.then_some(draft),
             expected_generation,
+            picker,
             intent,
             copies,
             ctx: ctx.clone(),
@@ -862,8 +1005,80 @@ impl ExplorerTabsDialog {
             return (false, Vec::new());
         }
         copies.extend(actions.copies);
+        if self.picker.as_ref().map(|p| p.incarnation)
+            == actions.picker.as_ref().map(|p| p.incarnation)
+        {
+            self.picker = actions.picker.take();
+        }
         let mut changed_store = false;
         match actions.intent {
+            Some(Intent::OpenSavedFolders) => {
+                self.picker_incarnation = self.picker_incarnation.wrapping_add(1).max(1);
+                let (snapshot, error) = match folders::saved_folders_snapshot(&self.folders_path) {
+                    Ok(snapshot) => (Some(snapshot), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                self.picker = Some(SavedFolderPicker {
+                    incarnation: self.picker_incarnation,
+                    editor_incarnation: self.draft.editor_incarnation,
+                    draft_generation: self.draft.generation,
+                    query: String::new(),
+                    snapshot,
+                    error,
+                });
+            }
+            Some(Intent::RefreshSavedFolders) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.draft_generation = self.draft.generation;
+                    picker.editor_incarnation = self.draft.editor_incarnation;
+                    match folders::saved_folders_snapshot(&self.folders_path) {
+                        Ok(snapshot) => {
+                            picker.snapshot = Some(snapshot);
+                            picker.error = None;
+                        }
+                        Err(error) => {
+                            picker.snapshot = None;
+                            picker.error = Some(error.to_string());
+                        }
+                    }
+                }
+            }
+            Some(Intent::CloseSavedFolders) => self.picker = None,
+            Some(Intent::SelectSavedFolder(incarnation, index)) => {
+                if let Some(picker) = &mut self.picker
+                    && picker.incarnation == incarnation
+                    && picker.editor_incarnation == self.draft.editor_incarnation
+                {
+                    if picker.draft_generation != self.draft.generation {
+                        picker.error = Some("The draft changed; refresh the picker".into());
+                        return (changed_store, copies);
+                    }
+                    let result = picker
+                        .snapshot
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Saved folders are unavailable"))
+                        .and_then(|snapshot| {
+                            folders::revalidate_saved_folder(&self.folders_path, snapshot, index)
+                        })
+                        .and_then(|entry| {
+                            FolderPath::parse(&entry.path)
+                                .map_err(|error| anyhow::anyhow!("Invalid folder path: {error:?}"))
+                        });
+                    match result {
+                        Ok(path) if self.draft.folders.len() < 32 => {
+                            self.draft.folders.push(path.as_str().to_owned());
+                            self.draft.row_ids.push(self.draft.next_row_id);
+                            self.draft.next_row_id = self.draft.next_row_id.wrapping_add(1);
+                            self.draft.generation = self.draft.generation.wrapping_add(1);
+                            self.picker = None;
+                        }
+                        Ok(_) => {
+                            picker.error = Some("A list can contain at most 32 folders".into())
+                        }
+                        Err(error) => picker.error = Some(error.to_string()),
+                    }
+                }
+            }
             Some(Intent::New) => {
                 if self.draft.dirty() {
                     self.replacement = Some(Replacement::New);
@@ -954,6 +1169,7 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
     const SIZE: egui::Vec2 = egui::vec2(640.0, 520.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
     const SCROLL_NATIVE_WINDOW: bool = true;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = ExplorerTabsRuntime;
     type Actions = ExplorerTabsActions;
     type Checkpoint = ();
@@ -1046,6 +1262,76 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply(dialog: &mut ExplorerTabsDialog, intent: Intent) {
+        let actions = ExplorerTabsActions {
+            host_request: None,
+            close: false,
+            draft: None,
+            expected_generation: dialog.draft.generation,
+            picker: dialog.picker.clone(),
+            intent: Some(intent),
+            copies: Vec::new(),
+            ctx: egui::Context::default(),
+            receipt: None,
+            host_button: None,
+        };
+        dialog.complete(actions);
+    }
+
+    #[test]
+    fn saved_folder_picker_search_copy_staleness_and_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("folders.json");
+        let entries = vec![
+            folders::FolderEntry {
+                label: "Same".into(),
+                path: r"C:\first".into(),
+                alias: Some("Work".into()),
+            },
+            folders::FolderEntry {
+                label: "Same".into(),
+                path: r"C:\second".into(),
+                alias: None,
+            },
+        ];
+        std::fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
+        let mut dialog = ExplorerTabsDialog::new(AppDataRoot::from_path(directory.path()));
+        dialog.folders_path = path.to_string_lossy().into_owned();
+        assert!(saved_folder_matches(&entries[0], "work"));
+        assert!(saved_folder_matches(&entries[1], "second"));
+        assert!(!saved_folder_matches(&entries[1], "work"));
+        apply(&mut dialog, Intent::OpenSavedFolders);
+        assert!(!dialog.draft.dirty());
+        let incarnation = dialog.picker.as_ref().unwrap().incarnation;
+        dialog.draft.generation = dialog.draft.generation.wrapping_add(1);
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert!(dialog.draft.folders.is_empty());
+        assert!(dialog.picker.as_ref().unwrap().error.is_some());
+        apply(&mut dialog, Intent::RefreshSavedFolders);
+        apply(&mut dialog, Intent::CloseSavedFolders);
+        assert!(!dialog.draft.dirty());
+        apply(&mut dialog, Intent::OpenSavedFolders);
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert!(dialog.draft.folders.is_empty());
+        let incarnation = dialog.picker.as_ref().unwrap().incarnation;
+        std::fs::write(&path, serde_json::to_vec(&entries[1..]).unwrap()).unwrap();
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert!(dialog.draft.folders.is_empty());
+        assert!(dialog.picker.as_ref().unwrap().error.is_some());
+        apply(&mut dialog, Intent::RefreshSavedFolders);
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert_eq!(dialog.draft.folders, vec![r"C:\second"]);
+        std::fs::write(&path, "[]").unwrap();
+        assert_eq!(dialog.draft.folders, vec![r"C:\second"]);
+        std::fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
+        dialog.draft.folders = vec![r"C:\full".into(); 32];
+        apply(&mut dialog, Intent::OpenSavedFolders);
+        let incarnation = dialog.picker.as_ref().unwrap().incarnation;
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert_eq!(dialog.draft.folders.len(), 32);
+        assert!(dialog.picker.as_ref().unwrap().error.is_some());
+    }
 
     #[test]
     fn explorer_tabs_run_reloads_saved_id_and_refuses_deleted_or_corrupt_store() {

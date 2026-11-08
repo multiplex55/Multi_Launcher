@@ -18535,6 +18535,76 @@ mod tests {
     }
 
     #[test]
+    fn explorer_tabs_saved_folder_picker_accepts_actual_clicks() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let path = workspace.root().join("picker-folders.json");
+        std::fs::write(&path, r#"[{"label":"Work","path":"C:\\Work","alias":"office"}]"#).unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.explorer_tabs_dialog.test_saved_folders_path(&path);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+        }
+        for name in ["add-saved-folder", "saved-folder-0"] {
+            let mut target = None;
+            let mut last = None;
+            for _ in 0..16 {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false,
+                );
+                if let Some((rect, clip, enabled)) = app.explorer_tabs_dialog.test_control(name) {
+                    last = Some((rect, clip, enabled));
+                    if enabled && clip.contains_rect(rect) {
+                        target = Some(rect);
+                        break;
+                    }
+                    let direction = if rect.center().y > clip.center().y { -140.0 } else { 140.0 };
+                    let pointer = egui::pos2(clip.center().x, if direction < 0.0 {
+                        clip.bottom() - 4.0
+                    } else {
+                        clip.top() + 4.0
+                    });
+                    run_host_viewport_frame(
+                        &ctx, &mut app, egui::ViewportId::ROOT,
+                        vec![egui::Event::PointerMoved(pointer), egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, direction),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        }], false, false,
+                    );
+                }
+            }
+            let rect = target.unwrap_or_else(|| panic!("picker control {name} must be reachable: {last:?}"));
+            if name == "saved-folder-0" {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, true), false, false,
+                );
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, false), true, false,
+                );
+                assert!(app.explorer_tabs_dialog.test_folders().is_empty());
+            }
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, pressed), false, false,
+                );
+            }
+            run_host_viewport_frame(
+                &ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false,
+            );
+        }
+        assert_eq!(app.explorer_tabs_dialog.test_folders(), vec![r"C:\Work"]);
+    }
+
+    #[test]
     fn explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts() {
         use crate::explorer_tabs::{FolderListStore, FolderPath};
         use crate::platform::app_data::AppDataRoot;

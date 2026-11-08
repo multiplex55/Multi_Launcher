@@ -37,7 +37,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M4-D | Persistent editable connector bends | complete |
 | M4-E | Four additional editable templates | complete |
 | M5-A | Timeout-capable UIA activation | complete |
-| M5-B | Saved folder snapshot picker | pending |
+| M5-B | Saved folder snapshot picker | complete |
 | M6-A | Cold-cache recorder enumeration | pending |
 | M6-B | Frozen-region preview and active indicators | pending |
 | M7-A | Command-only help | pending |
@@ -466,3 +466,26 @@ Scoped runf92957d7-2767-4b5a-ade5-cb1b542b859c passed7/7. Actual native COM-only
 
 Source formatted BEFORE checks and frozen afterward; parent inspected complete native_uia-only production/test diff and existing MTA wrapper. git diff --check clean, no Cargo/native worker remains. Exact selector follows before commit.
 M5-A exact command: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E 'test(explorer_tabs_uia_setup_checks_each_stage_and_preserves_hresult) | test(explorer_tabs_uia_modern_activation_and_timeouts_on_worker_apartment) | test(explorer_tabs_backend_preflight_refusal_has_zero_requests) | test(explorer_tabs_backend_cancel_after_request_never_retries) | test(explorer_tabs_backend_cancel_during_error_takes_precedence) | test(explorer_tabs_operation_checks_cancellation_and_deadline_around_calls) | test(explorer_tabs_backend_bootstrap_receipt_rejects_preexisting_and_ambiguous_windows)'`. Runf92957d77/7,7668skipped. Only three relevant native_uia diff hunks; no post-check source changes and source writer retired.
+
+M5-A checkpoint83f75669c100d4a548af53d84ad389d0b1aa7118 committed; one normal push succeeded and tree clean. Sole writer now M5-B using prepared bounded-accessor/picker handoff; root ledger/Git separate. Format before scoped tests, no unproved post-test extraction. Supported Windows11 tab acceptance remains externally unavailable, while picker/data ownership can be implemented/tested independently.
+### M5-B implementation / scoped verification in progress
+
+Existing folder-owner snapshot/revalidation and transient same-host dialog picker implemented. First scoped run71cc9550 passed3/4 (owner/dialog/retained-run cases); actual row click fixture failed clipping. Parent requested immediate count refusal before lock-held byte scan, normalized originating store key in snapshot/revalidation, and bounded virtualized row/text rendering with query normalization once. These are applied before affected rerun; full valid path retained on hover/search and current-record path copied through existing draft mutation.
+
+Actual click fixture now uses ordinary scroll-to-reveal, preserves clipping assertion, exercises discarded release then retained click. Affected three-case batch running. No supported-Windows11 tab claim; all GUI input simulated. Production relative folders.json identity unchanged, test store path injected only for focused fixtures. Native M5-A COM assertion receipt stored at ignored target/productivity-tools-refinement/native-evidence/m5a-com-initialization.json with assertion provenance and explicit no-tab-evidence status.
+M5-B affected842464cb passed2/3 owner/dialog, rendered control still failed reachability. Diagnostic8336dff2 established picker open/row registered, rowtop333.0 versus cliptop333.2; bounded row inset/spacing corrects full clickability without weakening containment. Next c994db86 reached row but discarded release poisoned fresh click. Narrow Explorer host REGISTER_TARGETS_ON_REPLAY opt-in follows existing Inspector pattern; effect allowed/first/retained guards unchanged. Picker additionally binds opening draft generation with refresh/reopen feedback so obsolete rows do not silently append after draft edits. Current batch only actual picker click, generation/dialog case and existing owner/root saved-run anchor. Unrelated ZIP-test whitespace wrap introduced by generic format patch is being restored exactly; no production ZIP change or extra tests required for token-equivalent line restoration.
+### M5-B result
+
+Folder owner exposes noncreating normalized-store snapshot lookup, maximum4096 records/1MiB retained text checked before clones; transaction->entry lock captures version, typed fallback admission precedes transaction and rechecks live owner, preserving last-good data/Missing-Empty behavior. Snapshot carries source key; selected index/full record/version/store are revalidated. No new watcher/plugin or per-frame disk load.
+
+Explorer dialog has searchable label/alias/path picker with bounded virtualized/truncated rows, full-path hover and explicit refresh/cancel/no-match/error. Accepted selection is picker/editor/draft-generation/current-host-pass qualified, parses FolderPath and appends copied path with fresh row ID through normal draft mutation; cap32/order/manual/save/frozenrun/schema unchanged. Later bookmark edits/deletion do not rewrite inserted values. Open/search/cancel remain non-dirty; stale source or draft requires refresh. Narrow replay registration opt-in keeps targets live, all effects remain first/retained-owner guarded.
+
+Actual common prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E`.
+
+- Initial71cc9550 (reported run prefix)3/4 selector: `test(saved_folder_picker_bounds_and_revalidates_live_and_fallback_records) | test(saved_folder_picker_search_copy_staleness_and_limit) | test(explorer_tabs_saved_folder_picker_accepts_actual_clicks) | test(explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts)`.
+- Affected842464cb2/3 used first three selectors above; owner bounded/source-path case passed and unchanged afterward.
+- Diagnostic8336dff20/1 used `test(explorer_tabs_saved_folder_picker_accepts_actual_clicks)` (0.2point clip edge).
+- Affectedc994db861/2 selector: `test(saved_folder_picker_search_copy_staleness_and_limit) | test(explorer_tabs_saved_folder_picker_accepts_actual_clicks)`; only discard/retry failed.
+- Final8e3f8dc1-d4a1-426e-bbdc-52a6df7029453/3 selector: `test(saved_folder_picker_search_copy_staleness_and_limit) | test(explorer_tabs_saved_folder_picker_accepts_actual_clicks) | test(explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts)`.
+
+All scoped cases have passing evidence. Actual egui click fixture uses existing app helper disabling Paste Sequence shortcuts before construction, scrolls/requires full reachable control and verifies discarded release inert/fresh retry inserts. Owner/path/key/size/live/fallback/lastgood, alias/path search/duplicates, stale record/editor/generation, path-copy independence, cap and retained saved-run covered. These are simulated GUI, native picker M8 pending; positive Windows11 tabs remain unavailable/LIMITED. Parent inspected owner lock/order/key/bounds, accepted flow/registry-only accessor, row work and final diff. Unrelated ZIP whitespace wrap restored exactly, render diff only new picker test. Source frozen, no Cargo/writer; git diff --check clean.
