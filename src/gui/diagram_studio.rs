@@ -1172,6 +1172,13 @@ struct PendingViewerEffects {
     native_close_requested: bool,
     canvas_focus_requested: Option<egui::Id>,
     focus_viewer: bool,
+    preview_drag: Option<ViewerPreviewDrag>,
+}
+
+#[derive(Clone, Copy)]
+struct ViewerPreviewDrag {
+    started: bool,
+    delta: egui::Vec2,
 }
 
 pub(crate) struct DiagramStudioDialog {
@@ -1338,6 +1345,8 @@ pub(crate) struct DiagramStudioDialog {
     test_action_enabled: Vec<(String, bool)>,
     #[cfg(test)]
     test_visual_scroll_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_body_scroll_id: Option<egui::Id>,
     #[cfg(test)]
     test_generic_preview_drawn: bool,
     #[cfg(test)]
@@ -1549,6 +1558,8 @@ impl DiagramStudioDialog {
             test_action_enabled: Vec::new(),
             #[cfg(test)]
             test_visual_scroll_rect: None,
+            #[cfg(test)]
+            test_body_scroll_id: None,
             #[cfg(test)]
             test_generic_preview_drawn: false,
             #[cfg(test)]
@@ -2385,6 +2396,7 @@ impl DiagramStudioDialog {
         let mut close_requested = false;
         let mut focus_requested = false;
         let mut canvas_focus_requested = None;
+        let mut preview_drag = None;
         let mut body_rendered = false;
         #[cfg(test)]
         {
@@ -2453,7 +2465,7 @@ impl DiagramStudioDialog {
                     self.record_host_action("viewer_presentation", ui, &control);
                     change_host = control.clicked();
                     close_requested |=
-                        self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested);
+                        self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested, &mut preview_drag);
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -2464,7 +2476,7 @@ impl DiagramStudioDialog {
                 self.record_host_action("viewer_presentation", child, &control);
                 change_host = control.clicked();
                 close_requested |=
-                    self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested);
+                    self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested, &mut preview_drag);
                 if focus_requested && canvas_focus_requested.is_none() {
                     canvas_focus_requested = Some(control.id);
                 }
@@ -2547,6 +2559,7 @@ impl DiagramStudioDialog {
                         .then_some(canvas_focus_requested)
                         .flatten(),
                     focus_viewer: focus_requested && callback_pass_accepted,
+                    preview_drag: callback_pass_accepted.then_some(preview_drag).flatten(),
                 });
         }
     }
@@ -2570,6 +2583,7 @@ impl DiagramStudioDialog {
         ui: &mut egui::Ui,
         actions_allowed: bool,
         canvas_focus_requested: &mut Option<egui::Id>,
+        preview_drag: &mut Option<ViewerPreviewDrag>,
     ) -> bool {
         if let Some(label) = self.documents.visual_label().map(str::to_owned) {
             let presentation = self.visual_projection();
@@ -2587,6 +2601,7 @@ impl DiagramStudioDialog {
                 &label,
                 projection,
                 canvas_focus_requested,
+                preview_drag,
             );
         }
         self.ensure_generic_texture(ui.ctx());
@@ -2745,9 +2760,10 @@ impl DiagramStudioDialog {
                     )
                 })
                 .inner;
+            *preview_drag = viewer_preview_drag(&_rect, actions_allowed);
             #[cfg(test)]
             {
-                *test_viewer_canvas_rect = Some(_rect);
+                *test_viewer_canvas_rect = Some(_rect.rect);
                 *test_viewer_generic_preview_drawn = viewer_generic_preview_drawn;
             }
         } else {
@@ -2775,9 +2791,10 @@ impl DiagramStudioDialog {
                 })
                 .inner;
             *canvas_focus_requested = unused_focus.or(*canvas_focus_requested);
+            *preview_drag = viewer_preview_drag(&_rect, actions_allowed);
             #[cfg(test)]
             {
-                *test_viewer_canvas_rect = Some(_rect);
+                *test_viewer_canvas_rect = Some(_rect.rect);
             }
         }
         close_requested
@@ -2790,6 +2807,7 @@ impl DiagramStudioDialog {
         label: &str,
         projection: Option<Result<Arc<VisualSceneProjection>, VisualProjectionError>>,
         canvas_focus_requested: &mut Option<egui::Id>,
+        preview_drag: &mut Option<ViewerPreviewDrag>,
     ) -> bool {
         let mut camera = self.viewer_camera;
         let mut close_requested = false;
@@ -2902,6 +2920,11 @@ impl DiagramStudioDialog {
         if let Some(rect) = minimap_rect {
             self.test_action_rects
                 .push(("visual_viewer_minimap".into(), rect, ui.clip_rect()));
+        }
+        let origin_in_minimap = ui.input(|input| input.pointer.press_origin())
+            .is_some_and(|origin| minimap_rect.is_some_and(|rect| rect.contains(origin)));
+        if !origin_in_minimap {
+            *preview_drag = viewer_preview_drag(&canvas_response, actions_allowed);
         }
         let before_minimap = camera;
         let minimap_interacting = handle_visual_minimap_drag(
@@ -3556,6 +3579,21 @@ impl DiagramStudioDialog {
                             Some(egui::Vec2::from(MIN_VIEWER_VIEWPORT_SIZE)),
                             None,
                         );
+                    }
+                }
+                if !viewer_effects.close_requested && !viewer_effects.change_host
+                    && let Some(drag) = viewer_effects.preview_drag
+                {
+                    if viewer_effects.callback_viewport_id == viewer_viewport_id() {
+                        if drag.started {
+                            ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::StartDrag);
+                        }
+                    } else if let Some(layer) = viewer_effects.embedded_root_layer
+                        && let Some(mut area) = egui::AreaState::load(ctx, layer.id)
+                    {
+                        area.set_left_top_pos(area.left_top_pos() + drag.delta);
+                        area.store(ctx, layer);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                 }
                 self.viewer_bootstrap_pending = false;
@@ -6982,6 +7020,51 @@ impl DiagramStudioDialog {
         self.property_draft = None;
     }
 
+    fn draw_pending_decision(
+        &mut self,
+        ui: &mut egui::Ui,
+        actions_allowed: bool,
+        closing_requested: bool,
+        document_intent: &mut Option<DocumentIntent>,
+    ) {
+        let Some(transition) = self.documents.pending_transition() else { return; };
+        let description = match transition {
+            PendingDiagramTransition::New => "starting a new Mermaid document".to_owned(),
+            PendingDiagramTransition::NewVisual => "starting a new visual document".to_owned(),
+            PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
+            PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
+            PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
+            PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
+            PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
+            PendingDiagramTransition::Close => "closing this diagram".to_owned(),
+        };
+        let menu_open = self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            && egui::Popup::is_any_open(ui.ctx());
+        let enabled = actions_allowed && !closing_requested && !menu_open;
+        ui.group(|ui| {
+            ui.label(format!("Save changes before {description}?"));
+            ui.horizontal_wrapped(|ui| {
+                for (_name, label, decision) in [
+                    ("decision_save", "Save", TransitionDecision::Save),
+                    ("decision_discard", "Discard", TransitionDecision::Discard),
+                    ("decision_cancel", "Cancel", TransitionDecision::Cancel),
+                ] {
+                    let response = ui.add_enabled(enabled, egui::Button::new(label));
+                    #[cfg(test)]
+                    {
+                        self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
+                        if _name == "decision_discard" {
+                            self.test_discard_button_id = Some(response.id);
+                        }
+                    }
+                    if response.clicked() && document_intent.is_none() {
+                        *document_intent = Some(DocumentIntent::ResolvePending(decision));
+                    }
+                }
+            });
+        });
+    }
+
     fn draw_body(
         &mut self,
         ui: &mut egui::Ui,
@@ -6994,6 +7077,7 @@ impl DiagramStudioDialog {
         source_focus_requested: &mut Option<egui::Id>,
         source_focus_allowed: bool,
     ) -> DrawBodyEffects {
+        self.draw_pending_decision(ui, actions_allowed, closing_requested, document_intent);
         if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual) {
             return self.draw_visual_body(
                 ui,
@@ -7058,6 +7142,8 @@ impl DiagramStudioDialog {
             drawio_work,
             drawio_review,
             #[cfg(test)]
+            test_body_scroll_id,
+            #[cfg(test)]
             test_source_editor_id,
             #[cfg(test)]
             test_source_editor_rect,
@@ -7081,8 +7167,6 @@ impl DiagramStudioDialog {
             test_native_inspector_visible,
             #[cfg(test)]
             test_action_focus_ids,
-            #[cfg(test)]
-            test_discard_button_id,
             ..
         } = self;
         let session = documents
@@ -7139,7 +7223,7 @@ impl DiagramStudioDialog {
             *pending = Some(action);
         }
 
-        egui::ScrollArea::vertical()
+        let _body_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-body-scroll")
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -7584,7 +7668,6 @@ impl DiagramStudioDialog {
                 let source_edit_allowed =
                     actions_allowed && pending_transition.is_none() && !menu_open;
                 let visual_mutations_allowed = editing_allowed && native_editable;
-                let decision_actions_allowed = actions_allowed && !closing_requested && !menu_open;
 
                 ui.horizontal_wrapped(|ui| {
                     let add_node = ui.add_enabled(
@@ -7726,60 +7809,6 @@ impl DiagramStudioDialog {
                     closing_requested, focused_at_start,
                 );
                 draw_effects.active_menu_scope = active_menu_scope;
-
-                if let Some(transition) = pending_transition.as_ref() {
-                    ui.group(|ui| {
-                        let description = match transition {
-                            PendingDiagramTransition::New => {
-                                "starting a new Mermaid document".to_owned()
-                            }
-                            PendingDiagramTransition::NewVisual => {
-                                "starting a new visual document".to_owned()
-                            }
-                            PendingDiagramTransition::Open(path) => {
-                                format!("opening {}", path.display())
-                            }
-                            PendingDiagramTransition::ImportMermaid(file) => {
-                                format!("importing {}", file.path().display())
-                            }
-                            PendingDiagramTransition::CopySource(_) => {
-                                "copying Mermaid source from Markdown".to_owned()
-                            }
-                            PendingDiagramTransition::ApplyTemplate(template) => {
-                                format!("using the {} template", template.name())
-                            }
-                            PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
-                            PendingDiagramTransition::Close => "closing this diagram".to_owned(),
-                        };
-                        ui.label(format!("Save changes before {description}?"));
-                        ui.horizontal_wrapped(|ui| {
-                            for (_name, label, decision) in [
-                                ("decision_save", "Save", TransitionDecision::Save),
-                                ("decision_discard", "Discard", TransitionDecision::Discard),
-                                ("decision_cancel", "Cancel", TransitionDecision::Cancel),
-                            ] {
-                                let response = ui.add_enabled(
-                                    decision_actions_allowed,
-                                    egui::Button::new(label),
-                                );
-                                #[cfg(test)]
-                                test_action_rects.push((
-                                    _name.into(),
-                                    response.rect,
-                                    ui.clip_rect(),
-                                ));
-                                #[cfg(test)]
-                                if _name == "decision_discard" {
-                                    *test_discard_button_id = Some(response.id);
-                                }
-                                if response.clicked() && document_intent.is_none() {
-                                    *document_intent =
-                                        Some(DocumentIntent::ResolvePending(decision));
-                                }
-                            }
-                        });
-                    });
-                }
 
                 if generic_family.is_some() {
                     #[cfg(test)]
@@ -8062,6 +8091,8 @@ impl DiagramStudioDialog {
                     }
                 }
             });
+        #[cfg(test)]
+        { *test_body_scroll_id = Some(_body_scroll.id); }
         draw_effects
     }
 
@@ -10444,38 +10475,12 @@ impl DiagramStudioDialog {
                     }
                 }
 
-                if let Some(transition) = pending_transition.as_ref() {
-                    let description = match transition {
-                        PendingDiagramTransition::New => "starting a new Mermaid document".to_owned(),
-                        PendingDiagramTransition::NewVisual => "starting a new visual document".to_owned(),
-                        PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
-                        PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
-                        PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
-                        PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
-                        PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
-                        PendingDiagramTransition::Close => "closing this document".to_owned(),
-                    };
-                    ui.group(|ui| {
-                        ui.label(format!("Save changes before {description}?"));
-                        ui.horizontal_wrapped(|ui| {
-                            for (_name, label, decision) in [
-                                ("decision_save", "Save", TransitionDecision::Save),
-                                ("decision_discard", "Discard", TransitionDecision::Discard),
-                                ("decision_cancel", "Cancel", TransitionDecision::Cancel),
-                            ] {
-                                let response = ui.add_enabled(actions_allowed && !closing_requested, egui::Button::new(label));
-                                #[cfg(test)]
-                                self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
-                                if response.clicked() && document_intent.is_none() {
-                                    *document_intent = Some(DocumentIntent::ResolvePending(decision));
-                                }
-                            }
-                        });
-                    });
-                }
             });
         #[cfg(test)]
-        { self.test_visual_scroll_rect = Some(_visual_scroll.inner_rect); }
+        {
+            self.test_visual_scroll_rect = Some(_visual_scroll.inner_rect);
+            self.test_body_scroll_id = Some(_visual_scroll.id);
+        }
         if selected_object != selection_state.primary {
             selection_state.objects.clear();
             if let Some(id) = selected_object {
@@ -12367,7 +12372,7 @@ fn preview_workspace(
         );
         #[cfg(test)]
         {
-            *test_canvas_rect = Some(_rect);
+            *test_canvas_rect = Some(_rect.rect);
         }
     } else {
         #[cfg(test)]
@@ -12400,6 +12405,13 @@ fn preview_workspace(
     }
 }
 
+fn viewer_preview_drag(response: &egui::Response, actions_allowed: bool) -> Option<ViewerPreviewDrag> {
+    (actions_allowed && response.dragged_by(egui::PointerButton::Primary)).then(|| ViewerPreviewDrag {
+        started: response.drag_started_by(egui::PointerButton::Primary),
+        delta: response.drag_delta(),
+    })
+}
+
 fn draw_generic_canvas(
     ui: &mut egui::Ui,
     texture: Option<&GenericPreviewTexture>,
@@ -12411,7 +12423,7 @@ fn draw_generic_canvas(
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
     #[cfg(test)] test_generic_preview_drawn: &mut bool,
     #[cfg(test)] test_generic_canvas_placeholder: &mut Option<String>,
-) -> egui::Rect {
+) -> egui::Response {
     let width = ui.available_width().max(CANVAS_MIN_WIDTH);
     let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
     let (canvas_response, painter) =
@@ -12479,7 +12491,7 @@ fn draw_generic_canvas(
             *test_generic_canvas_placeholder = Some(empty_message.to_owned());
         }
     }
-    canvas_rect
+    canvas_response
 }
 
 fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut Camera) -> bool {
@@ -12590,7 +12602,7 @@ fn visual_workspace(
             .inner;
         #[cfg(test)]
         {
-            *test_canvas_rect = Some(_canvas_rect);
+            *test_canvas_rect = Some(_canvas_rect.rect);
         }
     } else {
         let available_width = ui.available_width();
@@ -12686,7 +12698,7 @@ fn visual_workspace(
                 .inner;
             #[cfg(test)]
             {
-                *test_canvas_rect = Some(_canvas_rect);
+                *test_canvas_rect = Some(_canvas_rect.rect);
             }
         });
     }
@@ -13144,7 +13156,7 @@ fn draw_canvas(
     message: &mut Option<StudioNotice>,
     canvas_focus_requested: &mut Option<egui::Id>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
-) -> egui::Rect {
+) -> egui::Response {
     let edit_actions_allowed = actions_allowed && interaction == CanvasInteraction::Editor;
     let width = ui.available_width().max(CANVAS_MIN_WIDTH);
     let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
@@ -13481,7 +13493,7 @@ fn draw_canvas(
         viewer_canvas_shortcuts(ui, canvas_id, camera);
     }
     let _ = graph_is_current;
-    canvas_rect
+    canvas_response
 }
 
 fn fit_camera(camera: &mut Camera, bounds: SceneRect, canvas_rect: egui::Rect) {
@@ -18254,6 +18266,55 @@ mod tests {
     }
 
     #[test]
+    fn diagram_studio_pending_decision_stays_above_scrolled_body() {
+        for visual in [false, true] {
+            for docked in [false, true] {
+                let mut dialog = if visual { initialized_visual_dialog() } else { initialized_dialog() };
+                if visual { dialog.documents.replace_visual_label("Changed").unwrap(); }
+                else { dialog.test_replace_source("flowchart TD\n  A-->B"); }
+                if docked { dialog.owner_host.transition(UtilityPresentation::Docked); }
+                let ctx = egui::Context::default();
+                for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                    ctx.style_mut_of(theme, |style| {
+                        for font in style.text_styles.values_mut() { font.size *= 1.25; }
+                    });
+                }
+                super::super::render::with_immediate_viewport_test_size(viewport_id(), egui::vec2(720.0, 520.0), || {
+                    for _ in 0..4 { frame(&mut dialog, &ctx); }
+                    let body_before = dialog.test_action_rect("open_viewer").unwrap().0;
+                    let id = dialog.test_body_scroll_id.unwrap();
+                    let mut scroll = egui::scroll_area::State::load(&ctx, id).unwrap();
+                    scroll.offset.y = 10_000.0;
+                    scroll.store(&ctx, id);
+                    frame(&mut dialog, &ctx);
+                    let body_scrolled = dialog.test_action_rect("open_viewer").unwrap().0;
+                    assert!(body_scrolled.top() < body_before.top(), "visual={visual} docked={docked}");
+                    dialog.request_close();
+                    for _ in 0..3 { frame(&mut dialog, &ctx); }
+                    assert!(dialog.documents.pending_transition().is_some());
+                    let presentation = dialog.test_action_rect("owner_presentation").unwrap().0;
+                    for name in ["decision_save", "decision_discard", "decision_cancel"] {
+                        let matches = dialog.test_action_rects.iter().filter(|(action, _, _)| action == name).collect::<Vec<_>>();
+                        assert_eq!(matches.len(), 1, "{name}, visual={visual} docked={docked}");
+                        let (_, rect, clip) = matches[0];
+                        assert!(clip.contains_rect(*rect), "{name} is clipped: {rect:?} {clip:?}");
+                        assert!(rect.top() >= presentation.bottom());
+                        assert!(rect.bottom() <= dialog.test_action_rect("open_viewer").unwrap().1.top());
+                    }
+                    if docked {
+                        let click = action_center(&dialog, "decision_cancel");
+                        assert_eq!(ctx.layer_id_at(click), dialog.owner_layer_if_root());
+                        click_root_position(&mut dialog, &ctx, click);
+                    } else { click_action(&mut dialog, &ctx, "decision_cancel"); }
+                    assert!(dialog.open);
+                    assert!(dialog.documents.pending_transition().is_none());
+                    assert!(dialog.documents.is_dirty());
+                });
+            }
+        }
+    }
+
+    #[test]
     fn diagram_studio_close_decision_orders_edits_and_explicit_reopen_starts_blank() {
         let directory = tempfile::tempdir().expect("temporary native document directory");
         let mut dialog = initialized_dialog();
@@ -19985,7 +20046,6 @@ mod tests {
             "accepted visual template action failed: {:?}",
             dialog.message
         );
-        reveal_visual_action(&mut dialog, &ctx, "decision_cancel");
         click_action(&mut dialog, &ctx, "decision_cancel");
         assert_eq!(dialog.documents.visual_label(), Some("Current visual"));
         assert_eq!(dialog.render_document, original_document);
@@ -20000,7 +20060,6 @@ mod tests {
                 crate::diagram::VisualAuthoringTemplate::DecisionTree
             ))
         );
-        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
         click_action(&mut dialog, &ctx, "decision_discard");
         assert_eq!(
             dialog.documents.visual_label(),
@@ -20109,7 +20168,6 @@ mod tests {
                 crate::diagram::VisualAuthoringTemplate::Architecture
             ))
         ));
-        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
         click_action_with_child_discard(&mut dialog, &ctx, "decision_discard");
         assert_eq!(dialog.documents.pending_transition(), pending.as_ref());
         assert_eq!(dialog.documents.visual_scene(), Some(&original_scene));
@@ -20442,6 +20500,134 @@ mod tests {
         assert_eq!(dialog.test_session().redo_depth(), redo_depth);
         assert_eq!(dialog.selection, selection);
         assert_eq!(dialog.test_scene_build_count, scene_builds);
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_moves_native_viewer_across_modes() {
+        for mode in 0..4 {
+            let mut dialog = match mode {
+                0 => initialized_dialog(),
+                1 => generic_dialog("mindmap\n  root((Preview))"),
+                2 => initialized_visual_dialog(),
+                _ => generic_dialog("mindmap\n invalid ["),
+            };
+            let ctx = egui::Context::default();
+            for _ in 0..3 { frame(&mut dialog, &ctx); }
+            open_viewer(&mut dialog, &ctx);
+            for _ in 0..2 { frame(&mut dialog, &ctx); }
+            let camera = dialog.viewer_camera;
+            let revision = dialog.documents.visual_revision().or_else(|| dialog.documents.session().map(|s| s.revision()));
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(50.0, 50.0);
+            let end = start + egui::vec2(40.0, 25.0);
+            frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }]);
+            frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+            let viewer = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+            assert!(viewer.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)), "mode {mode}");
+            let root = frame_with_viewport_commands_for(&mut dialog, &ctx, egui::ViewportId::ROOT);
+            assert!(!root.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+            assert_eq!(dialog.viewer_camera.center, camera.center);
+            assert_eq!(dialog.viewer_camera.zoom, camera.zoom);
+            assert_eq!(dialog.documents.visual_revision().or_else(|| dialog.documents.session().map(|s| s.revision())), revision);
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_moves_root_hosted_window() {
+        for embedded in [false, true] {
+            let mut dialog = initialized_dialog();
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(true);
+            if !embedded { dialog.viewer_host.transition(UtilityPresentation::Docked); }
+            dialog.viewer_open = true;
+            for _ in 0..4 { embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true); }
+            let layer = dialog.viewer_embedded_root_layer.unwrap();
+            let before = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(40.0, 40.0);
+            let end = start + egui::vec2(35.0, 25.0);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }], true);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)], true);
+            let after = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            assert_ne!(before, after, "embedded={embedded}");
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, TEST_VIEWPORT_SIZE)),
+                focused: true, ..Default::default()
+            }, |ui| dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, true));
+            let root_commands = output.viewport_output.get(&egui::ViewportId::ROOT)
+                .map(|viewport| viewport.commands.as_slice()).unwrap_or_default();
+            assert!(!root_commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)), "embedded={embedded}");
+            output.drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(&ctx);
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_rejects_stale_discarded_and_transition_effects() {
+        for rejection in 0..4 {
+            let mut dialog = initialized_dialog();
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(true);
+            dialog.viewer_open = true;
+            for _ in 0..4 { embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true); }
+            let layer = dialog.viewer_embedded_root_layer.unwrap();
+            let before = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(40.0, 40.0);
+            let end = start + egui::vec2(35.0, 25.0);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }], true);
+            if rejection == 0 { dialog.test_request_viewer_child_discard(); }
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, TEST_VIEWPORT_SIZE)),
+                focused: true, events: vec![egui::Event::PointerMoved(end)], ..Default::default()
+            }, |ui| dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, true));
+            output.drop_without_applying_deltas();
+            if rejection != 0 {
+                let effect = dialog.pending_viewer_effects.as_mut().unwrap();
+                assert!(effect.preview_drag.is_some());
+                match rejection {
+                    1 => effect.viewer_generation = effect.viewer_generation.wrapping_add(1),
+                    2 => effect.change_host = true,
+                    _ => effect.close_requested = true,
+                }
+            }
+            dialog.on_ui_frame_complete(&ctx);
+            let after = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            assert_eq!(before, after, "rejection {rejection}");
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_excludes_minimap_and_middle_pan() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 { frame(&mut dialog, &ctx); }
+        open_viewer(&mut dialog, &ctx);
+        let minimap = dialog.test_action_rect("visual_viewer_minimap").unwrap().0;
+        let start = minimap.center();
+        let end = start + egui::vec2(20.0, 10.0);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+            pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let commands = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+        assert!(!commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerButton {
+            pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
+        }]);
+        let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(50.0, 50.0);
+        let end = start + egui::vec2(30.0, 20.0);
+        let camera = dialog.viewer_camera;
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+            pos: start, button: egui::PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let commands = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+        assert!(!commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+        assert_ne!(dialog.viewer_camera.center, camera.center);
     }
 
     #[test]

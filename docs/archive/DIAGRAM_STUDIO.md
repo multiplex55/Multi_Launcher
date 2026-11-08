@@ -131,7 +131,9 @@ source-rendered families are not eligible for this conversion.
 
 Ctrl+N creates a document, Ctrl+O opens one, Ctrl+S saves, and Ctrl+Shift+S
 opens Save As. New, Open, and Close ask whether to Save, Discard, or Cancel when
-the document has unsaved changes. The same decision remains available when
+the document has unsaved changes. The decision panel stays below Dock/Pop Out,
+above the scrolling content, for Mermaid and Visual documents. The same decision
+remains available when
 closing with the window button, Escape, Ctrl+W, the launcher close command, or
 unpinning the panel. A cancelled file chooser or failed save leaves the current
 document and pending decision available. After an accepted Close, reopening
@@ -152,7 +154,9 @@ window, or **Focus viewer** to bring its existing window forward. It follows the
 current document, showing the shared Visual Canvas scene, native Mermaid graph,
 or current and stale source-rendered preview. The viewer has its own camera:
 wheel, middle-button drag, Ctrl+Arrow, and Ctrl+=/Ctrl+- affect only that view
-while it has focus.
+while it has focus. Drag the preview with the primary mouse button to move the
+viewer window. Middle-button dragging still pans; toolbar and minimap controls
+keep their existing actions.
 Open and **Fit** make the visual viewer follow its available size; a manual
 pan, zoom, or minimap move keeps that camera until Fit is chosen again. Drag
 inside the minimap viewport to pan continuously, or click outside it to

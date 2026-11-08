@@ -10118,6 +10118,11 @@ mod tests {
         children: Vec<EnumeratedName>,
     }
 
+    struct FakeHandle(Arc<AtomicUsize>);
+    impl Drop for FakeHandle {
+        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+    }
+
     #[derive(Default)]
     struct FakeBackend {
         objects: Mutex<HashMap<PathBuf, FakeObject>>,
@@ -10128,9 +10133,14 @@ mod tests {
         cloud_before_next_open: Mutex<Option<PathBuf>>,
         resource_limited: AtomicBool,
         child_open_calls: AtomicUsize,
+        live_handles: Arc<AtomicUsize>,
     }
 
     impl FakeBackend {
+        fn handle(&self) -> FakeHandle {
+            self.live_handles.fetch_add(1, Ordering::AcqRel);
+            FakeHandle(Arc::clone(&self.live_handles))
+        }
         fn identity(id: u64) -> NativeFileIdentity {
             let mut file_id = [0; 16];
             file_id[..8].copy_from_slice(&id.to_le_bytes());
@@ -10299,7 +10309,7 @@ mod tests {
     }
 
     impl RenameScanBackend for FakeBackend {
-        type Handle = PathBuf;
+        type Handle = FakeHandle;
 
         fn admit_root(
             &self,
@@ -10491,7 +10501,7 @@ mod tests {
                 length: object.length,
                 modified: object.modified,
                 cloud_placeholder: object.cloud_placeholder,
-                handle: path,
+                handle: self.handle(),
             })
         }
 
@@ -10553,7 +10563,7 @@ mod tests {
                 lookup_path: child.lookup_path.clone(),
                 canonical_path: child.canonical_path.clone(),
                 identity: object.identity,
-                handle: child.lookup_path.clone(),
+                handle: self.handle(),
             })
         }
 
@@ -10598,7 +10608,7 @@ mod tests {
                     lookup_path: proof.lookup_path.clone(),
                     canonical_path: proof.canonical_path.clone(),
                     identity: object.identity,
-                    handle: proof.lookup_path.clone(),
+                    handle: self.handle(),
                 }));
             }
             if directories.is_empty() {
@@ -10663,6 +10673,100 @@ mod tests {
             max_depth: 64,
             max_path_bytes: usize::MAX,
         }
+    }
+
+    #[test]
+    fn folder_size_scan_capacity_accepts_more_than_old_directory_limit() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        let known = backend.add_file(root, "000-known.bin", 2);
+        backend.change_metadata(&known, 41, std::time::UNIX_EPOCH);
+        for group in 0..22 {
+            let parent = backend.add_directory(root, &format!("group-{group:02}"), 100 + group);
+            for child in 0..100 {
+                backend.add_directory(&parent, &format!("child-{child:03}"), 1000 + group * 100 + child);
+            }
+        }
+        let result = scan_fake_folder_size(&backend, root, 220, crate::folder_size::folder_size_scan_bounds());
+        assert_eq!(result.status(), crate::folder_size::FolderSizeStatus::Complete, "{:?}", result.issues());
+        assert_eq!(result.total_logical_bytes(), 41);
+        assert_eq!(result.summary().directories_admitted(), 2223);
+        assert!(result.entries()[0].is_complete());
+        assert_eq!(backend.live_handles.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn folder_size_scan_capacity_path_headroom_and_small_limits_remain_bounded() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        let known = backend.add_file(root, "000-known.bin", 2);
+        backend.change_metadata(&known, 23, std::time::UNIX_EPOCH);
+        let tail = "x".repeat(210);
+        for group in 0..36 {
+            let parent = backend.add_directory(root, &format!("group-{group:02}"), 100 + group);
+            for child in 0..100 {
+                backend.add_directory(&parent, &format!("{child:03}-{tail}"), 1000 + group * 100 + child);
+            }
+        }
+        let mut old = crate::folder_size::folder_size_scan_bounds();
+        old.max_path_bytes = 3 * 1024 * 1024;
+        let old_result = scan_fake_folder_size(&backend, root, 221, old);
+        assert_eq!(old_result.status(), crate::folder_size::FolderSizeStatus::Partial);
+        assert_eq!(old_result.total_logical_bytes(), 23);
+        let result = scan_fake_folder_size(&backend, root, 222, crate::folder_size::folder_size_scan_bounds());
+        assert_eq!(result.status(), crate::folder_size::FolderSizeStatus::Complete, "{:?}", result.issues());
+        assert_eq!(result.total_logical_bytes(), 23);
+        assert_eq!(backend.live_handles.load(Ordering::Acquire), 0);
+
+        let limited = FakeBackend::new_root(root);
+        let known = limited.add_file(root, "000-known.bin", 2);
+        limited.change_metadata(&known, 23, std::time::UNIX_EPOCH);
+        let branch = limited.add_directory(root, "branch", 3);
+        for index in 0..20 { limited.add_file(&branch, &format!("{index:02}-{}", "y".repeat(180)), 10 + index); }
+        let mut path_bounds = crate::folder_size::folder_size_scan_bounds();
+        path_bounds.max_path_bytes = path_storage_bytes(root) * 12 + 2048;
+        let path_result = scan_fake_folder_size(&limited, root, 223, path_bounds);
+        assert_eq!(path_result.status(), crate::folder_size::FolderSizeStatus::Partial);
+        assert_eq!(path_result.total_logical_bytes(), 23);
+        assert!(!path_result.entries()[0].is_complete());
+        assert_eq!(limited.live_handles.load(Ordering::Acquire), 0);
+
+        let directory_backend = FakeBackend::new_root(root);
+        let known = directory_backend.add_file(root, "000-known.bin", 2);
+        directory_backend.change_metadata(&known, 23, std::time::UNIX_EPOCH);
+        for i in 0..4 { directory_backend.add_directory(root, &format!("dir-{i}"), 20 + i); }
+        let directory_result = scan_fake_folder_size(&directory_backend, root, 224, folder_size_test_bounds(50, 50, 3));
+        assert_eq!(directory_result.status(), crate::folder_size::FolderSizeStatus::Partial);
+        assert_eq!(directory_result.total_logical_bytes(), 23);
+        assert_eq!(directory_result.summary().directories_admitted(), 3);
+        assert_eq!(directory_backend.live_handles.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn folder_size_scan_capacity_cancellation_releases_open_handles() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        for group in 0..30 {
+            let parent = backend.add_directory(root, &format!("group-{group:02}"), 100 + group);
+            backend.add_file(&parent, "value.bin", 1000 + group);
+        }
+        let cancellation = ScanCancellation::new();
+        let mut ignore = |_| {};
+        let mut accumulator = crate::folder_size::FolderSizeAccumulator::new(root.to_path_buf(), 225, &mut ignore);
+        let mut progress = |summary: &RenameScanSummary| {
+            if summary.files_seen() >= 3 { cancellation.cancel(); }
+        };
+        let scanned = scan_with_backend_bounded_progress_and_observer(
+            &backend, request(root, true, 225), &cancellation,
+            ScanBounds::metadata(crate::folder_size::folder_size_scan_bounds()), &mut progress, Some(&mut accumulator),
+        );
+        let result = accumulator.finish(scanned.status(), scanned.summary());
+        assert_eq!(result.status(), crate::folder_size::FolderSizeStatus::Cancelled);
+        assert!(result.total_logical_bytes() >= 3);
+        assert_eq!(backend.live_handles.load(Ordering::Acquire), 0);
     }
 
     #[test]

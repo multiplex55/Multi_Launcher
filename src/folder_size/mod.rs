@@ -4,6 +4,8 @@ mod session;
 
 #[cfg(test)]
 pub(crate) use model::FolderSizeAccumulator;
+#[cfg(test)]
+pub(crate) use scan::folder_size_scan_bounds;
 
 #[cfg(test)]
 pub(crate) fn disposable_scan_fixture_root() -> tempfile::TempDir {

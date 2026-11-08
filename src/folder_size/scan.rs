@@ -10,7 +10,17 @@ use super::model::{
     MAX_FOLDER_SIZE_DIRECTORIES, MAX_FOLDER_SIZE_ENTRIES, MAX_FOLDER_SIZE_PATH_BYTES,
 };
 
-const SCAN_PATH_BUDGET_BYTES: usize = MAX_FOLDER_SIZE_PATH_BYTES * 3 / 32;
+const SCAN_PATH_BUDGET_BYTES: usize = MAX_FOLDER_SIZE_PATH_BYTES / 2;
+
+pub(crate) fn folder_size_scan_bounds() -> crate::file_operations::MetadataScanBounds {
+    crate::file_operations::MetadataScanBounds {
+        max_entries: MAX_FOLDER_SIZE_ENTRIES,
+        max_files: MAX_FOLDER_SIZE_ENTRIES,
+        max_directories: MAX_FOLDER_SIZE_DIRECTORIES,
+        max_depth: MAX_FOLDER_SIZE_DEPTH,
+        max_path_bytes: SCAN_PATH_BUDGET_BYTES,
+    }
+}
 
 pub(crate) fn scan_folder_size(
     root: ExplicitDirectoryRoot,
@@ -25,13 +35,7 @@ pub(crate) fn scan_folder_size(
         generation,
         cancellation,
         progress,
-        crate::file_operations::MetadataScanBounds {
-            max_entries: MAX_FOLDER_SIZE_ENTRIES,
-            max_files: MAX_FOLDER_SIZE_ENTRIES,
-            max_directories: MAX_FOLDER_SIZE_DIRECTORIES,
-            max_depth: MAX_FOLDER_SIZE_DEPTH,
-            max_path_bytes: SCAN_PATH_BUDGET_BYTES,
-        },
+        folder_size_scan_bounds(),
     )
 }
 

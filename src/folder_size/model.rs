@@ -10,16 +10,17 @@ use crate::file_operations::{
 };
 
 pub const MAX_FOLDER_SIZE_ENTRIES: usize = 100_000;
-pub const MAX_FOLDER_SIZE_DIRECTORIES: usize = 2_048;
+pub const MAX_FOLDER_SIZE_DIRECTORIES: usize = 16_384;
 pub const MAX_FOLDER_SIZE_DEPTH: usize = 64;
 pub const MAX_FOLDER_SIZE_ISSUE_EXAMPLES: usize = 64;
-pub const MAX_FOLDER_SIZE_PATH_BYTES: usize = 32 * 1024 * 1024;
-// The 32 MiB aggregate path budget is partitioned as follows: 3 MiB for live
-// scanner paths, up to 4 MiB for its 64 path-bearing issue samples (each path
-// is bounded by the Windows path limit), 8 MiB each for the final tree and
-// cumulative progress row chunks, 4 MiB for accumulator issue paths, and
-// 4 MiB for the final issue list. The remaining 1 MiB covers root-path copies
-// and bounded path bookkeeping.
+pub const MAX_FOLDER_SIZE_PATH_BYTES: usize = 64 * 1024 * 1024;
+// Scan path accounting allocates 32 MiB to discovery (including queued/active
+// frames, admission chains, names and conservatively cumulative handle paths),
+// 8 MiB each to final rows and cumulative immutable progress chunks, and 4 MiB
+// each to scanner, accumulator and converted-result issue paths. The remaining
+// 4 MiB covers root copies and bookkeeping. This is not a process RSS or GUI
+// allocation bound. Up to the directory limit may have queued shared handle
+// chains; those handles retire with their frames/chains, including on cancellation.
 pub(crate) const MAX_FOLDER_SIZE_RESULT_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FOLDER_SIZE_ISSUE_PATH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FOLDER_SIZE_ISSUE_MESSAGE_BYTES: usize = 1024;

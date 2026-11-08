@@ -12,7 +12,7 @@ use std::sync::Arc;
 const WINDOW_TITLE: &str = "Folder Size";
 const UTILITY_KEY: &str = "folder-size";
 const ROW_HEIGHT: f32 = 26.0;
-const MAX_VISIBLE_ISSUES: usize = 8;
+const ROW_TYPE_WIDTH: f32 = 64.0;
 const ROW_SIZE_WIDTH: f32 = 86.0;
 const ROW_SHARE_WIDTH: f32 = 64.0;
 const ROW_STATUS_WIDTH: f32 = 166.0;
@@ -22,8 +22,36 @@ const ROW_COLUMN_GAP: f32 = 10.0;
 pub(crate) enum FolderSizeDialogEffect {
     CopyPath(String),
     OpenPath(PathBuf),
+    Reveal(FolderSizeRevealRequest),
     FocusPanel,
     ShowRoot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FolderSizeRevealRequest {
+    key: ProjectionKey,
+    index: usize,
+    directory: Option<(u64, usize)>,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortColumn { Name, Type, Size, Share, Status }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortDirection { Ascending, Descending }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KindFilter { All, Files, Folders }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleKey { projection: ProjectionKey, directory: usize, column: SortColumn, direction: SortDirection, filter: KindFilter }
+struct VisibleRows { key: VisibleKey, indices: Arc<Vec<usize>> }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FolderSizeRevealRoute { OpenRoot, RevealEntry }
+pub(crate) fn reveal_route(path: &Path) -> FolderSizeRevealRoute {
+    if path.parent().is_none_or(|parent| parent.as_os_str().is_empty()) {
+        FolderSizeRevealRoute::OpenRoot
+    } else { FolderSizeRevealRoute::RevealEntry }
 }
 
 #[derive(Clone)]
@@ -187,7 +215,6 @@ impl FolderSizeProjection {
             issues: result
                 .issues()
                 .iter()
-                .take(MAX_VISIBLE_ISSUES)
                 .map(|issue| {
                     (
                         issue.path().map(Path::to_path_buf),
@@ -202,7 +229,7 @@ impl FolderSizeProjection {
     }
 
     fn finish_index(&mut self) {
-        self.children = sorted_child_indices(&self.rows);
+        self.children = child_indices(&self.rows);
     }
 
     fn row(&self, index: usize) -> Option<&FolderSizeRow> {
@@ -214,27 +241,25 @@ impl FolderSizeProjection {
     }
 }
 
-fn sorted_child_indices(rows: &[FolderSizeRow]) -> Vec<Vec<usize>> {
+fn child_indices(rows: &[FolderSizeRow]) -> Vec<Vec<usize>> {
     let mut children = vec![Vec::new(); rows.len()];
-    for (child_index, row) in rows.iter().enumerate() {
-        if let Some(parent_index) = row.parent_index
-            && let Some(parent_children) = children.get_mut(parent_index)
-        {
-            parent_children.push(child_index);
-        }
-    }
-    for child_indices in &mut children {
-        child_indices.sort_by(|left, right| {
-            row_sort_measurement(&rows[*right])
-                .cmp(&row_sort_measurement(&rows[*left]))
-                .then_with(|| rows[*left].sort_key.cmp(&rows[*right].sort_key))
-                .then_with(|| rows[*left].name.cmp(&rows[*right].name))
-                .then_with(|| left.cmp(right))
-        });
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(parent) = row.parent_index.and_then(|p| children.get_mut(p)) { parent.push(index); }
     }
     children
 }
 
+fn kind_rank(kind: FolderSizeEntryKind) -> u8 {
+    match kind { FolderSizeEntryKind::File => 0, FolderSizeEntryKind::Directory => 1, FolderSizeEntryKind::Omitted(_) => 2 }
+}
+fn status_rank(row: &FolderSizeRow) -> (u8, &'static str) {
+    match row.kind {
+        FolderSizeEntryKind::Directory if row.complete => (0, ""),
+        FolderSizeEntryKind::Directory => (1, ""),
+        FolderSizeEntryKind::File => (2, ""),
+        FolderSizeEntryKind::Omitted(reason) => (3, omission_label(reason)),
+    }
+}
 fn row_sort_measurement(row: &FolderSizeRow) -> Option<u64> {
     match row.kind {
         FolderSizeEntryKind::Directory => Some(row.subtree_logical_bytes),
@@ -242,17 +267,26 @@ fn row_sort_measurement(row: &FolderSizeRow) -> Option<u64> {
         FolderSizeEntryKind::Omitted(_) => None,
     }
 }
-
-fn visible_child_indices(
-    children: &[Vec<usize>],
-    current_index: Option<usize>,
-    root_index: Option<usize>,
-) -> &[usize] {
-    current_index
-        .or(root_index)
-        .and_then(|index| children.get(index))
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
+fn compare_rows(rows: &[FolderSizeRow], left: usize, right: usize, column: SortColumn, direction: SortDirection, total: u64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (a, b) = (&rows[left], &rows[right]);
+    let reverse = |value: Ordering| if direction == SortDirection::Descending { value.reverse() } else { value };
+    let primary = match column {
+        SortColumn::Name => reverse(a.sort_key.cmp(&b.sort_key).then_with(|| a.name.cmp(&b.name))),
+        SortColumn::Type => reverse(kind_rank(a.kind).cmp(&kind_rank(b.kind))),
+        SortColumn::Status => reverse(status_rank(a).cmp(&status_rank(b))),
+        SortColumn::Share if total == 0 => Ordering::Equal,
+        SortColumn::Size | SortColumn::Share => match (row_sort_measurement(a), row_sort_measurement(b)) {
+            (Some(a), Some(b)) => reverse(a.cmp(&b)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        },
+    };
+    primary.then_with(|| a.sort_key.cmp(&b.sort_key)).then_with(|| a.name.cmp(&b.name)).then_with(|| left.cmp(&right))
+}
+fn filter_matches(filter: KindFilter, kind: FolderSizeEntryKind) -> bool {
+    match filter { KindFilter::All => true, KindFilter::Files => kind == FolderSizeEntryKind::File, KindFilter::Folders => kind == FolderSizeEntryKind::Directory }
 }
 
 fn projection_contains_row(
@@ -274,7 +308,7 @@ fn row_measurement(row: &FolderSizeRow, total_logical_bytes: u64) -> (Option<u64
 }
 
 fn row_name_width(available_width: f32) -> f32 {
-    let reserved = ROW_SIZE_WIDTH + ROW_SHARE_WIDTH + ROW_STATUS_WIDTH + ROW_COLUMN_GAP * 3.0;
+    let reserved = ROW_TYPE_WIDTH + ROW_SIZE_WIDTH + ROW_SHARE_WIDTH + ROW_STATUS_WIDTH + ROW_COLUMN_GAP * 4.0;
     (available_width - reserved)
         .max(72.0)
         .min((available_width * 0.56).max(0.0))
@@ -340,6 +374,10 @@ enum FolderSizeAction {
     Cancel {
         session_generation: u64,
     },
+    SetSort(SortColumn),
+    SetFilter(KindFilter),
+    RevealRow { generation: u64, index: usize },
+    OpenRowMenu { generation: u64, index: usize, popup: egui::Id },
     Select {
         generation: u64,
         index: usize,
@@ -390,7 +428,12 @@ pub(crate) struct FolderSizeDialogState {
     current_directory: Option<(u64, usize)>,
     current_directory_path: Option<PathBuf>,
     selected_entry: Option<(u64, usize)>,
+    row_menu: Option<(ProjectionKey, usize, egui::Id, super::utility_host::HostIdentity, u64, Option<(u64, usize)>)>,
     projection: Option<Arc<FolderSizeProjection>>,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+    filter: KindFilter,
+    visible_rows: Option<VisibleRows>,
     pending: Option<PendingFolderSizePass>,
     notice: Option<String>,
     #[cfg(test)]
@@ -444,7 +487,12 @@ impl FolderSizeDialogState {
             current_directory: None,
             current_directory_path: None,
             selected_entry: None,
+            row_menu: None,
             projection: None,
+            sort_column: SortColumn::Size,
+            sort_direction: SortDirection::Descending,
+            filter: KindFilter::All,
+            visible_rows: None,
             pending: None,
             notice: None,
             #[cfg(test)]
@@ -530,13 +578,19 @@ impl FolderSizeDialogState {
         #[cfg(test)]
         self.test_action_enabled.clear();
 
-        let commit_allowed =
-            input_allowed && first_ui_pass && !ctx.will_discard() && !egui::Popup::is_any_open(ctx);
+        let pass_allowed = input_allowed && first_ui_pass && !ctx.will_discard();
+        let commit_allowed = pass_allowed && !egui::Popup::is_any_open(ctx);
+        self.sync_visible_rows();
         let mut window_open = self.open;
         let projection = self.projection.clone();
         let selected_root = self.selected_root.clone();
         let scan_root = self.scan_root.clone();
         let selected_entry = self.selected_entry;
+        let visible_indices = self.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices)).unwrap_or_default();
+        let sort_column = self.sort_column;
+        let sort_direction = self.sort_direction;
+        let filter = self.filter;
+        let owned_popup = self.row_menu.map(|(_, _, popup, _, _, _)| popup);
         let current_directory = self.current_directory;
         let current_directory_path = self.current_directory_path.clone();
         let mut recursive = self.recursive;
@@ -628,7 +682,7 @@ impl FolderSizeDialogState {
 
                         let selected_target = selected_entry.filter(|(generation, index)| {
                             projection.as_ref().is_some_and(|projection| {
-                                projection.contains_row(*generation, *index)
+                                projection.contains_row(*generation, *index) && visible_indices.contains(index)
                             })
                         });
                         let can_copy_or_open = selected_target.is_some() || selected_root.is_some();
@@ -645,7 +699,7 @@ impl FolderSizeDialogState {
                             }
                         }
                         if ui
-                            .add_enabled(can_copy_or_open, egui::Button::new("Reveal/Open"))
+                            .add_enabled(can_copy_or_open, egui::Button::new("Open"))
                             .clicked()
                         {
                             if let Some((generation, index)) = selected_target {
@@ -707,7 +761,8 @@ impl FolderSizeDialogState {
 
                     let scan_matches_selection = scan_root.is_some() && scan_root == selected_root;
                     if scan_matches_selection {
-                        show_scan_status(ui, &view, projection.as_deref());
+                        show_scan_status(ui, &view, projection.as_deref(),
+                            #[cfg(test)] &mut self.test_action_rects);
                     }
                     if let Some(projection) = projection.as_deref() {
                         show_folder_rows(
@@ -717,7 +772,13 @@ impl FolderSizeDialogState {
                             current_directory,
                             current_directory_path.as_deref(),
                             selected_entry,
+                            &visible_indices,
+                            sort_column,
+                            sort_direction,
+                            filter,
+                            owned_popup,
                             commit_allowed,
+                            pass_allowed,
                             &mut staged_actions,
                             #[cfg(test)]
                             &mut self.test_action_rects,
@@ -755,9 +816,26 @@ impl FolderSizeDialogState {
                 );
         }
         if !commit_allowed {
-            staged_actions.clear();
+            staged_actions.retain(|action| pass_allowed && matches!(action, FolderSizeAction::RevealRow { .. }));
         }
         (staged_actions, !window_open && commit_allowed)
+    }
+    pub(super) fn owns_row_menu(&self, ctx: &egui::Context) -> bool {
+        self.row_menu.is_some_and(|(key, index, popup, host, epoch, directory)| {
+            self.open && self.host.identity() == host && self.host_epoch == epoch
+                && self.current_directory == directory
+                && self.projection.as_ref().is_some_and(|p| {
+                    p.contains_row(key.generation, index)
+                        && p.row(index).is_some_and(|row| {
+                            row.parent_index == directory.map(|(_, parent)| parent).or(p.root_index)
+                                && filter_matches(self.filter, row.kind)
+                        })
+                })
+                && egui::Popup::is_id_open(ctx, popup)
+        })
+    }
+    pub(super) fn owns_row_menu_layer(&self, ctx: &egui::Context, layer: egui::LayerId) -> bool {
+        self.owns_row_menu(ctx) && self.row_menu.is_some_and(|(_, _, popup, _, _, _)| layer.id == popup)
     }
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
@@ -851,7 +929,7 @@ impl FolderSizeDialogState {
         let mut staged = None;
         if host.host == UtilityPresentation::Docked {
             if root_visible {
-                let allowed = root_owner && !egui::Popup::is_any_open(ctx);
+                let allowed = root_owner && (!egui::Popup::is_any_open(ctx) || self.owns_row_menu(ctx));
                 let shortcut = first
                     && allowed
                     && shortcut_allowed
@@ -893,11 +971,11 @@ impl FolderSizeDialogState {
                         && c.input(|i| i.focused)
                         && c.memory(|m| m.top_modal_layer().is_none())
                         && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
-                        && !egui::Popup::is_any_open(&c)
+                        && (!egui::Popup::is_any_open(&c) || self.owns_row_menu(&c))
                         && super::jump_mode::ui::focused_response_layer(&c)
-                            .is_none_or(|l| l == egui::LayerId::background())
+                            .is_none_or(|l| l == egui::LayerId::background() || self.owns_row_menu_layer(&c, l))
                 } else {
-                    root_owner && !egui::Popup::is_any_open(&c)
+                    root_owner && (!egui::Popup::is_any_open(&c) || self.owns_row_menu(&c))
                 };
                 if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
                     child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1091,6 +1169,8 @@ impl FolderSizeDialogState {
             let row_action = matches!(
                 action,
                 FolderSizeAction::Select { .. }
+                    | FolderSizeAction::RevealRow { .. } | FolderSizeAction::OpenRowMenu { .. }
+                    | FolderSizeAction::SetSort(_) | FolderSizeAction::SetFilter(_)
                     | FolderSizeAction::Drill { .. }
                     | FolderSizeAction::Back { .. }
                     | FolderSizeAction::CopyRow { .. }
@@ -1219,6 +1299,46 @@ impl FolderSizeDialogState {
                         }
                     }
                 }
+                FolderSizeAction::SetSort(column) => {
+                    if self.sort_column == column {
+                        self.sort_direction = if self.sort_direction == SortDirection::Ascending { SortDirection::Descending } else { SortDirection::Ascending };
+                    } else {
+                        self.sort_column = column;
+                        self.sort_direction = SortDirection::Ascending;
+                    }
+                    self.visible_rows = None;
+                    self.sync_visible_rows();
+                }
+                FolderSizeAction::SetFilter(filter) => {
+                    self.filter = filter;
+                    self.visible_rows = None;
+                    self.sync_visible_rows();
+                }
+                FolderSizeAction::OpenRowMenu { generation, index, popup } => {
+                    if let Some(projection) = self.projection.as_ref()
+                        && projection.contains_row(generation, index)
+                        && self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                    {
+                        self.selected_entry = Some((generation, index));
+                        self.row_menu = Some((projection.key, index, popup, pending.host, pending.epoch, self.current_directory));
+                    }
+                }
+                FolderSizeAction::RevealRow { generation, index } => {
+                    self.sync_visible_rows();
+                    if self.open && self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && let Some(projection) = self.projection.as_ref()
+                    {
+                        if projection.source.path_at(index).is_none() {
+                            self.notice = Some("Cannot reveal: this row has no retained path.".into());
+                            continue;
+                        }
+                        self.selected_entry = Some((generation, index));
+                        effects.push(FolderSizeDialogEffect::Reveal(FolderSizeRevealRequest {
+                            key: projection.key, index, directory: self.current_directory,
+                            host: pending.host, epoch: pending.epoch,
+                        }));
+                    }
+                }
                 FolderSizeAction::Select { generation, index } => {
                     if self
                         .projection
@@ -1341,6 +1461,43 @@ impl FolderSizeDialogState {
             Ok(()) => "Path opened in File Explorer.".into(),
             Err(error) => error,
         });
+    }
+
+    fn sync_visible_rows(&mut self) {
+        let Some(projection) = self.projection.as_ref() else { self.visible_rows = None; return; };
+        let Some(directory) = self.current_directory.filter(|(generation, _)| *generation == projection.key.generation)
+            .map(|(_, index)| index).or(projection.root_index) else { self.visible_rows = None; return; };
+        let key = VisibleKey { projection: projection.key, directory, column: self.sort_column, direction: self.sort_direction, filter: self.filter };
+        if self.visible_rows.as_ref().is_some_and(|cache| cache.key == key) { return; }
+        let mut indices = projection.children.get(directory).into_iter().flatten().copied()
+            .filter(|index| filter_matches(self.filter, projection.rows[*index].kind)).collect::<Vec<_>>();
+        indices.sort_by(|a, b| compare_rows(&projection.rows, *a, *b, self.sort_column, self.sort_direction, projection.total_logical_bytes));
+        if self.selected_entry.is_some_and(|(generation, index)| generation != key.projection.generation || !indices.contains(&index)) {
+            self.selected_entry = None;
+        }
+        self.visible_rows = Some(VisibleRows { key, indices: Arc::new(indices) });
+    }
+
+    pub(crate) fn take_reveal_path_for_dispatch(&mut self, request: &FolderSizeRevealRequest) -> Result<Option<PathBuf>, String> {
+        let view = self.session.view();
+        self.sync_projection(&view);
+        self.sync_visible_rows();
+        if !self.open || self.host_epoch != request.epoch || self.host.identity() != request.host
+            || self.current_directory != request.directory || self.selected_entry != Some((request.key.generation, request.index))
+            || self.projection.as_ref().map(|p| p.key) != Some(request.key)
+            || !self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&request.index)) {
+            return Ok(None);
+        }
+        let Some(path) = self.current_row_path(&view, request.key.generation, request.index) else { return Ok(None); };
+        match path.try_exists() {
+            Ok(true) => Ok(Some(path)),
+            Ok(false) => Err(format!("Missing path: {}", path.display())),
+            Err(error) => Err(format!("Cannot access {}: {error}", path.display())),
+        }
+    }
+
+    pub(crate) fn reveal_completed(&mut self, result: Result<(), String>) {
+        self.notice = Some(match result { Ok(()) => "Revealed in File Explorer.".into(), Err(error) => format!("Could not reveal selected path: {error}") });
     }
 
     fn current_row_path(
@@ -1537,6 +1694,25 @@ impl FolderSizeDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn age_row_menu_publication_for_test(&mut self) {
+        let (key, ..) = self.row_menu.as_mut().expect("retained row menu");
+        key.version = ProjectionVersion::Progress(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_long_issues_for_test(&mut self) {
+        let projection = Arc::make_mut(self.projection.as_mut().unwrap());
+        projection.counts.issues = 20;
+        projection.counts.issues_truncated = true;
+        projection.issues = (0..20).map(|index| (None, FolderSizeIssueKind::Inaccessible, format!("issue {index}: {}", "long detail ".repeat(30)))).collect();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn visible_cache_for_test(&self) -> Option<Arc<Vec<usize>>> {
+        self.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices))
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_folder_choice_for_test(&mut self, choice: Option<PathBuf>) {
         self.test_folder_choice = Some(choice);
     }
@@ -1601,57 +1777,37 @@ fn show_scan_status(
     ui: &mut egui::Ui,
     view: &crate::folder_size::FolderSizeSessionView,
     projection: Option<&FolderSizeProjection>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     ui.separator();
-    ui.label(status_label(view.status()));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(status_label(view.status()));
+        if let Some(projection) = projection {
+            ui.label(format!("Subtotal {} • {} entries • {} issues", format_bytes(projection.total_logical_bytes), projection.counts.entries, projection.counts.issues));
+        }
+    });
     if let Some(projection) = projection {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "Subtotal {} • {} entries seen ({} files) • {} directories enumerated • {} child directories seen",
-                format_bytes(projection.total_logical_bytes),
-                projection.counts.entries,
-                projection.counts.files,
-                projection.counts.scanned,
-                projection.counts.directories,
-            ));
-            if let Some(admitted) = projection.counts.directories_admitted {
-                ui.label(format!("{admitted} directories admitted in total"));
-            }
-            if projection.counts.reparse > 0
-                || projection.counts.cloud > 0
-                || projection.counts.inaccessible > 0
-            {
-                ui.label(format!(
-                    "Skipped: {} reparse, {} cloud, {} inaccessible",
-                    projection.counts.reparse,
-                    projection.counts.cloud,
-                    projection.counts.inaccessible,
-                ));
-            }
-            if projection.counts.issues > 0 {
-                ui.label(format!(
-                    "{} issue(s){}",
-                    projection.counts.issues,
-                    if projection.counts.issues_truncated { " (some details omitted)" } else { "" },
-                ));
-            }
-        });
-        if let Some(status) = projection.status {
-            ui.label(match status {
-                FolderSizeStatus::Complete => "Result: Complete",
-                FolderSizeStatus::Partial => {
-                    "Result: Partial; incomplete branches are marked below."
+        let _details = egui::CollapsingHeader::new("Scan details").default_open(false).show(ui, |ui| {
+            let _scroll = egui::ScrollArea::vertical().id_salt("folder-size-details").max_height(100.0).show(ui, |ui| {
+                ui.label(format!("{} files • {} directories seen • {} enumerated", projection.counts.files, projection.counts.directories, projection.counts.scanned));
+                if let Some(admitted) = projection.counts.directories_admitted { ui.label(format!("{admitted} directories admitted")); }
+                ui.label(format!("Skipped: {} reparse, {} cloud, {} inaccessible", projection.counts.reparse, projection.counts.cloud, projection.counts.inaccessible));
+                if let Some(status) = projection.status {
+                    ui.label(match status {
+                        FolderSizeStatus::Complete => "Result complete.",
+                        FolderSizeStatus::Partial => "Partial result: incomplete branches are marked below.",
+                        FolderSizeStatus::Cancelled => "Cancelled: showing verified entries only.",
+                        FolderSizeStatus::Failed => "Failed: verified subtotal is retained.",
+                    });
                 }
-                FolderSizeStatus::Cancelled => "Result: Cancelled; showing verified entries only.",
-                FolderSizeStatus::Failed => "Result: Failed; verified subtotal is retained.",
+                if projection.counts.issues_truncated { ui.label("Some issue details were omitted by the scanner."); }
+                for (path, kind, message) in &projection.issues {
+                    ui.small(match path { Some(path) => format!("{}: {message}", path.display()), None => format!("{}: {message}", issue_label(*kind)) });
+                }
             });
-        }
-        for (path, kind, message) in &projection.issues {
-            ui.small(match path {
-                Some(path) => format!("{}: {message}", path.display()),
-                None => format!("{}: {message}", issue_label(*kind)),
-            });
-        }
+            #[cfg(test)] test_action_rects.push(("details-body".into(), _scroll.inner_rect, ui.clip_rect()));
+        });
+        #[cfg(test)] test_action_rects.push(("details".into(), _details.header_response.rect, ui.clip_rect()));
     }
     if let Some(error) = view.error() {
         ui.colored_label(ui.visuals().error_fg_color, error.to_string());
@@ -1665,7 +1821,13 @@ fn show_folder_rows(
     current_directory: Option<(u64, usize)>,
     current_directory_path: Option<&Path>,
     selected_entry: Option<(u64, usize)>,
+    child_indices: &[usize],
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+    filter: KindFilter,
+    owned_popup: Option<egui::Id>,
     commit_allowed: bool,
+    menu_allowed: bool,
     staged_actions: &mut Vec<FolderSizeAction>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
@@ -1694,34 +1856,31 @@ fn show_folder_rows(
             .on_hover_text(full_path);
         }
     });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Show:");
+        for (label, value) in [("All", KindFilter::All), ("Files", KindFilter::Files), ("Folders", KindFilter::Folders)] {
+            let response = ui.selectable_label(filter == value, label);
+            #[cfg(test)] test_action_rects.push((format!("filter/{label}"), response.rect, ui.clip_rect()));
+            if response.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::SetFilter(value)); }
+        }
+    });
     ui.separator();
     ui.horizontal(|ui| {
         let name_width = row_name_width(ui.available_width());
-        ui.add_sized(
-            egui::vec2(name_width, ROW_HEIGHT),
-            egui::Label::new("Name").truncate(),
-        );
-        ui.add_space(ROW_COLUMN_GAP);
-        ui.add_sized(
-            egui::vec2(ROW_SIZE_WIDTH, ROW_HEIGHT),
-            egui::Label::new("Logical size").truncate(),
-        );
-        ui.add_space(ROW_COLUMN_GAP);
-        ui.add_sized(
-            egui::vec2(ROW_SHARE_WIDTH, ROW_HEIGHT),
-            egui::Label::new("Share").truncate(),
-        );
-        ui.add_space(ROW_COLUMN_GAP);
-        ui.add_sized(
-            egui::vec2(ROW_STATUS_WIDTH, ROW_HEIGHT),
-            egui::Label::new("Status").truncate(),
-        );
+        for (label, column, width) in [
+            ("Name", SortColumn::Name, name_width), ("Type", SortColumn::Type, ROW_TYPE_WIDTH),
+            ("Logical size", SortColumn::Size, ROW_SIZE_WIDTH), ("Share", SortColumn::Share, ROW_SHARE_WIDTH),
+            ("Status", SortColumn::Status, ROW_STATUS_WIDTH),
+        ] {
+            let arrow = if sort_column != column { "" } else if sort_direction == SortDirection::Ascending { " ↑" } else { " ↓" };
+            let response = ui.add_sized(egui::vec2(width, ROW_HEIGHT), egui::Button::new(format!("{label}{arrow}")));
+            #[cfg(test)] test_action_rects.push((format!("sort/{label}"), response.rect, ui.clip_rect()));
+            if response.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::SetSort(column)); }
+            ui.add_space(ROW_COLUMN_GAP);
+        }
     });
-
-    let child_indices =
-        visible_child_indices(&projection.children, current_index, projection.root_index);
     if child_indices.is_empty() {
-        ui.weak("No measured entries in this folder yet.");
+        ui.weak(if filter == KindFilter::All { "No measured entries in this folder yet." } else { "No entries match this filter." });
         return;
     }
 
@@ -1753,12 +1912,33 @@ fn show_folder_rows(
                         if response.clicked() && commit_allowed {
                             staged_actions.push(FolderSizeAction::Select { generation, index });
                         }
+                        if response.secondary_clicked() && commit_allowed {
+                            staged_actions.push(FolderSizeAction::OpenRowMenu {
+                                generation, index, popup: egui::Popup::default_response_id(&response),
+                            });
+                        }
+                        let popup = egui::Popup::default_response_id(&response);
+                        if response.context_menu_opened() && owned_popup != Some(popup) && !response.secondary_clicked() {
+                            egui::Popup::close_id(ui.ctx(), popup);
+                        }
+                        response.context_menu(|ui| {
+                            let reveal = ui.button("Reveal in File Explorer");
+                            #[cfg(test)] test_action_rects.push((format!("reveal/{}", row.name), reveal.rect, ui.clip_rect()));
+                            if reveal.clicked() && menu_allowed {
+                                staged_actions.push(FolderSizeAction::RevealRow { generation, index });
+                                ui.close();
+                            }
+                        });
                         if response.double_clicked()
                             && commit_allowed
                             && row.kind == FolderSizeEntryKind::Directory
                         {
                             staged_actions.push(FolderSizeAction::Drill { generation, index });
                         }
+                        ui.add_space(ROW_COLUMN_GAP);
+                        ui.add_sized(egui::vec2(ROW_TYPE_WIDTH, ROW_HEIGHT), egui::Label::new(match row.kind {
+                            FolderSizeEntryKind::File => "File", FolderSizeEntryKind::Directory => "Folder", FolderSizeEntryKind::Omitted(_) => "Skipped",
+                        }).truncate());
                         ui.add_space(ROW_COLUMN_GAP);
                         let (row_bytes, share) =
                             row_measurement(row, projection.total_logical_bytes);
@@ -1884,14 +2064,30 @@ mod tests {
                 0,
             ),
         ];
-        let children = sorted_child_indices(&rows);
-
-        assert_eq!(
-            visible_child_indices(&children, None, Some(0)),
-            &[2, 4, 1, 5]
-        );
-        assert_eq!(visible_child_indices(&children, Some(2), Some(0)), &[3]);
-        assert!(visible_child_indices(&children, Some(usize::MAX), Some(0)).is_empty());
+        let children = child_indices(&rows);
+        let mut visible = children[0].clone();
+        visible.sort_by(|a, b| compare_rows(&rows, *a, *b, SortColumn::Size, SortDirection::Descending, 16));
+        assert_eq!(visible, [2, 4, 1, 5]);
+        assert_eq!(children[2], [3]);
+        for column in [SortColumn::Name, SortColumn::Type, SortColumn::Size, SortColumn::Share, SortColumn::Status] {
+            for direction in [SortDirection::Ascending, SortDirection::Descending] {
+                let mut sorted = children[0].clone();
+                sorted.sort_by(|a, b| compare_rows(&rows, *a, *b, column, direction, 16));
+                assert_eq!(sorted.len(), 4);
+                if matches!(column, SortColumn::Size | SortColumn::Share) { assert_eq!(sorted.last(), Some(&5)); }
+                for pair in sorted.windows(2) {
+                    assert_ne!(compare_rows(&rows, pair[0], pair[1], column, direction, 16), std::cmp::Ordering::Greater);
+                }
+            }
+        }
+        let mut zero_share = children[0].clone();
+        zero_share.sort_by(|a, b| compare_rows(&rows, *a, *b, SortColumn::Share, SortDirection::Descending, 0));
+        assert_eq!(zero_share, [2, 4, 5, 1]);
+        assert!(filter_matches(KindFilter::All, rows[5].kind));
+        assert!(!filter_matches(KindFilter::Files, rows[5].kind));
+        assert!(!filter_matches(KindFilter::Folders, rows[5].kind));
+        assert!(filter_matches(KindFilter::Files, rows[1].kind));
+        assert!(filter_matches(KindFilter::Folders, rows[2].kind));
 
         let current = ProjectionKey {
             generation: 12,
@@ -1905,6 +2101,12 @@ mod tests {
             12,
             rows.len()
         ));
+    }
+
+    #[test]
+    fn folder_size_dialog_reveal_root_route_is_explicit() {
+        assert_eq!(reveal_route(Path::new(std::path::MAIN_SEPARATOR_STR)), FolderSizeRevealRoute::OpenRoot);
+        assert_eq!(reveal_route(Path::new("folder").join("file").as_path()), FolderSizeRevealRoute::RevealEntry);
     }
 
     #[test]

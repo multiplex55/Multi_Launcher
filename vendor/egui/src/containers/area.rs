@@ -60,6 +60,11 @@ impl AreaState {
         ctx.memory(|mem| mem.areas().get(id).copied())
     }
 
+    /// Store a moved area using its existing layer identity.
+    pub fn store(&self, ctx: &Context, layer_id: LayerId) {
+        ctx.memory_mut(|memory| memory.areas_mut().set_state(layer_id, *self));
+    }
+
     /// The left top positions of the area.
     pub fn left_top_pos(&self) -> Pos2 {
         let pivot_pos = self.pivot_pos.unwrap_or_default();

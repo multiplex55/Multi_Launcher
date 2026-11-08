@@ -32,6 +32,46 @@ pub enum ShellObservationError {
     ShellUnavailable(String),
 }
 
+#[derive(Debug, Clone, Default)]
+struct ObservationTrace {
+    phase: &'static str,
+    stage: &'static str,
+    index: Option<u16>,
+    hwnd: Option<usize>,
+    error_code: Option<i32>,
+    related_hwnd: Option<usize>,
+    related_root: Option<usize>,
+    expected_root: Option<usize>,
+}
+impl ObservationTrace {
+    fn set(
+        &mut self,
+        phase: &'static str,
+        stage: &'static str,
+        index: Option<u16>,
+        hwnd: Option<usize>,
+    ) {
+        self.phase = phase;
+        self.stage = stage;
+        self.index = index;
+        self.hwnd = hwnd;
+        self.error_code = None;
+        self.related_hwnd = None;
+        self.related_root = None;
+        self.expected_root = None;
+    }
+    fn error(&mut self, error: &windows::core::Error) {
+        self.error_code = Some(error.code().0);
+    }
+    fn relation(&mut self, failure: WindowRelationFailure, expected: WindowIdentity) {
+        self.stage = failure.stage;
+        self.related_hwnd = failure.hwnd;
+        self.related_root = failure.root;
+        self.expected_root = Some(expected.root_hwnd());
+        self.error_code = failure.error_code;
+    }
+}
+
 struct RetainedIdentity<T> {
     token: T,
     unknown: IUnknown,
@@ -67,17 +107,32 @@ pub struct WindowsShellObserver {
     previous_views: Vec<RetainedIdentity<ShellViewIdentity>>,
     next_binding_token: u64,
     next_view_token: u64,
+    last_trace: ObservationTrace,
     apartment: Option<crate::mkmacro::uia::ComApartment>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl WindowsShellObserver {
     pub fn connect() -> Result<Self, ShellObservationError> {
-        // Keep the apartment guard in this worker invocation. Local COM
-        // interfaces are declared after it and therefore drop first on an
-        // early return.
+        // IOleWindow calls require an STA; callers must keep using the observer
+        // on this thread and pump its messages while it is idle.
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map_err(|error| ShellObservationError::ComInitialization(error.to_string()))?;
+        Self::connect_with_apartment(crate::mkmacro::uia::ComApartment)
+    }
+
+    #[cfg(test)]
+    fn connect_mta_for_diagnostic() -> Result<Self, ShellObservationError> {
         let apartment = crate::mkmacro::uia::initialize_com_apartment()
             .map_err(|error| ShellObservationError::ComInitialization(error.to_string()))?;
+        Self::connect_with_apartment(apartment)
+    }
+
+    fn connect_with_apartment(
+        apartment: crate::mkmacro::uia::ComApartment,
+    ) -> Result<Self, ShellObservationError> {
         let shell: IShellWindows = unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) }
             .map_err(|error| ShellObservationError::ShellUnavailable(error.to_string()))?;
 
@@ -87,6 +142,7 @@ impl WindowsShellObserver {
             previous_views: Vec::new(),
             next_binding_token: 1,
             next_view_token: 1,
+            last_trace: ObservationTrace::default(),
             apartment: Some(apartment),
             _thread_bound: PhantomData,
         })
@@ -99,6 +155,18 @@ impl WindowsShellObserver {
     /// A returned `ShellViewSnapshot` contains candidates only. It is not
     /// UIA tab-order evidence and cannot advance a folder-tab operation.
     pub fn observe(&mut self, expected_folder: Option<&FolderPath>) -> ShellViewSnapshot {
+        let mut trace = ObservationTrace::default();
+        let snapshot = self.observe_inner(expected_folder, &mut trace);
+        self.last_trace = trace;
+        snapshot
+    }
+
+    fn observe_inner(
+        &mut self,
+        expected_folder: Option<&FolderPath>,
+        trace: &mut ObservationTrace,
+    ) -> ShellViewSnapshot {
+        trace.set("initial", "expected-folder", None, None);
         if expected_folder.is_some_and(|path| !is_filesystem_directory(path)) {
             return ShellViewSnapshot::incomplete(SnapshotFailure::ExpectedFolderUnavailable);
         }
@@ -114,6 +182,7 @@ impl WindowsShellObserver {
             None => None,
         };
 
+        trace.set("initial", "explorer-system-path", None, None);
         let explorer_path = match system_explorer_path() {
             Some(path) => path,
             None => {
@@ -121,7 +190,8 @@ impl WindowsShellObserver {
             }
         };
 
-        let windows = match enumerate_unfiltered_windows() {
+        trace.set("initial", "top-level-enumeration", None, None);
+        let windows = match enumerate_unfiltered_windows(trace) {
             Ok(windows) => windows,
             Err(failure) => return ShellViewSnapshot::incomplete(failure),
         };
@@ -130,13 +200,17 @@ impl WindowsShellObserver {
             .map(|window| (window.hwnd(), *window))
             .collect();
 
+        trace.set("initial", "shell-count", None, None);
         let Some(shell) = self.shell.as_ref() else {
             return ShellViewSnapshot::incomplete(SnapshotFailure::ShellUnavailable);
         };
         let count = match unsafe { shell.Count() } {
             Ok(count) if count >= 0 => count,
             Ok(_) => return ShellViewSnapshot::incomplete(SnapshotFailure::ShellCountInvalid),
-            Err(_) => return ShellViewSnapshot::incomplete(SnapshotFailure::ShellCountFailed),
+            Err(error) => {
+                trace.error(&error);
+                return ShellViewSnapshot::incomplete(SnapshotFailure::ShellCountFailed);
+            }
         };
         if count > MAX_SHELL_COUNT {
             return ShellViewSnapshot::incomplete(SnapshotFailure::ShellLimitExceeded);
@@ -146,28 +220,38 @@ impl WindowsShellObserver {
         let mut row_facts = Vec::with_capacity(count as usize);
         for index in 0..count {
             let incomplete = |failure| ShellViewSnapshot::incomplete(failure);
+            trace.set("initial", "shell-item", Some(index as u16), None);
             let dispatch = match unsafe { shell.Item(&VARIANT::from(index)) } {
                 Ok(dispatch) => dispatch,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ShellItemUnavailable {
                         index: index as u16,
                     });
                 }
             };
+            trace.set("initial", "shell-browser-cast", Some(index as u16), None);
             let browser: IWebBrowserApp = match dispatch.cast() {
                 Ok(browser) => browser,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ShellDispatchUnavailable {
                         index: index as u16,
                     });
                 }
             };
 
-            let hwnd_value = match unsafe { browser.HWND() }
-                .ok()
-                .and_then(|hwnd| usize::try_from(hwnd.0).ok())
-                .filter(|hwnd| *hwnd != 0)
-            {
+            trace.set("initial", "shell-hwnd", Some(index as u16), None);
+            let raw_hwnd = match unsafe { browser.HWND() } {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    trace.error(&error);
+                    return incomplete(SnapshotFailure::WindowHandleUnavailable {
+                        index: index as u16,
+                    });
+                }
+            };
+            let hwnd_value = match usize::try_from(raw_hwnd.0).ok().filter(|hwnd| *hwnd != 0) {
                 Some(hwnd) => hwnd,
                 None => {
                     return incomplete(SnapshotFailure::WindowHandleUnavailable {
@@ -175,6 +259,12 @@ impl WindowsShellObserver {
                     });
                 }
             };
+            trace.set(
+                "initial",
+                "shell-hwnd-membership",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let Some(window) = windows_by_handle.get(&hwnd_value).copied() else {
                 return incomplete(SnapshotFailure::WindowIdentityUnavailable {
                     index: index as u16,
@@ -182,7 +272,8 @@ impl WindowsShellObserver {
             };
             let browser_unknown: IUnknown = match browser.cast() {
                 Ok(unknown) => unknown,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ShellDispatchUnavailable {
                         index: index as u16,
                     });
@@ -191,18 +282,40 @@ impl WindowsShellObserver {
 
             // A ShellWindows row is irrelevant only after its live process
             // identity has been resolved and shown not to be Explorer.
+            trace.set(
+                "initial",
+                "shell-process-path",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let Some(process_path) = crate::multi_manager::win::window_process_path(hwnd_value)
             else {
                 return incomplete(SnapshotFailure::WindowIdentityUnavailable {
                     index: index as u16,
                 });
             };
-            let Some(identity_after_process_query) = window_identity(hwnd_from_usize(hwnd_value))
-            else {
-                return incomplete(SnapshotFailure::WindowIdentityUnavailable {
-                    index: index as u16,
-                });
-            };
+            trace.set(
+                "initial",
+                "shell-window-identity",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
+            let identity_after_process_query =
+                match window_identity_detailed(hwnd_from_usize(hwnd_value)) {
+                    Ok(identity) => identity,
+                    Err(stage) => {
+                        trace.stage = stage;
+                        return incomplete(SnapshotFailure::WindowIdentityUnavailable {
+                            index: index as u16,
+                        });
+                    }
+                };
+            trace.set(
+                "initial",
+                "shell-window-changed",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             if identity_after_process_query != window {
                 return incomplete(SnapshotFailure::WindowIdentityUnavailable {
                     index: index as u16,
@@ -222,60 +335,98 @@ impl WindowsShellObserver {
                 continue;
             }
 
+            trace.set(
+                "initial",
+                "shell-service-provider",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let service_provider: IServiceProvider = match browser.cast() {
                 Ok(provider) => provider,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ShellBrowserUnavailable {
                         index: index as u16,
                     });
                 }
             };
+            trace.set(
+                "initial",
+                "shell-browser-service",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let shell_browser: IShellBrowser =
                 match unsafe { service_provider.QueryService(&SID_STopLevelBrowser) } {
                     Ok(browser) => browser,
-                    Err(_) => {
+                    Err(error) => {
+                        trace.error(&error);
                         return incomplete(SnapshotFailure::ShellBrowserUnavailable {
                             index: index as u16,
                         });
                     }
                 };
-            if !shell_browser_window_matches(&shell_browser, window) {
+            trace.set(
+                "initial",
+                "shell-browser-window",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
+            if let Err(failure) = shell_browser_window_match_detail(&shell_browser, window) {
+                trace.relation(failure, window);
                 return incomplete(SnapshotFailure::WindowIdentityUnavailable {
                     index: index as u16,
                 });
             }
             let shell_browser_unknown: IUnknown = match shell_browser.cast() {
                 Ok(unknown) => unknown,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ShellBrowserUnavailable {
                         index: index as u16,
                     });
                 }
             };
+            trace.set(
+                "initial",
+                "active-view",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let shell_view = match unsafe { shell_browser.QueryActiveShellView() } {
                 Ok(view) => view,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ActiveViewUnavailable {
                         index: index as u16,
                     });
                 }
             };
-            let view_window: IOleWindow = match shell_view.cast() {
-                Ok(window) => window,
-                Err(_) => {
-                    return incomplete(SnapshotFailure::ActiveViewUnavailable {
-                        index: index as u16,
-                    });
-                }
-            };
-            if !ole_window_matches(&view_window, window) {
+            // IShellView inherits IOleWindow; use its base vtable directly.
+            // Some Shell objects reject a redundant IOleWindow QueryInterface.
+            let view_window: &IOleWindow = &shell_view;
+            trace.set(
+                "initial",
+                "active-view-window",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
+            if let Err(failure) = ole_window_match_detail(view_window, window) {
+                trace.relation(failure, window);
                 return incomplete(SnapshotFailure::WindowIdentityUnavailable {
                     index: index as u16,
                 });
             }
+            trace.set(
+                "initial",
+                "view-folder",
+                Some(index as u16),
+                Some(hwnd_value),
+            );
             let folder_view: IFolderView = match shell_view.cast() {
                 Ok(view) => view,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ActiveViewUnavailable {
                         index: index as u16,
                     });
@@ -283,7 +434,8 @@ impl WindowsShellObserver {
             };
             let persisted_folder: IPersistFolder2 = match unsafe { folder_view.GetFolder() } {
                 Ok(folder) => folder,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::FolderUnavailable {
                         index: index as u16,
                     });
@@ -300,7 +452,8 @@ impl WindowsShellObserver {
             let folder_pidl = PidlGuard(folder_raw);
             let view_unknown: IUnknown = match shell_view.cast() {
                 Ok(unknown) => unknown,
-                Err(_) => {
+                Err(error) => {
+                    trace.error(&error);
                     return incomplete(SnapshotFailure::ActiveViewUnavailable {
                         index: index as u16,
                     });
@@ -351,17 +504,20 @@ impl WindowsShellObserver {
             });
         }
 
+        trace.set("recheck", "shell-count-before", None, None);
         if unsafe { shell.Count() }.ok() != Some(count) {
             return ShellViewSnapshot::incomplete(SnapshotFailure::ShellCountInvalid);
         }
 
-        if let Err(failure) = recheck_shell_rows(shell, &row_facts, &explorer_path) {
+        if let Err(failure) = recheck_shell_rows(shell, &row_facts, &explorer_path, trace) {
             return ShellViewSnapshot::incomplete(failure);
         }
+        trace.set("recheck", "shell-count-after", None, None);
         if unsafe { shell.Count() }.ok() != Some(count) {
             return ShellViewSnapshot::incomplete(SnapshotFailure::ShellCountInvalid);
         }
 
+        trace.set("final", "snapshot-validation", None, None);
         self.finish_snapshot(windows, raw_views)
     }
 
@@ -511,8 +667,10 @@ fn recheck_shell_rows(
     shell: &IShellWindows,
     rows: &[ShellRowFact],
     explorer_path: &str,
+    trace: &mut ObservationTrace,
 ) -> Result<(), SnapshotFailure> {
     for row in rows {
+        trace.set("recheck", "shell-item", Some(row.index), Some(row.hwnd));
         let index = i32::from(row.index);
         let dispatch = unsafe { shell.Item(&VARIANT::from(index)) }
             .map_err(|_| SnapshotFailure::ShellItemUnavailable { index: row.index })?;
@@ -527,10 +685,20 @@ fn recheck_shell_rows(
             .and_then(|hwnd| usize::try_from(hwnd.0).ok())
             .filter(|hwnd| *hwnd != 0)
             .ok_or(SnapshotFailure::WindowHandleUnavailable { index: row.index })?;
-        let live_window = window_identity(hwnd_from_usize(hwnd))
-            .ok_or(SnapshotFailure::WindowIdentityUnavailable { index: row.index })?;
+        trace.set(
+            "recheck",
+            "shell-window-identity",
+            Some(row.index),
+            Some(hwnd),
+        );
+        let live_window = window_identity_detailed(hwnd_from_usize(hwnd)).map_err(|stage| {
+            trace.stage = stage;
+            SnapshotFailure::WindowIdentityUnavailable { index: row.index }
+        })?;
+        trace.set("recheck", "shell-process-path", Some(row.index), Some(hwnd));
         let process_path = crate::multi_manager::win::window_process_path(hwnd)
             .ok_or(SnapshotFailure::WindowIdentityUnavailable { index: row.index })?;
+        trace.set("recheck", "shell-row-changed", Some(row.index), Some(hwnd));
         if hwnd != row.hwnd
             || live_window != row.window
             || !same_com_identity(&browser_unknown, &row.browser)
@@ -547,13 +715,26 @@ fn recheck_shell_rows(
             continue;
         }
 
+        trace.set(
+            "recheck",
+            "shell-browser-service",
+            Some(row.index),
+            Some(hwnd),
+        );
         let service_provider: IServiceProvider = browser
             .cast()
             .map_err(|_| SnapshotFailure::ShellBrowserUnavailable { index: row.index })?;
         let shell_browser: IShellBrowser =
             unsafe { service_provider.QueryService(&SID_STopLevelBrowser) }
                 .map_err(|_| SnapshotFailure::ShellBrowserUnavailable { index: row.index })?;
-        if !shell_browser_window_matches(&shell_browser, row.window) {
+        trace.set(
+            "recheck",
+            "shell-browser-window",
+            Some(row.index),
+            Some(hwnd),
+        );
+        if let Err(failure) = shell_browser_window_match_detail(&shell_browser, row.window) {
+            trace.relation(failure, row.window);
             return Err(SnapshotFailure::WindowIdentityUnavailable { index: row.index });
         }
         let shell_browser_unknown: IUnknown = shell_browser
@@ -567,12 +748,13 @@ fn recheck_shell_rows(
             return Err(SnapshotFailure::ShellBrowserUnavailable { index: row.index });
         }
 
+        trace.set("recheck", "active-view", Some(row.index), Some(hwnd));
         let shell_view = unsafe { shell_browser.QueryActiveShellView() }
             .map_err(|_| SnapshotFailure::ActiveViewUnavailable { index: row.index })?;
-        let view_window: IOleWindow = shell_view
-            .cast()
-            .map_err(|_| SnapshotFailure::ActiveViewUnavailable { index: row.index })?;
-        if !ole_window_matches(&view_window, row.window) {
+        let view_window: &IOleWindow = &shell_view;
+        trace.set("recheck", "active-view-window", Some(row.index), Some(hwnd));
+        if let Err(failure) = ole_window_match_detail(view_window, row.window) {
+            trace.relation(failure, row.window);
             return Err(SnapshotFailure::WindowIdentityUnavailable { index: row.index });
         }
         let view_unknown: IUnknown = shell_view
@@ -586,6 +768,7 @@ fn recheck_shell_rows(
             return Err(SnapshotFailure::ActiveViewUnavailable { index: row.index });
         }
 
+        trace.set("recheck", "view-folder", Some(row.index), Some(hwnd));
         let folder_view: IFolderView = shell_view
             .cast()
             .map_err(|_| SnapshotFailure::FolderUnavailable { index: row.index })?;
@@ -630,32 +813,83 @@ fn is_filesystem_directory(path: &FolderPath) -> bool {
     std::fs::metadata(Path::new(path.as_str())).is_ok_and(|metadata| metadata.is_dir())
 }
 
-fn shell_browser_window_matches(shell_browser: &IShellBrowser, expected: WindowIdentity) -> bool {
-    let Ok(ole_window) = shell_browser.cast::<IOleWindow>() else {
-        return false;
-    };
-    ole_window_matches(&ole_window, expected)
+#[derive(Debug)]
+struct WindowRelationFailure {
+    stage: &'static str,
+    hwnd: Option<usize>,
+    root: Option<usize>,
+    error_code: Option<i32>,
 }
 
-fn ole_window_matches(ole_window: &IOleWindow, expected: WindowIdentity) -> bool {
-    let Ok(hwnd) = (unsafe { ole_window.GetWindow() }) else {
-        return false;
+fn shell_browser_window_match_detail(
+    shell_browser: &IShellBrowser,
+    expected: WindowIdentity,
+) -> Result<(), WindowRelationFailure> {
+    ole_window_match_detail(shell_browser, expected)
+}
+
+fn ole_window_match_detail(
+    ole_window: &IOleWindow,
+    expected: WindowIdentity,
+) -> Result<(), WindowRelationFailure> {
+    let hwnd = unsafe { ole_window.GetWindow() }.map_err(|error| WindowRelationFailure {
+        stage: "ole-get-window",
+        hwnd: None,
+        root: None,
+        error_code: Some(error.code().0),
+    })?;
+    let mut failure = WindowRelationFailure {
+        stage: "ole-window-null",
+        hwnd: Some(hwnd.0 as usize),
+        root: None,
+        error_code: None,
     };
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
-        return false;
+    if hwnd.0.is_null() {
+        return Err(failure);
+    }
+    failure.stage = "ole-window-invalid";
+    if !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err(failure);
     }
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
-    if root.0.is_null() || root.0 as usize != expected.root_hwnd() {
-        return false;
+    failure.root = Some(root.0 as usize);
+    failure.stage = "ole-root-null";
+    if root.0.is_null() {
+        return Err(failure);
+    }
+    failure.stage = "ole-root-mismatch";
+    if root.0 as usize != expected.root_hwnd() {
+        return Err(failure);
     }
     let mut process_id = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     let mut root_process_id = 0;
     let root_thread_id = unsafe { GetWindowThreadProcessId(root, Some(&mut root_process_id)) };
-    process_id == expected.process_id()
-        && root_process_id == expected.root_process_id()
-        && root_thread_id == expected.root_thread_id()
-        && thread_id != 0
+    failure.stage = "ole-window-process-mismatch";
+    if process_id != expected.process_id() {
+        return Err(failure);
+    }
+    failure.stage = "ole-root-process-mismatch";
+    if root_process_id != expected.root_process_id() {
+        return Err(failure);
+    }
+    failure.stage = "ole-root-thread-mismatch";
+    if root_thread_id != expected.root_thread_id() {
+        return Err(failure);
+    }
+    failure.stage = "ole-window-thread-zero";
+    if thread_id == 0 {
+        return Err(failure);
+    }
+    Ok(())
+}
+
+fn shell_browser_window_matches(shell_browser: &IShellBrowser, expected: WindowIdentity) -> bool {
+    shell_browser_window_match_detail(shell_browser, expected).is_ok()
+}
+
+fn ole_window_matches(ole_window: &IOleWindow, expected: WindowIdentity) -> bool {
+    ole_window_match_detail(ole_window, expected).is_ok()
 }
 
 fn parse_display_name(path: &FolderPath) -> Result<PidlGuard, ()> {
@@ -712,22 +946,34 @@ impl Drop for TaskWideString {
     }
 }
 
-fn enumerate_unfiltered_windows() -> Result<Vec<WindowIdentity>, SnapshotFailure> {
+fn enumerate_unfiltered_windows(
+    trace: &mut ObservationTrace,
+) -> Result<Vec<WindowIdentity>, SnapshotFailure> {
     struct Context {
         windows: Vec<WindowIdentity>,
         failure: Option<SnapshotFailure>,
+        trace: ObservationTrace,
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let context = unsafe { &mut *(lparam.0 as *mut Context) };
         if context.windows.len() >= MAX_OBSERVED_WINDOWS {
+            context.trace.set(
+                "initial",
+                "top-level-limit",
+                Some(context.windows.len() as u16),
+                Some(hwnd.0 as usize),
+            );
             context.failure = Some(SnapshotFailure::WindowLimitExceeded);
             return BOOL(0);
         }
         let index = context.windows.len() as u16;
-        match window_identity(hwnd) {
-            Some(identity) => context.windows.push(identity),
-            None => {
+        match window_identity_detailed(hwnd) {
+            Ok(identity) => context.windows.push(identity),
+            Err(stage) => {
+                context
+                    .trace
+                    .set("initial", stage, Some(index), Some(hwnd.0 as usize));
                 context.failure = Some(SnapshotFailure::WindowIdentityUnavailable { index });
                 return BOOL(0);
             }
@@ -738,6 +984,7 @@ fn enumerate_unfiltered_windows() -> Result<Vec<WindowIdentity>, SnapshotFailure
     let mut context = Context {
         windows: Vec::new(),
         failure: None,
+        trace: ObservationTrace::default(),
     };
     let result = unsafe {
         EnumWindows(
@@ -746,9 +993,13 @@ fn enumerate_unfiltered_windows() -> Result<Vec<WindowIdentity>, SnapshotFailure
         )
     };
     if let Some(failure) = context.failure {
+        *trace = context.trace;
         return Err(failure);
     }
-    result.map_err(|_| SnapshotFailure::WindowEnumerationFailed)?;
+    result.map_err(|error| {
+        trace.error(&error);
+        SnapshotFailure::WindowEnumerationFailed
+    })?;
     Ok(context.windows)
 }
 
@@ -757,17 +1008,33 @@ fn hwnd_from_usize(hwnd: usize) -> HWND {
 }
 
 fn window_identity(hwnd: HWND) -> Option<WindowIdentity> {
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
-        return None;
+    window_identity_detailed(hwnd).ok()
+}
+
+fn window_identity_detailed(hwnd: HWND) -> Result<WindowIdentity, &'static str> {
+    if hwnd.0.is_null() {
+        return Err("hwnd-null");
+    }
+    if !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err("hwnd-not-window");
     }
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
-    if root.0.is_null() || !unsafe { IsWindow(root) }.as_bool() {
-        return None;
+    if root.0.is_null() {
+        return Err("ancestor-null");
+    }
+    if !unsafe { IsWindow(root) }.as_bool() {
+        return Err("ancestor-not-window");
     }
     let mut process_id = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    if thread_id == 0 || process_id == 0 {
+        return Err("hwnd-thread-process-zero");
+    }
     let mut root_process_id = 0;
     let root_thread_id = unsafe { GetWindowThreadProcessId(root, Some(&mut root_process_id)) };
+    if root_thread_id == 0 || root_process_id == 0 {
+        return Err("ancestor-thread-process-zero");
+    }
     WindowIdentity::new(
         hwnd.0 as usize,
         root.0 as usize,
@@ -776,6 +1043,7 @@ fn window_identity(hwnd: HWND) -> Option<WindowIdentity> {
         root_process_id,
         root_thread_id,
     )
+    .ok_or("identity-invalid")
 }
 
 // The native port is worker-confined: UIA and Shell interfaces never leave the
@@ -854,48 +1122,15 @@ fn attributed_bootstrap(
     }
 }
 
-pub(super) struct WindowsExplorerTabsPort {
-    // UIA references must drop before observer's COM apartment guard.
-    uia: Option<ExplorerUia>,
-    tabs: Vec<NativeTab>,
-    pending: Option<PendingNativeTab>,
-    bindings: Vec<(IUnknown, ShellBindingIdentity)>,
+struct ShellState {
     observer: Option<WindowsShellObserver>,
-    operation_id: OperationId,
+    bindings: Vec<(IUnknown, ShellBindingIdentity)>,
+    target: Option<BoundTargetEvidence>,
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
-    baseline: Option<ShellViewSnapshot>,
-    target: Option<BoundTargetEvidence>,
-    bootstrap: BootstrapState,
-    bootstrap_path: Option<std::path::PathBuf>,
-    requested_step_attempted: bool,
-    last_error: Option<String>,
-    opennew_available: bool,
+    test_apartment: Option<crate::mkmacro::uia::ComApartment>,
 }
-impl WindowsExplorerTabsPort {
-    pub(super) fn new(
-        operation_id: OperationId,
-        cancelled: Arc<AtomicBool>,
-        deadline: Instant,
-    ) -> Self {
-        Self {
-            uia: None,
-            tabs: Vec::new(),
-            pending: None,
-            bindings: Vec::new(),
-            observer: None,
-            operation_id,
-            cancelled,
-            deadline,
-            baseline: None,
-            target: None,
-            bootstrap: BootstrapState::NotStarted,
-            bootstrap_path: None,
-            requested_step_attempted: false,
-            last_error: None,
-            opennew_available: false,
-        }
-    }
+impl ShellState {
     fn check(&self) -> Result<(), String> {
         if self.cancelled.load(Ordering::Acquire) {
             Err("cancelled".into())
@@ -905,83 +1140,20 @@ impl WindowsExplorerTabsPort {
             Ok(())
         }
     }
-    fn diagnostic_for(&self, reason: impl Into<String>) -> BackendDiagnostic {
-        BackendDiagnostic {
-            reason: reason.into(),
-            bootstrap: self.bootstrap,
-            owned_resource_remaining: self.bootstrap_path.is_some(),
-            owned_resource_path: self.bootstrap_path.clone(),
-            requested_step_attempted: self.requested_step_attempted,
-        }
-    }
-    fn uia(&self) -> Result<&ExplorerUia, String> {
-        self.uia
-            .as_ref()
-            .ok_or_else(|| "UI Automation is unavailable".into())
-    }
+
     fn observer(&mut self) -> Result<&mut WindowsShellObserver, String> {
         self.observer
             .as_mut()
             .ok_or_else(|| "Shell observer is unavailable".into())
     }
+
     fn target_window(&self) -> Result<WindowIdentity, String> {
         self.target
             .as_ref()
             .map(BoundTargetEvidence::window)
             .ok_or_else(|| "Explorer target is not attributed".into())
     }
-    fn checked_snapshot(&self) -> Result<UiaSnapshot, String> {
-        self.check()?;
-        let target = self.target_window()?;
-        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
-            return Err("Explorer target identity changed".into());
-        }
-        let snapshot = self.uia()?.snapshot(
-            hwnd_from_usize(target.root_hwnd()),
-            target.root_process_id(),
-        )?;
-        self.check()?;
-        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
-            return Err("Explorer target identity changed".into());
-        }
-        Ok(snapshot)
-    }
-    fn check_existing_tabs(&self, snapshot: &UiaSnapshot, expected: usize) -> Result<(), String> {
-        let expected_ids = self
-            .tabs
-            .iter()
-            .map(|tab| tab.runtime.clone())
-            .collect::<Vec<_>>();
-        let observed_ids = snapshot
-            .tabs
-            .iter()
-            .map(|tab| tab.runtime.clone())
-            .collect::<Vec<_>>();
-        let mut same = Vec::with_capacity(self.tabs.len());
-        for (old, current) in self.tabs.iter().zip(&snapshot.tabs) {
-            same.push(self.uia()?.same_element(&old.element, &current.element)?);
-        }
-        crate::explorer_tabs::evidence::validate_tab_prefix(
-            &expected_ids,
-            &observed_ids,
-            &same,
-            expected,
-        )
-        .map_err(str::to_owned)
-    }
-    fn wait_snapshot(&self, expected: usize) -> Result<UiaSnapshot, String> {
-        loop {
-            self.check()?;
-            match self.checked_snapshot() {
-                Ok(snapshot) if snapshot.tabs.len() == expected => return Ok(snapshot),
-                Ok(snapshot) if snapshot.tabs.len() > expected => {
-                    return Err("unexpected extra Explorer tabs".into());
-                }
-                Ok(_) => std::thread::sleep(Duration::from_millis(25)),
-                Err(reason) => return Err(reason),
-            }
-        }
-    }
+
     fn retained_browser(&self, binding: ShellBindingIdentity) -> Result<IShellBrowser, String> {
         let retained = self
             .observer
@@ -997,94 +1169,7 @@ impl WindowsExplorerTabsPort {
         self.call_native(|| unsafe { provider.QueryService(&SID_STopLevelBrowser) })?
             .map_err(|e| format!("Shell browser: {e}"))
     }
-    fn opennew_supported(&self) -> Result<bool, String> {
-        let mut length = 0u32;
-        let result = self.call_native(|| unsafe {
-            AssocQueryStringW(
-                ASSOCF_NONE,
-                ASSOCSTR_COMMAND,
-                w!("Directory"),
-                w!("opennew"),
-                PWSTR::null(),
-                &mut length,
-            )
-        })?;
-        if result.is_err() || !(2..=32768).contains(&length) {
-            return Ok(false);
-        }
-        let mut buffer = vec![0u16; length as usize];
-        let result = self.call_native(|| unsafe {
-            AssocQueryStringW(
-                ASSOCF_NONE,
-                ASSOCSTR_COMMAND,
-                w!("Directory"),
-                w!("opennew"),
-                PWSTR(buffer.as_mut_ptr()),
-                &mut length,
-            )
-        })?;
-        Ok(result.is_ok() && length > 1 && buffer.first().is_some_and(|value| *value != 0))
-    }
-    fn launch_bootstrap(&mut self, path: &FolderPath) -> Result<BootstrapReceipt, String> {
-        self.check()?;
-        let baseline = self.baseline.as_ref().ok_or("missing baseline")?;
-        let browser = baseline.views().first().map(|view| view.shell_binding());
-        if let Some(binding) = browser {
-            let shell = self.retained_browser(binding)?;
-            let pidl = self
-                .call_native(|| parse_display_name(path))?
-                .map_err(|_| "bootstrap PIDL unavailable")?;
-            self.check()?;
-            self.bootstrap = BootstrapState::Attempted;
-            let result =
-                unsafe { shell.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_NEWBROWSER) };
-            self.check()?;
-            result.map_err(|e| format!("new Explorer window request: {e}"))?;
-        } else {
-            self.check()?;
-            if !self.opennew_available || !self.opennew_supported()? {
-                return Err("opennew Shell verb unavailable".into());
-            }
-            self.check()?;
-            let wide: Vec<u16> = path.as_str().encode_utf16().chain(Some(0)).collect();
-            let mut info = SHELLEXECUTEINFOW {
-                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-                fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
-                lpVerb: w!("opennew"),
-                lpFile: PCWSTR(wide.as_ptr()),
-                nShow: SW_SHOWNORMAL.0,
-                ..Default::default()
-            };
-            self.check()?;
-            self.bootstrap = BootstrapState::Attempted;
-            let result = unsafe { ShellExecuteExW(&mut info) };
-            self.check()?;
-            result.map_err(|e| format!("opennew Shell request: {e}"))?;
-        }
-        Ok(BootstrapReceipt {
-            operation_id: self.operation_id,
-            private_path: path.clone(),
-        })
-    }
-    fn await_bootstrap(&mut self, receipt: &BootstrapReceipt) -> Result<(), String> {
-        loop {
-            self.check()?;
-            let after = self.observer()?.observe(Some(&receipt.private_path));
-            self.check()?;
-            let before = self.baseline.as_ref().ok_or("missing baseline")?;
-            match attributed_bootstrap(before, &after, receipt)? {
-                Some(target) => {
-                    self.target = Some(target);
-                    self.bootstrap = BootstrapState::Attributed;
-                    return Ok(());
-                }
-                None => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-    }
-}
 
-impl WindowsExplorerTabsPort {
     fn call_native<T>(&self, call: impl FnOnce() -> T) -> Result<T, String> {
         self.check()?;
         let result = call();
@@ -1101,8 +1186,7 @@ impl WindowsExplorerTabsPort {
         Ok(owned)
     }
 
-    /// Resolve exactly one Shell browser whose active view belongs to the
-    /// selected UIA pane. Shared root HWNDs are never treated as tab identity.
+    /// Resolve one Shell view for the selected UIA pane on the Shell STA.
     fn selected_view(
         &mut self,
         pane: HWND,
@@ -1170,9 +1254,7 @@ impl WindowsExplorerTabsPort {
             let view = self
                 .call_native(|| unsafe { shell_browser.QueryActiveShellView() })?
                 .map_err(|e| format!("Shell active view: {e}"))?;
-            let ole: IOleWindow = self
-                .call_native(|| view.cast())?
-                .map_err(|e| format!("Shell view window: {e}"))?;
+            let ole: &IOleWindow = &view;
             let view_hwnd = self
                 .call_native(|| unsafe { ole.GetWindow() })?
                 .map_err(|e| format!("Shell view HWND: {e}"))?;
@@ -1187,7 +1269,7 @@ impl WindowsExplorerTabsPort {
                 continue;
             }
             if !self.call_native(|| shell_browser_window_matches(&shell_browser, target))?
-                || !self.call_native(|| ole_window_matches(&ole, target))?
+                || !self.call_native(|| ole_window_matches(ole, target))?
             {
                 return Err("Shell view ownership changed".into());
             }
@@ -1248,9 +1330,7 @@ impl WindowsExplorerTabsPort {
         if !same_com_identity(&view_identity, &active_unknown) {
             return Err("Shell selected view changed".into());
         }
-        let active_window: IOleWindow = self
-            .call_native(|| active.cast())?
-            .map_err(|e| format!("Shell view window recheck: {e}"))?;
+        let active_window: &IOleWindow = &active;
         let active_hwnd = self
             .call_native(|| unsafe { active_window.GetWindow() })?
             .map_err(|e| format!("Shell view HWND recheck: {e}"))?;
@@ -1302,6 +1382,550 @@ impl WindowsExplorerTabsPort {
     }
 }
 
+impl Drop for ShellState {
+    fn drop(&mut self) {
+        // Browser references must be released before the observer's apartment.
+        self.bindings.clear();
+        self.observer.take();
+        self.test_apartment.take();
+    }
+}
+
+// All Shell interfaces and PIDLs remain on this single operation-scoped STA.
+type ShellJob = Box<dyn FnOnce(&mut ShellState) + Send>;
+struct ShellStaOwner {
+    sender: Option<std::sync::mpsc::SyncSender<ShellJob>>,
+    thread_id: u32,
+    thread: Option<std::thread::JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+impl ShellStaOwner {
+    fn start(
+        operation_id: OperationId,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        Self::start_inner(operation_id, cancelled, deadline, true)
+    }
+    fn start_inner(
+        _operation_id: OperationId,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+        connect_shell: bool,
+    ) -> Result<Self, String> {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
+            PeekMessageW, QS_ALLINPUT, TranslateMessage,
+        };
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<ShellJob>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_id = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let worker_id_out = Arc::clone(&worker_id);
+        let worker_cancelled = Arc::clone(&cancelled);
+        let thread = std::thread::Builder::new()
+            .name("explorer-shell-sta".into())
+            .spawn(move || {
+                let mut message = MSG::default();
+                unsafe {
+                    let _ = PeekMessageW(&mut message, None, 0, 0, PM_REMOVE);
+                }
+                let thread_id = unsafe { GetCurrentThreadId() };
+                worker_id_out.store(thread_id, Ordering::Release);
+                let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok();
+                let mut local = ShellState {
+                    observer: None,
+                    bindings: Vec::new(),
+                    target: None,
+                    cancelled: worker_cancelled,
+                    deadline,
+                    test_apartment: None,
+                };
+                let initialized = initialized.map_err(|e| format!("Shell STA initialization: {e}"));
+                let startup = initialized.and_then(|()| {
+                    let apartment = crate::mkmacro::uia::ComApartment;
+                    if connect_shell {
+                        local.observer = Some(
+                            WindowsShellObserver::connect_with_apartment(apartment)
+                                .map_err(|e| format!("Shell observer: {e:?}"))?,
+                        );
+                    } else {
+                        local.test_apartment = Some(apartment);
+                    }
+                    Ok(())
+                });
+                match startup {
+                    Ok(()) => {
+                        let _ = ready_tx.send(Ok(thread_id));
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                }
+                loop {
+                    unsafe {
+                        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                            let _ = TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(job) => job(&mut local),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    unsafe {
+                        MsgWaitForMultipleObjectsEx(None, 1000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                    }
+                }
+            })
+            .map_err(|e| format!("Shell STA thread: {e}"))?;
+        let thread_id = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if cancelled.load(Ordering::Acquire) || remaining.is_zero() {
+                drop(sender);
+                let id = worker_id.load(Ordering::Acquire);
+                if id != 0 {
+                    use windows::Win32::Foundation::{LPARAM, WPARAM};
+                    use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+                    let _ = unsafe { PostThreadMessageW(id, WM_APP + 41, WPARAM(0), LPARAM(0)) };
+                }
+                let _ = thread.join();
+                return Err("Shell STA start cancelled or timed out".into());
+            }
+            match ready_rx.recv_timeout(remaining.min(Duration::from_millis(25))) {
+                Ok(Ok(id)) => break id,
+                Ok(Err(error)) => {
+                    let _ = thread.join();
+                    return Err(error);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => {
+                    let _ = thread.join();
+                    return Err("Shell STA failed to start".into());
+                }
+            }
+        };
+        Ok(Self {
+            sender: Some(sender),
+            thread_id,
+            thread: Some(thread),
+            cancelled,
+            deadline,
+        })
+    }
+    fn call<R: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut ShellState) -> Result<R, String> + Send + 'static,
+    ) -> Result<R, String> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        if Instant::now() >= self.deadline {
+            return Err("deadline expired".into());
+        }
+        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(0)); // queued / running / retired
+        let worker_state = Arc::clone(&state);
+        let job = Box::new(move |local: &mut ShellState| {
+            if worker_state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            let result = local.check().and_then(|()| operation(local));
+            let _ = response_tx.send(result);
+        });
+        self.sender
+            .as_ref()
+            .ok_or("Shell STA stopped")?
+            .try_send(job)
+            .map_err(|_| "Shell STA is busy".to_owned())?;
+        let wake_failed =
+            unsafe { PostThreadMessageW(self.thread_id, WM_APP + 41, WPARAM(0), LPARAM(0)) }
+                .is_err();
+        if wake_failed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        loop {
+            let cancelled = self.cancelled.load(Ordering::Acquire);
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if (cancelled || remaining.is_zero())
+                && state
+                    .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                return Err(if wake_failed {
+                    "Shell STA wake failed"
+                } else if cancelled {
+                    "cancelled"
+                } else {
+                    "deadline expired"
+                }
+                .into());
+            }
+            // A running native call owns the attempt receipt. Wait for it so
+            // the caller cannot report an attempt before its result is known.
+            let wait = if remaining.is_zero() {
+                Duration::from_millis(25)
+            } else {
+                remaining.min(Duration::from_millis(25))
+            };
+            match response_rx.recv_timeout(wait) {
+                Ok(result) => {
+                    if wake_failed {
+                        return Err("Shell STA wake failed".into());
+                    }
+                    if self.cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    if Instant::now() >= self.deadline {
+                        return Err("deadline expired".into());
+                    }
+                    return result;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => return Err("Shell STA stopped".into()),
+            }
+        }
+    }
+}
+impl Drop for ShellStaOwner {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+        self.sender.take();
+        let _ = unsafe { PostThreadMessageW(self.thread_id, WM_APP + 41, WPARAM(0), LPARAM(0)) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub(super) struct WindowsExplorerTabsPort {
+    // UIA references drop before the operation thread's MTA guard.
+    uia: Option<ExplorerUia>,
+    tabs: Vec<NativeTab>,
+    pending: Option<PendingNativeTab>,
+    shell_sta: Option<ShellStaOwner>,
+    mutation_attempted: Arc<AtomicBool>,
+    bootstrap_attempted: Arc<AtomicBool>,
+    mta_apartment: Option<crate::mkmacro::uia::ComApartment>,
+    operation_id: OperationId,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+    baseline: Option<ShellViewSnapshot>,
+    target: Option<BoundTargetEvidence>,
+    bootstrap: BootstrapState,
+    bootstrap_path: Option<std::path::PathBuf>,
+    requested_step_attempted: bool,
+    last_error: Option<String>,
+    opennew_available: bool,
+}
+impl WindowsExplorerTabsPort {
+    pub(super) fn new(
+        operation_id: OperationId,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            uia: None,
+            tabs: Vec::new(),
+            pending: None,
+            shell_sta: None,
+            mutation_attempted: Arc::new(AtomicBool::new(false)),
+            bootstrap_attempted: Arc::new(AtomicBool::new(false)),
+            mta_apartment: None,
+            operation_id,
+            cancelled,
+            deadline,
+            baseline: None,
+            target: None,
+            bootstrap: BootstrapState::NotStarted,
+            bootstrap_path: None,
+            requested_step_attempted: false,
+            last_error: None,
+            opennew_available: false,
+        }
+    }
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err("cancelled".into())
+        } else if Instant::now() >= self.deadline {
+            Err("deadline expired".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn diagnostic_for(&self, reason: impl Into<String>) -> BackendDiagnostic {
+        BackendDiagnostic {
+            reason: reason.into(),
+            bootstrap: if self.bootstrap == BootstrapState::NotStarted
+                && self.bootstrap_attempted.load(Ordering::Acquire)
+            {
+                BootstrapState::Attempted
+            } else {
+                self.bootstrap
+            },
+            owned_resource_remaining: self.bootstrap_path.is_some(),
+            owned_resource_path: self.bootstrap_path.clone(),
+            requested_step_attempted: self.requested_step_attempted
+                || self.mutation_attempted.load(Ordering::Acquire),
+        }
+    }
+    fn uia(&self) -> Result<&ExplorerUia, String> {
+        self.uia
+            .as_ref()
+            .ok_or_else(|| "UI Automation is unavailable".into())
+    }
+
+    fn shell_call<R: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut ShellState) -> Result<R, String> + Send + 'static,
+    ) -> Result<R, String> {
+        self.shell_sta
+            .as_ref()
+            .ok_or("Shell STA unavailable")?
+            .call(job)
+    }
+    fn shell_observe(
+        &self,
+        folder: Option<FolderPath>,
+    ) -> Result<(ShellViewSnapshot, ObservationTrace), String> {
+        self.shell_call(move |local| {
+            let observer = local.observer()?;
+            let snapshot = observer.observe(folder.as_ref());
+            Ok((snapshot, observer.last_trace.clone()))
+        })
+    }
+    fn shell_validate_folder(&self, folder: &FolderPath) -> Result<(), String> {
+        let folder = folder.clone();
+        self.shell_call(move |local| {
+            let _pidl = local
+                .call_native(|| parse_display_name(&folder))?
+                .map_err(|_| "requested folder PIDL unavailable")?;
+            Ok(())
+        })
+    }
+    fn shell_selected_view(
+        &self,
+        pane: HWND,
+        expected: Option<&FolderPath>,
+    ) -> Result<ShellBindingIdentity, String> {
+        let target = self
+            .target
+            .clone()
+            .ok_or("Explorer target is not attributed")?;
+        let pane = pane.0 as usize;
+        let expected = expected.cloned();
+        self.shell_call(move |local| {
+            local.target = Some(target);
+            local
+                .selected_view(hwnd_from_usize(pane), expected.as_ref())
+                .map(|(_, binding)| binding)
+        })
+    }
+    fn shell_navigate(
+        &self,
+        pane: HWND,
+        expected: Option<&FolderPath>,
+        binding: ShellBindingIdentity,
+        folder: &FolderPath,
+    ) -> Result<(), String> {
+        let target = self
+            .target
+            .clone()
+            .ok_or("Explorer target is not attributed")?;
+        let pane = pane.0 as usize;
+        let expected = expected.cloned();
+        let folder = folder.clone();
+        let attempted = Arc::clone(&self.mutation_attempted);
+        self.shell_call(move |local| {
+            local.target = Some(target);
+            let pidl = local
+                .call_native(|| parse_display_name(&folder))?
+                .map_err(|_| "requested folder PIDL unavailable")?;
+            let (browser, current) =
+                local.selected_view(hwnd_from_usize(pane), expected.as_ref())?;
+            if current != binding {
+                return Err("Shell binding changed before navigation".into());
+            }
+            local.check()?;
+            attempted.store(true, Ordering::Release);
+            let result =
+                unsafe { browser.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_SAMEBROWSER) };
+            local.check()?;
+            result.map_err(|e| format!("folder navigation: {e}"))
+        })
+    }
+    fn target_window(&self) -> Result<WindowIdentity, String> {
+        self.target
+            .as_ref()
+            .map(BoundTargetEvidence::window)
+            .ok_or_else(|| "Explorer target is not attributed".into())
+    }
+    fn checked_snapshot(&self) -> Result<UiaSnapshot, String> {
+        self.check()?;
+        let target = self.target_window()?;
+        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
+            return Err("Explorer target identity changed".into());
+        }
+        let snapshot = self.uia()?.snapshot(
+            hwnd_from_usize(target.root_hwnd()),
+            target.root_process_id(),
+        )?;
+        self.check()?;
+        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
+            return Err("Explorer target identity changed".into());
+        }
+        Ok(snapshot)
+    }
+    fn check_existing_tabs(&self, snapshot: &UiaSnapshot, expected: usize) -> Result<(), String> {
+        let expected_ids = self
+            .tabs
+            .iter()
+            .map(|tab| tab.runtime.clone())
+            .collect::<Vec<_>>();
+        let observed_ids = snapshot
+            .tabs
+            .iter()
+            .map(|tab| tab.runtime.clone())
+            .collect::<Vec<_>>();
+        let mut same = Vec::with_capacity(self.tabs.len());
+        for (old, current) in self.tabs.iter().zip(&snapshot.tabs) {
+            same.push(self.uia()?.same_element(&old.element, &current.element)?);
+        }
+        crate::explorer_tabs::evidence::validate_tab_prefix(
+            &expected_ids,
+            &observed_ids,
+            &same,
+            expected,
+        )
+        .map_err(str::to_owned)
+    }
+    fn wait_snapshot(&self, expected: usize) -> Result<UiaSnapshot, String> {
+        loop {
+            self.check()?;
+            match self.checked_snapshot() {
+                Ok(snapshot) if snapshot.tabs.len() == expected => return Ok(snapshot),
+                Ok(snapshot) if snapshot.tabs.len() > expected => {
+                    return Err("unexpected extra Explorer tabs".into());
+                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(25)),
+                Err(reason) => return Err(reason),
+            }
+        }
+    }
+
+    fn opennew_supported(&self) -> Result<bool, String> {
+        let mut length = 0u32;
+        let result = self.call_native(|| unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_COMMAND,
+                w!("Directory"),
+                w!("opennew"),
+                PWSTR::null(),
+                &mut length,
+            )
+        })?;
+        if result.is_err() || !(2..=32768).contains(&length) {
+            return Ok(false);
+        }
+        let mut buffer = vec![0u16; length as usize];
+        let result = self.call_native(|| unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_COMMAND,
+                w!("Directory"),
+                w!("opennew"),
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        })?;
+        Ok(result.is_ok() && length > 1 && buffer.first().is_some_and(|value| *value != 0))
+    }
+    fn launch_bootstrap(&mut self, path: &FolderPath) -> Result<BootstrapReceipt, String> {
+        self.check()?;
+        let baseline = self.baseline.as_ref().ok_or("missing baseline")?;
+        let browser = baseline.views().first().map(|view| view.shell_binding());
+        if let Some(binding) = browser {
+            let path = path.clone();
+            let attempted = Arc::clone(&self.bootstrap_attempted);
+            self.shell_call(move |local| {
+                let shell = local.retained_browser(binding)?;
+                let pidl = local
+                    .call_native(|| parse_display_name(&path))?
+                    .map_err(|_| "bootstrap PIDL unavailable")?;
+                local.check()?;
+                attempted.store(true, Ordering::Release);
+                let result =
+                    unsafe { shell.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_NEWBROWSER) };
+                local.check()?;
+                result.map_err(|e| format!("new Explorer window request: {e}"))
+            })?;
+            self.bootstrap = BootstrapState::Attempted;
+        } else {
+            self.check()?;
+            if !self.opennew_available || !self.opennew_supported()? {
+                return Err("opennew Shell verb unavailable".into());
+            }
+            self.check()?;
+            let wide: Vec<u16> = path.as_str().encode_utf16().chain(Some(0)).collect();
+            let mut info = SHELLEXECUTEINFOW {
+                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+                lpVerb: w!("opennew"),
+                lpFile: PCWSTR(wide.as_ptr()),
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            self.check()?;
+            self.bootstrap = BootstrapState::Attempted;
+            let result = unsafe { ShellExecuteExW(&mut info) };
+            self.check()?;
+            result.map_err(|e| format!("opennew Shell request: {e}"))?;
+        }
+        Ok(BootstrapReceipt {
+            operation_id: self.operation_id,
+            private_path: path.clone(),
+        })
+    }
+    fn await_bootstrap(&mut self, receipt: &BootstrapReceipt) -> Result<(), String> {
+        loop {
+            self.check()?;
+            let (after, _) = self.shell_observe(Some(receipt.private_path.clone()))?;
+            self.check()?;
+            let before = self.baseline.as_ref().ok_or("missing baseline")?;
+            match attributed_bootstrap(before, &after, receipt)? {
+                Some(target) => {
+                    self.target = Some(target);
+                    self.bootstrap = BootstrapState::Attributed;
+                    return Ok(());
+                }
+                None => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    }
+}
+
+impl WindowsExplorerTabsPort {
+    fn call_native<T>(&self, call: impl FnOnce() -> T) -> Result<T, String> {
+        self.check()?;
+        let result = call();
+        self.check()?;
+        Ok(result)
+    }
+}
+
 impl WindowsExplorerTabsPort {
     fn prepare_initial(&mut self, step: &FolderRequestStep) -> Result<(), String> {
         self.check()?;
@@ -1309,10 +1933,8 @@ impl WindowsExplorerTabsPort {
             return Err("requested folder is unavailable or not a directory".into());
         }
         self.check()?;
-        let pidl =
-            parse_display_name(step.folder()).map_err(|_| "requested folder PIDL unavailable")?;
-        self.check()?;
-        let baseline = self.observer()?.observe(None);
+        self.shell_validate_folder(step.folder())?;
+        let (baseline, _) = self.shell_observe(None)?;
         self.check()?;
         if !baseline.is_complete() {
             return Err(format!(
@@ -1335,7 +1957,7 @@ impl WindowsExplorerTabsPort {
         let bootstrap = FolderPath::parse(path.to_str().ok_or("bootstrap path is not Unicode")?)
             .map_err(|e| format!("bootstrap path: {e:?}"))?;
         self.check()?;
-        let refreshed = self.observer()?.observe(None);
+        let (refreshed, _) = self.shell_observe(None)?;
         self.check()?;
         if self.baseline.as_ref() != Some(&refreshed) {
             return Err("Shell baseline changed before bootstrap request".into());
@@ -1347,7 +1969,7 @@ impl WindowsExplorerTabsPort {
         if snapshot.selected_index != 0 {
             return Err("bootstrap tab selection is ambiguous".into());
         }
-        let (_, binding) = self.selected_view(snapshot.selected_pane, Some(&bootstrap))?;
+        let binding = self.shell_selected_view(snapshot.selected_pane, Some(&bootstrap))?;
         let rechecked = self.checked_snapshot()?;
         if rechecked.tabs.len() != 1
             || rechecked.selected_index != 0
@@ -1359,17 +1981,17 @@ impl WindowsExplorerTabsPort {
         {
             return Err("bootstrap tab changed before navigation".into());
         }
-        let (browser, rechecked_binding) =
-            self.selected_view(rechecked.selected_pane, Some(&bootstrap))?;
+        let rechecked_binding =
+            self.shell_selected_view(rechecked.selected_pane, Some(&bootstrap))?;
         if rechecked_binding != binding {
             return Err("bootstrap Shell binding changed before navigation".into());
         }
-        self.check()?;
-        self.requested_step_attempted = true;
-        let result =
-            unsafe { browser.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_SAMEBROWSER) };
-        self.check()?;
-        result.map_err(|e| format!("initial folder navigation: {e}"))?;
+        self.shell_navigate(
+            rechecked.selected_pane,
+            Some(&bootstrap),
+            binding,
+            step.folder(),
+        )?;
         self.pending = Some(PendingNativeTab {
             element: snapshot.tabs[0].element.clone(),
             runtime: snapshot.tabs[0].runtime.clone(),
@@ -1383,16 +2005,14 @@ impl WindowsExplorerTabsPort {
             return Err("requested folder is unavailable or not a directory".into());
         }
         self.check()?;
-        let pidl =
-            parse_display_name(step.folder()).map_err(|_| "requested folder PIDL unavailable")?;
-        self.check()?;
+        self.shell_validate_folder(step.folder())?;
         let before = self.checked_snapshot()?;
         self.check_existing_tabs(&before, self.tabs.len())?;
         if self.tabs.is_empty() || before.selected_index + 1 != self.tabs.len() {
             return Err("Explorer selected tab changed".into());
         }
         let previous_folder = self.tabs.last().ok_or("missing prior tab")?.folder.clone();
-        let (_, binding) = self.selected_view(before.selected_pane, Some(&previous_folder))?;
+        let binding = self.shell_selected_view(before.selected_pane, Some(&previous_folder))?;
         if self.tabs.last().is_none_or(|tab| tab.binding != binding) {
             return Err("selected Shell binding changed".into());
         }
@@ -1403,8 +2023,8 @@ impl WindowsExplorerTabsPort {
         {
             return Err("Explorer selection changed before append".into());
         }
-        let (_, rechecked_binding) =
-            self.selected_view(rechecked.selected_pane, Some(&previous_folder))?;
+        let rechecked_binding =
+            self.shell_selected_view(rechecked.selected_pane, Some(&previous_folder))?;
         if rechecked_binding != binding {
             return Err("selected Shell binding changed before append".into());
         }
@@ -1435,7 +2055,7 @@ impl WindowsExplorerTabsPort {
                 return Err("reused tab element".into());
             }
         }
-        let (_, binding) = self.selected_view(after.selected_pane, None)?;
+        let binding = self.shell_selected_view(after.selected_pane, None)?;
         let rechecked = self.checked_snapshot()?;
         self.check_existing_tabs(&rechecked, self.tabs.len() + 1)?;
         let current = &rechecked.tabs[self.tabs.len()];
@@ -1446,15 +2066,11 @@ impl WindowsExplorerTabsPort {
         {
             return Err("new tab changed before navigation".into());
         }
-        let (browser, rechecked_binding) = self.selected_view(rechecked.selected_pane, None)?;
+        let rechecked_binding = self.shell_selected_view(rechecked.selected_pane, None)?;
         if rechecked_binding != binding {
             return Err("new tab Shell binding changed before navigation".into());
         }
-        self.check()?;
-        let result =
-            unsafe { browser.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_SAMEBROWSER) };
-        self.check()?;
-        result.map_err(|e| format!("new tab navigation: {e}"))?;
+        self.shell_navigate(rechecked.selected_pane, None, binding, step.folder())?;
         self.pending = Some(PendingNativeTab {
             element: new.element.clone(),
             runtime: new.runtime.clone(),
@@ -1479,8 +2095,8 @@ impl WindowsExplorerTabsPort {
         {
             return Err("pending tab identity changed".into());
         }
-        let (_, binding) = self
-            .selected_view(snapshot.selected_pane, Some(step.folder()))
+        let binding = self
+            .shell_selected_view(snapshot.selected_pane, Some(step.folder()))
             .map_err(|reason| {
                 if reason == FOLDER_NOT_READY {
                     PendingObservationError::NotReady
@@ -1499,8 +2115,8 @@ impl WindowsExplorerTabsPort {
         {
             return Err("pending tab changed during folder observation".into());
         }
-        let (_, rechecked_binding) = self
-            .selected_view(after.selected_pane, Some(step.folder()))
+        let rechecked_binding = self
+            .shell_selected_view(after.selected_pane, Some(step.folder()))
             .map_err(PendingObservationError::Failed)?;
         if !selected_relation_unchanged(
             snapshot.selected_pane,
@@ -1608,6 +2224,212 @@ fn selected_relation_unchanged(
 #[cfg(test)]
 mod native_relation_tests {
     use super::*;
+
+    /// Opt-in, read-only diagnostic; never creates windows or starts an operation.
+    #[test]
+    #[ignore = "requires an interactive Windows desktop and explicit receipt path"]
+    fn explorer_tabs_read_only_shell_observer_receipt() {
+        let path = std::env::var_os("EXPLORER_TABS_OBSERVER_RECEIPT")
+            .expect("set EXPLORER_TABS_OBSERVER_RECEIPT to an explicit receipt file");
+        fn collect(
+            label: &str,
+            observer: Result<WindowsShellObserver, ShellObservationError>,
+        ) -> String {
+            let mut report = String::new();
+            match observer {
+                Ok(mut observer) => {
+                    for sample in 0..2 {
+                        let snapshot = observer.observe(None);
+                        report.push_str(&format!("apartment={label} sample={sample} complete={} windows={} views={} failure={:?} trace={:?}\n",
+                        snapshot.is_complete(), snapshot.windows().len(), snapshot.views().len(), snapshot.failure(), observer.last_trace));
+                    }
+                }
+                Err(ShellObservationError::ComInitialization(_)) => report.push_str(&format!(
+                    "apartment={label} connect=com-initialization-failed\n"
+                )),
+                Err(ShellObservationError::ShellUnavailable(_)) => {
+                    report.push_str(&format!("apartment={label} connect=shell-unavailable\n"))
+                }
+            }
+            report
+        }
+        let mut report = String::from("Explorer Tabs read-only Shell observation\n");
+        report.push_str(&collect(
+            "MTA",
+            WindowsShellObserver::connect_mta_for_diagnostic(),
+        ));
+        let sta = ShellStaOwner::start(
+            OperationId::from_token(999).unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            Instant::now() + Duration::from_secs(10),
+        );
+        match sta {
+            Ok(owner) => {
+                for sample in 0..2 {
+                    match owner.call(|state| {
+                    let observer = state.observer()?;
+                    let snapshot = observer.observe(None);
+                    Ok((snapshot, observer.last_trace.clone()))
+                }) {
+                    Ok((snapshot, trace)) => report.push_str(&format!("apartment=STA-owner sample={sample} complete={} windows={} views={} failure={:?} trace={trace:?}\n",
+                        snapshot.is_complete(), snapshot.windows().len(), snapshot.views().len(), snapshot.failure())),
+                    Err(_) => report.push_str(&format!("apartment=STA-owner sample={sample} observation-failed\n")),
+                }
+                }
+            }
+            Err(_) => report.push_str("apartment=STA-owner connect-failed\n"),
+        }
+        std::fs::write(path, report).expect("write observer receipt");
+    }
+
+    #[test]
+    fn explorer_tabs_shell_sta_owner_dispatch_cancel_and_shutdown() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let owner = ShellStaOwner::start_inner(
+            OperationId::from_token(91).unwrap(),
+            Arc::clone(&cancelled),
+            deadline,
+            false,
+        )
+        .unwrap();
+        let caller = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let worker = owner
+            .call(|_| Ok(unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }))
+            .unwrap();
+        assert_ne!(caller, worker);
+        let started = Instant::now();
+        assert_eq!(owner.call(|_| Ok(7)).unwrap(), 7);
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "posted work wakes the pump"
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let mutation = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let attempt = Arc::clone(&mutation);
+            let owner_ref = &owner;
+            let call = scope.spawn(move || {
+                owner_ref.call(move |state| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    state.check()?;
+                    attempt.store(true, Ordering::Release);
+                    Ok(())
+                })
+            });
+            entered_rx.recv().unwrap();
+            cancelled.store(true, Ordering::Release);
+            release_tx.send(()).unwrap();
+            assert!(call.join().unwrap().is_err());
+        });
+        assert!(!mutation.load(Ordering::Acquire));
+        drop(owner);
+
+        // A queued command is retired before cancellation returns, even while
+        // another command is still running on the owner.
+        let queued_cancel = Arc::new(AtomicBool::new(false));
+        let queued_owner = ShellStaOwner::start_inner(
+            OperationId::from_token(93).unwrap(),
+            Arc::clone(&queued_cancel),
+            Instant::now() + Duration::from_secs(3),
+            false,
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let queued_mutation = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let first_owner = &queued_owner;
+            let first = scope.spawn(move || {
+                first_owner.call(move |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+            });
+            entered_rx.recv().unwrap();
+            let second_owner = &queued_owner;
+            let marker = Arc::clone(&queued_mutation);
+            let second = scope.spawn(move || {
+                second_owner.call(move |_| {
+                    marker.store(true, Ordering::Release);
+                    Ok(())
+                })
+            });
+            queued_cancel.store(true, Ordering::Release);
+            assert!(second.join().unwrap().is_err());
+            release_tx.send(()).unwrap();
+            assert!(first.join().unwrap().is_err());
+        });
+        assert!(!queued_mutation.load(Ordering::Acquire));
+        drop(queued_owner);
+
+        // If mutation has already started, cancellation waits for the exact
+        // attempt receipt before the caller returns.
+        let running_cancel = Arc::new(AtomicBool::new(false));
+        let running_owner = ShellStaOwner::start_inner(
+            OperationId::from_token(94).unwrap(),
+            Arc::clone(&running_cancel),
+            Instant::now() + Duration::from_secs(3),
+            false,
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let did_attempt = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let owner_ref = &running_owner;
+            let marker = Arc::clone(&did_attempt);
+            let running = scope.spawn(move || {
+                owner_ref.call(move |_| {
+                    marker.store(true, Ordering::Release);
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+            });
+            entered_rx.recv().unwrap();
+            running_cancel.store(true, Ordering::Release);
+            release_tx.send(()).unwrap();
+            assert!(running.join().unwrap().is_err());
+        });
+        assert!(did_attempt.load(Ordering::Acquire));
+        drop(running_owner);
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let owner = ShellStaOwner::start_inner(
+            OperationId::from_token(95).unwrap(),
+            Arc::clone(&cancelled),
+            Instant::now() + Duration::from_secs(3),
+            false,
+        )
+        .unwrap();
+        let attempts = Arc::new(AtomicBool::new(false));
+        cancelled.store(true, Ordering::Release);
+        let marker = Arc::clone(&attempts);
+        assert!(
+            owner
+                .call(move |_| {
+                    marker.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!attempts.load(Ordering::Acquire));
+        drop(owner);
+        let mut expired = ShellStaOwner::start_inner(
+            OperationId::from_token(92).unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            Instant::now() + Duration::from_secs(3),
+            false,
+        )
+        .unwrap();
+        expired.deadline = Instant::now();
+        assert!(expired.call(|_| Ok(())).is_err());
+        drop(expired);
+    }
 
     #[test]
     fn explorer_tabs_backend_replaced_selected_pane_cannot_verify_old_view() {
@@ -1816,17 +2638,25 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
                     "Windows 11 Explorer tab capability requires build 22621 or later".into(),
                 );
             }
-            let mut observer = WindowsShellObserver::connect()
-                .map_err(|error| format!("Shell observer: {error:?}"))?;
+            self.mta_apartment = Some(
+                crate::mkmacro::uia::initialize_com_apartment()
+                    .map_err(|e| format!("UIA apartment: {e}"))?,
+            );
+            self.shell_sta = Some(ShellStaOwner::start(
+                self.operation_id,
+                Arc::clone(&self.cancelled),
+                self.deadline,
+            )?);
             self.check()?;
             let uia = ExplorerUia::connect(Arc::clone(&self.cancelled), self.deadline)?;
             self.check()?;
-            let baseline = observer.observe(None);
+            let (baseline, trace) = self.shell_observe(None)?;
             self.check()?;
             if !baseline.is_complete() {
                 return Err(format!(
-                    "incomplete Shell baseline: {:?}",
-                    baseline.failure()
+                    "incomplete Shell baseline: {:?} ({:?})",
+                    baseline.failure(),
+                    trace
                 ));
             }
             let opennew = self.opennew_supported()?;
@@ -1836,7 +2666,6 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
             }
             self.opennew_available = opennew;
             self.baseline = Some(baseline);
-            self.observer = Some(observer);
             self.uia = Some(uia);
             Ok(())
         })();
@@ -1844,6 +2673,7 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
     }
     fn request(&mut self, step: &FolderRequestStep) -> Result<RequestResult, BackendDiagnostic> {
         self.requested_step_attempted = false;
+        self.mutation_attempted.store(false, Ordering::Release);
         let result = match step.kind() {
             FolderRequestKind::CreateInitialWindow => self.prepare_initial(step),
             FolderRequestKind::OpenAdditionalTab => self.prepare_append(step),
@@ -1851,6 +2681,11 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
         match result {
             Ok(()) => Ok(RequestResult::Accepted),
             Err(reason) => {
+                if self.bootstrap == BootstrapState::NotStarted
+                    && self.bootstrap_attempted.load(Ordering::Acquire)
+                {
+                    self.bootstrap = BootstrapState::Attempted;
+                }
                 if self.bootstrap == BootstrapState::NotStarted {
                     self.cleanup_bootstrap();
                 }
@@ -1931,8 +2766,8 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
                 self.check_existing_tabs(&before, self.tabs.len())?;
                 let current_index = before.selected_index;
                 let current_folder = self.tabs[current_index].folder.clone();
-                let (_, current_binding) =
-                    self.selected_view(before.selected_pane, Some(&current_folder))?;
+                let current_binding =
+                    self.shell_selected_view(before.selected_pane, Some(&current_folder))?;
                 if current_binding != self.tabs[current_index].binding {
                     return Err("current selected binding changed".into());
                 }
@@ -1943,8 +2778,8 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
                 {
                     return Err("selected pane changed before final selection".into());
                 }
-                let (_, rechecked_current) =
-                    self.selected_view(pre_select.selected_pane, Some(&current_folder))?;
+                let rechecked_current =
+                    self.shell_selected_view(pre_select.selected_pane, Some(&current_folder))?;
                 if rechecked_current != current_binding {
                     return Err("current Shell binding changed before final selection".into());
                 }
@@ -1957,7 +2792,7 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
                     return Err("selected tab changed during final check".into());
                 }
                 let folder = self.tabs[index].folder.clone();
-                let (_, binding) = self.selected_view(after.selected_pane, Some(&folder))?;
+                let binding = self.shell_selected_view(after.selected_pane, Some(&folder))?;
                 if binding != self.tabs[index].binding {
                     return Err("verified Shell binding changed".into());
                 }
@@ -1968,8 +2803,8 @@ impl ExplorerTabsPort for WindowsExplorerTabsPort {
                 {
                     return Err("selection changed during final verification".into());
                 }
-                let (_, rechecked_binding) =
-                    self.selected_view(final_snapshot.selected_pane, Some(&folder))?;
+                let rechecked_binding =
+                    self.shell_selected_view(final_snapshot.selected_pane, Some(&folder))?;
                 if rechecked_binding != binding {
                     return Err("Shell binding changed during final verification".into());
                 }
