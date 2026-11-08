@@ -22,7 +22,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M0-A | Exact-parent child, own baseline, initial push | complete |
 | M1-A | A: root query and intentional focus transfer | complete (native pending C smoke) |
 | M2-A | B: root-results-local fade override | complete (native pending C smoke) |
-| M3-A | C: release profile and bounded feature audit | pending |
+| M3-A | C: release profile and bounded feature audit | complete (release pending M3-B) |
 | M3-B | C: idle capability work and ordinary release build | pending |
 | M3-R | Independent A-C review/report/GitHub publication | pending |
 | M4-A | D: recovery persistence before scratch close | pending |
@@ -71,3 +71,13 @@ M1-A commit 6ec61e5b1d765022ee06381cd419d6acd15455b8; ordinary git push succeede
 The existing root-results UI saves its fade strength, sets scroll.fade.strength=0 immediately before the shared list/grid ScrollArea, and restores it immediately afterward. No new child UI/widget identity, global/vendor styling, selection-scroll timing or geometry changes. Parent inspected exact scoped diff; git diff --check passed.
 
 RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E 'test(root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection) | test(root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets)': 2/2 passed, 7,686 skipped, 2.962s execution, run 12b46689-66d7-4b5d-a08c-17e96e77db1d. Separate compilation 1m20s; existing100s owned runner exit0 in4.986s, cleanup/output drain verified. Receipts target/launcher-utility-fixes/evidence/m2a-root-results/{result.json,stderr.log}. Native visual check pending C release smoke; no evidence supports an extra selection-scroll change.
+
+M2-A commit b5df0946752e10d597bc76f01d84df8fa83d754a; normal push succeeded, clean checkpoint tree. M3-A planning active.
+
+## M3-A result
+
+Cargo.toml directly defines release opt-level=3, lto=thin, codegen-units=16, strip=symbols, panic=unwind. iteration adds strip=none; existing opt2/cgu64/ltooff/incremental and effective debug/panic fields preserved; dev/fast-dev untouched. Parent inspected manifest diff; Cargo.lock unchanged. Thin LTO may increase build/link work; no benchmark/performance metrics claimed.
+
+Bounded feature audit: cargo tree -e features -i eframe; cargo tree -e features -i image@0.24.9; cargo tree -e features -i image@0.25.6 all succeeded. No safe removal identified. Glow explicitly selected in main.rs4515; image024 serves screenshot/crop/diagram PNG/JPEG (screenshots also enables defaults), image025 serves egui_commonmark/extras and notes_markdown/html.rs541 decoder dispatch. Keep intentional decoder sets, accessibility/fonts/platform/link/web support; production catch_unwind in main.rs7191 and diagram/rendering.rs1488 requires unwind. No feature/version migration.
+
+cargo metadata --no-deps --format-version1 parsed manifest; profile-only TOML comparison against HEAD confirmed effective iteration settings preserved; git diff --check passed. Initial image@0.25.10 audit query corrected to actual0.25.6. Python3.11 tomllib rejects existing Cargo-supported multiline inline tables, so comparison parsed profile sections only, with Cargo metadata validating the manifest. No behavior tests needed for unchanged dependencies. Ordinary release build pending M3-B.
