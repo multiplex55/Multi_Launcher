@@ -627,7 +627,7 @@ impl<'a> Parser<'a> {
         } else if starts_number(character) {
             // A radix prefix is one scalar token, not decimal zero followed by
             // a unit such as `b`. Leave it to the scalar/programmer parser.
-            let bytes = self.source[self.cursor..].as_bytes();
+            let bytes = &self.source.as_bytes()[self.cursor..];
             if bytes.first() == Some(&b'0')
                 && bytes
                     .get(1)

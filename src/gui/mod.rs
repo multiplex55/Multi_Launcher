@@ -5882,12 +5882,12 @@ impl LauncherApp {
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
                 {
-                    if !self.zip_extractor_dialog.open {
-                        if self.archive_session.has_active_worker()
+                    if !self.zip_extractor_dialog.open
+                        && (self.archive_session.has_active_worker()
                             || self.zip_creation_session.reopen().is_err()
-                        {
-                            return;
-                        }
+                        )
+                    {
+                        return;
                     }
                     self.zip_extractor_dialog.open_with_snapshot(self.archive_session.snapshot());
                     self.zip_extractor_dialog.update_creation_snapshot(

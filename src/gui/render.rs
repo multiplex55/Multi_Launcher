@@ -12728,7 +12728,7 @@ impl LauncherApp {
                         self.panel_states.explorer_tabs_dialog = false;
                     }
                     ExplorerTabsHostCommand::Apply(actions) => {
-                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(actions);
+                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(*actions);
                         for text in copies {
                             effects.push(RootDialogEffect::CopyText {
                                 owner: DialogCopyOwner::ExplorerTabs, text

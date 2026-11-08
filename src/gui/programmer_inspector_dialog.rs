@@ -519,11 +519,11 @@ impl ProgrammerInspectorDialog {
                         }
                     }
                 });
-                if let Some(mode) = requested_mode {
-                    if mode != active_mode || mode != draft.target_mode() {
-                        draft.select_mode(mode);
-                        changed = true;
-                    }
+                if let Some(mode) = requested_mode
+                    && (mode != active_mode || mode != draft.target_mode())
+                {
+                    draft.select_mode(mode);
+                    changed = true;
                 }
                 let active_mode = draft.model.value().mode();
                 ui.horizontal_wrapped(|ui| {

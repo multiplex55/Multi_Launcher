@@ -1298,10 +1298,10 @@ impl CalculationPadDialog {
         if let Some(search) = help.search.take() {
             self.examples_search = search;
         }
-        if let Some(scroll) = help.scroll {
-            if scroll.is_finite() {
-                self.examples_scroll = scroll.max(0.0);
-            }
+        if let Some(scroll) = help.scroll
+            && scroll.is_finite()
+        {
+            self.examples_scroll = scroll.max(0.0);
         }
         if help.close {
             self.retire_examples(ctx);

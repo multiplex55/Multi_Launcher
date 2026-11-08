@@ -1161,7 +1161,7 @@ pub(super) type ExplorerTabsWindowHost =
     super::utility_window_host::UtilityWindowHost<ExplorerTabsDialog>;
 pub(super) enum ExplorerTabsHostCommand {
     Closed,
-    Apply(ExplorerTabsActions),
+    Apply(Box<ExplorerTabsActions>),
 }
 impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
     const KEY: &'static str = "explorer-tabs";
@@ -1250,7 +1250,7 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
         if actions.close {
             vec![ExplorerTabsHostCommand::Closed]
         } else {
-            vec![ExplorerTabsHostCommand::Apply(actions)]
+            vec![ExplorerTabsHostCommand::Apply(Box::new(actions))]
         }
     }
     #[cfg(test)]

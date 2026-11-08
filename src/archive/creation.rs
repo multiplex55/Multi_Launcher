@@ -912,9 +912,11 @@ fn create_zip(
             }
             progress.lock().unwrap_or_else(|e| e.into_inner()).completed += 1;
         }
-        let adapter = writer.finish().map_err(|e| e.to_string())?.into_inner();
-        let output_len = adapter.offset;
-        drop(adapter);
+        let output_len = writer
+            .finish()
+            .map_err(|e| e.to_string())?
+            .into_inner()
+            .offset;
         if io.is_cancelled() {
             return Err("cancelled".into());
         }

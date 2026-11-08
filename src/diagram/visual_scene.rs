@@ -859,7 +859,7 @@ pub(crate) fn seed_manual_route(
     if connector.route == VisualConnectorRoute::Curved {
         // Inversion below uses exact samples at one and two thirds of a single cubic.
         if item.route_fallback
-            || CONNECTOR_CURVE_SEGMENTS % 3 != 0
+            || !CONNECTOR_CURVE_SEGMENTS.is_multiple_of(3)
             || path.len() != CONNECTOR_CURVE_SEGMENTS + 1
         {
             return None;

@@ -1853,8 +1853,9 @@ impl LauncherApp {
                         error_changed = true;
                     }
                 }
-                VisualOverlayEvent::Expired { operation_id } | VisualOverlayEvent::Cancelled { operation_id } => {
-                    if overlay.preview.is_some_and(|(id, _)| id == operation_id) { overlay.preview = None; }
+                VisualOverlayEvent::Expired { operation_id } | VisualOverlayEvent::Cancelled { operation_id }
+                    if overlay.preview.is_some_and(|(id, _)| id == operation_id) => {
+                    overlay.preview = None;
                 }
                 _ => {}
             }

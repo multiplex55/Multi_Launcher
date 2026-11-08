@@ -440,7 +440,7 @@ struct PreparedLine {
 enum PreparedStatement {
     Blank,
     Comment,
-    Expression(PreparedExpression),
+    Expression(Box<PreparedExpression>),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -727,7 +727,7 @@ fn prepare_line(
                 PreparedLine {
                     source_range,
                     assignment_name,
-                    statement: PreparedStatement::Expression(PreparedExpression {
+                    statement: PreparedStatement::Expression(Box::new(PreparedExpression {
                         vector: Some(Ok(expression)),
                         explicit_vector: true,
                         scalar: None,
@@ -738,7 +738,7 @@ fn prepare_line(
                         quantity: None,
                         quantity_error: None,
                         quantity_unit_evidence: UnitParseEvidence::None,
-                    }),
+                    })),
                     references,
                     dependencies: Vec::new(),
                     diagnostic: None,
@@ -914,7 +914,7 @@ fn prepare_line(
         return PreparedLine {
             source_range,
             assignment_name,
-            statement: PreparedStatement::Expression(PreparedExpression {
+            statement: PreparedStatement::Expression(Box::new(PreparedExpression {
                 vector: None,
                 explicit_vector: false,
                 scalar: None,
@@ -925,7 +925,7 @@ fn prepare_line(
                 quantity: Some(quantity),
                 quantity_error: None,
                 quantity_unit_evidence,
-            }),
+            })),
             references,
             dependencies: Vec::new(),
             diagnostic: None,
@@ -954,7 +954,7 @@ fn prepare_line(
             return PreparedLine {
                 source_range,
                 assignment_name,
-                statement: PreparedStatement::Expression(PreparedExpression {
+                statement: PreparedStatement::Expression(Box::new(PreparedExpression {
                     vector: None,
                     explicit_vector: false,
                     scalar: None,
@@ -965,7 +965,7 @@ fn prepare_line(
                     quantity: Some(quantity),
                     quantity_error: None,
                     quantity_unit_evidence,
-                }),
+                })),
                 references,
                 dependencies: Vec::new(),
                 diagnostic: None,
@@ -1036,7 +1036,7 @@ fn prepare_line(
     PreparedLine {
         source_range,
         assignment_name,
-        statement: PreparedStatement::Expression(PreparedExpression {
+        statement: PreparedStatement::Expression(Box::new(PreparedExpression {
             vector,
             explicit_vector: false,
             scalar,
@@ -1047,7 +1047,7 @@ fn prepare_line(
             quantity: quantity_parse.expression,
             quantity_error: quantity_parse.error,
             quantity_unit_evidence,
-        }),
+        })),
         references,
         dependencies: Vec::new(),
         diagnostic: None,
@@ -2024,12 +2024,13 @@ pub(super) fn evaluate_comparison_expression(
 fn defers_scalar_diagnostic(line: &PreparedLine) -> bool {
     matches!(
         &line.statement,
-        PreparedStatement::Expression(PreparedExpression {
-            programmer: Some(_),
-            scalar_error: Some(_),
-            uses_programmer_syntax: false,
-            ..
-        })
+        PreparedStatement::Expression(expression)
+            if matches!(expression.as_ref(), PreparedExpression {
+                programmer: Some(_),
+                scalar_error: Some(_),
+                uses_programmer_syntax: false,
+                ..
+            })
     )
 }
 
