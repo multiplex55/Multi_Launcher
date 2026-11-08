@@ -35,7 +35,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M4-B | Structural clipboard and keyboard ownership | complete |
 | M4-C | Owned persistent inline labels | complete |
 | M4-D | Persistent editable connector bends | complete |
-| M4-E | Four additional editable templates | pending |
+| M4-E | Four additional editable templates | in_progress |
 | M5-A | Timeout-capable UIA activation | pending |
 | M5-B | Saved folder snapshot picker | pending |
 | M6-A | Cold-cache recorder enumeration | pending |
@@ -432,3 +432,11 @@ GUI interactions are simulated egui; no native bend/export claim. Constructor ad
 
 M4-D sole writer confirmed source writes/formatting finished and no Cargo/rustc job active; parent inspected final hunk scope, only intentional files remain. Source-write retirement confirmed before staging.
 
+M4-D checkpoint255169341afd9ab6a71d2dae590744faf9f8e51a committed; its one normal push succeeded, tree clean before next source assignment. Parent last ledger append introduced an EOF blank-line warning after source checks; it was noticed after commit and is removed in this next ledger update, without rewriting checkpoint history. Future mutation orchestration checks command exit status before proceeding. M4-E now assigned to sole source writer using prepared handoff; no parallel Cargo/source job.
+### M4-D post-test formatting repair discovered during M4-E
+
+M4-E first compile failed before tests with a mismatched delimiter in connector-point preview. M4-D's final scratch-format extraction had stopped at a nested wildcard arm, deleting25 lines AFTER its passing tests; the previous "formatting only" assessment was incorrect. Commit25516934 therefore contained a syntax regression. Source writer restored the exact tested branch: isolated GUI hunk old8889/new8889, reinstating wildcard arm, world-delta update, preview projection, rollback and closures before Transform branch. Preserve all M4-E drafts; no reset/stash/history rewrite. Root will stage this repair hunk only (other GUI hunks are Decision Tree/narrow-fit M4-E test changes), commit/push a separate repair after targeted drag+template checks pass, then complete the template checkpoint. No source formatting after tests without full-boundary/token-equivalence verification. Existing operational ledger remains authoritative; this is ordinary task-caused implementation feedback, not an external blocker/stall.
+
+Repair/M4-E scoped runccc83d45-1440-491e-81ea-1aac0277389f passed5/6: restored connector drag and new catalogue/persistence passed; dirty-transition/narrow-fit test reached viewer opening but button was clipped by retained decision-panel scroll. Fix uses existing reveal_visual_action before actual click, preserving assertions. Sole writer cannot prove all M4-D formatted blocks token-equivalent from retained evidence; repeat original bounded13-case M4-D set with the one failing template test after helper correction. Concrete reason: demonstrated post-test formatter corruption across blocks, not automatic regression expansion. No full suite or new campaign. Keep source unchanged afterward.
+
+Final repair/template run3628f1d1-ad35-45e6-9079-016ecd083628 passed14/14: original bounded13 M4-D cases on FINAL formatted/restored source plus corrected template dirty-transition/narrow-fit. This establishes M4-D acceptance after the actual formatter defect. Initial M4-E compilation ran zero tests; prior ccc83d5/6 proved catalogue/save-reopen/keyboard menu/discard/drag, final clipped button uses existing reveal helper. No further formatting/source changes/Cargo jobs. Root now stages isolated25-line preview repair plus ledger only, preserving M4-E source hunks for separate checkpoint.

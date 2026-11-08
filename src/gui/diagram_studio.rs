@@ -8889,6 +8889,31 @@ impl DiagramStudioDialog {
                                                 match index {
                                                     0 => Some(control1),
                                                     1 => Some(control2),
+                                                    _ => None,
+                                                }
+                                            }
+                                        };
+                                        if let Some(target) = target {
+                                            target.x += world.x - active.pointer_start_world.x;
+                                            target.y += world.y - active.pointer_start_world.y;
+                                            connector.manual_route = Some(route);
+                                            let mut preview = scene.clone();
+                                            if let Some(saved) = preview.objects.iter_mut().find(|object| object.id == object_id) {
+                                                *saved = edited.clone();
+                                            }
+                                            if let Ok(projection) = project_visual_scene(&preview) {
+                                                active.preview_scene = Some(Arc::new(preview));
+                                                active.preview_projection = Some(Arc::new(projection));
+                                                active.preview_objects = vec![edited];
+                                            } else {
+                                                active.preview_scene = None;
+                                                active.preview_projection = None;
+                                                active.preview_objects = active.initial_objects.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             VisualGestureMode::Transform(mode) if pointer_changed => {
                                 let mut current_world = active
                                     .mapping
