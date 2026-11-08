@@ -70,6 +70,8 @@ pub(super) struct RootFrameLogic {
     ui_passes: u32,
     show_query_focus_attempted_revision: Option<u64>,
     query_autocomplete_tab_pending: bool,
+    query_jump_pointer_transfer: Option<(super::QueryFocusSession, QueryShowGeometry, u64)>,
+    query_pointer_cancel_focus_intent: bool,
     trace_root_hwnd: Option<windows::Win32::Foundation::HWND>,
 }
 
@@ -86,6 +88,8 @@ impl Default for RootFrameLogic {
             ui_passes: 0,
             show_query_focus_attempted_revision: None,
             query_autocomplete_tab_pending: false,
+            query_jump_pointer_transfer: None,
+            query_pointer_cancel_focus_intent: false,
             trace_root_hwnd: None,
         }
     }
@@ -1975,7 +1979,8 @@ impl LauncherApp {
                 false,
                 gesture_capture_active,
             )
-            || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            || (self.notes_dialog.host_layer_if_root().is_some()
+                && self.notes_dialog.jump_mode_unsupported_nested_owner_open())
             || (self.unused_assets_dialog.open
                 && !ordinary_layer_is_allowed(egui::LayerId::new(
                     egui::Order::Middle,
@@ -2087,7 +2092,7 @@ impl LauncherApp {
                 egui::Id::new("Plugin Settings"),
             )))
             .chain(self.calculation_pad_dialog.examples_layer_if_root())
-            .chain(self.diagram_studio_dialog.docked_owner_layer())
+            .chain(self.diagram_studio_dialog.owner_layer_if_root())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
@@ -2098,7 +2103,8 @@ impl LauncherApp {
             || self.calculation_pad_dialog.examples_layer_if_root().is_some()
             || self.show_plugins
             || !note_panel_layers.is_empty()
-            || !self.image_panels.is_empty())
+            || !self.image_panels.is_empty()
+            || self.any_panel_open())
         .then_some(super::QueryFocusOrdinaryContext {
             note_panel_layers,
             ordinary_panel_layers,
@@ -2174,7 +2180,8 @@ impl LauncherApp {
             Panel::FileLockDialog => self.file_lock_dialog.root_layer(),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
             Panel::RecordingDialog => self.recording_dialog.root_layer(),
-            Panel::DiagramStudioDialog | Panel::RadialEditor => None,
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.owner_layer_if_root(),
+            Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
             Panel::CompletionDialog | Panel::SnippetPromptDialog | Panel::CropDialog => None,
         }
@@ -2571,7 +2578,6 @@ impl LauncherApp {
         if !self.visible_flag.load(Ordering::Relaxed)
             || ctx.viewport_id() != egui::ViewportId::ROOT
             || !ctx.input(|input| input.focused)
-            || self.jump_mode_ui.active_session().is_some()
             || self.query_show_geometry_is_eligible(ctx, geometry) != Some(true)
             || self.query_focus_mouse_owner_blocks(ctx, Some(geometry.layer_id))
         {
@@ -2600,7 +2606,11 @@ impl LauncherApp {
         let ordinary_context = self.query_focus_ordinary_context();
         focused_layer == Some(geometry.layer_id)
             || ordinary_context.as_ref().is_some_and(|context| {
-                focused_layer.is_some_and(|layer| context.ordinary_panel_layers.contains(&layer))
+                (focused_layer.is_none()
+                    && (context.ordinary_panel_layers.is_empty()
+                        || self.jump_mode_ui.active_session().is_some()))
+                    || focused_layer
+                        .is_some_and(|layer| context.ordinary_panel_layers.contains(&layer))
                     || focused_layer.is_some_and(|layer| {
                         self.notes_dialog.host_layer_if_root() == Some(layer)
                     })
@@ -4791,6 +4801,8 @@ impl LauncherApp {
             ui_passes: 0,
             show_query_focus_attempted_revision: None,
             query_autocomplete_tab_pending: false,
+            query_jump_pointer_transfer: None,
+            query_pointer_cancel_focus_intent: false,
             trace_root_hwnd,
         });
     }
@@ -8487,12 +8499,13 @@ impl LauncherApp {
         let Some(ordinary_context) = self.query_focus_ordinary_context() else {
             return false;
         };
-        let Some(top_layer) = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) else {
-            return false;
-        };
-        ordinary_context.ordinary_panel_layers.contains(&top_layer)
-            && !ordinary_context.note_panel_layers.contains(&top_layer)
-            && self.notes_dialog.host_layer_if_root() != Some(top_layer)
+        let top_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+        (top_layer.is_none() && ordinary_context.ordinary_panel_layers.is_empty()
+            || top_layer.is_some_and(|layer| {
+                ordinary_context.ordinary_panel_layers.contains(&layer)
+                    && !ordinary_context.note_panel_layers.contains(&layer)
+                    && self.notes_dialog.host_layer_if_root() != Some(layer)
+            }))
             && self.query_focus_mouse_session_has_keyboard_authority(
                 ctx,
                 root_visible,
@@ -8535,15 +8548,7 @@ impl LauncherApp {
                         | super::Panel::RadialEditor
                 )
             })
-            .any(|panel| {
-                self.is_panel_open(panel)
-                    && (panel != super::Panel::MkMacroDialog
-                        || self.mkmacro_dialog.host_layer_if_root().is_some())
-                    && (panel != super::Panel::ClipboardModifyDialog
-                        || self.clipboard_modify_has_root_presentation())
-                    && (!matches!(panel, super::Panel::CalendarPopover | super::Panel::CalendarEventEditor | super::Panel::CalendarEventDetails)
-                        || self.calendar_panel_root_layer(panel).is_some())
-            })
+            .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
     }
 
     fn jump_mode_navigation_owner_candidate(
@@ -8565,7 +8570,7 @@ impl LauncherApp {
             .observe_settings_visibility(self.show_settings);
         let notes_visibility_changed = self
             .jump_mode_ui
-            .observe_notes_visibility(self.notes_dialog.open);
+            .observe_notes_visibility(self.notes_dialog.host_layer_if_root().is_some());
         let todo_visibility_changed = self
             .jump_mode_ui
             .observe_todo_visibility(self.todo_dialog.open);
@@ -8576,7 +8581,7 @@ impl LauncherApp {
             .observe_paste_sequence_visibility(self.paste_sequence_dialog.open && self.paste_sequence_host.root_layer().is_some());
         let mkmacro_visibility_changed = self
             .jump_mode_ui
-            .observe_mkmacro_visibility(self.mkmacro_dialog.open);
+            .observe_mkmacro_visibility(self.mkmacro_dialog.host_layer_if_root().is_some());
         let radial_designer_open = self
             .radial_editor
             .lock()
@@ -8697,8 +8702,8 @@ impl LauncherApp {
                 settings_layer: self.settings_window_host.root_layer(),
                 notes: self
                     .notes_dialog
-                    .open
-                    .then_some(self.jump_mode_ui.notes_instance()),
+                    .host_layer_if_root()
+                    .map(|_| self.jump_mode_ui.notes_instance()),
                 todo: self
                     .todo_dialog
                     .open
@@ -9162,6 +9167,13 @@ impl LauncherApp {
     }
 
     fn query_focus_preservation_for_jump(&self, ctx: &egui::Context) -> bool {
+        if self
+            .root_frame_logic
+            .as_ref()
+            .is_some_and(|logic| logic.query_jump_pointer_transfer.is_some())
+        {
+            return true;
+        }
         let geometry = self
             .query_focus_session
             .as_ref()
@@ -9210,6 +9222,8 @@ impl LauncherApp {
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
+            logic.query_jump_pointer_transfer = None;
+            logic.query_pointer_cancel_focus_intent = false;
         }
         let (
             navigation_owner_candidate,
@@ -9775,7 +9789,7 @@ impl LauncherApp {
         let root_navigation_allowed = !self.jump_mode_enabled()
             || (self.jump_mode_ui.frame_navigation_owner()
                 == crate::gui::jump_mode::ui::NavigationOwner::Root
-                && !self.any_panel_open());
+                && !self.any_root_panel_open());
 
         let mut deferred_universal_action = None;
         let mut deferred_radial_authoring_add = None;
@@ -9887,9 +9901,10 @@ impl LauncherApp {
                 {
                     self.query_focus_session = None;
                 }
-            let query_navigation_allowed =
-                (ordinary_root_query_allowed && self.query_focus_ordinary_context().is_none())
-                        || query_focus_session_active;
+            let query_navigation_allowed = (ordinary_root_query_allowed
+                && self.query_focus_ordinary_context().as_ref()
+                    .is_none_or(|context| context.ordinary_panel_layers.is_empty()))
+                || query_focus_session_active;
                 let pending_show_can_enable_query = !root_navigation_allowed
                     && self.pending_show_query_focus_can_enable_query(
                         &ctx,
@@ -10019,7 +10034,6 @@ impl LauncherApp {
                     && mouse_candidate_ordinary_context.is_some()
                     && self.query_focus_ordinary_context().as_ref()
                         == mouse_candidate_ordinary_context.as_ref()
-                    && self.jump_mode_ui.active_session().is_none()
                     && self.query_show_geometry_is_eligible(
                         &ctx,
                         QueryShowGeometry {
@@ -10034,13 +10048,31 @@ impl LauncherApp {
                         mouse_candidate_ordinary_context.clone(),
                     )
                 {
-                    self.query_focus_session = Some(super::QueryFocusSession {
+                    let session = super::QueryFocusSession {
                         origin: super::QueryFocusOrigin::Mouse,
                         visibility_revision: mouse_candidate_revision,
                         root_identity,
                         ordinary_context,
                         root_jump_session_generation: None,
-                    });
+                    };
+                    if let Some(generation) = self.jump_mode_ui.active_session_generation() {
+                        if let Some(logic) = self.root_frame_logic.as_mut() {
+                            logic.query_jump_pointer_transfer = Some((
+                                session,
+                                QueryShowGeometry {
+                                    rect: query_response.rect,
+                                    clip_rect: query_clip_rect,
+                                    layer_id: query_response.layer_id,
+                                },
+                                generation,
+                            ));
+                        }
+                    } else {
+                        self.query_focus_session = Some(session);
+                        if let Some(logic) = self.root_frame_logic.as_mut() {
+                            logic.query_pointer_cancel_focus_intent = true;
+                        }
+                    }
                     current_query_mouse_focus_accepted = true;
                 }
                 if mouse_query_session_transfer_pending
@@ -10163,7 +10195,11 @@ impl LauncherApp {
                             }
                         }
                     });
-                let query_workflow_allowed = if self.query_focus_ordinary_context().is_some() {
+                let query_workflow_allowed = if self
+                    .query_focus_ordinary_context()
+                    .as_ref()
+                    .is_some_and(|context| !context.ordinary_panel_layers.is_empty())
+                {
                     query_focus_session_valid && query_focus_session_keyboard_authority
                 } else {
                     ordinary_root_query_allowed
@@ -12056,6 +12092,46 @@ impl LauncherApp {
         });
     }
 
+    // Only a retained query response may retire a hint or its queued focus.
+    fn complete_query_jump_pointer_transfer(&mut self, ctx: &egui::Context) {
+        let cancel_focus_intent = self.root_frame_logic.as_ref()
+            .is_some_and(|logic| logic.query_pointer_cancel_focus_intent);
+        if cancel_focus_intent && self.query_focus_session.as_ref().is_some_and(|session| {
+            self.current_query_focus_geometry(ctx).is_some_and(|geometry| {
+                self.query_focus_session_is_eligible(ctx, session, geometry, true)
+            })
+        }) {
+            self.jump_mode_ui.cancel_focus_intent();
+        }
+        let transfer = self.root_frame_logic.as_mut()
+            .and_then(|logic| logic.query_jump_pointer_transfer.take());
+        let Some((session, geometry, generation)) = transfer else {
+            return;
+        };
+        let query_id = egui::Id::new("query_input");
+        let valid = self.jump_mode_ui.active_session_generation() == Some(generation)
+            && self.query_focus_ordinary_context().as_ref() == Some(&session.ordinary_context)
+            && self.visibility_revision.current() == session.visibility_revision
+            && self.visible_flag.load(Ordering::Relaxed)
+            && self.published_root_identity_for_query_focus() == Some(session.root_identity)
+            && self.root_window_bridge.is_current(session.root_identity.0, session.root_identity.1)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.read_response(query_id).is_some_and(|response| {
+                response.enabled() && response.has_focus()
+                    && response.rect == geometry.rect && response.layer_id == geometry.layer_id
+            })
+            && self.query_show_geometry_is_eligible(ctx, geometry) == Some(true)
+            && !self.query_focus_mouse_owner_blocks(ctx, Some(geometry.layer_id));
+        if valid {
+            self.jump_mode_ui.cancel_for_query_pointer_transfer();
+            self.query_focus_session = Some(session);
+            ctx.request_repaint();
+        } else if ctx.memory(|memory| memory.has_focus(query_id)) {
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        }
+    }
+
     fn finish_ui_frame_receipt(&mut self) {
         let completed_show_focus_revision = self
             .root_frame_logic
@@ -13231,6 +13307,7 @@ impl eframe::App for LauncherApp {
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
         self.complete_recording_dialog(_ctx);
+        self.complete_query_jump_pointer_transfer(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -13456,6 +13533,7 @@ impl LauncherApp {
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
         self.complete_recording_dialog(ctx);
+        self.complete_query_jump_pointer_transfer(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -59906,29 +59984,159 @@ mod tests {
         app.timer_dialog.open = true;
 
         let dynamic_root_layers = [Panel::NotePanel, Panel::ImagePanel];
+        let stateful_hosts = [
+            Panel::Settings, Panel::FileSearchDialog, Panel::ClipboardDialog,
+            Panel::ClipboardModifyDialog, Panel::JsonUtilityDialog,
+            Panel::ProgrammerInspectorDialog, Panel::ExplorerTabsDialog,
+            Panel::TableUtilityDialog, Panel::TimerDialog, Panel::DateTimeStudioDialog,
+            Panel::ImageCompareDialog, Panel::DuplicateFinderDialog, Panel::FolderSizeDialog,
+            Panel::FileLockDialog, Panel::RecordingDialog, Panel::ZipExtractorDialog,
+            Panel::CalendarPopover, Panel::CalendarEventEditor, Panel::CalendarEventDetails,
+            Panel::XmlToolkitDialog, Panel::RegexTesterDialog, Panel::SnippetDialog,
+            Panel::PasteSequenceDialog, Panel::BatchRenameDialog, Panel::SearchReplaceDialog,
+            Panel::MouseGesturesDialog, Panel::MouseSettingsDialog,
+            Panel::MouseGestureSettingsDialog, Panel::NotesDialog, Panel::MarkdownStudioDialog,
+            Panel::CalculationPadDialog, Panel::DiagramStudioDialog, Panel::MkMacroDialog,
+        ];
         let non_root_or_exclusive = [
             Panel::CompletionDialog,
             Panel::SnippetPromptDialog,
             Panel::CropDialog,
-            Panel::DiagramStudioDialog,
             Panel::RadialEditor,
         ];
-        let mut mapped_root_layers = 0;
+        let mut classified = 0;
         for panel in LauncherApp::TRACKED_PANELS {
             if app.query_focus_panel_layer(panel).is_some() {
-                mapped_root_layers += 1;
+                classified += 1;
             } else {
                 assert!(
-                    dynamic_root_layers.contains(&panel) || non_root_or_exclusive.contains(&panel),
+                    dynamic_root_layers.contains(&panel)
+                        || non_root_or_exclusive.contains(&panel)
+                        || (stateful_hosts.contains(&panel)
+                            && (!app.is_panel_open(panel) || !app.panel_has_root_presentation(panel))),
                     "tracked panel {panel:?} needs an explicit query-focus owner classification"
                 );
+                classified += 1;
             }
         }
-        assert_eq!(
-            mapped_root_layers + dynamic_root_layers.len() + non_root_or_exclusive.len(),
-            LauncherApp::TRACKED_PANELS.len(),
-            "every tracked panel has exactly one known root, dynamic, or protected classification"
-        );
+        assert_eq!(classified, LauncherApp::TRACKED_PANELS.len());
+    }
+
+    #[test]
+    fn studio_usability_query_focus_detached_tools_leave_root_query_usable() {
+        use crate::gui::Panel;
+
+        let screen = egui::vec2(1600.0, 1200.0);
+        let query_id = egui::Id::new("query_input");
+        for jump in [false, true] {
+            for panel in [Panel::NotesDialog, Panel::MarkdownStudioDialog,
+                Panel::CalculationPadDialog, Panel::MkMacroDialog, Panel::DiagramStudioDialog] {
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root query");
+                app.set_jump_mode_enabled(jump);
+                app.focus_panel(panel);
+                match panel {
+                    Panel::NotesDialog => {
+                        app.notes_dialog.test_set_edit_draft("notes draft");
+                        app.notes_dialog.test_pop_out();
+                        if jump {
+                            app.focus_panel(Panel::MarkdownStudioDialog);
+                            app.markdown_studio_dialog.test_replace_source("second draft");
+                            app.markdown_studio_dialog.test_pop_out();
+                        }
+                    }
+                    Panel::MarkdownStudioDialog => {
+                        app.markdown_studio_dialog.test_replace_source("markdown draft");
+                        app.markdown_studio_dialog.test_pop_out();
+                    }
+                    Panel::CalculationPadDialog => {
+                        app.calculation_pad_dialog.test_replace_source("answer = 42");
+                        app.calculation_pad_dialog.test_popout_pad(&ctx);
+                    }
+                    Panel::MkMacroDialog => app.mkmacro_dialog.test_pop_out(),
+                    Panel::DiagramStudioDialog => {}
+                    _ => unreachable!(),
+                }
+                launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+                notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, jump);
+                assert!(!app.panel_has_root_presentation(panel), "{panel:?} should be native");
+                let query_rect = ctx.read_response(query_id).unwrap().rect;
+                // A just-retired docked area can still appear in egui's
+                // previous pass. Move to the query and wait for its real
+                // interactive rectangle to be retained before clicking.
+                for _ in 0..3 {
+                    notes_query_mouse_run_frame(&mut app, &ctx, screen,
+                        vec![egui::Event::PointerMoved(query_rect.center())]);
+                    if ctx.interactive_rects_last_pass().contains(&query_rect) {
+                        break;
+                    }
+                }
+                assert!(ctx.interactive_rects_last_pass().contains(&query_rect),
+                    "the actual query should be registered for pointer input beside {panel:?}, Jump {jump}");
+                notes_query_mouse_click(&mut app, &ctx, screen, query_rect);
+                notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+                assert!(ctx.memory(|memory| memory.has_focus(query_id)), "{panel:?}, Jump {jump}");
+                notes_query_mouse_type(&mut app, &ctx, screen, "λ🙂");
+                assert!(app.query.contains("λ🙂"), "{panel:?}, Jump {jump}: {}", app.query);
+                notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+                assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+                assert!(app.is_panel_open(panel));
+                match panel {
+                    Panel::NotesDialog => assert_eq!(app.notes_dialog.test_edit_draft(), "notes draft"),
+                    Panel::MarkdownStudioDialog => assert_eq!(app.markdown_studio_dialog.test_source(), Some("markdown draft")),
+                    Panel::CalculationPadDialog => assert_eq!(app.calculation_pad_dialog.test_source(), Some("answer = 42")),
+                    _ => {}
+                }
+                if panel == Panel::NotesDialog && jump {
+                    assert_eq!(app.markdown_studio_dialog.test_source(), Some("second draft"));
+                    assert!(app.markdown_studio_dialog.open);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn studio_usability_query_focus_click_retires_active_jump_hint() {
+        let screen = egui::vec2(1600.0, 1200.0);
+        let query_id = egui::Id::new("query_input");
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root query");
+        app.set_jump_mode_enabled(true);
+        app.focus_panel(crate::gui::Panel::MarkdownStudioDialog);
+        app.markdown_studio_dialog.test_pop_out();
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, true);
+        let rect = ctx.read_response(query_id).unwrap().rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, rect);
+        notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+        notes_query_hint_start_leader(&mut app, &ctx, screen);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        let rect = ctx.read_response(query_id).unwrap().rect;
+        let pos = rect.center();
+        let (output, passes) = app.run_root_frame_for_test(&ctx, egui::RawInput {
+            events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..launcher_show_owner_input(true, screen)
+        }, true);
+        output.drop_without_applying_deltas();
+        assert!(passes > 1);
+        assert!(app.jump_mode_ui.active_session().is_some(), "discarded press cannot retire the hint");
+        let outside = egui::pos2(screen.x - 1.0, screen.y - 1.0);
+        notes_query_mouse_run_frame(&mut app, &ctx, screen, vec![
+            egui::Event::PointerMoved(outside), egui::Event::PointerButton {
+                pos: outside, button: egui::PointerButton::Primary, pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        notes_query_mouse_click(&mut app, &ctx, screen, rect);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
     }
 
     #[test]

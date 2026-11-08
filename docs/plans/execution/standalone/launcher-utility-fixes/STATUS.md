@@ -19,8 +19,8 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 
 | Checkpoint | Task and deliverable | State |
 | --- | --- | --- |
-| M0-A | Exact-parent child, own baseline, initial push | in_progress |
-| M1-A | A: root query and intentional focus transfer | pending |
+| M0-A | Exact-parent child, own baseline, initial push | complete |
+| M1-A | A: root query and intentional focus transfer | complete (native pending C smoke) |
 | M2-A | B: root-results-local fade override | pending |
 | M3-A | C: release profile and bounded feature audit | pending |
 | M3-B | C: idle capability work and ordinary release build | pending |
@@ -34,3 +34,32 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M9-A | Final independent review, scoped Clippy, exact-tip handoff | pending |
 
 Continue directly from M3-R to D-H without approval or merge waits. Publication/native limitations remain explicit; they do not stop safe implementation. No broad suite or historical acceptance campaign.
+
+M0-A receipt: baseline_sha c10da8ddd90d3ebc7cf477409deb7921921a10d8; immediate parent verified equal required parent. Elevated ordinary initial push succeeded; upstream origin/codex/launcher-utility-fixes. Initial sandbox network failure did not persist in authorized Git execution. M1-A planning active.
+
+
+## Verification environment preparation
+
+- Computer-use skill read and @oai/sky initialized through node_repl. App/window inventory succeeds; no native interaction claimed yet.
+- Isolated synthetic settings/actions profile prepared at target/launcher-utility-fixes/native-profile, based on predecessor task-owned profile. Paste Sequence next/cancel and launcher global shortcuts disabled before construction; empty index roots and empty actions. No user profile edited.
+- Host registry: Windows 10 Home 22H2, build 19045.6466 (receipt target/launcher-utility-fixes/evidence/os.json). Supported Windows 11 Explorer tab end-to-end behavior cannot be demonstrated on this OS; H observation investigation and safe refusal remain independently testable.
+- GitHub connector confirms repository multiplex55/Multi_Launcher, default integration branch master and push permission; no existing open PR for task head. gh is unavailable; use connector for requested publication at M3-R.
+
+## M1-A investigation (active, not accepted)
+
+Planner identified global-open-state gates across navigation/Jump/focus plus incomplete actual-host classification. Implementer owns the sequential source changes and focused actual-frame regressions. Detached Note/Markdown and accepted active Jump query-click (including rejected discarded press) have passing focused evidence so far; Diagram embedded host tracking also passed. The detached Pad case exposed a press-frame interactivity gate despite stable query geometry, requiring root-cause correction before checkpoint acceptance. No later task source implementation has started.
+
+The local test binary requires RUST_MIN_STACK=16777216 for these large application fixtures; an existing neighboring Pad/Dashboard test also overflows at default stack. A temporary test-only instrumentation lock panic ended through egui's own 10s protection, with no remaining Cargo/rustc/test processes. Subsequent compile and test execution are separated; the existing owned-process runner bounds pure-test execution to 100s and records cleanup/output drain. Final exact selectors/results follow on completion; diagnostic failures are not passes or native proof.
+
+
+## M1-A result
+
+Root presentation now comes from actual host layers for Notes/Markdown/Pad/Diagram and companion/viewer surfaces. Root navigation and unsupported Jump classification use ROOT presentation; detached-only contexts remain ordinary query contexts. Native Notes/MkMacro no longer register ROOT navigation ownership. A real query response stages cancellation of the exact active Jump generation; only retained completion after current identity/visibility/geometry/focus/blocker validation retires its hint and stale focus intent. Diagram owner embedded layer is tracked/cleared through accepted lifecycle effects. No global any_panel_open semantics or modal/capture/foreground protections changed.
+
+New actual-frame coverage spans five detached hosts, Jump on/off, multiple detached Notes/Markdown, Unicode and persistent focus/drafts; active hint transfer rejects a discarded press. Embedded Diagram ownership assertion and explicit stateful-host policy classification retained. Investigation resolved Pad's synthetic first-click failure as prior docked-layer fixture state: the test establishes an actual retained interactive rectangle before sending the real click; production received no delay/workaround. Temporary diagnostics removed. Parent inspected full source/test diff; git diff --check passed.
+
+Verification: RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E with exact selector below. 15/15 passed, 7,673 skipped, 9.363s execution, run 6d2c6a33-45bf-4a96-8ffa-30f237ad2bc2. Existing owned-process wrapper: 100s execution deadline excluding separately completed compilation; 11.467s actual, exit0, cleanup and output drain verified. Receipts target/launcher-utility-fixes/evidence/m1a-focused/{result.json,stderr.log}. Native verification pending consolidated release smoke after C; these are egui/state tests, not Windows UI proof.
+
+```text
+test(studio_usability_query_focus_) | test(studio_usability_diagram_viewer_embedded_fallback_keeps_root_host_identity) | test(notes_query_mouse_) | test(notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft) | test(jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass) | test(notes_query_activation_mouse_workflow_runs_current_result_beside_notes) | test(notes_query_activation_autocomplete_tab_keeps_focus_through_discarded_pass) | test(launcher_show_focus_waits_for_root_focus_and_never_refocuses_an_already_visible_query) | test(launcher_show_focus_cancels_on_click_tab_and_protected_owner_takeover) | test(launcher_show_focus_rejects_replaced_root_generation)
+```
