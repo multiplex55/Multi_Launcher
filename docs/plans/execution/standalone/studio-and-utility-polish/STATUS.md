@@ -28,8 +28,8 @@ Goal section F contains the authoritative objective, ownership, scope, invariant
 | M2-B | Compact grouped bit Inspector | implemented/tested; native limited |
 | M2-C | Three-section source/result Copy All | implemented/tested |
 | M3-A | Diagram menus, header and stable source editing | implemented/tested; native limited |
-| M3-B | Adjustable Visual canvas, reset and viewer pan | in_progress |
-| M4-A | Native persisted Mermaid styling semantics | pending |
+| M3-B | Adjustable Visual canvas, reset and viewer pan | implemented/tested; native limited |
+| M4-A | Native persisted Mermaid styling semantics | in_progress |
 | M4-B | Qualified generic family colors and narrow Timeline patch | pending |
 | M4-C | Color controls, templates and offline help | pending |
 | M5-A | Independent cumulative review, scoped lint/native smoke and handoff | pending |
@@ -81,3 +81,20 @@ M2-C commit 01e9ddf0abcfc957e997237427476ad45265f1b1 pushed successfully; clean 
 Both authoring modes expose File/Edit/View/Templates/Help. Flat scrollable File menus retain accepted intents, enablement, dirty decisions, export options and focus scopes. Source editor locks Tab/Shift+Tab using TextEdit behavior and application undo. A compact reserved status beside Direction exposes full detail on hover; notices/cache diagnostics sit below the workspace. Visual recents header and bounded title share a wrapping row, entries below; long title text is preserved.
 
 Final source-changing fast-dev library test compilation passed in 1m00s with six existing unrelated warnings. Initial run 87e91ef8-d335-4e5e-b067-6e7baf67dcaa passed five Tab/undo/status/header/focus/pending-decision cases; menu failures identified obsolete test focus setup and a clipped Visual export item. Fixed export layout; keyboard setup now leaves the locked editor via real menu click/Escape before navigation, retaining unchanged-source/history assertions. Full-rect status/newline/Visual PNG cases passed run 43af6979-c93f-489f-a0f6-362c9d6aff3c. Final keyboard 3/3 passed run f720438a-7023-46ff-8ca0-45050e1821bc. Directly affected menu routes 7/7 passed run 802be457-dff8-4edb-97ef-e3fb3f8f35fe, including SVG/PNG, discarded options, dirty template, Draw.io and narrow width. Owned execution batches <=100s with cleanup/drain verified; receipts under target/studio-and-utility-polish/evidence/{m3a-focused,m3a-retry,m3a-keyboard-final2,m3a-menu-routes}/result.json. Final formatting was scoped whitespace only. Parent inspected menu/status/header ownership and diff; diff check passed. Native gestures remain separate/unverified.
+
+M3-A commit 89cb5fdb9fdf82516f30f7b769b972d428b0dca6 pushed successfully; clean checkpoint tree. M3-B is the sole active writer/Cargo lane.
+
+## M3-B result
+
+Visual editor canvas width is uncapped and height derives from visible host space with an explicit ratio control. Scroll-invariant content-relative header measurement preserves lower controls. Visual viewer primary drag pans camera rather than native/embedded host. Double-middle reset fits all current projected bounds, uses finite empty defaults, restores viewer resize-follow, and wins over other same-frame camera input. New camera effects and accepted primary/middle click capture are fenced by existing owner/viewer receipts, host/generation and document/revision checks. Rejected first/second clicks cannot contribute to reset; editor object dragging and other viewers preserve existing behavior.
+
+Final separate fast-dev library test compilation passed in 1m28s. Initial 12-test run e65b3d29 exposed a real lower-control feedback loop from using the scrolled cursor for height; corrected to scroll-stable content-relative geometry. Final 12/12 passed run 7f38ac8a-e2b8-4e49-b5f5-eb12eb4e7004 in 2.869s, owned 100s runner exit 0 with cleanup/drain verified. Receipt target/studio-and-utility-polish/evidence/m3b-focused-corrected/result.json. Tests cover editor/viewer camera independence, native/root drag modes, minimap exclusions, imported bounds, empty/reset/resize follow, size control/lower controls, discarded primary/click chains and stale/transition effects. Parent inspected staged camera/press ownership and sizing; diff check passed. Native physical gestures remain unverified.
+
+## Remaining implementation notes
+
+Goal section F remains the milestone contract. Planner completed bounded packets for M3-B and M4-A/B/C; keep sequential writes and checkpoint commits on this branch.
+
+- M4-A: before adding style fields, capture `codec.rs::tests::session_with_history().encode()` as `tests/fixtures/diagram_session_v1_unstyled_history.json`; no frozen Mermaid history fixture currently exists. Test those fixed old bytes for decode, source/graph, undo/redo and encoding stability. Correction to an earlier planning concern: HistoryEntry.encoded_bytes is serde-skipped and recomputed during decode, not stored and compared from disk. Omit-default style fields still preserve old output/budgets; no custom accounting migration is justified solely by the earlier concern.
+- M4-B: pinned registry package is C:/Users/Jay/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mermaid-rs-renderer-0.3.1, upstream SHA 2f993bd79a55235eb59a34d807852276ba25bea7, archive checksum 6cb5b469222ce6b9896edf0a969cf68464f5a028ef394fd6643f00bd943df117, MIT. Narrow Timeline patch is TimelineConfig plus render_timeline event-card palette, retaining exact six-color default/empty fallback and geometry. Follow vendor PATCH.md convention; no renderer upgrade.
+- M4-C: existing DiagramSourceCopy/request_source_copy can capture a styled template/example through current dirty decisions; preserve captured preset, update origin wording accurately. Node colors use existing property draft; help copies use accepted effects. Current documentation paths are docs/DIAGRAM_STUDIO.md and docs/DIAGRAM_MERMAID_SUBSET.md.
+- M5-A: one cumulative independent reviewer, scoped first-party Clippy, appropriate formatting/diff checks, one current fast-dev app build and consolidated smoke where supported. Capture and its prescribed refreshed-selection retry both failed; do not repeat unchanged capture attempts or bypass unavailable click geometry. Final native limitations must remain explicit. Read final SHA after actual last commit; no self-reference commit loop.
