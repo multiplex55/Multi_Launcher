@@ -921,6 +921,15 @@ mod native {
                 .session
                 .as_ref()
                 .ok_or_else(|| "capture session was not created".to_owned())?;
+            match session.IsBorderRequired() {
+                Ok(required) => tracing::info!(
+                    required,
+                    "Windows capture border setting; effective border may also depend on consent and other capture sessions"
+                ),
+                Err(error) => {
+                    tracing::info!(%error, "Windows capture border setting is unavailable; leaving the system indicator unchanged")
+                }
+            }
             session
                 .SetIsCursorCaptureEnabled(self.request.options().includes_cursor())
                 .map_err(|error| {

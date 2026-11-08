@@ -4270,6 +4270,7 @@ impl LauncherApp {
             self.pending_screenshot_completion = Some(completion);
         }
         self.recording_controller.poll();
+        self.reconcile_recording_outline(ctx);
         self.poll_recording_targets(ctx);
         self.poll_recording_region(ctx);
         if self.recording_controller.has_active_job() {
@@ -13236,6 +13237,7 @@ impl eframe::App for LauncherApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.recording_controller.request_shutdown();
+        self.recording_dialog.retire_recording_outline();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);
