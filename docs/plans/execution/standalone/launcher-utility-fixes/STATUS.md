@@ -25,13 +25,13 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M3-A | C: release profile and bounded feature audit | complete |
 | M3-B | C: idle capability work and ordinary release build | complete |
 | M3-R | Independent A-C review/report/GitHub publication | complete; published |
-| M4-A | D: recovery persistence before scratch close | implemented/tested; native pending |
+| M4-A | D: recovery persistence before scratch close | implemented/tested; native scratch close/reopen verified |
 | M5-A | E: accepted viewer-only preview dragging | implemented/tested; native limited |
 | M6-A | F: top-level pending decision controls | implemented/tested; native limited |
 | M7-A | G: bounded details, typed cached sort/filter, reveal | implemented/tested; native limited |
 | M7-B | G: bounded directory/path capacity | complete |
 | M8-A | H: actual Shell baseline observation correction | implemented/tested; native observer verified; ordered tabs limited |
-| M9-A | Final independent review, scoped Clippy, exact-tip handoff | in_progress |
+| M9-A | Final independent review, scoped Clippy, exact-tip handoff | delivered LIMITED; external native acceptance open |
 
 Continue directly from M3-R to D-H without approval or merge waits. Publication/native limitations remain explicit; they do not stop safe implementation. No broad suite or historical acceptance campaign.
 
@@ -245,3 +245,22 @@ test(explorer_tabs_shell_sta_owner_dispatch_cancel_and_shutdown) | test(explorer
 ```
 
 Final reviewed binary native opt-in test through the real STA-owner queue passed two complete observations, each201windows/1view/no failure. Deliberate MTA comparison still reproduces0x8001010D twice, confirming the regression boundary. Final receipt m8a-shell-owner-final.txt, runner m8a-owner-final-result.json, exit0 elapsed0.202s cleanup/output drain verified. Earlier integrated receipt0.256s agrees. No Explorer creation/navigation, user-window retargeting or unsupported gate bypass occurred. This is native observer proof, not a demonstrated ordered-tab saved-list operation. Windows10 build19045 cannot provide the required Windows11≥22621 tab acceptance; it remains open. An already-running synchronous COM call can delay retirement; no unsafe abandoned worker or hard native-call interruptibility is claimed.
+
+## M9-A final review/lint progress
+
+M8-A commit7f301d5d92f707abac098eb7e63f8633ce0033d5; ordinary push succeeded and checkpoint tree clean. Final independent review report PEER_REVIEW_FINAL.md records D–G and H source boundary, corrected public-constructor P2 and no unresolved actionable finding.
+
+Required first-party lint command `cargo clippy -p multi_launcher --profile fast-dev --lib --bin multi_launcher --no-deps` passed exit0 in2m10s. Log target/launcher-utility-fixes/evidence/m9-clippy.log. Existing library115 and binary3 warnings plus dependency/vendor warnings remain. Parent matched all warning locations in task-touched files against cumulative added-line ranges: none points to a Goal-added line. Examples are existing enum size/style warnings in Diagram Studio, existing collapsible conditionals in moved selected-view logic/Pad/Folder Size and pre-existing render references; unchanged main hotkey helpers have argument-count warnings. No unrelated fixes or warning suppression. Current `cargo build --profile fast-dev --bin multi_launcher` is running solely for the consolidated native keyboard smoke; no repeated release build.
+
+
+## M9-A final build/native result and disposition
+
+Current app `cargo build --profile fast-dev --bin multi_launcher` passed in4m20s, six existing warnings; log m9-fast-dev-build.log. Binary SHA25631166C7AB37977051788C903EA3E0CCA50C693325D08595685DFAF8574C5D145, source tip7f301d5d92f707abac098eb7e63f8633ce0033d5. This current build includes A–H; the earlier C release build boundary remains unchanged and no second release build was performed.
+
+Isolated final profile had Paste Sequence next/cancel and launcher hotkeys disabled before construction, empty actions/index roots and test-owned notes/recovery. Actual keyboard query opened Pad; actual source native_smoke = 12 + 34 evaluated46. Keyboard Pop Out created a native Pad, native Alt+F4 closed it quietly, then query reopening restored exact source/result. Recovery JSON agrees. D native core close/reopen passes. With Pad detached again, root Tab navigation reached query, typed diagram studio and activated its result, creating a separate native Diagram Studio window. This is A keyboard evidence, not required mouse/hint acceptance. Native immediate child accessibility exposed only chrome, so no editable Diagram source, F native decision layout or E physical drag proof.
+
+Folder Size opened and keyboard Choose folder opened native Select Folder. The picker appears in accessibility but its descendant actions are unavailable: Raise failed 'element122 has no cached secondary actions'; Set Value on fresh Folder field290 failed 'element290 is not available in cached app state'. Ctrl+L/Alt+D/Escape did not change it. No scan or Reveal was dispatched, so G native acceptance remains open. No guessed coordinates, alternate UIA/capture helper or retry of prior failed screenshot environment. Parent verified PID24332/path/starttime against recorded identity and retired only this test app to release its inaccessible owned picker. Runner exit-1 (explicit task cleanup, not app crash or timeout), elapsed442.559s, cleanup/output drain verified. Final sky/process inventory contains no launcher or Cargo job. Test note SHA unchanged71059A5EDDFC25881DA2E48CD56F8A2A33E3A67E3C03FE4D55FC2F2274160C18. Full observations/identity/artifact/runner receipts under target/launcher-utility-fixes/evidence/m9-native/. Empty disposable profile emitted missing optional radial/dashboard store messages; no user data edited.
+
+Final disposition **LIMITED**, not full functional acceptance: A–H source implementation, targeted tests, ordinary C release build, current fast-dev build, scoped Clippy, independent reviews and GitHub interim delivery are done. D native scratch round trip and H native observer are verified. Still native-unverified: A genuine mouse handoff with detached editors, B fade/flicker/wheel/context visuals, E preview drag and preserved physical interactions, F top-panel native layout, G real scan/sort/filter/Explorer reveal, H supported Windows11 ordered saved-list tabs. Required next environment is working capture/input geometry plus Windows11 build≥22621 for tabs; no source/test review substitutes for those checks. An in-flight synchronous COM call can delay retirement until return.
+
+Cumulative diff inspected; stale MTA public observer path removed, old decision copies/test sort helpers removed, current effect ownership paths used. `git diff baseline HEAD --check` passed; baseline immediate parent is exact16b740fec66a3c077b63ac22a31cfb9577896e65; no merge commits in parent..task range. No full suite, benchmark, worktree, auxiliary clone/checkout, intermediate branch or merge. All implementation checkpoints pushed normally. Final ledger/review/limited-handoff commit follows; retrieve its exact SHA with git rev-parse HEAD after commit. Final response and PR will contain actual final_tip_sha without a self-reference loop. The next Goal must create a fresh child from that exact final_tip_sha, not master/main.
