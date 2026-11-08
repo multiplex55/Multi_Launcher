@@ -9,7 +9,10 @@ recomputes after an edit, undo, or redo changes that revision.
 The Pad's **Examples & reference** window has a pinned search and executable
 examples with expected results. Use **Pop Out** to keep it in a separate native
 window, or **Dock** to return it to the launcher; its search and scroll position
-are retained when moving between presentations.
+are retained when moving between presentations. Search matches group names,
+titles, source, and keywords without regard to case; matching examples are
+shown even if their group was collapsed. Copy an example's source to try it
+in the Pad. Clearing search restores the ordinary groups.
 
 ## Lines and names
 
@@ -73,8 +76,8 @@ Vectors contain one to 128 finite dimensionless scalar components, for example
 `v = [1, 2, sqrt(16)]`. Components may use scalar expressions and earlier named
 or physical-line references. Equal-length vectors support element-wise `+`,
 `-`, `*`, and `/`; either order of scalar multiplication and vector divided by
-a scalar are also supported. Scalar addition is not broadcast. `dot(v, w)` or
-`v · w` gives a scalar; `cross(v, w)` or `v × w` gives a three-component vector
+a scalar are also supported. Scalar addition and subtraction are not broadcast.
+`dot(v, w)` or `v · w` gives a scalar; `cross(v, w)` or `v × w` gives a three-component vector
 and requires three components on each side. Vector `*` remains element-wise.
 Dimension mismatch, zero divisors, typed integers, quantities and non-finite
 intermediate values produce line-local errors. Results use the shared scalar
@@ -243,6 +246,9 @@ transient grid layout. Named spans show inclusive bit numbers such as
 binary, octal and hexadecimal, with optional
 prefixes, width padding and digit grouping. Only these format preferences are
 saved; working bits, labels, expressions and comparison results are transient.
+Spans extending beyond the current width remain in the draft and are marked
+invalid until the width or span is changed. The grid's bit grouping is separate
+from the grouping preference used for copied numbers.
 
 For example, `123 >> 12` uses the default `u64` mode and yields zero;
 `i8(-1) >> 1` stays negative, and `u8(255) << 1` masks to 254. A value such

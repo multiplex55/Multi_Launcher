@@ -3,6 +3,10 @@
 Contract: `docs/plans/CODEX_GOAL_PRODUCTIVITY_TOOLS_REFINEMENT.md` and companion Kickstart.
 One existing checkout; sequential source writers; no worktrees or auxiliary branches.
 
+**Final disposition: LIMITED.** M0–M7 implementation and focused checks are complete. M8 source review, selected tests, build, lint triage, documentation and feasible native checks are finished. Mandatory native acceptance remains blocked as itemized in the final section below; no complete functional acceptance is claimed. Chronological “pending/in progress” entries below describe their receipt time, not current activity. All task-owned native processes have been cleaned up; no implementation or Cargo job remains active.
+
+Stop report: [20261108T034022Z](stalls/20261108T034022Z.md). This STATUS remains the authoritative operational ledger. Final commit identity is the last intentional report commit, obtainable with `git log -1 --format=%H -- docs/plans/execution/standalone/productivity-tools-refinement/stalls/20261108T034022Z.md`; the actual SHA is also delivered in the final handoff, avoiding a self-referential commit loop.
+
 ## Ancestry / M0-A
 
 - Preparation: 2026-11-07; original clean branch `master`, HEAD/upstream `5824ae576ca20549f392177f0aee80df3264b3e0`.
@@ -42,7 +46,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M6-B | Frozen-region preview and active indicators | complete |
 | M7-A | Command-only help | complete |
 | M7-B | Complete Recycle command boundary | complete |
-| M8-A | Consolidated native flows, independent review, scoped lint, handoff | in_progress |
+| M8-A | Consolidated native flows, independent review, scoped lint, handoff | LIMITED: bounded verification finished; mandatory native gaps below |
 
 Use configured planner/implementer/reviewer roles, one explicitly bounded packet at a time. Parent owns Git, ledger and push attempts. One Cargo job at a time, fast-dev/targeted Nextest; disable Paste Sequence test hotkeys before application construction. Native/environmental retries follow section H. Final disposition requires actual native evidence and final SHA; pending checks are never reported passed.
 
@@ -561,3 +565,102 @@ Sole implementer assigned these9lint corrections then the one final selected aff
 Nine diagnostic sites corrected across10source files (render.rs is the necessary consuming caller for boxed Explorer actions). PreparedStatement::Expression and ExplorerTabsHostCommand::Apply now box their expanded payloads; equivalent local borrow/slice/divisibility/guards preserve behavior and serialization. Focused follow-up by the same independent reviewer found no regression or persistence change. Root inspected the complete correction diff and exact caller migration. No second cumulative review or Clippy campaign.
 
 Actual selection audit: exactly60/60 requested library cases each matched once, plus recycle_plugin::search_returns_action; no extras, ambiguity, duplicates, ignored or destructive tests. Inputs/receipts: target/productivity-tools-refinement/m8-selected-lib-cases.txt, m8-selected-filter.txt, m8-selected-list.json, m8-selected-audit.txt. Command: read filter with Get-Content -Raw, then `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --test recycle_plugin --no-fail-fast -j 1 -E $filter`. Authorized unsandboxed normal-user serial run passed61/61,7627skipped,11.658s,exit0. Initial runner output was tool-truncated and no local Nextest run receipt directory found; run UUID is unavailable, not invented or recovered by redundant rerun. These selected tests compile production and lib-test targets. No source writes after success, diff check clean/no active Cargo job. Native acceptance remains pending.
+M8 lint checkpoint ecb62322ea843b4d480828c45ba30ea8953b3513 committed and normal push succeeded (68a03c95..ecb62322). Final cached `cargo build --locked --offline -p multi_launcher --profile fast-dev --bin multi_launcher` passed exit0,2m46s; six existing Rust warnings, no new task compile error. Binary copied into isolated native-profile with verified identical SHA2567733441CEE8E182564AC5F55D57FC553BAB250ADA6A5DB436DD11C1E9D8B4F36; build/profile manifest native-evidence/m8-build-profile-manifest.json. Notes/template dirs isolated, Paste shortcuts null, original profile untouched.
+
+### M8 native session in progress / capture-tool limitation
+Final profile app launched visibly through dev/run_owned_process.ps1 under owned Job, stage M8-native-productivity-refinement, timeout14400s/cleanup5s, evidence native-evidence/native-session-01, exec session92753 (still active). RUST_LOG only relevant overlay/debug and capture/info plus warn. Sky returned exact profile-executable Window80808754 title Multi Lnchr; no guessed handles. Disposable Notepad Window11145092, process C:\Windows\System32\notepad.exe, was launched through Sky from initially nonrunning app. Its Open dialog remains open, no file loaded or user file changed; must close/clean up this task-created instance before final handoff.
+
+Screenshot bounded attempts: initial Notepad get_window_state FrameArrived timed out; refreshed selection + activation retry window capture timed out; final corrective attempt on fresh OpenGL launcher also window capture timed out. No more blind screenshot retries or alternate capture/input helper. Accessibility-only state reads work, no LockApp/lockscreen surface returned. Indexed native-file-dialog controls unavailable in cached app state; launcher indexed click fails coordinate input geometry unavailable. No screenshot evidence exists and paint/drag/native file-picker-dependent checks are not verified.
+
+Supported keyboard path remains usable: actual launcher query typed record, accessibility shows exactly Open Screen Recorder / Stop Screen Recording and no Clean Recycle Bin. Saved receipt native-evidence/command-record-query.txt. Tab to Open action and Return actually opened fresh Recorder; saved native-evidence/recorder-fresh-open.txt shows Display/region, DISPLAY1, GIF10fps, Show region disabled without selected region, OS/app-border hint. This is native open/query evidence ONLY, not cold Window population or capture. Source popup opened via keyboard but its options were outside observed Tab traversal, direct string value did not change selection; no guessed coordinate selection. Escape closed popup then idle Recorder. Current launcher query remains record; no recording/file output started. Continue independent supported keyboard/accessibility checks, preserve exact native gaps. Native process and Notepad cleanup still pending.
+
+## M8-A final disposition and evidence
+
+**LIMITED — implementation complete, mandatory native acceptance incomplete.** All source is frozen at `ecb62322ea843b4d480828c45ba30ea8953b3513`; subsequent commits contain documentation/evidence only. No known requested-feature source defect remains from scoped verification or independent review. Missing native checks are not passed by inference from code, simulated egui tests, filesystem tests, or the independent capture backend test.
+
+### Final scoped verification
+
+- Independent configured reviewer found no actionable findings in the cumulative source/current docs; focused follow-up on the nine task-owned lint corrections found no regression or persistence change.
+- One final first-party Clippy invocation, recorded above, exited 0. Its 141 warning messages comprise 127 main-package, 3 unchanged first-party table_core and 11 vendor messages. Among 30 touched-file sites, 9 task-owned sites were repaired and 21 have baseline source provenance. This is not a lint-clean claim or historical diagnostic-emission equivalence. No second full Clippy pass or unrelated cleanup was run.
+- Exactly 60 named library cases plus the non-destructive Recycle integration case passed **61/61**, 7,627 skipped, 11.658 seconds, exit 0. Actual selection was audited, including ignored/destructive exclusion. The run UUID is unavailable after tool-output truncation; no redundant rerun was used to manufacture it. Inputs and result: `target/productivity-tools-refinement/m8-selected-{lib-cases.txt,filter.txt,list.json,audit.txt,result.json}`.
+- Final `cargo build --locked --offline -p multi_launcher --profile fast-dev --bin multi_launcher` passed, exit 0, 2m46s; six existing Rust warnings. Result/stdout/stderr receipts use `target/productivity-tools-refinement/m8-build-*`.
+- Final binary/profile SHA256: `7733441CEE8E182564AC5F55D57FC553BAB250ADA6A5DB436DD11C1E9D8B4F36`. All three GUI sessions used this binary, isolated profiles and disabled Paste next/cancel shortcuts before construction. Original profile and production defaults were preserved.
+- No full suite, release/performance campaign, pixel-diff campaign or historical regression matrix was required or run.
+
+### Actual native observations
+
+Receipt paths in this section are relative to ignored `target/productivity-tools-refinement/native-evidence/`. They are local evidence, not committed or claimed uploaded.
+
+| Flow | Actual observation | Receipts |
+| --- | --- | --- |
+| Calculation | Six representative scalar/vector/programmer expressions returned 128; [-1, 2]; [3, 6, 9]; 32; [0, 0, 1]; 255. Managed Save Copy, close, fresh Pad and managed Open restored source and all six results. Newline/undo/redo/undo produced row counts 7/6/7/6. | `calculation-native-{results,source,saved,reopened}.txt`, `calculation-native-{persistence-summary,roundtrip-summary,history}.json` |
+| Inspector | Fitting u16 applied immediately; NOT produced 65535/16 ones. Narrowing to 8 was rejected with working u16 intact and explicit pending state. Reinterpret produced u8=255/eight ones; Pad source stayed unchanged. | `inspector-native-{fitting-u16,overflow-preserved,reinterpreted-u8}.txt`, `inspector-native-summary.json` |
+| Reference | Search floor and sqrt exposed matching examples. Pop Out created a distinct native child; OS close removed only that child and preserved Pad source/dirty state. Child UIA exposed chrome only, so Dock/resize/scroll claims are withheld. | `reference-native-{floor-search,sqrt-search,child-chrome-only,close-preserved-pad}.txt`, `reference-native-summary.json` |
+| Explorer | Saved-folder alias search selected the current copied path; manual second path and Save persisted an ordered two-path list. Run truthfully refused Windows 10 build 19045 (requires Windows 11 build >=22621), both paths Not attempted; before/after Explorer window identity set unchanged. | `explorer-picker-alias-match.txt`, `explorer-saved-two-paths.txt`, `explorer-win10-refusal.{txt,json}` |
+| Discovery | Native record showed Open/Stop Screen Recording without Clean Recycle Bin; rec showed cleanup action without executing it. | `command-record-query.txt`, `command-rec-query-no-execution.txt` |
+| Recorder setup | First fresh-process Recorder open showed Display/region, DISPLAY1, GIF 10fps, Show region disabled with no region, and app/OS border hint. Window selection/start/stop and region UI were not verified. | `recorder-fresh-open.txt` |
+
+Calculation history's dirty flag remained true after undo restored visible source because unchanged baseline dirty comparison includes allocator/line-identity metadata. Saved source stayed unchanged; no claim of restored clean state or new task regression.
+
+An independent, existing ignored Windows backend test was run once because a failed screenshot transport does not establish recorder backend failure:
+
+```text
+cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib -j 1 --no-fail-fast --run-ignored only -E 'test(=recording::windows::tests::native_smoke::native_owned_hwnd_capture_writes_decodable_gif)'
+```
+
+Exact selection audited as one ignored test, **1/1 passed**, 7,685 skipped, 2.083 seconds (case 2.068s), run `31571d63-b8f4-447e-bb5e-44480549712b`. Existing owned-process wrapper: 120s deadline/5s cleanup, 4.284s actual, exit 0, Succeeded/CleanupVerified/OutputDrainVerified, all 16 owned identities absent. Actual WGC/GIF output decoded at 360x240 with both owned-source paint phases and duration assertion; UserStop retired/published correctly. The temporary GIF was deleted by normal test cleanup, so no retained playable GIF is claimed. This does not verify GUI target selection, Display crop/outline/exclusion, moving-window indicators or actual OS border capability result. Receipts: `recording-backend-01/{result.json,stdout.log,stderr.log,processes.jsonl,post-cleanup-processes.json}`; selection/audit are `../m8-native-recording-{list,audit}.json`. The first listing without opt-in selected zero and ran nothing; corrected listing preceded the only run.
+
+### Mandatory native checks still unverified
+
+| Requirement IDs | Exact remaining check / reason |
+| --- | --- |
+| HELP-CALC-02 | Small-window full reference-body scroll/pinned layout; capture geometry unavailable. Search itself verified. |
+| HELP-CALC-03 | Dock/resize/query+scroll retention through Dock. Distinct pop-out/OS-close preservation verified; child exposes chrome only. |
+| BITS-02, BITS-03 | Painted bit grouping/wrapping/named-span placement. BITS-01 representative checked mode/reinterpret flow verified. |
+| ZIP-01, ZIP-02, ZIP-03 | Native load/default/filter/bulk selection/multiroot collision/create/reopen/extract/content flow; file-dialog controls and geometry unavailable. Scoped real-filesystem roundtrips pass but do not replace GUI acceptance. |
+| DIAG-01 through DIAG-08 | Native canvas/clipboard focus/marquee including Ctrl/labels/fonts/minimap/bends/save/export/viewer resize/new-template flow; no screenshot/input geometry. Model/egui/codec/export checks passed. |
+| EXPLORER-01, EXPLORER-02 supported end-to-end portion | One attributable Explorer window and both requested tab identities on supported Windows 11. Host is Windows 10 Home 22H2 build 19045; picker/manual/save and safe refusal verified. |
+| RECORD-01 | GUI cold Window population/Refresh/select/start/stop. Fresh setup open and independent owned-window backend GIF capture are partial evidence only. |
+| RECORD-02 | Display-region crop and precise app outline, capture exclusion, output content, moving Window behavior and actual OS border capability/result. |
+| RECORD-03 | Native valid preview expiry/cleanup and active-outline lifecycle. Disabled Show region without selection observed; state tests do not replace native flow. |
+| COMMAND-01 | Native folder-size filter, absent tutorial blocks and retained Replace display. Command Help UIA body was truncated with 1,209 children omitted; absence cannot be inferred. Focused filter/scroll tests passed. |
+
+Host OS facts came from OSVersion and registry. Three allowed screenshot attempts failed: initial Notepad FrameArrived channel timeout, refreshed/activated Notepad window-capture timeout, fresh launcher corrective window-capture timeout. Accessibility reads and keyboard worked; indexed click lacked coordinate geometry, modal chooser controls lacked cached state. The application was built visible; no locked/unlocked assertion or global capture failure diagnosis is made. Budget exhausted for this cause; no fourth attempt, alternate helper, guessed coordinates or security/privacy changes. No screenshot exists. Supported keyboard/accessibility checks continued independently.
+
+### Cleanup and source preservation
+
+All owned GUI jobs completed exit 0 with cleanup/output-drain verified: `native-session-01`, `native-session-02`, `native-session-03`. Original session01 process 41640 and session03 process 39868 are absent. The initially task-created blank Notepad had no loaded file; owner-target Escape/Alt+F4 was ineffective while its modal was active. Exact PID/path/creation identity 20328 / System32 Notepad / 2026-11-08T02:02:45.3994871Z was rechecked before terminating only that Process object. Absence verified at 2026-11-08T03:20:08.2139553Z (`notepad-owned-cleanup.json`). Final Sky inventory contained neither isolated launcher nor task Notepad; subsequent backend test also cleaned all its own identities. No user process was killed by name.
+
+`source-fixture-unchanged.json` confirms all four disposable source fixtures retained their original byte lengths and SHA256 hashes. No user profile/source file, original archive or user diagram was modified. No active source writer, Cargo job, native GUI job or queued implementation remains. Mandatory native verification is the only acceptance blocker.
+
+### Git chain and final handoff
+
+Parent branch/tip and baseline are recorded at the top. Implementation checkpoint history follows; every listed commit received one successful ordinary push. Final user-doc/evidence and report-only stop commits follow this table on the same branch; resolve their final identity as described at the top and in the delivered handoff. No worktree, auxiliary checkout/clone, per-agent branch, intermediate merge, rebase, squash or cherry-pick was used.
+
+**Next Goal must create its fresh child branch directly from this Goal's delivered `final_tip_sha`. Do not restart from master/main or the integration branch, and do not merge intermediate branches.** Native completion requires a supported Windows 11 >=22621 environment with functioning native UI inspection/input geometry, then only the missing checks above. The existing bounded source/test evidence remains valid until relevant code changes. No intermediate user testing is requested.
+
+| Commit SHA | Checkpoint |
+| --- | --- |
+| fbf1f2d15cdf0db4e0415adcabfe0f996c6a9dd5 | chore: [M0-A] establish productivity tools refinement baseline |
+| f1ccc2f18303713d1c14d3def77234bd88ecc379 | fix(calculation-pad): [M1-A] repair numeric dispatch and contextual aliases |
+| bfbd250a7d594f0b8d20ec40cba31a95a09812f2 | feat(calculation-pad): [M1-B] add bounded vector arithmetic |
+| e8b167983cc3fd27e7762643646831142cc2f73d | feat(calculation-pad): [M1-C] add searchable detachable reference |
+| 39c76626a0083046bbe2dfe07b19ce7cea8cff9d | feat(programmer-inspector): [M2-A] synchronize modes and visualize bit ranges |
+| da0f494d2a0919b864aeb0ff6764dac0c0abf3b6 | fix(zip): [M3-A] extract deflated entries through the bounded writer |
+| d8c33f64467bb12cf7df6b6f79f36f7dabe9e8ba | feat(zip): [M3-B] select archive members by default and in bulk |
+| 8a8d4c7eb56732825099132b859a6463f968cfb6 | feat(zip): [M3-C] add staged multi-source archive creation |
+| df14a7eadc1a3526a31a19d8167148fcf89d26f4 | feat(zip): [M3-D] expose create and extract workflows |
+| 4a50a6c576127d236f4241eb8f6b17831b58511e | fix(diagram): [M4-A] repair visual navigation and presentation |
+| 1876f9c2ce30897815e5f4bb21ba6109f930f86f | feat(diagram): [M4-B] add visual clipboard and keyboard editing |
+| e11ee01d95ca08530a7395bef5b3253ece1e0574 | feat(diagram): [M4-C] add owned inline shape labels |
+| 255169341afd9ab6a71d2dae590744faf9f8e51a | feat(diagram): [M4-D] persist and edit connector bends |
+| 8c875ba091184fb2a54c84cbb9e016fbdf32fe6b | fix(diagram): [M4-D] restore connector preview branch |
+| 0d772aa71473571b4d51c1d8719a226ddc3f3a58 | feat(diagram): [M4-E] expand visual starter templates |
+| 83f75669c100d4a548af53d84ad389d0b1aa7118 | fix(explorer-tabs): [M5-A] initialize timeout-capable UI Automation |
+| ae81773413f5a8a74ff649815d58894e56a7df80 | feat(explorer-tabs): [M5-B] select saved folder links |
+| 971939892b7d59e48b2f2082718ca9043d052116 | fix(recording): [M6-A] request and publish window discovery |
+| 0a854003fc14d30a5bc915910938da68ffa3929d | feat(recording): [M6-B] show precise recording regions |
+| 710b15606445bc3815195e5aa5d5056263e1468c | fix(help): [M7-A] focus command help on plugin usage |
+| b13948f85bd35ac977ae12f8d3ceeb1749008fd2 | fix(recording): import overlay notifier Arc in production |
+| 68a03c95afbcbda179fff08984d620561cf84181 | fix(search): [M7-B] enforce recycle command boundaries |
+| ecb62322ea843b4d480828c45ba30ea8953b3513 | refactor(productivity-tools): resolve task-owned lint findings |

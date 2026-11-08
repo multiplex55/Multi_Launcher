@@ -48,6 +48,8 @@ It’s designed to be “one hotkey away” from:
 - [MultiManager](#multimanager)
 - [Calendar](#calendar)
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
+- [ZIP creation and extraction](#zip-creation-and-extraction)
+- [Explorer Tabs](#explorer-tabs)
 - [Silent Screen Recorder](#silent-screen-recorder)
 - [Screenshot pinboard](#screenshot-pinboard)
 - [Screen Draw](#screen-draw)
@@ -71,6 +73,11 @@ It’s designed to be “one hotkey away” from:
 ### Discoverability
 - Press **`F1`** (default) to open help.
 - Type **`help`** in the launcher to show a quick command/prefix overview.
+
+Command Help lists plugin commands, capabilities, prefixes, and optional
+examples. Its filter matches plugin and command information without regard to
+case; a no-match message appears when nothing matches. Quick Help remains a
+separate guide.
 
 ---
 
@@ -144,6 +151,8 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `pinboard` | Session-only static and live reference pins | `pinboard capture` / `pinboard live` / `pinboard list` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `record` | Silent GIF and MP4 screen recording | `record` / `record:open` / `record:stop` |
+| `zip` | Create or extract a ZIP archive | `zip` / `zip:open` |
+| `explorertabs` | Manage and run saved ordered folder lists | `explorertabs` / `explorertabs:open` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
 | `date` | Local date arithmetic and date differences | `date tomorrow` / `date days between 2026-10-05 and 2026-12-25` |
@@ -179,7 +188,7 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `drop` | Drop-rate calculator | `drop 1/128` |
 | `rand` | Random helpers | `rand 1..100` |
 | `tmp` | Temp file manager | `tmp new log` / `tmp list` |
-| `recycle` | Recycle bin tools | `recycle` |
+| `rec` | Recycle bin tools | `rec` |
 | `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
 | `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
 | `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
@@ -1380,12 +1389,47 @@ Screenshot behavior is controlled by settings:
 - `screenshot_auto_save`
 - `screenshot_use_editor`
 
+## ZIP creation and extraction
+
+Type `zip` or use `zip:open`. Extract mode opens an archive with all physical
+entries selected, including duplicate names. Filter the list to find entries;
+**Select all** applies to the whole archive, and **Clear selection** clears it.
+Review the preview and its issues before confirming extraction. Ordinary
+unencrypted Stored and Deflated entries are supported; unsafe paths, unsupported
+entries, conflicts, and limits are reported rather than silently bypassed.
+Extraction uses staged, no-clobber publication, so an existing destination is
+not overwritten.
+
+In Create mode, add files and folders from multiple locations. Folder scans
+include nested contents and empty directories. Edit a member's archive-relative
+path with **Apply**, or remove the member to resolve duplicate, case-equivalent,
+file/directory, and ancestor conflicts. Validate the draft, choose a new `.zip`
+output path, then choose **Create ZIP**. Existing outputs and files that appear
+at the destination are not overwritten. Sources are read without modification;
+changed or unsupported sources are reported and the draft remains available.
+
+## Explorer Tabs
+
+Type `explorertabs` or use `explorertabs:open` to create and manage ordered
+folder lists. A list holds up to 32 paths and can include duplicates. **Add
+saved folder** searches existing `f` entries by label, alias, or path and copies
+the current path into the draft; later changes to the saved folder do not change
+that copied row. Save the list before running it. Runs use a frozen saved list
+and report verified tabs, unverified requests, and remaining folders.
+
+Opening multiple tabs through this workflow requires Windows 11 build 22621 or
+later and its Explorer/UI Automation support. If the capability is unavailable,
+the operation reports a refusal rather than issuing unverified window requests.
+
 ## Silent Screen Recorder
 
 Type `record` and choose **Open Screen Recorder**, or enter `record:open`.
 Opening the setup or choosing a format does not start a recording.
 
 1. Choose a window, a display, or a rectangle contained within one display.
+   The window list loads asynchronously when setup opens or Window is selected;
+   **Refresh** requests a new list. A window that has disappeared stays marked
+   unavailable and must be selected again before recording.
 2. Choose **GIF** (10 fps by default) or **MP4** (30 fps by default). Both
    formats are silent. Set the frame rate, clip limit (30 seconds by default,
    up to 120 seconds), and whether to include the cursor.
@@ -1412,6 +1456,16 @@ it captured before the window closed. It uses a fixed capture area and can
 skip intermediate frames to keep memory bounded. While recording owns capture,
 the launcher blocks conflicting new screenshot, Crop, Pinboard, or Screen Draw
 capture actions.
+
+For a selected display region, **Show region** briefly outlines the region
+without recording or changing the selection. During display capture, a separate
+outline follows the frozen region until capture stops. The recorder requests and
+checks Windows capture exclusion for these app-owned edges; failures are shown
+instead of silently claiming an outline. Window capture uses the Windows window
+indicator and does not draw a frozen rectangle from the window's initial
+position. Windows may also show its own display or window capture border; this
+app does not suppress it. Border visibility depends on Windows and other capture
+sessions.
 
 ## Screenshot pinboard
 
