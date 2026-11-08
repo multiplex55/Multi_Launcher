@@ -88,6 +88,10 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_inspect_rects: Vec<(usize, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
+    test_result_rows: Vec<(usize, egui::Rect)>,
+    #[cfg(test)]
+    test_select_comparison: Option<egui::Rect>,
+    #[cfg(test)]
     test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
@@ -382,6 +386,10 @@ impl CalculationPadDialog {
             test_line_copy_rects: Vec::new(),
             #[cfg(test)]
             test_inspect_rects: Vec::new(),
+            #[cfg(test)]
+            test_result_rows: Vec::new(),
+            #[cfg(test)]
+            test_select_comparison: None,
             #[cfg(test)]
             test_inspector_reopen: None,
             #[cfg(test)]
@@ -2269,6 +2277,11 @@ impl CalculationPadDialog {
         self.test_line_copy_rects.clear();
         #[cfg(test)]
         self.test_inspect_rects.clear();
+        #[cfg(test)]
+        {
+            self.test_result_rows.clear();
+            self.test_select_comparison = None;
+        }
 
         egui::ScrollArea::vertical()
             .id_salt("calculation-pad-results")
@@ -2284,7 +2297,24 @@ impl CalculationPadDialog {
                 for line in &evaluation.lines {
                     ui.group(|ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.monospace(format!("r{}", line.line_index + 1));
+                            let row = ui
+                                .monospace(format!("r{}", line.line_index + 1))
+                                .interact(egui::Sense::click());
+                            if matches!(line.outcome, LineOutcome::Value(_)) {
+                                #[cfg(test)]
+                                self.test_result_rows.push((line.line_index, row.rect));
+                                row.context_menu(|ui| {
+                                    let select = ui.button("Select for comparison");
+                                    #[cfg(test)]
+                                    {
+                                        self.test_select_comparison = Some(select.rect);
+                                    }
+                                    if select.clicked() {
+                                        *inspector_selection = Some(line.id);
+                                        ui.close();
+                                    }
+                                });
+                            }
                             if let Some(name) = line.assignment_name.as_deref() {
                                 ui.strong(name);
                             }
@@ -2309,9 +2339,6 @@ impl CalculationPadDialog {
                                         .formatted_result()
                                         .unwrap_or_else(|| "unavailable".into());
                                     ui.label(&formatted);
-                                    if ui.small_button("Select for comparison").clicked() {
-                                        *inspector_selection = Some(line.id);
-                                    }
                                     if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
                                         let inspect = ui.small_button("Inspect bits…");
                                         #[cfg(test)]
@@ -2672,6 +2699,19 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_inspector_reopen(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_inspector_reopen
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_result_row(&self, index: usize) -> Option<egui::Rect> {
+        self.test_result_rows
+            .iter()
+            .find(|(row, _)| *row == index)
+            .map(|(_, rect)| *rect)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_select_comparison(&self) -> Option<egui::Rect> {
+        self.test_select_comparison
     }
 
     #[cfg(test)]

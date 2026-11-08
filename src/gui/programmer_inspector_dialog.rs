@@ -23,10 +23,8 @@ struct InspectorDraft {
     control_dirty: bool,
     feedback: Option<String>,
     generation: u64,
-    comparison_left: String,
-    comparison_right: String,
-    left_result: Option<crate::calculation_pad::ComparisonResultRef>,
-    right_result: Option<crate::calculation_pad::ComparisonResultRef>,
+    comparison_left: ComparisonSlot,
+    comparison_right: ComparisonSlot,
     comparison_result: Option<Arc<ComparisonResult>>,
     comparison_selection_generation: Option<u64>,
 }
@@ -43,10 +41,8 @@ impl Default for InspectorDraft {
             control_dirty: false,
             feedback: None,
             generation: 0,
-            comparison_left: String::new(),
-            comparison_right: String::new(),
-            left_result: None,
-            right_result: None,
+            comparison_left: ComparisonSlot::Expression(String::new()),
+            comparison_right: ComparisonSlot::Expression(String::new()),
             comparison_result: None,
             comparison_selection_generation: None,
         }
@@ -54,6 +50,13 @@ impl Default for InspectorDraft {
 }
 
 impl InspectorDraft {
+    fn comparison_request(&self) -> ComparisonRequest {
+        ComparisonRequest {
+            left: self.comparison_left.clone(),
+            right: self.comparison_right.clone(),
+        }
+    }
+
     fn target_mode(&self) -> IntegerMode {
         if self.target_signed {
             IntegerMode::signed(self.target_width)
@@ -86,6 +89,27 @@ impl InspectorDraft {
         self.bit_grouping = self.bit_grouping.min(mode.width().bits());
         self.feedback = None;
         self.control_dirty = true;
+    }
+}
+
+fn comparison_input_text(
+    input: &ComparisonSlot,
+    context: Option<&crate::calculation_pad::ComparisonContext>,
+) -> String {
+    match input {
+        ComparisonSlot::Expression(expression) => expression.clone(),
+        ComparisonSlot::Result(selected) => context
+            .filter(|context| {
+                context.incarnation == selected.incarnation
+                    && context.document_id == selected.document_id
+            })
+            .and_then(|context| {
+                context.rows.iter().position(|row| row.id == selected.line_id)
+            })
+            .map_or_else(
+                || "Unavailable selected result".to_owned(),
+                |index| format!("r{}", index + 1),
+            ),
     }
 }
 
@@ -248,6 +272,18 @@ impl ProgrammerInspectorDialog {
         self.draft.comparison_result.as_deref()
     }
     #[cfg(test)]
+    pub(super) fn test_comparison_input(&self, left: bool) -> String {
+        let input = if left {
+            &self.draft.comparison_left
+        } else {
+            &self.draft.comparison_right
+        };
+        comparison_input_text(
+            input,
+            self.published.as_ref().and_then(|context| context.comparison.as_deref()),
+        )
+    }
+    #[cfg(test)]
     pub(super) fn test_preference_requests(&self) -> usize {
         self.test_preference_requests
     }
@@ -324,17 +360,7 @@ impl ProgrammerInspectorDialog {
         if actions.compare
             && let Some(context) = current.comparison.as_ref()
         {
-            let slot = |selected: Option<crate::calculation_pad::ComparisonResultRef>,
-                        expression: &String| {
-                selected.map_or_else(
-                    || ComparisonSlot::Expression(expression.clone()),
-                    ComparisonSlot::Result,
-                )
-            };
-            let request = ComparisonRequest {
-                left: slot(self.draft.left_result, &self.draft.comparison_left),
-                right: slot(self.draft.right_result, &self.draft.comparison_right),
-            };
+            let request = self.draft.comparison_request();
             self.draft.comparison_result = Some(Arc::new(context.compare(request)));
             self.draft.comparison_selection_generation = Some(current.selection_generation);
         }
@@ -866,17 +892,15 @@ impl ProgrammerInspectorDialog {
                 }
                 ui.separator();
                 ui.strong("Compare two values");
-                for (title, expression, selected) in [
-                    ("Left", &mut draft.comparison_left, &mut draft.left_result),
-                    (
-                        "Right",
-                        &mut draft.comparison_right,
-                        &mut draft.right_result,
-                    ),
+                for (title, input) in [
+                    ("Left", &mut draft.comparison_left),
+                    ("Right", &mut draft.comparison_right),
                 ] {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(title);
-                        let field = ui.text_edit_singleline(expression);
+                        let mut expression =
+                            comparison_input_text(input, runtime.context.comparison.as_deref());
+                        let field = ui.text_edit_singleline(&mut expression);
                         #[cfg(test)]
                         test_controls.push((
                             format!("comparison-{title}"),
@@ -894,7 +918,7 @@ impl ProgrammerInspectorDialog {
                                 draft.feedback =
                                     Some("Comparison input was limited to 2048 bytes.".into());
                             }
-                            *selected = None;
+                            *input = ComparisonSlot::Expression(expression);
                             changed = true;
                         }
                         let select = ui.add_enabled(
@@ -910,7 +934,7 @@ impl ProgrammerInspectorDialog {
                             select.enabled(),
                         ));
                         if select.clicked() {
-                            *selected = runtime
+                            if let Some(selected) = runtime
                                 .context
                                 .selected_line
                                 .zip(runtime.context.comparison.as_ref())
@@ -920,11 +944,13 @@ impl ProgrammerInspectorDialog {
                                         document_id: context.document_id,
                                         line_id,
                                     }
-                                });
-                            changed = true;
+                                }) {
+                                *input = ComparisonSlot::Result(selected);
+                                changed = true;
+                            }
                         }
-                        if let Some(line) = selected {
-                            ui.weak(format!("Selected line ID {}", line.line_id.get()));
+                        if matches!(input, ComparisonSlot::Result(_)) {
+                            ui.weak("Selected result");
                         }
                     });
                 }
@@ -943,16 +969,7 @@ impl ProgrammerInspectorDialog {
                     compare = true;
                 }
                 if let Some(result) = &draft.comparison_result {
-                    let current_request = ComparisonRequest {
-                        left: draft.left_result.map_or_else(
-                            || ComparisonSlot::Expression(draft.comparison_left.clone()),
-                            ComparisonSlot::Result,
-                        ),
-                        right: draft.right_result.map_or_else(
-                            || ComparisonSlot::Expression(draft.comparison_right.clone()),
-                            ComparisonSlot::Result,
-                        ),
-                    };
+                    let current_request = draft.comparison_request();
                     let current_context =
                         runtime.context.comparison.as_ref().is_some_and(|context| {
                             context.incarnation == result.context.incarnation
@@ -1124,6 +1141,37 @@ mod tests {
     use super::*;
     use crate::calculation_pad::{CalculationPadSession, TypedInteger};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn selected_comparison_input_tracks_identity_and_reports_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("data")));
+        session.replace_source("123\n345").unwrap();
+        session.save_as("selected input").unwrap();
+        session.evaluation();
+        let initial = session.comparison_context().unwrap();
+        let input = ComparisonSlot::Result(crate::calculation_pad::ComparisonResultRef {
+            incarnation: initial.incarnation,
+            document_id: initial.document_id,
+            line_id: initial.rows[0].id,
+        });
+        assert_eq!(comparison_input_text(&input, Some(&initial)), "r1");
+        session.replace_source("0\n123\n345").unwrap();
+        session.evaluation();
+        let moved = session.comparison_context().unwrap();
+        assert_eq!(moved.rows[1].id, initial.rows[0].id);
+        assert_eq!(comparison_input_text(&input, Some(&moved)), "r2");
+        session.replace_source("0\n345").unwrap();
+        session.evaluation();
+        let removed = session.comparison_context().unwrap();
+        assert_eq!(comparison_input_text(&input, Some(&removed)), "Unavailable selected result");
+        session.request_open(initial.document_id).unwrap();
+        session.resolve_pending(crate::calculation_pad::TransitionDecision::Discard).unwrap();
+        session.evaluation();
+        let reopened = session.comparison_context().unwrap();
+        assert_eq!(comparison_input_text(&input, Some(&reopened)), "Unavailable selected result");
+    }
 
     #[test]
     fn inspector_mode_selection_checks_and_preserves_pending_target() {
