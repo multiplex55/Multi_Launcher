@@ -1346,6 +1346,8 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_visual_scroll_rect: Option<egui::Rect>,
     #[cfg(test)]
+    test_body_scroll_id: Option<egui::Id>,
+    #[cfg(test)]
     test_generic_preview_drawn: bool,
     #[cfg(test)]
     test_preview_status_text: Option<String>,
@@ -1556,6 +1558,8 @@ impl DiagramStudioDialog {
             test_action_enabled: Vec::new(),
             #[cfg(test)]
             test_visual_scroll_rect: None,
+            #[cfg(test)]
+            test_body_scroll_id: None,
             #[cfg(test)]
             test_generic_preview_drawn: false,
             #[cfg(test)]
@@ -7016,6 +7020,51 @@ impl DiagramStudioDialog {
         self.property_draft = None;
     }
 
+    fn draw_pending_decision(
+        &mut self,
+        ui: &mut egui::Ui,
+        actions_allowed: bool,
+        closing_requested: bool,
+        document_intent: &mut Option<DocumentIntent>,
+    ) {
+        let Some(transition) = self.documents.pending_transition() else { return; };
+        let description = match transition {
+            PendingDiagramTransition::New => "starting a new Mermaid document".to_owned(),
+            PendingDiagramTransition::NewVisual => "starting a new visual document".to_owned(),
+            PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
+            PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
+            PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
+            PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
+            PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
+            PendingDiagramTransition::Close => "closing this diagram".to_owned(),
+        };
+        let menu_open = self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            && egui::Popup::is_any_open(ui.ctx());
+        let enabled = actions_allowed && !closing_requested && !menu_open;
+        ui.group(|ui| {
+            ui.label(format!("Save changes before {description}?"));
+            ui.horizontal_wrapped(|ui| {
+                for (_name, label, decision) in [
+                    ("decision_save", "Save", TransitionDecision::Save),
+                    ("decision_discard", "Discard", TransitionDecision::Discard),
+                    ("decision_cancel", "Cancel", TransitionDecision::Cancel),
+                ] {
+                    let response = ui.add_enabled(enabled, egui::Button::new(label));
+                    #[cfg(test)]
+                    {
+                        self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
+                        if _name == "decision_discard" {
+                            self.test_discard_button_id = Some(response.id);
+                        }
+                    }
+                    if response.clicked() && document_intent.is_none() {
+                        *document_intent = Some(DocumentIntent::ResolvePending(decision));
+                    }
+                }
+            });
+        });
+    }
+
     fn draw_body(
         &mut self,
         ui: &mut egui::Ui,
@@ -7028,6 +7077,7 @@ impl DiagramStudioDialog {
         source_focus_requested: &mut Option<egui::Id>,
         source_focus_allowed: bool,
     ) -> DrawBodyEffects {
+        self.draw_pending_decision(ui, actions_allowed, closing_requested, document_intent);
         if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual) {
             return self.draw_visual_body(
                 ui,
@@ -7092,6 +7142,8 @@ impl DiagramStudioDialog {
             drawio_work,
             drawio_review,
             #[cfg(test)]
+            test_body_scroll_id,
+            #[cfg(test)]
             test_source_editor_id,
             #[cfg(test)]
             test_source_editor_rect,
@@ -7115,8 +7167,6 @@ impl DiagramStudioDialog {
             test_native_inspector_visible,
             #[cfg(test)]
             test_action_focus_ids,
-            #[cfg(test)]
-            test_discard_button_id,
             ..
         } = self;
         let session = documents
@@ -7173,7 +7223,7 @@ impl DiagramStudioDialog {
             *pending = Some(action);
         }
 
-        egui::ScrollArea::vertical()
+        let _body_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-body-scroll")
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -7618,7 +7668,6 @@ impl DiagramStudioDialog {
                 let source_edit_allowed =
                     actions_allowed && pending_transition.is_none() && !menu_open;
                 let visual_mutations_allowed = editing_allowed && native_editable;
-                let decision_actions_allowed = actions_allowed && !closing_requested && !menu_open;
 
                 ui.horizontal_wrapped(|ui| {
                     let add_node = ui.add_enabled(
@@ -7760,60 +7809,6 @@ impl DiagramStudioDialog {
                     closing_requested, focused_at_start,
                 );
                 draw_effects.active_menu_scope = active_menu_scope;
-
-                if let Some(transition) = pending_transition.as_ref() {
-                    ui.group(|ui| {
-                        let description = match transition {
-                            PendingDiagramTransition::New => {
-                                "starting a new Mermaid document".to_owned()
-                            }
-                            PendingDiagramTransition::NewVisual => {
-                                "starting a new visual document".to_owned()
-                            }
-                            PendingDiagramTransition::Open(path) => {
-                                format!("opening {}", path.display())
-                            }
-                            PendingDiagramTransition::ImportMermaid(file) => {
-                                format!("importing {}", file.path().display())
-                            }
-                            PendingDiagramTransition::CopySource(_) => {
-                                "copying Mermaid source from Markdown".to_owned()
-                            }
-                            PendingDiagramTransition::ApplyTemplate(template) => {
-                                format!("using the {} template", template.name())
-                            }
-                            PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
-                            PendingDiagramTransition::Close => "closing this diagram".to_owned(),
-                        };
-                        ui.label(format!("Save changes before {description}?"));
-                        ui.horizontal_wrapped(|ui| {
-                            for (_name, label, decision) in [
-                                ("decision_save", "Save", TransitionDecision::Save),
-                                ("decision_discard", "Discard", TransitionDecision::Discard),
-                                ("decision_cancel", "Cancel", TransitionDecision::Cancel),
-                            ] {
-                                let response = ui.add_enabled(
-                                    decision_actions_allowed,
-                                    egui::Button::new(label),
-                                );
-                                #[cfg(test)]
-                                test_action_rects.push((
-                                    _name.into(),
-                                    response.rect,
-                                    ui.clip_rect(),
-                                ));
-                                #[cfg(test)]
-                                if _name == "decision_discard" {
-                                    *test_discard_button_id = Some(response.id);
-                                }
-                                if response.clicked() && document_intent.is_none() {
-                                    *document_intent =
-                                        Some(DocumentIntent::ResolvePending(decision));
-                                }
-                            }
-                        });
-                    });
-                }
 
                 if generic_family.is_some() {
                     #[cfg(test)]
@@ -8096,6 +8091,8 @@ impl DiagramStudioDialog {
                     }
                 }
             });
+        #[cfg(test)]
+        { *test_body_scroll_id = Some(_body_scroll.id); }
         draw_effects
     }
 
@@ -10478,38 +10475,12 @@ impl DiagramStudioDialog {
                     }
                 }
 
-                if let Some(transition) = pending_transition.as_ref() {
-                    let description = match transition {
-                        PendingDiagramTransition::New => "starting a new Mermaid document".to_owned(),
-                        PendingDiagramTransition::NewVisual => "starting a new visual document".to_owned(),
-                        PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
-                        PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
-                        PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
-                        PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
-                        PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
-                        PendingDiagramTransition::Close => "closing this document".to_owned(),
-                    };
-                    ui.group(|ui| {
-                        ui.label(format!("Save changes before {description}?"));
-                        ui.horizontal_wrapped(|ui| {
-                            for (_name, label, decision) in [
-                                ("decision_save", "Save", TransitionDecision::Save),
-                                ("decision_discard", "Discard", TransitionDecision::Discard),
-                                ("decision_cancel", "Cancel", TransitionDecision::Cancel),
-                            ] {
-                                let response = ui.add_enabled(actions_allowed && !closing_requested, egui::Button::new(label));
-                                #[cfg(test)]
-                                self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
-                                if response.clicked() && document_intent.is_none() {
-                                    *document_intent = Some(DocumentIntent::ResolvePending(decision));
-                                }
-                            }
-                        });
-                    });
-                }
             });
         #[cfg(test)]
-        { self.test_visual_scroll_rect = Some(_visual_scroll.inner_rect); }
+        {
+            self.test_visual_scroll_rect = Some(_visual_scroll.inner_rect);
+            self.test_body_scroll_id = Some(_visual_scroll.id);
+        }
         if selected_object != selection_state.primary {
             selection_state.objects.clear();
             if let Some(id) = selected_object {
@@ -18295,6 +18266,55 @@ mod tests {
     }
 
     #[test]
+    fn diagram_studio_pending_decision_stays_above_scrolled_body() {
+        for visual in [false, true] {
+            for docked in [false, true] {
+                let mut dialog = if visual { initialized_visual_dialog() } else { initialized_dialog() };
+                if visual { dialog.documents.replace_visual_label("Changed").unwrap(); }
+                else { dialog.test_replace_source("flowchart TD\n  A-->B"); }
+                if docked { dialog.owner_host.transition(UtilityPresentation::Docked); }
+                let ctx = egui::Context::default();
+                for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                    ctx.style_mut_of(theme, |style| {
+                        for font in style.text_styles.values_mut() { font.size *= 1.25; }
+                    });
+                }
+                super::super::render::with_immediate_viewport_test_size(viewport_id(), egui::vec2(720.0, 520.0), || {
+                    for _ in 0..4 { frame(&mut dialog, &ctx); }
+                    let body_before = dialog.test_action_rect("open_viewer").unwrap().0;
+                    let id = dialog.test_body_scroll_id.unwrap();
+                    let mut scroll = egui::scroll_area::State::load(&ctx, id).unwrap();
+                    scroll.offset.y = 10_000.0;
+                    scroll.store(&ctx, id);
+                    frame(&mut dialog, &ctx);
+                    let body_scrolled = dialog.test_action_rect("open_viewer").unwrap().0;
+                    assert!(body_scrolled.top() < body_before.top(), "visual={visual} docked={docked}");
+                    dialog.request_close();
+                    for _ in 0..3 { frame(&mut dialog, &ctx); }
+                    assert!(dialog.documents.pending_transition().is_some());
+                    let presentation = dialog.test_action_rect("owner_presentation").unwrap().0;
+                    for name in ["decision_save", "decision_discard", "decision_cancel"] {
+                        let matches = dialog.test_action_rects.iter().filter(|(action, _, _)| action == name).collect::<Vec<_>>();
+                        assert_eq!(matches.len(), 1, "{name}, visual={visual} docked={docked}");
+                        let (_, rect, clip) = matches[0];
+                        assert!(clip.contains_rect(*rect), "{name} is clipped: {rect:?} {clip:?}");
+                        assert!(rect.top() >= presentation.bottom());
+                        assert!(rect.bottom() <= dialog.test_action_rect("open_viewer").unwrap().1.top());
+                    }
+                    if docked {
+                        let click = action_center(&dialog, "decision_cancel");
+                        assert_eq!(ctx.layer_id_at(click), dialog.owner_layer_if_root());
+                        click_root_position(&mut dialog, &ctx, click);
+                    } else { click_action(&mut dialog, &ctx, "decision_cancel"); }
+                    assert!(dialog.open);
+                    assert!(dialog.documents.pending_transition().is_none());
+                    assert!(dialog.documents.is_dirty());
+                });
+            }
+        }
+    }
+
+    #[test]
     fn diagram_studio_close_decision_orders_edits_and_explicit_reopen_starts_blank() {
         let directory = tempfile::tempdir().expect("temporary native document directory");
         let mut dialog = initialized_dialog();
@@ -20026,7 +20046,6 @@ mod tests {
             "accepted visual template action failed: {:?}",
             dialog.message
         );
-        reveal_visual_action(&mut dialog, &ctx, "decision_cancel");
         click_action(&mut dialog, &ctx, "decision_cancel");
         assert_eq!(dialog.documents.visual_label(), Some("Current visual"));
         assert_eq!(dialog.render_document, original_document);
@@ -20041,7 +20060,6 @@ mod tests {
                 crate::diagram::VisualAuthoringTemplate::DecisionTree
             ))
         );
-        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
         click_action(&mut dialog, &ctx, "decision_discard");
         assert_eq!(
             dialog.documents.visual_label(),
@@ -20150,7 +20168,6 @@ mod tests {
                 crate::diagram::VisualAuthoringTemplate::Architecture
             ))
         ));
-        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
         click_action_with_child_discard(&mut dialog, &ctx, "decision_discard");
         assert_eq!(dialog.documents.pending_transition(), pending.as_ref());
         assert_eq!(dialog.documents.visual_scene(), Some(&original_scene));

@@ -27,7 +27,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M3-R | Independent A-C review/report/GitHub publication | complete; published |
 | M4-A | D: recovery persistence before scratch close | implemented/tested; native pending |
 | M5-A | E: accepted viewer-only preview dragging | implemented/tested; native limited |
-| M6-A | F: top-level pending decision controls | pending |
+| M6-A | F: top-level pending decision controls | implemented/tested; native limited |
 | M7-A | G: bounded details, typed cached sort/filter, reveal | pending |
 | M7-B | G: bounded directory/path capacity | pending |
 | M8-A | H: actual Shell baseline observation correction | pending |
@@ -162,3 +162,17 @@ test(diagram_viewer_preview_drag_) | test(studio_usability_diagram_viewer_discar
 ```
 
 Native physical preview drag is unverified due the established capture/coordinate-geometry limitation; model/egui command/position checks are not claimed as OS proof. No additional failed capture environment or release build was recreated.
+
+M5-A commit 803e8150f386bbc23571fb5d953d617fff70ed1a; ordinary push succeeded, checkpoint tree clean. M6-A/F planning active.
+
+## M6-A / F result
+
+One shared draw_pending_decision renderer runs at draw_body entry, immediately after host presentation controls and before either Mermaid/Visual scroll body. Removed both old in-scroll panels. Existing ResolvePending intents, accepted effects, save/conflict/cancel behavior and Mermaid popup ownership guard remain; wrapped controls and test hooks retained. Search confirms a single production decision renderer. docs/DIAGRAM_STUDIO.md now documents viewer preview window dragging and the pinned decision location. Parent inspected source/test/guide diffs; git diff --check passed.
+
+Focused fast-dev lib Nextest selection below passed4/4, execution0.582s, runc73f5239-756c-4d4f-8e61-95f2b7c79347. RUST_MIN_STACK=16777216; separate compilation and existing100s owned execution, runner exit0 after2.860s, cleanup/output drain verified. Layout test checks Mermaid/Visual × native/docked, real stored body scroll offset, 1.25x fonts, exactly one Save/Discard/Cancel set, clipping/position above the body and actual Cancel preserving dirty state. Existing transition/save/canceled-chooser/discarded-pass assertions retained. Initial test-only style API compile error corrected; initial3/4 run exposed unreliable wheel targeting in the fixture, replaced by an observation hook for the existing ScrollArea ID and direct stored offset, with no production ID change. Receipts target/launcher-utility-fixes/evidence/m6a-decision-panel-state/.
+
+```text
+test(diagram_studio_pending_decision_stays_above_scrolled_body) | test(diagram_studio_close_decision_orders_edits_and_explicit_reopen_starts_blank) | test(diagram_studio_os_viewport_close_requests_cancel_until_dirty_decision) | test(diagram_studio_visual_template_discarded_root_and_decisions_preserve_state)
+```
+
+Native visual acceptance remains unverified because capture/coordinate geometry is unavailable. Feasible later keyboard smoke will be consolidated after remaining UI changes rather than repeatedly rebuilding/launching. No release rebuild or additional capture retry.
