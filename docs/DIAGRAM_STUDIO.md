@@ -164,3 +164,9 @@ recenter. Editor and viewer cameras are independent.
 Closing the viewer window leaves Diagram Studio and its draft open. Saving or
 discarding an accepted Diagram Studio close also closes the viewer; Cancel keeps
 both windows open. The viewer remains synchronized while the launcher is hidden.
+
+### Colors and examples
+
+Open **Colors** to choose an app default or Mermaid default, dark, forest, or neutral preset. Enter `#RGB` or `#RRGGBB` values and select **Apply colors** once; blank fields inherit. Palette fields accept up to eight comma-separated colors. **Reset to app default** removes the recognized color envelope. Existing unsupported configuration must be resolved first. Native flowchart node properties also allow fill, border, and text colors; applying properties is one undoable edit.
+
+Mindmap controls distinguish root fill/text, branch fill/text/edge palettes, and an optional global edge color. The global edge overrides the branch edge palette; otherwise branch edge colors override the common line color. Entity Relationship header color uses the secondary color; sectioned Gantt task colors use the primary border color and task-label contrast is automatic. Pie and GitGraph use their own palettes. Open **Help** for offline examples of each supported family, with **Copy example** and **Open example** actions. Opening an example uses the same unsaved-document decision as a template. The Templates menu captures its chosen preset when a template is requested.

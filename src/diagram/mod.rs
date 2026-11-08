@@ -91,7 +91,7 @@ pub use visual_scene::{
     color_with_opacity, project_visual_document, project_visual_scene,
 };
 
-pub use style::{EffectiveMermaidColors, MermaidColor, MermaidNodeStyle, MermaidStyle, MermaidTheme, MermaidThemeVariables};
+pub use style::{edit_mermaid_style, mermaid_source_style, EffectiveMermaidColors, MermaidColor, MermaidNodeStyle, MermaidStyle, MermaidTheme, MermaidThemeVariables};
 
 pub use layout::{DiagramLayoutError, layout_positions};
 pub use mermaid::{

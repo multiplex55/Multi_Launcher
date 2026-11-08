@@ -8,7 +8,7 @@ use super::utility_host::{
 use super::utility_window_geometry::NativeViewportIdentity;
 use crate::diagram::{
     CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
-    CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument,
+    CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument, DiagramFamily,
     DiagramDocumentController, DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot,
     DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene, DiagramSession,
     DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate,
@@ -40,7 +40,7 @@ use crate::diagram::{
     stage_export_unoccupied,
 };
 use eframe::egui;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -528,6 +528,9 @@ enum PropertyFields {
         label: String,
         shape: NodeShape,
         group: Option<GroupId>,
+        fill: String,
+        stroke: String,
+        text_color: String,
     },
     Edge {
         label: Option<String>,
@@ -544,6 +547,33 @@ struct PropertyDraft {
     target: DiagramElement,
     basis_revision: u64,
     fields: PropertyFields,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MermaidColorField {
+    Fill, Border, Text, Line, Background, Secondary, RootFill, RootText,
+    BranchFills, BranchText, BranchLines, GlobalEdge, TimelineCards, PieSlices,
+    GitBranches, GitHighlights, GitBranchText,
+}
+impl MermaidColorField {
+    #[cfg(test)]
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Fill => "fill", Self::Border => "border", Self::Text => "text", Self::Line => "line",
+            Self::Background => "background", Self::Secondary => "secondary", Self::RootFill => "root_fill", Self::RootText => "root_text",
+            Self::BranchFills => "branch_fills", Self::BranchText => "branch_text", Self::BranchLines => "branch_lines", Self::GlobalEdge => "global_edge",
+            Self::TimelineCards => "timeline_cards", Self::PieSlices => "pie_slices", Self::GitBranches => "git_branches", Self::GitHighlights => "git_highlights", Self::GitBranchText => "git_branch_text",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MermaidColorDraft {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    family: Option<DiagramFamily>,
+    style: crate::diagram::MermaidStyle,
+    values: BTreeMap<MermaidColorField, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -835,6 +865,8 @@ enum PendingMutation {
         expected_revision: u64,
     },
     ReplaceSource(String),
+    ApplyMermaidStyle { source: String, expected_document: RenderDocumentIdentity, expected_revision: u64 },
+    CopyHelpExample { text: String, expected_document: RenderDocumentIdentity },
     ReplaceSourceWithCursor {
         source: String,
         expected_document: RenderDocumentIdentity,
@@ -894,7 +926,7 @@ enum DocumentIntent {
     NewVisual,
     Open,
     ImportMermaid,
-    ApplyTemplate(DiagramTemplate),
+    ApplyTemplate { template: DiagramTemplate, style: Option<crate::diagram::MermaidStyle> },
     ApplyVisualTemplate(crate::diagram::VisualAuthoringTemplate),
     AutoLayout,
     Save,
@@ -984,6 +1016,8 @@ struct DrawBodyEffects {
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
     visual_middle_capture: Option<VisualMiddleCapture>,
+    mermaid_color_draft: Option<MermaidColorDraft>,
+    template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1016,6 +1050,7 @@ struct RecentPanelEffects {
 }
 
 struct PendingRootEffects {
+    mutation_document: RenderDocumentIdentity,
     root_pass: ViewportPassProvenance,
     host: HostIdentity,
     change_host: bool,
@@ -1054,6 +1089,8 @@ struct PendingRootEffects {
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
     visual_middle_capture: Option<VisualMiddleCapture>,
+    mermaid_color_draft: Option<MermaidColorDraft>,
+    template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
 }
 
 #[derive(Clone)]
@@ -1273,6 +1310,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_viewer_middle_capture: VisualMiddleCapture,
     visual_editor_middle_capture: VisualMiddleCapture,
     visual_canvas_height_ratio: f32,
+    mermaid_color_draft: Option<MermaidColorDraft>,
+    template_preset: Option<crate::diagram::MermaidTheme>,
     visual_viewer_minimap_drag: Option<MinimapDrag>,
     visual_editor_minimap_drag: Option<MinimapDrag>,
     render_document: RenderDocumentIdentity,
@@ -1382,6 +1421,8 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_body_scroll_id: Option<egui::Id>,
     #[cfg(test)]
+    test_body_scroll_rect: Option<egui::Rect>,
+    #[cfg(test)]
     test_generic_preview_drawn: bool,
     #[cfg(test)]
     test_preview_status_text: Option<String>,
@@ -1490,6 +1531,8 @@ impl DiagramStudioDialog {
             visual_viewer_middle_capture: VisualMiddleCapture::default(),
             visual_editor_middle_capture: VisualMiddleCapture::default(),
             visual_canvas_height_ratio: 1.0,
+            mermaid_color_draft: None,
+            template_preset: None,
             visual_viewer_minimap_drag: None,
             visual_editor_minimap_drag: None,
             render_document: RenderDocumentIdentity::fresh(),
@@ -1598,6 +1641,8 @@ impl DiagramStudioDialog {
             test_visual_scroll_rect: None,
             #[cfg(test)]
             test_body_scroll_id: None,
+            #[cfg(test)]
+            test_body_scroll_rect: None,
             #[cfg(test)]
             test_generic_preview_drawn: false,
             #[cfg(test)]
@@ -1946,6 +1991,8 @@ impl DiagramStudioDialog {
         let mut visual_camera_reset = None;
         let mut visual_canvas_ratio = None;
         let mut visual_middle_capture = None;
+        let mut mermaid_color_draft = None;
+        let mut template_preset_requested = None;
         let mut body_rendered = false;
         let mut child_modal_open = false;
         let mut child_focused = false;
@@ -2136,6 +2183,8 @@ impl DiagramStudioDialog {
                     visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                     visual_asset_picker_requested = effects.visual_asset_picker_requested;
                     recent_panel = effects.recent_panel;
+                    template_preset_requested = effects.template_preset_requested;
+                    mermaid_color_draft = effects.mermaid_color_draft;
                     visual_middle_capture = effects.visual_middle_capture;
                     visual_camera_reset = effects.visual_camera_reset;
                     visual_canvas_ratio = effects.visual_canvas_ratio;
@@ -2174,6 +2223,8 @@ impl DiagramStudioDialog {
                 visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                 visual_asset_picker_requested = effects.visual_asset_picker_requested;
                 recent_panel = effects.recent_panel;
+                template_preset_requested = effects.template_preset_requested;
+                mermaid_color_draft = effects.mermaid_color_draft;
                 visual_middle_capture = effects.visual_middle_capture;
                 visual_camera_reset = effects.visual_camera_reset;
                 visual_canvas_ratio = effects.visual_canvas_ratio;
@@ -2309,7 +2360,7 @@ impl DiagramStudioDialog {
                 .filter(|intent| intent.requires_action_fence())
                 .map(|_| DocumentActionFence {
                     host: owner_host,
-                    document: action_document,
+                    document: action_document.clone(),
                     revision: action_revision,
                     owner_generation,
                     owner_viewport_id,
@@ -2317,6 +2368,7 @@ impl DiagramStudioDialog {
                     owner_pass,
                 });
             self.pending_root_effects = Some(PendingRootEffects {
+                mutation_document: action_document,
                 root_pass,
                 host: owner_host,
                 change_host: owner_effects_accepted && !close_requested && change_host,
@@ -2399,6 +2451,8 @@ impl DiagramStudioDialog {
                 recent_panel: (child_pass_accepted && body_rendered)
                     .then_some(recent_panel)
                     .flatten(),
+                template_preset_requested: (child_pass_accepted && body_rendered && !close_requested).then_some(template_preset_requested).flatten(),
+                mermaid_color_draft: (child_pass_accepted && body_rendered && !close_requested).then_some(mermaid_color_draft).flatten(),
                 visual_middle_capture: (child_pass_accepted && body_rendered && !close_requested)
                     .then_some(visual_middle_capture).flatten(),
                 visual_camera_reset: (child_pass_accepted && body_rendered && !close_requested)
@@ -3240,6 +3294,11 @@ impl DiagramStudioDialog {
             && !effects.close_viewport && !effects.os_close_requested
             && effects.document_intent.is_none() && effects.mutation.is_none()
         {
+            if let Some(preset) = effects.template_preset_requested { self.template_preset = preset; }
+            if let Some(draft) = effects.mermaid_color_draft.as_ref()
+                && draft.document == self.render_document
+                && self.documents.session().is_some_and(|session| session.revision() == draft.revision)
+            { self.mermaid_color_draft = Some(draft.clone()); }
             if let Some(capture) = effects.visual_middle_capture {
                 self.visual_editor_middle_capture = capture;
             }
@@ -3517,7 +3576,8 @@ impl DiagramStudioDialog {
                 } => Some((*editor_id, *cursor_character)),
                 _ => None,
             });
-        let source_cursor_mutation_requested = source_cursor_request.is_some();
+        let source_cursor_mutation_requested = source_cursor_request.is_some()
+            || effects.mutation.as_ref().is_some_and(|mutation| matches!(mutation, PendingMutation::ApplyMermaidStyle { .. } | PendingMutation::CopyHelpExample { .. }));
         let visual_mutation_requested = effects.mutation.as_ref().is_some_and(|mutation| {
             matches!(
                 mutation,
@@ -3556,7 +3616,12 @@ impl DiagramStudioDialog {
                 && (viewer_takes_focus || effects.change_host || effects.close_dialog || effects.close_viewport
                     || effects.os_close_requested || effects.document_intent.is_some()
                     || effects.open_viewer_requested);
-            if inline_invalidated && owner_pass_current {
+            if matches!(&mutation, PendingMutation::Transaction { .. })
+                && (!owner_pass_current || effects.mutation_document != self.render_document)
+            {
+                self.message = Some(StudioNotice::error("The document changed. Reload properties before applying."));
+                false
+            } else if inline_invalidated && owner_pass_current {
                 true
             } else if visual_mutation_requested && (!owner_pass_current || !gesture_capture_is_current) {
                 self.reject_stale_visual_intent()
@@ -3855,7 +3920,7 @@ impl DiagramStudioDialog {
             && matches!(
                 &intent,
                 DocumentIntent::ImportMermaid
-                    | DocumentIntent::ApplyTemplate(_)
+                    | DocumentIntent::ApplyTemplate { .. }
                     | DocumentIntent::AutoLayout
                     | DocumentIntent::Export(DiagramExportFormat::Mermaid, _)
                     | DocumentIntent::UseSourceInMarkdown(_)
@@ -3887,7 +3952,7 @@ impl DiagramStudioDialog {
             && matches!(
                 &intent,
                 DocumentIntent::ImportMermaid
-                    | DocumentIntent::ApplyTemplate(_)
+                    | DocumentIntent::ApplyTemplate { .. }
                     | DocumentIntent::ApplyVisualTemplate(_)
                     | DocumentIntent::AutoLayout
                     | DocumentIntent::Export(_, _)
@@ -4051,14 +4116,10 @@ impl DiagramStudioDialog {
                     }
                 }
             }
-            DocumentIntent::ApplyTemplate(template) => {
-                match self.documents.request_template(template) {
-                    Ok(outcome) => {
-                        self.finish_transition(outcome, false);
-                    }
-                    Err(error) => {
-                        self.show_document_error("apply template", None, error);
-                    }
+            DocumentIntent::ApplyTemplate { template, style } => {
+                match self.documents.request_template_with_style(template, style) {
+                    Ok(outcome) => { self.finish_transition(outcome, false); }
+                    Err(error) => self.show_document_error("apply template", None, error),
                 }
             }
             DocumentIntent::ApplyVisualTemplate(template) => {
@@ -6575,6 +6636,23 @@ impl DiagramStudioDialog {
                     }
                 }
             }
+            PendingMutation::CopyHelpExample { text, expected_document } => {
+                if expected_document != self.render_document { return false; }
+                match self.visual_clipboard.write_text(&text) {
+                    Ok(()) => { self.message = Some(StudioNotice::info("Example copied.")); }
+                    Err(error) => { self.message = Some(StudioNotice::error(format!("Copy example failed: {error}"))); }
+                }
+                false
+            }
+            PendingMutation::ApplyMermaidStyle { source, expected_document, expected_revision } => {
+                if expected_document != self.render_document || self.documents.session().is_none_or(|session| session.revision() != expected_revision) {
+                    self.message = Some(StudioNotice::error("The source changed. Reload colors before applying."));
+                    return false;
+                }
+                let changed = self.apply_mermaid_pending(PendingMutation::ReplaceSource(source));
+                if changed { self.mermaid_color_draft = None; }
+                changed
+            }
             PendingMutation::ReplaceSourceWithCursor {
                 source,
                 expected_document,
@@ -6811,8 +6889,8 @@ impl DiagramStudioDialog {
             | PendingMutation::VisualHistory { .. } => {
                 unreachable!("visual mutation dispatched above")
             }
-            PendingMutation::ReplaceSourceWithCursor { .. } => {
-                unreachable!("source assistance mutation dispatched above")
+            PendingMutation::ReplaceSourceWithCursor { .. } | PendingMutation::ApplyMermaidStyle { .. } | PendingMutation::CopyHelpExample { .. } => {
+                unreachable!("source mutation dispatched above")
             }
             PendingMutation::Transaction {
                 operations,
@@ -7175,7 +7253,7 @@ impl DiagramStudioDialog {
             PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
             PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
             PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
-            PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
+            PendingDiagramTransition::ApplyTemplate { template, .. } => format!("using the {} template", template.name()),
             PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
             PendingDiagramTransition::Close => "closing this diagram".to_owned(),
         };
@@ -7271,6 +7349,8 @@ impl DiagramStudioDialog {
             selection,
             selected_nodes,
             property_draft,
+            mermaid_color_draft,
+            template_preset,
             drag,
             message,
             focus_source,
@@ -7284,6 +7364,8 @@ impl DiagramStudioDialog {
             drawio_review,
             #[cfg(test)]
             test_body_scroll_id,
+            #[cfg(test)]
+            test_body_scroll_rect,
             #[cfg(test)]
             test_source_editor_id,
             #[cfg(test)]
@@ -7574,9 +7656,18 @@ impl DiagramStudioDialog {
                                 response.id,
                             ));
                             if response.clicked() && document_intent.is_none() {
-                                *document_intent = Some(DocumentIntent::ApplyTemplate(template));
+                                *document_intent = Some(DocumentIntent::ApplyTemplate { template, style: template_preset.map(|theme| crate::diagram::MermaidStyle { theme: Some(theme), ..Default::default() }) });
                                 menu_ui.close();
                             }
+                        }
+                        menu_ui.separator();
+                        menu_ui.label("Preset for new templates");
+                        let mut preset_candidate = *template_preset;
+                        for (preset, label) in [(None, "App default"), (Some(crate::diagram::MermaidTheme::Default), "Mermaid default"), (Some(crate::diagram::MermaidTheme::Dark), "Dark"), (Some(crate::diagram::MermaidTheme::Forest), "Forest"), (Some(crate::diagram::MermaidTheme::Neutral), "Neutral")] {
+                            let response = menu_ui.selectable_value(&mut preset_candidate, preset, label);
+                            if response.changed() { draw_effects.template_preset_requested = Some(preset_candidate); }
+                            #[cfg(test)] test_action_rects.push((format!("template_preset_{}", label.to_lowercase().replace(' ', "_")), response.rect, menu_ui.clip_rect()));
+                            if response.enabled() { template_item_ids.push(response.id); }
                         }
                     });
                     #[cfg(test)]
@@ -7599,7 +7690,7 @@ impl DiagramStudioDialog {
                         });
                     }
 
-                    let (help, help_items, help_sizing) = studio_help_menu(ui, menu_actions_allowed);
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, menu_actions_allowed, pending, document_intent, render_document, *template_preset, #[cfg(test)] test_action_rects);
                     #[cfg(test)] {
                         test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         test_action_focus_ids.push(("menu_help".into(), help.id));
@@ -8221,6 +8312,7 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
+                draw_effects.mermaid_color_draft = draw_mermaid_colors(ui, session.draft(), render_document, revision, generic_family, mermaid_color_draft, base_editing_allowed && draw_effects.active_menu_scope.is_none(), pending, #[cfg(test)] test_action_rects, #[cfg(test)] test_action_focus_ids);
                 if let Some(notice) = message.as_ref() {
                     match notice {
                         StudioNotice::Info(_) => { ui.label(notice.text()); }
@@ -8232,7 +8324,7 @@ impl DiagramStudioDialog {
                 }
             });
         #[cfg(test)]
-        { *test_body_scroll_id = Some(_body_scroll.id); }
+        { *test_body_scroll_id = Some(_body_scroll.id); *test_body_scroll_rect = Some(_body_scroll.inner_rect); }
         draw_effects
     }
 
@@ -8711,7 +8803,7 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
                     }
-                    let (help, help_items, help_sizing) = studio_help_menu(ui, file_allowed);
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, file_allowed, pending, document_intent, &self.render_document, self.template_preset, #[cfg(test)] &mut self.test_action_rects);
                     #[cfg(test)] {
                         self.test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
                         self.test_action_focus_ids.push(("menu_help".into(), help.id));
@@ -12531,6 +12623,131 @@ fn char_index_to_byte(source: &str, character_index: usize) -> usize {
         .map_or(source.len(), |(byte_index, _)| byte_index)
 }
 
+fn color_draft_for(source: &str, document: &RenderDocumentIdentity, revision: u64, family: Option<DiagramFamily>) -> Result<MermaidColorDraft, String> {
+    use MermaidColorField as Field;
+    let style = crate::diagram::mermaid_source_style(source)?;
+    crate::diagram::edit_mermaid_style(source, &style)?;
+    let v = &style.theme_variables;
+    let color = |c: Option<crate::diagram::MermaidColor>| c.map_or_else(String::new, |c| c.hex());
+    let list = |items: &[crate::diagram::MermaidColor]| items.iter().map(|c| c.hex()).collect::<Vec<_>>().join(", ");
+    let values = BTreeMap::from([
+        (Field::Fill, color(v.primary_color)), (Field::Border, color(v.primary_border_color)),
+        (Field::Text, color(v.primary_text_color)), (Field::Line, color(v.line_color)),
+        (Field::Background, color(v.background)), (Field::Secondary, color(v.secondary_color)),
+        (Field::RootFill, color(v.mindmap_root_fill)), (Field::RootText, color(v.mindmap_root_text)),
+        (Field::BranchFills, list(&v.mindmap_section_colors)), (Field::BranchText, list(&v.mindmap_section_label_colors)),
+        (Field::BranchLines, list(&v.mindmap_section_line_colors)), (Field::GlobalEdge, color(v.mindmap_edge_color)),
+        (Field::TimelineCards, list(&v.timeline_event_colors)), (Field::PieSlices, list(&v.pie_colors)),
+        (Field::GitBranches, list(&v.git_colors)), (Field::GitHighlights, list(&v.git_inv_colors)),
+        (Field::GitBranchText, list(&v.git_branch_label_colors)),
+    ]);
+    Ok(MermaidColorDraft { document: document.clone(), revision, family, style, values })
+}
+
+fn apply_color_field(style: &mut crate::diagram::MermaidStyle, field: MermaidColorField, value: &str) -> Result<(), String> {
+    use MermaidColorField as Field;
+    let parse_color = || -> Result<Option<crate::diagram::MermaidColor>, String> {
+        if value.trim().is_empty() { Ok(None) } else { crate::diagram::MermaidColor::parse(value.trim()).map(Some).map_err(str::to_owned) }
+    };
+    let parse_list = || -> Result<Vec<crate::diagram::MermaidColor>, String> {
+        if value.trim().is_empty() { return Ok(Vec::new()); }
+        let colors = value.split(',').map(|s| crate::diagram::MermaidColor::parse(s.trim()).map_err(str::to_owned)).collect::<Result<Vec<_>, _>>()?;
+        if colors.len() > 8 { return Err("A palette can contain at most eight colors.".into()); }
+        Ok(colors)
+    };
+    let v = &mut style.theme_variables;
+    match field {
+        Field::Fill => v.primary_color = parse_color()?, Field::Border => v.primary_border_color = parse_color()?,
+        Field::Text => v.primary_text_color = parse_color()?, Field::Line => v.line_color = parse_color()?,
+        Field::Background => v.background = parse_color()?, Field::Secondary => v.secondary_color = parse_color()?,
+        Field::RootFill => v.mindmap_root_fill = parse_color()?, Field::RootText => v.mindmap_root_text = parse_color()?,
+        Field::BranchFills => v.mindmap_section_colors = parse_list()?, Field::BranchText => v.mindmap_section_label_colors = parse_list()?,
+        Field::BranchLines => v.mindmap_section_line_colors = parse_list()?, Field::GlobalEdge => v.mindmap_edge_color = parse_color()?,
+        Field::TimelineCards => v.timeline_event_colors = parse_list()?, Field::PieSlices => v.pie_colors = parse_list()?,
+        Field::GitBranches => v.git_colors = parse_list()?, Field::GitHighlights => v.git_inv_colors = parse_list()?,
+        Field::GitBranchText => v.git_branch_label_colors = parse_list()?,
+    }
+    Ok(())
+}
+
+fn draw_mermaid_colors(
+    ui: &mut egui::Ui, source: &str, document: &RenderDocumentIdentity, revision: u64,
+    family: Option<DiagramFamily>, prior: &Option<MermaidColorDraft>, enabled: bool,
+    pending: &mut Option<PendingMutation>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
+) -> Option<MermaidColorDraft> {
+    use MermaidColorField as Field;
+    let mut draft = match prior.as_ref().filter(|d| d.document == *document && d.family == family).cloned() {
+        Some(draft) => draft,
+        None => match color_draft_for(source, document, revision, family) {
+            Ok(draft) => draft,
+            Err(error) => { ui.collapsing("Colors", |ui| { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), format!("Resolve source configuration first: {error}")); }); return None; }
+        },
+    };
+    let stale = draft.revision != revision;
+    let _panel = ui.collapsing("Colors", |ui| {
+        if stale {
+            ui.label("Source changed. Reload colors before applying.");
+            match color_draft_for(source, document, revision, family) {
+                Ok(reloaded) => { if ui.add_enabled(enabled, egui::Button::new("Reload colors")).clicked() { draft = reloaded; } }
+                Err(error) => { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), format!("Resolve source configuration first: {error}")); }
+            }
+        }
+        ui.add_enabled_ui(enabled && draft.revision == revision, |ui| {
+            egui::ComboBox::from_id_salt("mermaid-color-preset")
+                .selected_text(match draft.style.theme { None => "No preset (keep colors)", Some(crate::diagram::MermaidTheme::Default) => "Mermaid default", Some(crate::diagram::MermaidTheme::Dark) => "Dark", Some(crate::diagram::MermaidTheme::Forest) => "Forest", Some(crate::diagram::MermaidTheme::Neutral) => "Neutral" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut draft.style.theme, None, "No preset (keep colors)");
+                    for (theme, label) in [(crate::diagram::MermaidTheme::Default, "Mermaid default"), (crate::diagram::MermaidTheme::Dark, "Dark"), (crate::diagram::MermaidTheme::Forest, "Forest"), (crate::diagram::MermaidTheme::Neutral, "Neutral")] { ui.selectable_value(&mut draft.style.theme, Some(theme), label); }
+                });
+            ui.weak("Hex colors: #RGB or #RRGGBB. Blank inherits. Explicit colors override the preset. Palettes: comma-separated, up to eight.");
+            let fields: &[(Field, &str)] = match family {
+                Some(DiagramFamily::Mindmap) => &[(Field::RootFill,"Root fill"),(Field::RootText,"Root text"),(Field::BranchFills,"Branch fills"),(Field::BranchText,"Branch text"),(Field::BranchLines,"Branch edges"),(Field::GlobalEdge,"Global edge (overrides branch edges)")],
+                Some(DiagramFamily::EntityRelationship) => &[(Field::Secondary,"Entity header"),(Field::Background,"Body/background"),(Field::Border,"Border"),(Field::Text,"Text"),(Field::Line,"Relationship line")],
+                Some(DiagramFamily::Gantt) => &[(Field::Border,"Task and section color"),(Field::Text,"Text and axis"),(Field::Line,"Axis line"),(Field::Background,"Background")],
+                Some(DiagramFamily::Pie) => &[(Field::PieSlices,"Slice palette"),(Field::Text,"Title and legend text"),(Field::Line,"Outer stroke"),(Field::Background,"Background")],
+                Some(DiagramFamily::GitGraph) => &[(Field::GitBranches,"Branch palette"),(Field::GitHighlights,"Commit highlight palette"),(Field::GitBranchText,"Branch label text palette"),(Field::Text,"Commit and tag text"),(Field::Line,"Branch line"),(Field::Background,"Background")],
+                Some(DiagramFamily::Timeline) => &[(Field::TimelineCards,"Event card palette"),(Field::Fill,"Timeline marker"),(Field::Border,"Border"),(Field::Text,"Text"),(Field::Background,"Background")],
+                Some(DiagramFamily::UserJourney) => &[(Field::Fill,"Task cards"),(Field::GitBranches,"Section and actor palette"),(Field::Border,"Border"),(Field::Text,"Text"),(Field::Line,"Line"),(Field::Background,"Background")],
+                _ => &[(Field::Fill,"Fill"),(Field::Border,"Border"),(Field::Text,"Text"),(Field::Line,"Line"),(Field::Background,"Background")],
+            };
+            for &(field, label) in fields {
+                if let Some(value) = draft.values.get_mut(&field) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(label);
+                        let _response = ui.add(egui::TextEdit::singleline(value).desired_width(180.0).char_limit(72));
+                        #[cfg(test)] test_action_rects.push((format!("mermaid_color_{}", field.slug()), _response.rect, ui.clip_rect()));
+                    });
+                }
+            }
+            let mut style = draft.style.clone();
+            let error = fields.iter().find_map(|(field, _)| draft.values.get(field).and_then(|value| apply_color_field(&mut style, *field, value).err()));
+            if let Some(error) = &error { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), error); }
+            ui.horizontal(|ui| {
+                let apply = ui.add_enabled(error.is_none(), egui::Button::new("Apply colors"));
+                #[cfg(test)] test_action_rects.push(("mermaid_color_apply".into(), apply.rect, ui.clip_rect()));
+                if apply.clicked() && pending.is_none() {
+                    match crate::diagram::edit_mermaid_style(source, &style) {
+                        Ok(source) => *pending = Some(PendingMutation::ApplyMermaidStyle { source, expected_document: document.clone(), expected_revision: revision }),
+                        Err(error) => { ui.label(error); },
+                    };
+                }
+                if ui.button("Reset to app default").clicked() && pending.is_none() {
+                    if let Ok(source) = crate::diagram::edit_mermaid_style(source, &crate::diagram::MermaidStyle::default()) {
+                        *pending = Some(PendingMutation::ApplyMermaidStyle { source, expected_document: document.clone(), expected_revision: revision });
+                    }
+                }
+            });
+        });
+    });
+    #[cfg(test)] {
+        test_action_rects.push(("mermaid_colors".into(), _panel.header_response.rect, ui.clip_rect()));
+        test_action_focus_ids.push(("mermaid_colors".into(), _panel.header_response.id));
+    }
+    Some(draft)
+}
+
 fn direction_control(
     ui: &mut egui::Ui,
     graph: Option<&DiagramDocument>,
@@ -12927,6 +13144,7 @@ fn visual_workspace(
             property_draft,
             actions_allowed,
             pending,
+            #[cfg(test)] test_action_rects,
         );
         ui.separator();
         let _canvas_rect = ui
@@ -12979,17 +13197,20 @@ fn visual_workspace(
                 egui::vec2(inspector_width, available_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    draw_inspector(
-                        ui,
-                        graph,
-                        graph_is_current,
-                        revision,
-                        selection,
-                        selected_nodes,
-                        property_draft,
-                        actions_allowed,
-                        pending,
-                    );
+                    egui::ScrollArea::vertical().id_salt("diagram-native-inspector-scroll").show(ui, |ui| {
+                        draw_inspector(
+                            ui,
+                            graph,
+                            graph_is_current,
+                            revision,
+                            selection,
+                            selected_nodes,
+                            property_draft,
+                            actions_allowed,
+                            pending,
+                            #[cfg(test)] test_action_rects,
+                        );
+                    });
                 },
             );
             let (splitter_rect, splitter_response) =
@@ -13078,6 +13299,7 @@ fn draw_inspector(
     property_draft: &mut Option<PropertyDraft>,
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     ui.set_min_width(INSPECTOR_PANE_MIN_WIDTH);
     ui.heading("Structure");
@@ -13141,6 +13363,7 @@ fn draw_inspector(
         property_draft,
         actions_allowed,
         pending,
+        #[cfg(test)] test_action_rects,
     );
 }
 
@@ -13194,6 +13417,7 @@ fn draw_properties(
     property_draft: &mut Option<PropertyDraft>,
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     let (Some(graph), Some(selection)) = (graph, selection.as_ref()) else {
         *property_draft = None;
@@ -13230,6 +13454,9 @@ fn draw_properties(
             label,
             shape,
             group,
+            fill,
+            stroke,
+            text_color,
         } => {
             ui.label(format!("Node {}", selection_label(selection)));
             let label_id =
@@ -13238,6 +13465,14 @@ fn draw_properties(
             ui.add_enabled_ui(actions_allowed && !stale_basis, |ui| {
                 ui.label("Label");
                 ui.add(egui::TextEdit::singleline(label).id(label_id));
+                ui.label("Node colors (#RGB or #RRGGBB; blank inherits)");
+                for (name, value) in [("Fill", &mut *fill), ("Border", &mut *stroke), ("Text", &mut *text_color)] {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(name);
+                        let _response = ui.add(egui::TextEdit::singleline(value).char_limit(7));
+                        #[cfg(test)] test_action_rects.push((format!("node_color_{}", name.to_lowercase()), _response.rect, ui.clip_rect()));
+                    });
+                }
                 ui.label("Shape");
                 egui::ComboBox::from_id_salt(("diagram-node-shape", selection_label(selection)))
                     .selected_text(shape_label(*shape))
@@ -13261,6 +13496,16 @@ fn draw_properties(
                     });
             });
             if let DiagramElement::Node(id) = selection {
+                let parse = |value: &str| -> Result<Option<crate::diagram::MermaidColor>, &'static str> {
+                    if value.trim().is_empty() { Ok(None) } else { crate::diagram::MermaidColor::parse(value.trim()).map(Some) }
+                };
+                let colors = (parse(fill), parse(stroke), parse(text_color));
+                if let (Ok(fill), Ok(stroke), Ok(color)) = colors {
+                    operations.push(GraphOperation::SetNodeStyle { id: id.clone(), style: crate::diagram::MermaidNodeStyle { fill, stroke, color } });
+                } else {
+                    ui.colored_label(egui::Color32::from_rgb(190, 65, 45), "Colors must be blank or valid hexadecimal values.");
+                    return;
+                }
                 operations.extend([
                     GraphOperation::SetNodeLabel {
                         id: id.clone(),
@@ -13339,9 +13584,9 @@ fn draw_properties(
             }
         }
     }
-    if ui
-        .add_enabled(can_apply, egui::Button::new("Apply properties"))
-        .clicked()
+    let apply = ui.add_enabled(can_apply, egui::Button::new("Apply properties"));
+    #[cfg(test)] test_action_rects.push(("node_properties_apply".into(), apply.rect, ui.clip_rect()));
+    if apply.clicked()
         && pending.is_none()
         && !operations.is_empty()
     {
@@ -13365,6 +13610,9 @@ fn property_draft_for(
                 label: node.label.clone(),
                 shape: node.shape,
                 group: node.group.clone(),
+                fill: graph.node_styles.get(id).and_then(|style| style.fill).map_or_else(String::new, |color| color.hex()),
+                stroke: graph.node_styles.get(id).and_then(|style| style.stroke).map_or_else(String::new, |color| color.hex()),
+                text_color: graph.node_styles.get(id).and_then(|style| style.color).map_or_else(String::new, |color| color.hex()),
             }
         }
         DiagramElement::Edge(id) => {
@@ -14105,23 +14353,80 @@ fn menu_focus_request_for_ui(
     }
 }
 
-fn studio_help_menu(ui: &mut egui::Ui, enabled: bool) -> (egui::Response, Vec<egui::Id>, bool) {
+const HELP_COLOR_EXAMPLE: &str = "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"primaryColor\":\"#234567\"}}}%%\nflowchart TD\nA[\"Start\"] --> B[\"Finish\"]\nstyle A fill:#123456,stroke:#abcdef,color:#ffffff\n";
+
+fn studio_help_menu(
+    ui: &mut egui::Ui, enabled: bool, pending: &mut Option<PendingMutation>,
+    intent: &mut Option<DocumentIntent>, document: &RenderDocumentIdentity,
+    preset: Option<crate::diagram::MermaidTheme>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) -> (egui::Response, Vec<egui::Id>, bool) {
     let mut items = Vec::new();
     let mut sizing = false;
-    let menu = ui.add_enabled_ui(enabled, |ui| {
-    ui.menu_button("Help", |ui| {
+    let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help", |ui| {
         sizing = ui.is_sizing_pass();
-        ui.strong("Diagram Studio");
-        ui.label("Mermaid source is retained as text. Use Templates for supported examples.");
-        ui.label("Flowcharts support visual node and edge editing. Other families use source rendering.");
-        ui.monospace("flowchart TD\n    A --> B");
-        ui.label("Tab indents in the source editor; Shift+Tab removes indentation.");
-        ui.label("A stale preview shows the last valid result until the source renders successfully.");
-        let close = ui.button("Close help");
-        if close.enabled() { items.push(close.id); }
-        if close.clicked() { ui.close(); }
-    })
-}).inner;
+        let help_scroll = egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 100.0).max(160.0)).show(ui, |ui| {
+            ui.set_max_width(480.0);
+            ui.strong("Diagram Studio — Mermaid guide");
+            ui.label("Flowcharts are editable on the canvas. Other supported families render from source. Source remains authoritative.");
+            ui.label("Tab indents; Shift+Tab removes indentation. Ctrl+Z and Ctrl+Y use document history.");
+            ui.label("Use File for New, Open, Save and Export. A stale preview shows the last successful result until the new source renders.");
+            ui.label("Sources are limited to 65,536 bytes, 4,096 lines and 8,192 bytes per line. Unsupported CSS, frontmatter and configuration remain in the draft with a diagnostic.");
+            ui.label("Colors accepts #RGB or #RRGGBB. Presets and overrides use a bounded Mermaid JSON init directive; native nodes support style ID fill, stroke and color.");
+            ui.label("ER headers use secondaryColor; sectioned Gantt tasks use primaryBorderColor and automatic label contrast. Pie slices, GitGraph branches and Timeline cards use their respective palette keys.");
+            ui.label("Mindmap indentation defines hierarchy. Branch palettes have up to eight colors; global edge overrides branch edges. Renderer-specific keys: mindmapRootFill, mindmapRootText, mindmapEdgeColor, mindmapSectionColors, mindmapSectionLabelColors, mindmapSectionLineColors, timelineEventColors, pieColors, gitColors, gitInvColors and gitBranchLabelColors.");
+            ui.monospace(HELP_COLOR_EXAMPLE);
+            let copy_color = ui.button("Copy color example");
+            if copy_color.enabled() { items.push(copy_color.id); }
+            #[cfg(test)] test_action_rects.push(("help_copy_color".into(), copy_color.rect, ui.clip_rect()));
+            if copy_color.clicked() && pending.is_none() {
+                *pending = Some(PendingMutation::CopyHelpExample { text: HELP_COLOR_EXAMPLE.to_owned(), expected_document: document.clone() });
+                ui.close();
+            }
+            for template in DiagramTemplate::ALL {
+                ui.separator();
+                if template == DiagramTemplate::Linear { ui.strong("Flowchart"); }
+                else if matches!(template, DiagramTemplate::Decision | DiagramTemplate::Process) { ui.label(template.name()); }
+                else { ui.strong(template.name()); }
+                if template.family() != DiagramFamily::Flowchart || template == DiagramTemplate::Linear { ui.label(match template.family() {
+                    DiagramFamily::Flowchart => "Flowchart: declare nodes and --> edges; native canvas editing is available.",
+                    DiagramFamily::Mindmap => "Mindmap: indent child nodes beneath their parent.",
+                    DiagramFamily::Sequence => "Sequence: declare participants and arrow messages.",
+                    DiagramFamily::Class => "Class: declare classes, members and relationships.",
+                    DiagramFamily::State => "State: use --> transitions, including [*] start/end.",
+                    DiagramFamily::EntityRelationship => "ER: use labeled relationship statements.",
+                    DiagramFamily::Gantt => "Gantt: use sections, dates and task statements.",
+                    DiagramFamily::Timeline => "Timeline: use time : event lines and optional sections.",
+                    DiagramFamily::UserJourney => "Journey: use task: score: actors, with scores from 0 to 5.",
+                    DiagramFamily::Pie => "Pie: use quoted labels and positive values.",
+                    DiagramFamily::GitGraph => "GitGraph: use commits, branches, checkout and merge.",
+                    DiagramFamily::Other => "Other Mermaid syntax may be unsupported.",
+                }); }
+                ui.monospace(template.source());
+                ui.horizontal(|ui| {
+                    let copy = ui.button("Copy example");
+                    if copy.enabled() { items.push(copy.id); }
+                    #[cfg(test)] test_action_rects.push((format!("help_copy_{}", template.name().to_lowercase()), copy.rect, ui.clip_rect()));
+                    if copy.clicked() && pending.is_none() {
+                        *pending = Some(PendingMutation::CopyHelpExample { text: template.source().to_owned(), expected_document: document.clone() });
+                        ui.close();
+                    }
+                    let open = ui.button("Open example");
+                    if open.enabled() { items.push(open.id); }
+                    #[cfg(test)] test_action_rects.push((format!("help_open_{}", template.name().to_lowercase()), open.rect, ui.clip_rect()));
+                    if open.clicked() && intent.is_none() {
+                        *intent = Some(DocumentIntent::ApplyTemplate { template, style: preset.map(|theme| crate::diagram::MermaidStyle { theme: Some(theme), ..Default::default() }) });
+                        ui.close();
+                    }
+                });
+            }
+            let close = ui.button("Close help");
+            if close.enabled() { items.push(close.id); }
+            if close.clicked() { ui.close(); }
+        });
+        #[cfg(test)] test_action_rects.push(("help_scroll".into(), help_scroll.inner_rect, help_scroll.inner_rect));
+        #[cfg(not(test))] let _ = help_scroll;
+    })).inner;
     (menu.response, items, sizing)
 }
 
@@ -17686,6 +17991,39 @@ mod tests {
             })
     }
 
+    fn reveal_control(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
+        for _ in 0..20 {
+            frame(dialog, ctx);
+            let (_, rect, clip) = dialog.test_action_rects.iter().find(|(action, _, _)| action == name)
+                .unwrap_or_else(|| panic!("missing {name} while scrolling"));
+            if clip.contains_rect(*rect) { return; }
+            let direction = if rect.bottom() > clip.bottom() { -150.0 } else { 150.0 };
+            let scroll = if name.starts_with("mermaid_color") || name.starts_with("menu_") {
+                dialog.test_body_scroll_rect.unwrap_or(*clip)
+            } else if name.starts_with("help_") {
+                dialog.test_action_rects.iter().find(|(action, _, _)| action == "help_scroll").map_or(*clip, |(_, rect, _)| rect.intersect(*clip))
+            } else { *clip };
+            let point = egui::pos2(scroll.left() + 5.0, if direction < 0.0 { scroll.bottom() - 5.0 } else { scroll.top() + 5.0 });
+            frame_with_child_events(dialog, ctx, vec![egui::Event::PointerMoved(point), egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, direction),
+                phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE,
+            }]);
+            // Wait for the observed target rectangle to stop moving after the wheel event.
+            let mut previous = None;
+            let mut stable_frames = 0;
+            for _ in 0..20 {
+                frame(dialog, ctx);
+                let current = dialog.test_action_rects.iter().find(|(action, _, _)| action == name).map(|(_, rect, _)| *rect);
+                if current == previous && current.is_some() { stable_frames += 1; } else { stable_frames = 0; }
+                if stable_frames >= 2 { break; }
+                previous = current;
+            }
+        }
+        let observation = dialog.test_action_rects.iter().find(|(action, _, _)| action == name);
+        let state = dialog.test_body_scroll_id.and_then(|id| egui::scroll_area::State::load(ctx, id));
+        panic!("{name} remains clipped after scrolling: {observation:?}, body offset={:?}", state.map(|s| s.offset));
+    }
+
     fn reveal_visual_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
         for _ in 0..12 {
             frame(dialog, ctx);
@@ -19977,6 +20315,13 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let ready = draw(&mut dialog, &ctx);
+        let color_id = dialog.test_action_focus_ids.iter().find(|(name, _)| name == "mermaid_colors").unwrap().1;
+        let mut color_state = egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, color_id, false);
+        color_state.set_open(true);
+        color_state.store(&ctx);
+        dialog.mermaid_color_draft = Some(color_draft_for(dialog.test_session().draft(), &dialog.render_document, dialog.test_session().revision(), None).unwrap());
+        let expanded = draw(&mut dialog, &ctx);
+        assert_eq!(ready, expanded);
         dialog.test_replace_source("flowchart TD\nA -->");
         dialog.message = Some(StudioNotice::error("long diagnostic ".repeat(100)));
         let stale = draw(&mut dialog, &ctx);
@@ -20351,6 +20696,136 @@ mod tests {
                 .map(StudioNotice::text)
                 .is_some_and(|message| message.contains("invalid"))
         );
+    }
+
+    fn set_text_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, action: &str, value: &str) {
+        reveal_control(dialog, ctx, action);
+        click_action(dialog, ctx, action);
+        send_child_key(dialog, ctx, egui::Key::A, egui::Modifiers::COMMAND);
+        frame_with_child_events(dialog, ctx, vec![egui::Event::Text(value.to_owned())]);
+        frame(dialog, ctx);
+    }
+
+    #[test]
+    fn mermaid_node_color_controls_apply_once_and_survive_history_and_save() {
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Visual;
+        dialog.set_selection(DiagramElement::Node(NodeId::new("A").unwrap()), false);
+        let ctx = egui::Context::default();
+        for _ in 0..3 { frame(&mut dialog, &ctx); }
+        let revision = dialog.test_session().revision();
+        let depth = dialog.test_session().undo_depth();
+        set_text_action(&mut dialog, &ctx, "node_color_fill", "#123456");
+        set_text_action(&mut dialog, &ctx, "node_color_border", "#abcdef");
+        set_text_action(&mut dialog, &ctx, "node_color_text", "#fedcba");
+        reveal_control(&mut dialog, &ctx, "node_properties_apply");
+        click_action_with_child_discard(&mut dialog, &ctx, "node_properties_apply");
+        assert_eq!(dialog.test_session().revision(), revision);
+        click_action(&mut dialog, &ctx, "node_properties_apply");
+        assert_eq!(dialog.test_session().undo_depth(), depth + 1);
+        assert!(dialog.test_session().draft().contains("style A fill:#123456,stroke:#abcdef,color:#fedcba"));
+        let snapshot = DiagramImageSnapshot::capture(dialog.test_session(), SceneMetrics::default()).unwrap();
+        assert_eq!(build_scene(dialog.test_session().current_graph().unwrap(), SceneMetrics::default()).unwrap().nodes[0].colors.fill.0, [0x12, 0x34, 0x56]);
+        let svg = snapshot.encode_svg(1.0).unwrap();
+        assert!(std::str::from_utf8(svg.bytes()).unwrap().contains("#123456"));
+        let png = snapshot.encode_png(1.0).unwrap();
+        assert!(image::load_from_memory(png.bytes()).unwrap().to_rgba8().pixels().any(|pixel| pixel.0 == [0x12, 0x34, 0x56, 255]));
+        assert!(dialog.documents.undo().unwrap());
+        assert!(!dialog.test_session().draft().contains("style A"));
+        assert!(dialog.documents.redo().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("styled.mld");
+        dialog.documents.save_as(&path).unwrap();
+        let reopened = crate::diagram::decode_session(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(reopened.draft(), dialog.test_session().draft());
+    }
+
+    #[test]
+    fn mindmap_color_controls_apply_once_and_reject_discarded_or_stale_effects() {
+        let mut dialog = initialized_dialog();
+        dialog.test_replace_source(DiagramTemplate::Mindmap.source());
+        let ctx = egui::Context::default();
+        for _ in 0..3 { frame(&mut dialog, &ctx); }
+        reveal_control(&mut dialog, &ctx, "mermaid_colors");
+        click_action(&mut dialog, &ctx, "mermaid_colors");
+        set_text_action(&mut dialog, &ctx, "mermaid_color_root_fill", "#123456");
+        set_text_action(&mut dialog, &ctx, "mermaid_color_branch_fills", "#a10001, #a20002");
+        set_text_action(&mut dialog, &ctx, "mermaid_color_branch_text", "#ffffff, #eeeeee");
+        set_text_action(&mut dialog, &ctx, "mermaid_color_branch_lines", "#b10001, #b20002");
+        let revision = dialog.test_session().revision();
+        let depth = dialog.test_session().undo_depth();
+        reveal_control(&mut dialog, &ctx, "mermaid_color_apply");
+        click_action_with_child_discard(&mut dialog, &ctx, "mermaid_color_apply");
+        assert_eq!(dialog.test_session().revision(), revision);
+        click_action(&mut dialog, &ctx, "mermaid_color_apply");
+        assert_eq!(dialog.test_session().undo_depth(), depth + 1);
+        let source = dialog.test_session().draft().to_owned();
+        let output = crate::diagram::render_mermaid_preview(&source, RasterSize::new(400, 300).unwrap()).unwrap();
+        for color in ["#123456", "#a10001", "#a20002", "#b10001", "#b20002"] { assert!(output.svg.contains(color), "{color}"); }
+        assert!(output.raster.rgba.chunks_exact(4).any(|pixel| pixel[..3] == [0x12, 0x34, 0x56]));
+        let rendered = DiagramRenderedImageSnapshot::capture(dialog.test_session().revision(), Arc::new(output));
+        assert!(std::str::from_utf8(rendered.encode_svg(1.0).unwrap().bytes()).unwrap().contains("#123456"));
+        let png = rendered.encode_png(1.0).unwrap();
+        assert!(image::load_from_memory(png.bytes()).unwrap().to_rgba8().pixels().any(|pixel| pixel.0 == [0x12, 0x34, 0x56, 255]));
+        let stale_source = source.replace("#123456", "#654321");
+        dialog.apply_pending(PendingMutation::ApplyMermaidStyle { source: stale_source, expected_document: dialog.render_document.clone(), expected_revision: revision });
+        assert_eq!(dialog.test_session().draft(), source);
+        assert!(dialog.documents.undo().unwrap());
+        assert!(!dialog.test_session().draft().contains("mindmapRootFill"));
+        assert!(dialog.documents.redo().unwrap());
+        assert_eq!(dialog.test_session().draft(), source);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mindmap.mld");
+        dialog.documents.save_as(&path).unwrap();
+        let reopened = crate::diagram::decode_session(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(reopened.draft(), source);
+    }
+
+    #[test]
+    fn help_copy_requires_accepted_frame_and_template_captures_preset() {
+        use crate::clipboard_modify::fake::FakeClipboardBackend;
+        assert!(crate::diagram::parse_mermaid(HELP_COLOR_EXAMPLE).is_ok());
+        assert!(crate::diagram::render_mermaid_preview(HELP_COLOR_EXAMPLE, RasterSize::new(320, 240).unwrap()).is_ok());
+        let mut dialog = initialized_dialog();
+        let backend = Arc::new(FakeClipboardBackend::default());
+        dialog.visual_clipboard = backend.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 { frame(&mut dialog, &ctx); }
+        reveal_control(&mut dialog, &ctx, "menu_help");
+        click_action(&mut dialog, &ctx, "menu_help");
+        reveal_control(&mut dialog, &ctx, "help_copy_linear");
+        click_action_with_child_discard(&mut dialog, &ctx, "help_copy_linear");
+        assert!(backend.writes().is_empty());
+        reveal_control(&mut dialog, &ctx, "menu_help");
+        click_action(&mut dialog, &ctx, "menu_help");
+        reveal_control(&mut dialog, &ctx, "help_copy_linear");
+        click_action(&mut dialog, &ctx, "help_copy_linear");
+        assert_eq!(backend.writes(), vec![DiagramTemplate::Linear.source().to_owned()]);
+        let original = dialog.test_session().draft().to_owned();
+        reveal_control(&mut dialog, &ctx, "menu_templates");
+        click_action(&mut dialog, &ctx, "menu_templates");
+        reveal_control(&mut dialog, &ctx, "template_preset_dark");
+        click_action_with_child_discard(&mut dialog, &ctx, "template_preset_dark");
+        assert_eq!(dialog.template_preset, None);
+        click_action(&mut dialog, &ctx, "menu_templates");
+        reveal_control(&mut dialog, &ctx, "template_preset_dark");
+        click_action(&mut dialog, &ctx, "template_preset_dark");
+        assert_eq!(dialog.template_preset, Some(crate::diagram::MermaidTheme::Dark));
+        reveal_control(&mut dialog, &ctx, "menu_help");
+        click_action(&mut dialog, &ctx, "menu_help");
+        reveal_control(&mut dialog, &ctx, "help_open_linear");
+        click_action(&mut dialog, &ctx, "help_open_linear");
+        assert!(dialog.documents.pending_transition().is_some());
+        click_action(&mut dialog, &ctx, "decision_cancel");
+        assert_eq!(dialog.test_session().draft(), original);
+        reveal_control(&mut dialog, &ctx, "menu_help");
+        click_action(&mut dialog, &ctx, "menu_help");
+        reveal_control(&mut dialog, &ctx, "help_open_linear");
+        click_action(&mut dialog, &ctx, "help_open_linear");
+        dialog.template_preset = Some(crate::diagram::MermaidTheme::Forest);
+        click_action(&mut dialog, &ctx, "decision_discard");
+        assert!(dialog.test_session().draft().contains("\"theme\":\"dark\""));
+        assert_eq!(dialog.test_session().revision(), 1);
     }
 
     #[test]
@@ -20850,6 +21325,7 @@ mod tests {
                 label: "pending edit".into(),
                 shape: NodeShape::Rectangle,
                 group: None,
+                fill: String::new(), stroke: String::new(), text_color: String::new(),
             },
         });
         dialog.camera = Camera {
@@ -20877,9 +21353,7 @@ mod tests {
         click_action(&mut dialog, &ctx, "template_linear");
         assert_eq!(
             dialog.documents.pending_transition(),
-            Some(&PendingDiagramTransition::ApplyTemplate(
-                DiagramTemplate::Linear
-            ))
+            Some(&PendingDiagramTransition::ApplyTemplate { template: DiagramTemplate::Linear, style: None })
         );
         click_action(&mut dialog, &ctx, "decision_discard");
 

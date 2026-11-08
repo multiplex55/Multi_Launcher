@@ -134,11 +134,21 @@ impl DiagramTemplate {
         }
     }
 
-    /// Build the source session without pretending generic source is a native
-    /// editable graph or synchronously invoking the generic renderer.
+    /// Build a fresh template with its captured source color envelope.
+    pub fn create_styled_session(self, style: &super::style::MermaidStyle) -> Result<DiagramSession, DiagramTemplateError> {
+        self.create_session_with_style(Some(style))
+    }
+
     pub fn create_session(self) -> Result<DiagramSession, DiagramTemplateError> {
-        let session = DiagramSession::from_fresh_source(self.source())
-            .map_err(DiagramTemplateError::Session)?;
+        self.create_session_with_style(None)
+    }
+
+    pub fn create_session_with_style(self, style: Option<&super::style::MermaidStyle>) -> Result<DiagramSession, DiagramTemplateError> {
+        let source = match style {
+            Some(style) => super::style::edit_mermaid_style(self.source(), style).map_err(|_| DiagramTemplateError::InvalidDefinition(self))?,
+            None => self.source().to_owned(),
+        };
+        let session = DiagramSession::from_fresh_source(source).map_err(DiagramTemplateError::Session)?;
         let valid_for_capability = match self.capability() {
             DiagramTemplateCapability::NativeGraph => {
                 session.status().preview == PreviewState::Current
@@ -356,7 +366,9 @@ mod tests {
                 assert!(styled.svg.contains("stroke=\"#345678\""));
             }
             let dark_source = format!("%%{{init: {{\"theme\":\"dark\"}}}}%%\n{}", template.source());
-            let dark = render_mermaid_preview(&dark_source, raster_size).unwrap();
+            let session = template.create_styled_session(&crate::diagram::MermaidStyle { theme: Some(crate::diagram::MermaidTheme::Dark), ..Default::default() }).unwrap();
+            assert_eq!(session.draft(), dark_source);
+            let dark = render_mermaid_preview(session.draft(), raster_size).unwrap();
             let preset_fill = match template {
                 DiagramTemplate::EntityRelationship => "#302f3d",
                 DiagramTemplate::Pie => "#0b0000",

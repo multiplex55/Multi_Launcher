@@ -170,3 +170,48 @@ impl MermaidNodeStyle {
         base
     }
 }
+
+/// Replace only the recognized leading color envelope, preserving the body byte-for-byte.
+pub fn edit_mermaid_style(source: &str, style: &MermaidStyle) -> Result<String, String> {
+    if !style.is_valid() { return Err("palette exceeds eight colors".into()); }
+    let (_, range) = extract_style(source).map_err(|(_, message)| message)?;
+    let (prefix, body) = match range { Some(range) => (&source[..range.start], &source[range.end..]), None => ("", source) };
+    if body.lines().any(|line| {
+        let line = line.trim_start().trim_start_matches('\u{feff}').trim_start();
+        line.starts_with("%%{") || line.trim() == "---"
+    }) {
+        return Err("unsupported directive or frontmatter must be resolved before changing colors".into());
+    }
+    let mut result = String::new();
+    result.push_str(prefix);
+    if !style.is_empty() {
+        let json = serde_json::to_string(style).map_err(|error| format!("cannot format colors: {error}"))?;
+        result.push_str("%%{init: "); result.push_str(&json); result.push_str("}%%\n");
+    }
+    result.push_str(body);
+    super::mermaid::preflight_source(&result).map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+/// Read a recognized leading color envelope without modifying the draft.
+pub fn mermaid_source_style(source: &str) -> Result<MermaidStyle, String> {
+    extract_style(source).map(|(style, _)| style).map_err(|(_, error)| error)
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+    #[test]
+    fn style_edit_preserves_body_and_refuses_unknown_configuration() {
+        let source = "\r\n%%{init: {\"theme\":\"dark\"}}%%\r\nflowchart TD\r\nA[\"東京\"]\r\n";
+        let removed = edit_mermaid_style(source, &MermaidStyle::default()).unwrap();
+        assert_eq!(removed, "\r\nflowchart TD\r\nA[\"東京\"]\r\n");
+        let invalid = "%%{init: {\"securityLevel\":\"loose\"}}%%\nflowchart TD\nA\n";
+        assert!(edit_mermaid_style(invalid, &MermaidStyle::default()).is_err());
+        assert!(edit_mermaid_style(&format!("\u{feff}{invalid}"), &MermaidStyle::default()).is_err());
+        assert!(edit_mermaid_style("flowchart TD\n%%{unknown}%%\n", &MermaidStyle::default()).is_err());
+        let broken_body = "flowchart TD\nA -->\n";
+        let styled = edit_mermaid_style(broken_body, &MermaidStyle { theme: Some(MermaidTheme::Dark), ..Default::default() }).unwrap();
+        assert!(styled.ends_with(broken_body));
+    }
+}

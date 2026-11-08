@@ -28,7 +28,7 @@ not a claim of complete Mermaid compatibility.
 | GitGraph | Basic commits, simple branch/checkout/switch commands, and merges with simple branch identifiers; commit and branch accounting must match parsed data. |
 
 Common source bounds remain 65,536 bytes, 4,096 physical lines, and 8,192
-bytes per line. Directives and frontmatter are not part of the admitted forms.
+bytes per line. Only the bounded color init directive described below is admitted; frontmatter and other directives are not.
 Other syntax may be rejected even when Mermaid itself accepts it. Do not infer
 native graph editing, layout preservation, or full Mermaid parity from a
 successful rendered preview. Native flowchart editing continues to use only
@@ -94,7 +94,7 @@ as Visual…** is a separate operation and requires a current native flowchart
 without groups. It creates a new Visual Canvas `.mld` and leaves the Mermaid
 document and its exact source intact.
 
-The parser rejects unsupported constructs rather than ignoring them. Examples include comments and directives beginning with `%%`, styling/class/click statements, callbacks, nested groups, chains, semicolon-separated statements, other diagram kinds, unquoted shape labels, and unrecognized arrow forms. The source owner keeps the original draft intact and blocks graph-to-source mutations while the current text is invalid or unsupported.
+The parser rejects unsupported constructs rather than ignoring them. Examples include comments and directives other than the bounded leading color init, styling beyond the node color subset, class/click statements, callbacks, nested groups, chains, semicolon-separated statements, other diagram kinds, unquoted shape labels, and unrecognized arrow forms. The source owner keeps the original draft intact and blocks graph-to-source mutations while the current text is invalid or unsupported.
 
 Diagnostics carry a byte range into the original source plus one-based line and Unicode-scalar column. CRLF input is accepted; formatting normalizes it. Ranges always start and end at UTF-8 character boundaries.
 
@@ -129,3 +129,18 @@ The pure import boundary accepts an explicitly selected regular `.mmd` file, rea
 Saved-content comparison includes the exact draft and last-good source/graph, including node positions and native IDs, but excludes revision, undo/redo, and allocator bookkeeping. Returning to the saved content through undo becomes clean. A save acknowledgement applies to the exact captured snapshot; edits made while a save is in flight remain dirty when the older snapshot is acknowledged.
 
 Scene construction and its renderer-independent geometry contract are documented in [Diagram scene geometry](DIAGRAM_SCENE_GEOMETRY.md).
+
+## Bounded color configuration
+
+One leading Mermaid JSON init directive may specify `theme` (`default`, `dark`, `forest`, or `neutral`) and a color-only `themeVariables` object. For example:
+
+```mermaid
+%%{init: {"theme":"dark","themeVariables":{"primaryColor":"#234567","primaryTextColor":"#ffffff"}}}%%
+flowchart TD
+A["Start"] --> B["Finish"]
+style A fill:#123456,stroke:#abcdef,color:#ffffff
+```
+
+Colors use `#RGB` or `#RRGGBB`. Native node `style` accepts only `fill`, `stroke`, and `color` for an existing node; duplicate declarations and properties are rejected. Common keys are `primaryColor`, `primaryBorderColor`, `primaryTextColor`, `lineColor`, `background`, `secondaryColor`, and `tertiaryColor`.
+
+The following bounded palette keys are renderer-specific extensions, not a claim of Mermaid.js compatibility: `mindmapRootFill`, `mindmapRootText`, `mindmapEdgeColor`, `mindmapSectionColors`, `mindmapSectionLabelColors`, `mindmapSectionLineColors`, `timelineEventColors`, `pieColors`, `gitColors`, `gitInvColors`, and `gitBranchLabelColors`. Palettes contain one through eight hex colors. A mindmap global edge color overrides its branch edge palette; branch edge colors otherwise override the common line color. Unknown configuration, additional directives, arbitrary CSS, and frontmatter remain unsupported and are never silently removed.
