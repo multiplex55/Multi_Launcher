@@ -2095,17 +2095,8 @@ impl LauncherApp {
             .chain(self.diagram_studio_dialog.owner_layer_if_root())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
-        (Self::TRACKED_PANELS
-            .into_iter()
-            .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
-            || self.dashboard_editor.host_layer_if_root().is_some()
-            || self.diff_dialog.host_layer_if_root().is_some()
-            || self.calculation_pad_dialog.examples_layer_if_root().is_some()
-            || self.show_plugins
-            || !note_panel_layers.is_empty()
-            || !self.image_panels.is_empty()
-            || self.any_panel_open())
-        .then_some(super::QueryFocusOrdinaryContext {
+        // Bare ROOT keeps the same empty context when a Jump hint is cancelled.
+        Some(super::QueryFocusOrdinaryContext {
             note_panel_layers,
             ordinary_panel_layers,
         })
@@ -60104,44 +60095,53 @@ mod tests {
     fn studio_usability_query_focus_click_retires_active_jump_hint() {
         let screen = egui::vec2(1600.0, 1200.0);
         let query_id = egui::Id::new("query_input");
-        let ctx = egui::Context::default();
-        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root query");
-        app.set_jump_mode_enabled(true);
-        app.focus_panel(crate::gui::Panel::MarkdownStudioDialog);
-        app.markdown_studio_dialog.test_pop_out();
-        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
-        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, true);
-        let rect = ctx.read_response(query_id).unwrap().rect;
-        notes_query_mouse_click(&mut app, &ctx, screen, rect);
-        notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
-        notes_query_hint_start_leader(&mut app, &ctx, screen);
-        assert!(app.jump_mode_ui.active_session().is_some());
-        let rect = ctx.read_response(query_id).unwrap().rect;
-        let pos = rect.center();
-        let (output, passes) = app.run_root_frame_for_test(&ctx, egui::RawInput {
-            events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
-                pos, button: egui::PointerButton::Primary, pressed: true,
-                modifiers: egui::Modifiers::default(),
-            }],
-            ..launcher_show_owner_input(true, screen)
-        }, true);
-        output.drop_without_applying_deltas();
-        assert!(passes > 1);
-        assert!(app.jump_mode_ui.active_session().is_some(), "discarded press cannot retire the hint");
-        let outside = egui::pos2(screen.x - 1.0, screen.y - 1.0);
-        notes_query_mouse_run_frame(&mut app, &ctx, screen, vec![
-            egui::Event::PointerMoved(outside), egui::Event::PointerButton {
-                pos: outside, button: egui::PointerButton::Primary, pressed: false,
-                modifiers: egui::Modifiers::default(),
-            },
-        ]);
-        assert!(app.jump_mode_ui.active_session().is_some());
-        notes_query_mouse_click(&mut app, &ctx, screen, rect);
-        assert!(app.jump_mode_ui.active_session().is_none());
-        notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
-        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
-        assert!(app.query.contains('λ'));
-        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        for detached_markdown in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root query");
+            app.set_jump_mode_enabled(true);
+            if detached_markdown {
+                app.focus_panel(crate::gui::Panel::MarkdownStudioDialog);
+                app.markdown_studio_dialog.test_pop_out();
+            } else {
+                assert!(!app.any_panel_open(), "bare ROOT must have no tools open");
+            }
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+            notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, true);
+            let rect = ctx.read_response(query_id).unwrap().rect;
+            notes_query_mouse_click(&mut app, &ctx, screen, rect);
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+            notes_query_hint_start_leader(&mut app, &ctx, screen);
+            assert!(app.jump_mode_ui.active_session().is_some());
+            let rect = ctx.read_response(query_id).unwrap().rect;
+            let pos = rect.center();
+            let (output, passes) = app.run_root_frame_for_test(&ctx, egui::RawInput {
+                events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                ..launcher_show_owner_input(true, screen)
+            }, true);
+            output.drop_without_applying_deltas();
+            assert!(passes > 1);
+            assert!(app.jump_mode_ui.active_session().is_some(), "discarded press cannot retire the hint");
+            let outside = egui::pos2(screen.x - 1.0, screen.y - 1.0);
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, vec![
+                egui::Event::PointerMoved(outside), egui::Event::PointerButton {
+                    pos: outside, button: egui::PointerButton::Primary, pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]);
+            assert!(app.jump_mode_ui.active_session().is_some());
+            notes_query_mouse_click(&mut app, &ctx, screen, rect);
+            assert!(app.jump_mode_ui.active_session().is_none());
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+            notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+            assert!(app.query.contains('λ'));
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            notes_query_mouse_run_frame(&mut app, &ctx, screen, Vec::new());
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(app.query.contains('λ'));
+        }
     }
 
     #[test]
