@@ -1206,6 +1206,45 @@ impl HotFolderExecutionEngine {
         )))
     }
 
+    fn admission_time(&self) -> Result<Option<Instant>, HotFolderExecutionError> {
+        if self.control.admission_blocked() {
+            return Ok(None);
+        }
+        let now = self.clock.now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HotFolderExecutionError::InvalidJournal)?;
+        if state
+            .global_throttled_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            state.global_throttled_until = None;
+        }
+        Ok((!state.shutdown
+            && !state.paused
+            && state.active.is_none()
+            && !state
+                .global_throttled_until
+                .is_some_and(|deadline| deadline > now))
+            .then_some(now))
+    }
+
+    /// Skip context construction unless there is plausibly work to run. The
+    /// callback still invokes `run_next_ready`, which repeats admission and
+    /// acquires and validates the actual lease after the context is built.
+    pub(crate) fn run_if_ready_hint(
+        &self,
+        watcher: &HotFolderWatchService,
+        run: impl FnOnce() -> Result<Option<HotFolderRunDisposition>, HotFolderExecutionError>,
+    ) -> Result<Option<HotFolderRunDisposition>, HotFolderExecutionError> {
+        if self.admission_time()?.is_some() && watcher.has_unleased_ready_candidate() {
+            run()
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Claim at most one settled B candidate, revalidate the current selected
     /// rule and native source version, persist an intent, then execute one
     /// built-in action. Duplicates and causal outputs are consumed or deferred
@@ -1216,31 +1255,9 @@ impl HotFolderExecutionEngine {
         store: &HotFolderRulesStore,
         context: &HotFolderCapabilityContext<'_>,
     ) -> Result<Option<HotFolderRunDisposition>, HotFolderExecutionError> {
-        if self.control.admission_blocked() {
+        let Some(now) = self.admission_time()? else {
             return Ok(None);
-        }
-        let now = self.clock.now();
-        {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| HotFolderExecutionError::InvalidJournal)?;
-            if state
-                .global_throttled_until
-                .is_some_and(|deadline| deadline <= now)
-            {
-                state.global_throttled_until = None;
-            }
-            if state.shutdown || state.paused || state.active.is_some() {
-                return Ok(None);
-            }
-            if state
-                .global_throttled_until
-                .is_some_and(|deadline| deadline > now)
-            {
-                return Ok(None);
-            }
-        }
+        };
         let Some(lease) = watcher.try_lease_ready() else {
             return Ok(None);
         };
@@ -3102,6 +3119,72 @@ mod tests {
         engine
             .run_next_ready(&watcher, store, context)
             .expect("run candidate")
+    }
+
+    #[test]
+    fn idle_or_blocked_admission_does_not_construct_execution_capabilities() {
+        let fixture = metadata_fixture(false);
+        let engine = HotFolderExecutionEngine::new(&fixture.store).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let macros = crate::mkmacro::MkMacroDocument::default();
+        let availability = HashMap::new();
+        let context = HotFolderCapabilityContext::new(
+            &[],
+            ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+            &macros,
+            &availability,
+        );
+        let run = |watcher: &HotFolderWatchService| {
+            engine.run_if_ready_hint(watcher, || {
+                calls.set(calls.get() + 1);
+                engine.run_next_ready(watcher, &fixture.store, &context)
+            })
+        };
+
+        let idle = HotFolderWatchService::new();
+        for _ in 0..3 {
+            assert!(run(&idle).unwrap().is_none());
+        }
+        let ready = HotFolderWatchService::with_test_ready_candidate(fixture.candidate.clone());
+        engine.pause();
+        engine.control().allow_admission();
+        assert!(run(&ready).unwrap().is_none());
+        engine.resume();
+        engine.control().block_admission();
+        assert!(run(&ready).unwrap().is_none());
+        engine.control().allow_admission();
+        engine.state.lock().unwrap().global_throttled_until =
+            Some(Instant::now() + Duration::from_secs(60));
+        assert!(run(&ready).unwrap().is_none());
+        assert_eq!(calls.get(), 0, "idle and blocked ticks never construct capability inputs");
+        assert_eq!(
+            ready.snapshot().ready_candidates, 1,
+            "the hint must not consume ready work"
+        );
+
+        engine.state.lock().unwrap().global_throttled_until = None;
+        assert!(
+            engine.run_if_ready_hint(&ready, || {
+                engine.control().block_admission();
+                engine.run_next_ready(&ready, &fixture.store, &context)
+            }).unwrap().is_none()
+        );
+        assert_eq!(
+            ready.snapshot().ready_candidates, 1,
+            "fresh admission rejects a stale hint"
+        );
+        engine.control().allow_admission();
+        assert!(matches!(
+            run(&ready).unwrap(),
+            Some(HotFolderRunDisposition::StaleCandidate)
+        ));
+        assert_eq!(calls.get(), 1, "one admitted candidate evaluates fresh capability once");
+        assert_eq!(ready.snapshot().ready_candidates, 0);
+        engine.shutdown();
+        let after_shutdown =
+            HotFolderWatchService::with_test_ready_candidate(fixture.candidate.clone());
+        assert!(run(&after_shutdown).unwrap().is_none());
+        assert_eq!(calls.get(), 1);
     }
 
     struct MetadataFixture {

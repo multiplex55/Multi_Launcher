@@ -480,6 +480,13 @@ impl HotFolderWatchService {
             .map_err(|_| HotFolderRuntimeError::WorkerStopped)
     }
 
+    /// A cheap hint only; the executor must still acquire and validate a lease.
+    pub(crate) fn has_unleased_ready_candidate(&self) -> bool {
+        self.output
+            .lock()
+            .is_ok_and(|output| output.leased.is_none() && !output.ready.is_empty())
+    }
+
     pub fn try_lease_ready(&self) -> Option<HotFolderReadyLease> {
         let lease = {
             let mut output = self.output.lock().ok()?;

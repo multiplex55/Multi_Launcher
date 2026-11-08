@@ -874,9 +874,11 @@ fn driver_main(
             && !paused
             && let (Some(watcher), Some(engine)) = (watcher.as_ref(), engine.as_ref())
         {
-            let rules = store.snapshot();
-            let result = inputs.with_context(&rules, adapter.as_ref(), |context| {
-                engine.run_next_ready(watcher, &store, &context)
+            let result = engine.run_if_ready_hint(watcher, || {
+                let rules = store.snapshot();
+                inputs.with_context(&rules, adapter.as_ref(), |context| {
+                    engine.run_next_ready(watcher, &store, &context)
+                })
             });
             if let Err(error) = result {
                 last_error = Some(format!("Hot Folder execution failed: {error:?}"));

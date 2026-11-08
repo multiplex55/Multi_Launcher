@@ -20,11 +20,11 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | Checkpoint | Task and deliverable | State |
 | --- | --- | --- |
 | M0-A | Exact-parent child, own baseline, initial push | complete |
-| M1-A | A: root query and intentional focus transfer | complete (native pending C smoke) |
-| M2-A | B: root-results-local fade override | complete (native pending C smoke) |
-| M3-A | C: release profile and bounded feature audit | complete (release pending M3-B) |
-| M3-B | C: idle capability work and ordinary release build | pending |
-| M3-R | Independent A-C review/report/GitHub publication | pending |
+| M1-A | A: root query and intentional focus transfer | implemented/tested; native limited |
+| M2-A | B: root-results-local fade override | implemented/tested; native limited |
+| M3-A | C: release profile and bounded feature audit | complete |
+| M3-B | C: idle capability work and ordinary release build | complete |
+| M3-R | Independent A-C review/report/GitHub publication | in_progress |
 | M4-A | D: recovery persistence before scratch close | pending |
 | M5-A | E: accepted viewer-only preview dragging | pending |
 | M6-A | F: top-level pending decision controls | pending |
@@ -58,7 +58,7 @@ Root presentation now comes from actual host layers for Notes/Markdown/Pad/Diagr
 
 New actual-frame coverage spans five detached hosts, Jump on/off, multiple detached Notes/Markdown, Unicode and persistent focus/drafts; active hint transfer rejects a discarded press. Embedded Diagram ownership assertion and explicit stateful-host policy classification retained. Investigation resolved Pad's synthetic first-click failure as prior docked-layer fixture state: the test establishes an actual retained interactive rectangle before sending the real click; production received no delay/workaround. Temporary diagnostics removed. Parent inspected full source/test diff; git diff --check passed.
 
-Verification: RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E with exact selector below. 15/15 passed, 7,673 skipped, 9.363s execution, run 6d2c6a33-45bf-4a96-8ffa-30f237ad2bc2. Existing owned-process wrapper: 100s execution deadline excluding separately completed compilation; 11.467s actual, exit0, cleanup and output drain verified. Receipts target/launcher-utility-fixes/evidence/m1a-focused/{result.json,stderr.log}. Native verification pending consolidated release smoke after C; these are egui/state tests, not Windows UI proof.
+Verification: RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E with exact selector below. 15/15 passed, 7,673 skipped, 9.363s execution, run 6d2c6a33-45bf-4a96-8ffa-30f237ad2bc2. Existing owned-process wrapper: 100s execution deadline excluding separately completed compilation; 11.467s actual, exit 0, cleanup and output drain verified. Receipts target/launcher-utility-fixes/evidence/m1a-focused/{result.json,stderr.log}. Native verification pending consolidated release smoke after C; these are egui/state tests, not Windows UI proof.
 
 ```text
 test(studio_usability_query_focus_) | test(studio_usability_diagram_viewer_embedded_fallback_keeps_root_host_identity) | test(notes_query_mouse_) | test(notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft) | test(jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass) | test(notes_query_activation_mouse_workflow_runs_current_result_beside_notes) | test(notes_query_activation_autocomplete_tab_keeps_focus_through_discarded_pass) | test(launcher_show_focus_waits_for_root_focus_and_never_refocuses_an_already_visible_query) | test(launcher_show_focus_cancels_on_click_tab_and_protected_owner_takeover) | test(launcher_show_focus_rejects_replaced_root_generation)
@@ -70,7 +70,7 @@ M1-A commit 6ec61e5b1d765022ee06381cd419d6acd15455b8; ordinary git push succeede
 
 The existing root-results UI saves its fade strength, sets scroll.fade.strength=0 immediately before the shared list/grid ScrollArea, and restores it immediately afterward. No new child UI/widget identity, global/vendor styling, selection-scroll timing or geometry changes. Parent inspected exact scoped diff; git diff --check passed.
 
-RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E 'test(root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection) | test(root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets)': 2/2 passed, 7,686 skipped, 2.962s execution, run 12b46689-66d7-4b5d-a08c-17e96e77db1d. Separate compilation 1m20s; existing100s owned runner exit0 in4.986s, cleanup/output drain verified. Receipts target/launcher-utility-fixes/evidence/m2a-root-results/{result.json,stderr.log}. Native visual check pending C release smoke; no evidence supports an extra selection-scroll change.
+RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E 'test(root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection) | test(root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets)': 2/2 passed, 7,686 skipped, 2.962s execution, run 12b46689-66d7-4b5d-a08c-17e96e77db1d. Separate compilation 1m20s; existing 100s owned runner exit 0 in 4.986s, cleanup/output drain verified. Receipts target/launcher-utility-fixes/evidence/m2a-root-results/{result.json,stderr.log}. Native visual check pending C release smoke; no evidence supports an extra selection-scroll change.
 
 M2-A commit b5df0946752e10d597bc76f01d84df8fa83d754a; normal push succeeded, clean checkpoint tree. M3-A planning active.
 
@@ -80,4 +80,27 @@ Cargo.toml directly defines release opt-level=3, lto=thin, codegen-units=16, str
 
 Bounded feature audit: cargo tree -e features -i eframe; cargo tree -e features -i image@0.24.9; cargo tree -e features -i image@0.25.6 all succeeded. No safe removal identified. Glow explicitly selected in main.rs4515; image024 serves screenshot/crop/diagram PNG/JPEG (screenshots also enables defaults), image025 serves egui_commonmark/extras and notes_markdown/html.rs541 decoder dispatch. Keep intentional decoder sets, accessibility/fonts/platform/link/web support; production catch_unwind in main.rs7191 and diagram/rendering.rs1488 requires unwind. No feature/version migration.
 
-cargo metadata --no-deps --format-version1 parsed manifest; profile-only TOML comparison against HEAD confirmed effective iteration settings preserved; git diff --check passed. Initial image@0.25.10 audit query corrected to actual0.25.6. Python3.11 tomllib rejects existing Cargo-supported multiline inline tables, so comparison parsed profile sections only, with Cargo metadata validating the manifest. No behavior tests needed for unchanged dependencies. Ordinary release build pending M3-B.
+cargo metadata --no-deps --format-version 1 parsed manifest; profile-only TOML comparison against HEAD confirmed effective iteration settings preserved; git diff --check passed. Initial image@0.25.10 audit query corrected to actual0.25.6. Python3.11 tomllib rejects existing Cargo-supported multiline inline tables, so comparison parsed profile sections only, with Cargo metadata validating the manifest. No behavior tests needed for unchanged dependencies. Ordinary release build pending M3-B.
+
+M3-A commit 2224684e0cbadb5d33e1ab4624e7606eee150e01; normal push succeeded. M3-B planning active.
+
+## M3-B result
+
+Driver skips rules snapshot/capability allocation/path probes unless a shared engine admission-time predicate and lock-only watcher unleased-ready hint permit a possible attempt. The original executor repeats fresh admission and lease/rule/fingerprint/native-evidence validation. Probes stay outside the existing 30s lease; original captured admission Instant remains the rate/causal-output timestamp. 80ms cadence, atomic shutdown/timeout wake, pause/disable/cancel and snapshot publication unchanged. Expected benefit is fewer idle probes/allocations; no measured CPU claim. Parent inspected all three source files and diff; git diff --check passed.
+
+RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E with selector below: 4/4 passed, 7,685 skipped, 6.359s execution, run48347404-bd13-4c2f-8d48-0e362ac74fc3. Existing 100s owned runner exit0 in8.548s, cleanup/output drain verified; target/launcher-utility-fixes/evidence/m3b-hotfolder/result.json. Initial extraction compilation found missing now uses (E0425); shared helper now returns the original Instant, preserving semantics; corrected compilation passed.
+
+```text
+test(idle_or_blocked_admission_does_not_construct_execution_capabilities) | test(m10e_driver_reuses_service_and_restores_enabled_intent_without_backfill) | test(m10f_disabled_rule_requires_strong_enable_and_moves_only_new_settled_files_across_lifecycle) | test(m10c_fake_ready_execution_dedupes_partial_outputs_and_caps_runs)
+```
+
+Single ordinary cargo build --release succeeded exit0 in13m10s on this Windows host. Log target/launcher-utility-fixes/evidence/m3b-release-build.log. Executable target/release/multi_launcher.exe, SHA256 64D2D0DD61E7BBA50D2EDAD7DA73D29FB0B0044F8E1F442E6A461EC434275AEC. Six first-party library warnings are in unchanged Note Panel/Table Utility code; vendor warnings remain outside scope. No second release build.
+
+## A-C native smoke evidence and limitations
+
+- Existing owned-process runner launched the exact release executable with isolated working directory/settings/actions and ML_NOTES_DIR pointing at disposable notes. Production profiles/user notes were not edited. Paste Sequence next/cancel shortcuts were disabled before application construction.
+- Initial sandbox process had a responding native main-window handle but was absent from helper inventory. Exact task-owned PID/path/start-time matched before retirement; runner exit-1 after129.838s, cleanup/output drain verified. A bounded authorized interactive launch then exposed the intended window successfully.
+- Interactive release smoke: native keyboard navigation focused the real query; literal text entry, note search, selection and Return opened Quick Notes containing the disposable fixture. Accessibility tree saved at target/launcher-utility-fixes/evidence/native-abc-interactive/accessibility-notes.txt. Alt+F4 exited the app normally, runner exit0 after525.913s, cleanup/output drain verified; subsequent process and helper inventories contain no task launcher.
+- Screenshot capture failed twice with window capture timed out: timed out waiting on channel, including one refreshed/re-activated target retry. An indexed query click failed coordinate input geometry is unavailable. No further screenshot backend recreation, alternate helper, guessed coordinate or privacy/security change was attempted. Accessibility reads and keyboard input worked; Notes accessibility set_value produced no observed edit and is not counted as success.
+- Therefore A's real query-click round trip with multiple detached editors, and B's temporal fade/flicker/wheel/context-menu visual checks, remain native-unverified. Actual-frame focused tests passed; they do not replace this native evidence. A supported capture/input-geometry session is the smallest remaining verification requirement. These limitations do not stop D-H.
+- Disposable note SHA256 remained C15A673AB6067A9371EDEC3C6DA20D343A1763CA97E859B9AF7D36726D896A04. No user process was killed and no source fixture was lost. Native session receipts are native-abc/result.json and native-abc-interactive/result.json under the task evidence directory.
