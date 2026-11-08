@@ -28,7 +28,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M4-A | D: recovery persistence before scratch close | implemented/tested; native pending |
 | M5-A | E: accepted viewer-only preview dragging | implemented/tested; native limited |
 | M6-A | F: top-level pending decision controls | implemented/tested; native limited |
-| M7-A | G: bounded details, typed cached sort/filter, reveal | pending |
+| M7-A | G: bounded details, typed cached sort/filter, reveal | implemented/tested; native limited |
 | M7-B | G: bounded directory/path capacity | pending |
 | M8-A | H: actual Shell baseline observation correction | pending |
 | M9-A | Final independent review, scoped Clippy, exact-tip handoff | pending |
@@ -176,3 +176,19 @@ test(diagram_studio_pending_decision_stays_above_scrolled_body) | test(diagram_s
 ```
 
 Native visual acceptance remains unverified because capture/coordinate geometry is unavailable. Feasible later keyboard smoke will be consolidated after remaining UI changes rather than repeatedly rebuilding/launching. No release rebuild or additional capture retry.
+
+M6-A commit a6d4c553f8be79021ce5e6a9697ae372914e96fe; ordinary push succeeded, checkpoint tree clean. M7-A/G usability planning active; capacity remains the separate M7-B checkpoint.
+
+## M7-A / G usability result
+
+Status/subtotal/counts and errors remain visible; default-collapsed Scan details contains finite-height independent scrolling and all domain-bounded issue examples (64 rather than silent UI truncation to8). Typed Name/Type/Size/Share/Status sorting supports both directions with active arrows, deterministic name/index ties and unknown measurements last; zero-denominator shares tie deterministically. All/Files/Folders preserves omitted kinds in All and never changes scan totals. Current-directory original indices are cached by projection publication/directory/sort/filter, with virtualization and stable generation/index row identity. Hidden selection clears; Up and no-match state remain available. Obsolete test-only sorter/visibility helpers were removed and tests now exercise the real path.
+
+Right-click selects its exact original row; a typed Reveal request carries generation/publication/index/directory and originating retained host/epoch through RootDialogEffect. Final dispatch re-resolves it against current open/session/projection/root/visibility/selection before try_exists and native calls, preserving access errors and reporting missing/pathless targets. Root paths use typed OpenRoot routing; normal entries use shared reveal_path, separate from existing Open. Menu eligibility is scoped to actual popup ID, host/epoch, generation, directory and visible row across publications, while final actions retain exact-publication checks. Discarded openings are cleaned up and discarded Reveal cannot suppress a later fresh action. Foreign popup/modal/foreground guards remain. Origin-host stamping prevents a host-changing batch from borrowing new authority. README Folder Size instructions updated; no scanner limits changed here.
+
+RUST_MIN_STACK=16777216; standard fast-dev lib Nextest prefix with selector below passed6/6, execution0.987s, run51f96722-f903-4c39-9287-05aa53fc177c. Existing100s owned runner exit0 after3.128s, cleanup/output drain verified. Initial5/6 exposed the real own-popup host lock; corrected at the ownership boundary. An accidental removal of shared row measurement during obsolete-helper deletion caused E0425 compile feedback and was restored before passing checks. Final originating-host assertion reran the exact actual-row case1/1, execution0.872s, run529240fe-dac9-4571-af1f-b7eea91b7a73; runner exit0 after3.179s with cleanup/output drain verified. Separate compilation passed. Evidence m7a-folder-size-final/ and m7a-origin-host/ under task evidence. Parent inspected source, popup lifetime, dispatch and README diffs; git diff --check and stale-reference search passed.
+
+```text
+test(folder_size_dialog_projection_sorts_drills_and_rejects_stale_generation_selection) | test(folder_size_dialog_sorted_filtered_context_reveal_keeps_original_row) | test(folder_size_dialog_reveal_root_route_is_explicit) | test(folder_size_dialog_close_wins_same_pass_arbitration) | test(folder_size_retained_close_suppresses_same_frame_prefill_focus) | test(folder_size_native_owner_rejects_discarded_choose_scan_copy_and_close)
+```
+
+Coverage includes all comparator directions/unknowns/filter totals, cache reuse/invalidation, bounded long-issue disclosure, actual sort/filter then selecting a different right-click row, discarded/fresh Reveal, aged-publication menu ownership, host transition rejection/fresh request, missing/hidden/refresh/close rejection and root routing. Native Explorer selection was not observed and is not claimed from dispatch. A tiny disposable final-smoke tree was prepared under target/launcher-utility-fixes/native-fixtures/folder-size; no user drive scan. No release rebuild or capture retry.

@@ -929,12 +929,18 @@ Type `foldersize` and choose **Open Folder Size**. Choose a local folder, then
 press **Scan**. Opening the tool or choosing a folder does not start a scan.
 You can also right-click a directory result in File Search and choose
 **Analyze folder size…** to fill in that folder. The result list shows the
-largest measured entries in the current directory first, including during a
-scan.
-Double-click a directory row to drill down, or use **Copy Path** and **Reveal/Open**
-to work with the displayed path. Use **Refresh** to scan again or **Cancel** to
-keep the last verified subtotal while the worker settles. ActivityCenter shows
+largest measured entries in the current directory first by default, including
+during a scan. Click a column header to sort, then click it again to reverse the
+direction. **Type** identifies files, folders and skipped entries; **All**,
+**Files** and **Folders** filter the visible rows without changing scan totals.
+Double-click a directory row to drill down. Use **Copy Path** or **Open** for a
+selected path, or right-click a row and choose **Reveal in File Explorer** to
+select that exact entry in its parent folder. Use **Refresh** to scan again or
+**Cancel** to keep the last verified subtotal while the worker settles. ActivityCenter shows
 scans that have started and can cancel the current scan.
+
+The status, subtotal and issue count stay visible. Expand **Scan details** for
+verbose counters and bounded, independently scrolling issue details.
 
 The tool sums logical file bytes per directory entry. Each hard-link name
 contributes its file length; the subtotal does not measure allocated disk space.

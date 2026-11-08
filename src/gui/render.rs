@@ -41,6 +41,7 @@ enum RootDialogEffect {
     },
     OpenPath(std::path::PathBuf),
     RevealFileLockExecutable(super::FileLockRevealRequest),
+    RevealFolderSize(super::folder_size_dialog::FolderSizeRevealRequest),
     SaveConverterPreferences,
     PrepareCalendar {
         instant_utc: chrono::DateTime<chrono::Utc>,
@@ -7316,6 +7317,7 @@ impl LauncherApp {
                     || (top.is_none() && self.folder_size_dialog.awaiting_root_focus()))
                     && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
                         focus == layer || focus.order == egui::Order::Background
+                            || self.folder_size_dialog.owns_row_menu_layer(ctx, focus)
                     })
             });
         self.folder_size_dialog.show_hosted(
@@ -12910,6 +12912,7 @@ impl LauncherApp {
                 super::FolderSizeDialogEffect::OpenPath(path) => {
                     effects.push(RootDialogEffect::OpenPath(path));
                 }
+                super::FolderSizeDialogEffect::Reveal(request) => effects.push(RootDialogEffect::RevealFolderSize(request)),
                 super::FolderSizeDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
                 super::FolderSizeDialogEffect::FocusPanel => {
                     self.focus_panel(super::Panel::FolderSizeDialog);
@@ -13135,6 +13138,23 @@ impl LauncherApp {
                         .and_then(crate::file_search::actions::execute_explorer_action)
                         .map_err(|error| format!("Could not open the selected path: {error:#}"));
                     self.folder_size_dialog.path_action_completed(result);
+                }
+                RootDialogEffect::RevealFolderSize(request) => {
+                    let path = match self.folder_size_dialog.take_reveal_path_for_dispatch(&request) {
+                        Ok(Some(path)) => path,
+                        Ok(None) => continue,
+                        Err(error) => { self.folder_size_dialog.reveal_completed(Err(error)); continue; }
+                    };
+                    let route = super::folder_size_dialog::reveal_route(&path);
+                    #[cfg(test)]
+                    let result = { let _ = (path, route); Ok(()) };
+                    #[cfg(not(test))]
+                    let result = if route == super::folder_size_dialog::FolderSizeRevealRoute::OpenRoot {
+                        crate::file_search::actions::open_path(&path)
+                    } else {
+                        crate::file_search::actions::reveal_path(&path)
+                    }.map_err(|error| format!("{error:#}"));
+                    self.folder_size_dialog.reveal_completed(result);
                 }
                 RootDialogEffect::RevealFileLockExecutable(request) => {
                     let path = match self
@@ -23271,6 +23291,94 @@ mod tests {
         );
         assert!(!app.folder_size_dialog.open);
     }
+    #[test]
+    fn folder_size_dialog_sorted_filtered_context_reveal_keeps_original_row() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let fixture = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(fixture.path().join("alpha.txt"), b"a").unwrap();
+        std::fs::write(fixture.path().join("beta.txt"), b"larger").unwrap();
+        std::fs::create_dir(fixture.path().join("folder")).unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        app.folder_size_dialog.set_folder_choice_for_test(Some(fixture.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let _ = folder_size_host_control(&ctx, &mut app, root, "row/alpha.txt");
+        app.folder_size_dialog.inject_long_issues_for_test();
+        let _ = folder_size_host_control(&ctx, &mut app, root, "details");
+        assert!(app.folder_size_dialog.test_action_rect("details-body").is_none());
+        click_folder_size_host_control(&ctx, &mut app, root, "details");
+        let (details_body, _) = app.folder_size_dialog.test_action_rect("details-body").expect("expanded details");
+        assert!(details_body.height() <= 101.0);
+        let _ = folder_size_host_control(&ctx, &mut app, root, "row/alpha.txt");
+        click_folder_size_host_control(&ctx, &mut app, root, "details");
+        let cache = app.folder_size_dialog.visible_cache_for_test().unwrap();
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        assert!(std::sync::Arc::ptr_eq(&cache, &app.folder_size_dialog.visible_cache_for_test().unwrap()));
+        click_folder_size_host_control(&ctx, &mut app, root, "sort/Name");
+        assert!(!std::sync::Arc::ptr_eq(&cache, &app.folder_size_dialog.visible_cache_for_test().unwrap()));
+        click_folder_size_host_control(&ctx, &mut app, root, "filter/Files");
+        click_folder_size_host_control(&ctx, &mut app, root, "row/alpha.txt");
+        let previously_selected = app.folder_size_dialog.test_navigation_state().1;
+        let beta = folder_size_host_control(&ctx, &mut app, root, "row/beta.txt");
+        for pressed in [true, false] {
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::PointerMoved(beta.center()), egui::Event::PointerButton {
+                pos: beta.center(), button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE,
+            }], false, false);
+        }
+        assert_ne!(app.folder_size_dialog.test_navigation_state().1, previously_selected);
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let reveal = folder_size_host_control(&ctx, &mut app, root, "reveal/beta.txt");
+        run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(reveal, true), false, false);
+        run_host_viewport_frame(&ctx, &mut app, root, tool_dialog_pointer_events(reveal, false), true, false);
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(), "discarded Reveal has no authority");
+        for pressed in [true, false] {
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::PointerMoved(beta.center()), egui::Event::PointerButton {
+                pos: beta.center(), button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE,
+            }], false, false);
+        }
+        app.folder_size_dialog.age_row_menu_publication_for_test();
+        assert!(app.folder_size_dialog.owns_row_menu(&ctx), "same-generation menu survives a newer publication");
+        click_folder_size_host_control(&ctx, &mut app, root, "reveal/beta.txt");
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let [RootDialogEffect::RevealFolderSize(request)] = effects.as_slice() else { panic!("expected typed reveal, got {effects:?}") };
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), Some(fixture.path().join("beta.txt")));
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), None, "a host transition retires the old request");
+        let native = super::super::FolderSizeDialogState::viewport();
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        let beta = folder_size_host_control(&ctx, &mut app, root, "row/beta.txt");
+        for pressed in [true, false] {
+            run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::PointerMoved(beta.center()), egui::Event::PointerButton {
+                pos: beta.center(), button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE,
+            }], false, false);
+        }
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        click_folder_size_host_control(&ctx, &mut app, root, "reveal/beta.txt");
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let [RootDialogEffect::RevealFolderSize(request)] = effects.as_slice() else { panic!("expected fresh typed reveal, got {effects:?}") };
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), Some(fixture.path().join("beta.txt")));
+        std::fs::remove_file(fixture.path().join("beta.txt")).unwrap();
+        assert!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap_err().contains("Missing path"));
+        click_folder_size_host_control(&ctx, &mut app, root, "filter/Folders");
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), None);
+        click_folder_size_host_control(&ctx, &mut app, root, "refresh");
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), None);
+        run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
+        assert!(!app.folder_size_dialog.open);
+        assert_eq!(app.folder_size_dialog.take_reveal_path_for_dispatch(request).unwrap(), None);
+    }
+
     #[test]
     fn folder_size_native_owner_rejects_discarded_choose_scan_copy_and_close() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
