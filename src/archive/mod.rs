@@ -6,6 +6,8 @@
 
 mod catalog;
 pub(crate) mod crc32;
+#[cfg(windows)]
+mod creation;
 mod model;
 #[cfg(windows)]
 mod native;
@@ -30,6 +32,11 @@ pub use plan::{
     SelectionTarget, build_extraction_plan,
 };
 
+#[cfg(windows)]
+pub(crate) use creation::{
+    CreationIssue, CreationIssueKind, CreationMember, CreationMemberId, CreationPhase,
+    CreationProgress, CreationSession, CreationSnapshot, CreationSourceId,
+};
 #[cfg(windows)]
 pub(crate) use session::{
     ArchivePreviewSummary, ArchiveSession, ArchiveSessionFailure, ArchiveSessionPhase,

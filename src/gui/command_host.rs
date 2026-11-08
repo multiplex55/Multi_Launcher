@@ -243,6 +243,16 @@ impl LauncherApp {
 
 impl DialogCommandHost for LauncherApp {
     fn open_zip_extractor_dialog(&mut self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let extraction_active = self.archive_session.has_active_worker();
+            let creation_active = self.zip_creation_session.has_active_worker();
+            if !self.zip_extractor_dialog.open && (extraction_active || creation_active) {
+                return Err("The previous ZIP operation is still retiring. Try again shortly.".into());
+            }
+            self.zip_extractor_dialog
+                .enter_extract_if_idle(extraction_active, creation_active)?;
+        }
         self.focus_panel(super::Panel::ZipExtractorDialog);
         Ok(())
     }
@@ -5641,6 +5651,29 @@ pub(in crate::gui) mod tests {
                     "opening the command panel must not open a path or start archive I/O"
                 );
                 assert!(snapshot.catalog.is_none());
+                app.zip_extractor_dialog.test_set_create_mode();
+                DialogCommandHost::open_zip_extractor_dialog(app).unwrap();
+                assert!(!app.zip_extractor_dialog.test_create_mode());
+                app.zip_extractor_dialog.test_set_create_mode();
+                let temp = tempfile::tempdir().unwrap();
+                let source = temp.path().join("source.txt");
+                std::fs::write(&source, b"source").unwrap();
+                app.zip_creation_session
+                    .add_sources(0, vec![source])
+                    .unwrap();
+                assert!(DialogCommandHost::open_zip_extractor_dialog(app).is_err());
+                assert!(app.zip_extractor_dialog.test_create_mode());
+                assert!(app.zip_creation_session.has_active_worker());
+                app.close_zip_extractor_dialog();
+                app.focus_panel(super::super::Panel::ZipExtractorDialog);
+                assert!(!app.zip_extractor_dialog.open);
+                assert!(
+                    !app.panel_stack.contains(&super::super::Panel::ZipExtractorDialog)
+                );
+                app.zip_creation_session.shutdown();
+                DialogCommandHost::open_zip_extractor_dialog(app).unwrap();
+                assert!(app.zip_extractor_dialog.open);
+                assert!(!app.zip_extractor_dialog.test_create_mode());
             }
         }
         workspace

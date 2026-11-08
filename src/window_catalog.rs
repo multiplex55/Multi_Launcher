@@ -63,6 +63,20 @@ pub struct WindowCatalogSnapshot {
     pub generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowDiscoveryStatus {
+    Never,
+    Loading,
+    Ready,
+    Failed,
+}
+
+pub(crate) struct WindowDiscoverySnapshot {
+    pub windows: Arc<Vec<WindowDescriptor>>,
+    pub generation: u64,
+    pub status: WindowDiscoveryStatus,
+}
+
 pub(crate) trait WindowProvider: Send + 'static {
     fn enumerate(&mut self) -> Vec<WindowDescriptor>;
     fn desktop_memberships(
@@ -297,6 +311,30 @@ impl WindowCatalog {
             .unwrap_or_else(|_| Arc::new(Vec::new()))
     }
 
+    /// Observe discovery without scheduling enumeration, under one state lock.
+    pub(crate) fn discovery_snapshot(&self) -> WindowDiscoverySnapshot {
+        match self.state.lock() {
+            Ok(state) => WindowDiscoverySnapshot {
+                windows: Arc::clone(&state.windows),
+                generation: state.generation,
+                status: if state.terminal {
+                    WindowDiscoveryStatus::Failed
+                } else if state.in_flight {
+                    WindowDiscoveryStatus::Loading
+                } else if state.generation == 0 {
+                    WindowDiscoveryStatus::Never
+                } else {
+                    WindowDiscoveryStatus::Ready
+                },
+            },
+            Err(_) => WindowDiscoverySnapshot {
+                windows: Arc::new(Vec::new()),
+                generation: 0,
+                status: WindowDiscoveryStatus::Failed,
+            },
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.state.lock().map(|state| state.generation).unwrap_or(0)
     }
@@ -304,6 +342,9 @@ impl WindowCatalog {
     /// Explicitly request a fresh publication, used by bounded background discovery.
     pub fn request_refresh(&self) {
         if let Ok(mut state) = self.state.lock() {
+            if state.terminal {
+                return;
+            }
             if state.in_flight {
                 state.refresh_after_flight = true;
                 return;
@@ -776,6 +817,57 @@ mod tests {
     }
 
     #[test]
+    fn discovery_snapshot_is_coherent_idle_and_refresh_coalesces_followup() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || {
+            let _ = repaint_tx.send(());
+        }));
+        let catalog = WindowCatalog::start(
+            ControlledProvider {
+                started: started_tx,
+                release: release_rx,
+            },
+            updates,
+        );
+        for _ in 0..4 {
+            let view = catalog.discovery_snapshot();
+            assert_eq!(view.status, WindowDiscoveryStatus::Never);
+            assert_eq!(view.generation, 0);
+            assert!(view.windows.is_empty());
+        }
+        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+        catalog.request_refresh();
+        started_rx.recv().unwrap();
+        assert_eq!(
+            catalog.discovery_snapshot().status,
+            WindowDiscoveryStatus::Loading
+        );
+        catalog.request_refresh();
+        catalog.request_refresh();
+        release_tx.send(vec![window("Editor", 42)]).unwrap();
+        repaint_rx.recv().unwrap();
+        started_rx.recv().unwrap();
+        let view = catalog.discovery_snapshot();
+        assert_eq!(
+            (view.generation, view.status),
+            (1, WindowDiscoveryStatus::Loading)
+        );
+        assert_eq!(view.windows[0].hwnd, 42);
+        release_tx.send(Vec::new()).unwrap();
+        repaint_rx.recv().unwrap();
+        let view = catalog.discovery_snapshot();
+        assert_eq!(
+            (view.generation, view.status),
+            (2, WindowDiscoveryStatus::Ready)
+        );
+        assert!(view.windows.is_empty());
+        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
     fn drop_while_blocked_resolves_ticket_and_suppresses_stale_publication() {
         let (started_tx, started_rx) = channel();
         let (release_tx, release_rx) = channel();
@@ -820,11 +912,16 @@ mod tests {
         catalog.snapshot_and_refresh();
         repaint_rx.recv().unwrap();
         assert!(catalog.state.lock().unwrap().terminal);
+        assert_eq!(
+            catalog.discovery_snapshot().status,
+            WindowDiscoveryStatus::Failed
+        );
         assert!(!catalog.state.lock().unwrap().in_flight);
         assert_eq!(updates.active_ticket(UPDATE_SOURCE), None);
         let generation = updates.generation();
         for _ in 0..4 {
             catalog.snapshot_and_refresh();
+            catalog.request_refresh();
         }
         assert_eq!(updates.generation(), generation);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));

@@ -14,6 +14,17 @@ use eframe::egui;
 
 const PAD_VIEWPORT_SIZE: [f32; 2] = [1080.0, 760.0];
 const MIN_PAD_VIEWPORT_SIZE: [f32; 2] = [500.0, 380.0];
+const REFERENCE_SIZE: egui::Vec2 = egui::vec2(620.0, 540.0);
+const MIN_REFERENCE_SIZE: egui::Vec2 = egui::vec2(360.0, 280.0);
+
+fn reference_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("calculation_pad_reference_native_viewport")
+}
+
+fn reference_tool_key() -> crate::settings::UtilityToolKey {
+    crate::settings::UtilityToolKey::parse("calculation-pad-reference")
+        .expect("Calculation Pad reference is a registered utility window key")
+}
 
 fn pad_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("calculation_pad_native_viewport")
@@ -52,6 +63,11 @@ pub(crate) struct CalculationPadDialog {
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
+    examples_host: UtilityHostState,
+    examples_epoch: u64,
+    examples_owner: Option<DocumentIncarnation>,
+    examples_search: String,
+    examples_scroll: f32,
     save_as_open: bool,
     save_as_name: String,
     error: Option<String>,
@@ -86,6 +102,14 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_examples_copy_rect: Option<egui::Rect>,
     #[cfg(test)]
+    test_examples_copy_state: Option<(bool, egui::Rect)>,
+    #[cfg(test)]
+    test_examples_controls: Option<(egui::Rect, egui::Rect, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_examples_group_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_examples_rendered_sources: Vec<&'static str>,
+    #[cfg(test)]
     test_host_button_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_callback_viewport_id: Option<egui::ViewportId>,
@@ -105,9 +129,28 @@ pub(crate) enum CalculationPadDialogEffect {
 
 struct RootEffects {
     pass: ViewportPassProvenance,
-    root_effect: Option<CalculationPadDialogEffect>,
-    close_examples_requested: bool,
+    help: Option<HelpEffects>,
     host: Option<HostEffects>,
+}
+
+struct HelpEffects {
+    identity: PadHostIdentity,
+    owner: Option<DocumentIncarnation>,
+    epoch: u64,
+    viewport_id: egui::ViewportId,
+    viewport_class: egui::ViewportClass,
+    viewport_info: Option<egui::ViewportInfo>,
+    pass: Option<ViewportPassProvenance>,
+    accepted: bool,
+    search: Option<String>,
+    scroll: Option<f32>,
+    copy: Option<String>,
+    close: bool,
+    native_close: bool,
+    host_request: Option<PadHost>,
+    focus_viewport: bool,
+    embedded_layer: Option<egui::LayerId>,
+    embedded_focus: Option<egui::Id>,
 }
 
 struct HostEffects {
@@ -283,8 +326,16 @@ impl CalculationPadDialog {
     }
 
     pub(super) fn examples_layer_if_root(&self) -> Option<egui::LayerId> {
-        (self.open && self.examples_open)
-            .then(|| egui::LayerId::new(egui::Order::Middle, Self::examples_window_id()))
+        if !self.open || !self.examples_open {
+            return None;
+        }
+        match self.examples_host.presentation() {
+            PadHost::Docked => Some(egui::LayerId::new(
+                egui::Order::Middle,
+                Self::examples_window_id(),
+            )),
+            PadHost::Popout => self.examples_host.embedded_root_layer(),
+        }
     }
 
     pub(crate) fn new(root: &AppDataRoot) -> Self {
@@ -307,6 +358,11 @@ impl CalculationPadDialog {
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
+            examples_host: UtilityHostState::docked(),
+            examples_epoch: 0,
+            examples_owner: None,
+            examples_search: String::new(),
+            examples_scroll: 0.0,
             save_as_open: false,
             save_as_name: String::new(),
             error: None,
@@ -340,6 +396,14 @@ impl CalculationPadDialog {
             test_examples_window_rect: None,
             #[cfg(test)]
             test_examples_copy_rect: None,
+            #[cfg(test)]
+            test_examples_copy_state: None,
+            #[cfg(test)]
+            test_examples_controls: None,
+            #[cfg(test)]
+            test_examples_group_rect: None,
+            #[cfg(test)]
+            test_examples_rendered_sources: Vec::new(),
             #[cfg(test)]
             test_host_button_rect: None,
             #[cfg(test)]
@@ -386,8 +450,46 @@ impl CalculationPadDialog {
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
         self.host_state.bootstrap_pending()
+            || self.examples_host.bootstrap_pending()
             || self.examples_open
+            || self.examples_owner.is_some()
+            || self.examples_host.presentation() == PadHost::Popout
             || (self.open && self.host_state.presentation() == PadHost::Popout)
+    }
+
+    fn examples_owner(&self) -> Option<DocumentIncarnation> {
+        self.session.document_incarnation()
+    }
+
+    fn open_examples(&mut self) {
+        if !self.examples_open && self.examples_owner().is_some() {
+            self.examples_epoch = self.examples_epoch.wrapping_add(1);
+            self.examples_owner = self.examples_owner();
+            self.examples_host.retire_to_docked();
+            self.examples_open = true;
+        }
+    }
+
+    fn empty_examples_effects(&self, viewport_id: egui::ViewportId) -> HelpEffects {
+        HelpEffects {
+            identity: self.examples_host.identity(),
+            owner: self.examples_owner,
+            epoch: self.examples_epoch,
+            viewport_id,
+            viewport_class: egui::ViewportClass::Root,
+            viewport_info: None,
+            pass: None,
+            accepted: false,
+            search: None,
+            scroll: None,
+            copy: None,
+            close: false,
+            native_close: false,
+            host_request: None,
+            focus_viewport: false,
+            embedded_layer: None,
+            embedded_focus: None,
+        }
     }
 
     fn ensure_session_open(&mut self) {
@@ -618,11 +720,26 @@ impl CalculationPadDialog {
             self.test_examples_button_rect = None;
             self.test_examples_window_rect = None;
             self.test_examples_copy_rect = None;
+            self.test_examples_copy_state = None;
+            self.test_examples_controls = None;
+            self.test_examples_group_rect = None;
+            self.test_examples_rendered_sources.clear();
             self.test_host_button_rect = None;
             self.test_callback_viewport_id = None;
             self.test_child_discard_requested = false;
         }
         if !self.open {
+            if first_ui_pass
+                && (self.examples_open
+                    || self.examples_owner.is_some()
+                    || self.examples_host.presentation() == PadHost::Popout)
+            {
+                self.pending_root_effects = Some(RootEffects {
+                    pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                    help: None,
+                    host: None,
+                });
+            }
             return;
         }
 
@@ -850,52 +967,170 @@ impl CalculationPadDialog {
             }
         }
 
-        let mut examples_window_open = self.examples_open;
-        let mut examples_authorized = false;
-        let mut root_effect = None;
-        let examples_output = if self.examples_open {
-            egui::Window::new("Calculation Pad Examples & Reference")
-                .id(Self::examples_window_id())
-                .order(egui::Order::Middle)
-                .open(&mut examples_window_open)
-                .resizable(true)
-                .default_size(egui::vec2(620.0, 540.0))
-                .min_size(egui::vec2(360.0, 280.0))
-                .show(ctx, |ui| {
-                    examples_authorized = first_ui_pass
-                        && !ctx.will_discard()
-                        && ui.is_visible()
-                        && !ui.is_sizing_pass();
-                    ui.add_enabled_ui(examples_authorized, |ui| {
-                        self.examples_ui(ui, &mut root_effect);
-                    });
-                })
-        } else {
-            None
-        };
-
-        #[cfg(test)]
-        {
-            self.test_examples_window_rect =
-                examples_output.as_ref().map(|output| output.response.rect);
-        }
-
-        let close_examples_requested = self.examples_open
-            && !examples_window_open
-            && first_ui_pass
-            && !ctx.will_discard()
-            && examples_output
-                .as_ref()
-                .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
-        let has_host_frame = host_effects.is_some();
-        let has_root_frame_effect = root_effect.is_some() || close_examples_requested;
-        if first_ui_pass && (has_host_frame || has_root_frame_effect || examples_authorized) {
+        let help_effects = self.show_examples(
+            ctx,
+            first_ui_pass,
+            application_input_allowed,
+            root_input_allowed,
+            root_pass,
+        );
+        if first_ui_pass && (host_effects.is_some() || help_effects.is_some()) {
             self.pending_root_effects = Some(RootEffects {
                 pass: root_pass,
-                root_effect,
-                close_examples_requested,
+                help: help_effects,
                 host: host_effects,
             });
+        }
+    }
+
+    fn show_examples(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        application_input_allowed: bool,
+        root_input_allowed: bool,
+        root_pass: ViewportPassProvenance,
+    ) -> Option<HelpEffects> {
+        if !self.examples_open {
+            return None;
+        }
+        let reference_namespace = ("calculation-pad-reference-host", self.examples_epoch);
+        match self.examples_host.presentation() {
+            PadHost::Docked => {
+                let mut effects = self.empty_examples_effects(egui::ViewportId::ROOT);
+                let mut open = true;
+                let content = ctx.content_rect().size();
+                let min_size = MIN_REFERENCE_SIZE.min(content);
+                let output = egui::Window::new("Calculation Pad Examples & Reference")
+                    .id(Self::examples_window_id())
+                    .order(egui::Order::Middle)
+                    .open(&mut open)
+                    .resizable(true)
+                    .default_size(REFERENCE_SIZE)
+                    .min_size(min_size)
+                    .max_size(content)
+                    .show_utility(
+                        ctx,
+                        "calculation-pad-reference",
+                        Self::examples_window_id(),
+                        None,
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(
+                            REFERENCE_SIZE,
+                        )
+                        .with_minimum(min_size)
+                        .with_maximum(content),
+                        |ui| {
+                            // Keep the retained widget tree interactive on a replay;
+                            // staged effects are independently guarded by provenance.
+                            let allowed = ui.is_visible()
+                                && !ui.is_sizing_pass()
+                                && root_input_allowed
+                                && !ctx.memory(|m| m.top_modal_layer().is_some());
+                            ui.add_enabled_ui(allowed, |ui| {
+                                ui.push_id(reference_namespace, |ui| {
+                                    self.examples_ui(ui, &mut effects)
+                                });
+                            });
+                        },
+                    );
+                #[cfg(test)]
+                {
+                    self.test_examples_window_rect =
+                        output.as_ref().map(|output| output.response.rect);
+                }
+                effects.accepted = first
+                    && !ctx.will_discard()
+                    && output
+                        .as_ref()
+                        .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
+                effects.pass = effects.accepted.then_some(root_pass);
+                effects.close = effects.accepted
+                    && root_input_allowed
+                    && !ctx.memory(|memory| memory.top_modal_layer().is_some())
+                    && !open;
+                effects.accepted.then_some(effects)
+            }
+            PadHost::Popout => {
+                let mut result = None;
+                ctx.show_viewport_immediate(
+                    reference_viewport_id(),
+                    egui::ViewportBuilder::default()
+                        .with_title("Calculation Pad Examples & Reference")
+                        .with_inner_size(REFERENCE_SIZE)
+                        .with_min_inner_size(MIN_REFERENCE_SIZE)
+                        .with_resizable(true)
+                        .with_visible(true),
+                    |child, class| {
+                        let child_ctx = child.ctx().clone();
+                        let viewport = child_ctx.viewport_id();
+                        let independent = class == egui::ViewportClass::Immediate
+                            && viewport == reference_viewport_id();
+                        let mut effects = self.empty_examples_effects(viewport);
+                        effects.viewport_class = class;
+                        let (focused, close) = child.input(|input| {
+                            (
+                                input.focused,
+                                independent && input.viewport().close_requested(),
+                            )
+                        });
+                        if independent {
+                            effects.viewport_info =
+                                Some(child.input(|input| input.viewport().clone()));
+                        }
+                        let pass_ok = first
+                            && child.current_pass_index() == 0
+                            && !ctx.will_discard()
+                            && !child.will_discard();
+                        let surface = if independent {
+                            application_input_allowed
+                        } else {
+                            root_input_allowed && viewport == egui::ViewportId::ROOT
+                        };
+                        let modal = child.memory(|memory| memory.top_modal_layer().is_some());
+                        let allowed = surface && !modal && (!independent || focused) && !close;
+                        effects.native_close = close;
+                        effects.close = pass_ok && close;
+                        effects.focus_viewport = independent
+                            && self.examples_host.focus_pending()
+                            && pass_ok
+                            && application_input_allowed
+                            && !modal;
+                        if independent {
+                            let _output = egui::CentralPanel::default().show(child, |ui| {
+                                ui.add_enabled_ui(
+                                    allowed && ui.is_visible() && !ui.is_sizing_pass(),
+                                    |ui| {
+                                        ui.push_id(reference_namespace, |ui| {
+                                            self.examples_ui(ui, &mut effects)
+                                        });
+                                    },
+                                );
+                            });
+                            #[cfg(test)]
+                            {
+                                self.test_examples_window_rect = Some(_output.response.rect);
+                            }
+                        } else {
+                            let visible = child.is_visible() && !child.is_sizing_pass();
+                            child.add_enabled_ui(allowed && visible, |ui| {
+                                ui.push_id(reference_namespace, |ui| {
+                                    self.examples_ui(ui, &mut effects)
+                                });
+                            });
+                            if viewport == egui::ViewportId::ROOT {
+                                effects.embedded_layer = Some(child.layer_id());
+                                effects.embedded_focus = child.memory(|memory| memory.focused());
+                            }
+                        }
+                        effects.accepted = pass_ok && !ctx.will_discard() && !child.will_discard();
+                        effects.pass = effects
+                            .accepted
+                            .then_some(ViewportPassProvenance::current(&child_ctx, viewport));
+                        result = Some(effects);
+                    },
+                );
+                result
+            }
         }
     }
 
@@ -971,20 +1206,169 @@ impl CalculationPadDialog {
             {
                 ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::CancelClose);
             }
+            if effects.help.as_ref().is_some_and(|help| {
+                help.native_close
+                    && self.examples_open
+                    && help.epoch == self.examples_epoch
+                    && help.identity == self.examples_host.identity()
+                    && help.owner == self.examples_owner()
+            }) {
+                ctx.send_viewport_cmd_to(
+                    reference_viewport_id(),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
             return Vec::new();
         }
 
-        let mut delivered = Vec::new();
-        if let Some(effect) = effects.root_effect {
-            delivered.push(effect);
+        let help = effects.help;
+        let mut delivered = effects
+            .host
+            .map_or_else(Vec::new, |host| self.complete_pad_host(ctx, host));
+        if (self.examples_open
+            || self.examples_owner.is_some()
+            || self.examples_host.presentation() == PadHost::Popout)
+            && (!self.open || !self.examples_open || self.examples_owner != self.examples_owner())
+        {
+            self.retire_examples(ctx);
         }
-        if effects.close_examples_requested {
-            self.examples_open = false;
+        if let Some(help) = help {
+            self.complete_examples(ctx, help, &mut delivered);
         }
+        delivered
+    }
 
-        let Some(mut host) = effects.host else {
-            return delivered;
-        };
+    fn retire_examples(&mut self, ctx: &egui::Context) {
+        let identity = self.examples_host.identity();
+        if identity.host == PadHost::Popout {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                ctx,
+                crate::gui::utility_window_geometry::NativeViewportIdentity {
+                    key: reference_tool_key(),
+                    viewport_id: reference_viewport_id(),
+                    owner_generation: self.examples_epoch,
+                    host_generation: identity.generation,
+                },
+            );
+            ctx.send_viewport_cmd_to(reference_viewport_id(), egui::ViewportCommand::Close);
+        }
+        self.examples_host.retire_to_docked();
+        self.examples_open = false;
+        self.examples_owner = None;
+        self.examples_epoch = self.examples_epoch.wrapping_add(1);
+    }
+
+    fn complete_examples(
+        &mut self,
+        ctx: &egui::Context,
+        mut help: HelpEffects,
+        delivered: &mut Vec<CalculationPadDialogEffect>,
+    ) {
+        let retained = help.accepted
+            && self.open
+            && self.examples_open
+            && help.identity == self.examples_host.identity()
+            && help.epoch == self.examples_epoch
+            && help.owner.is_some()
+            && help.owner == self.examples_owner
+            && help.owner == self.examples_owner()
+            && help
+                .pass
+                .is_some_and(|pass| pass.viewport_id == help.viewport_id && pass.was_retained(ctx));
+        if !retained {
+            if help.native_close
+                && self.examples_open
+                && help.epoch == self.examples_epoch
+                && help.identity == self.examples_host.identity()
+                && help.owner == self.examples_owner()
+            {
+                ctx.send_viewport_cmd_to(
+                    reference_viewport_id(),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            return;
+        }
+        let needs_repaint = help.search.is_some()
+            || help.copy.is_some()
+            || help.close
+            || help.host_request.is_some()
+            || help.focus_viewport
+            || self.examples_host.bootstrap_pending();
+        if let Some(search) = help.search.take() {
+            self.examples_search = search;
+        }
+        if let Some(scroll) = help.scroll
+            && scroll.is_finite()
+        {
+            self.examples_scroll = scroll.max(0.0);
+        }
+        if help.close {
+            self.retire_examples(ctx);
+            ctx.request_repaint();
+            return;
+        }
+        let old = help.identity;
+        if let Some(requested) = help.host_request
+            && self.examples_host.transition(requested)
+        {
+            if requested == PadHost::Docked {
+                crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx,
+                    crate::gui::utility_window_geometry::NativeViewportIdentity {
+                        key: reference_tool_key(),
+                        viewport_id: help.viewport_id,
+                        owner_generation: help.epoch,
+                        host_generation: old.generation,
+                    },
+                );
+                ctx.send_viewport_cmd_to(reference_viewport_id(), egui::ViewportCommand::Close);
+                delivered.push(CalculationPadDialogEffect::ShowRoot);
+            }
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        if self.examples_host.identity() == old && old.host == PadHost::Popout {
+            if let Some(info) = help.viewport_info.as_ref() {
+                crate::gui::utility_dialog_size::apply_native_utility_geometry_restore(
+                    ctx,
+                    help.viewport_class,
+                    true,
+                    "Calculation Pad Examples & Reference",
+                    crate::gui::utility_window_geometry::NativeViewportIdentity {
+                        key: reference_tool_key(),
+                        viewport_id: help.viewport_id,
+                        owner_generation: help.epoch,
+                        host_generation: old.generation,
+                    },
+                    info,
+                    REFERENCE_SIZE,
+                    Some(MIN_REFERENCE_SIZE),
+                    None,
+                );
+            }
+            if help.focus_viewport {
+                ctx.send_viewport_cmd_to(reference_viewport_id(), egui::ViewportCommand::Focus);
+                self.examples_host.complete_focus(old);
+            }
+        }
+        if self.examples_host.identity() == old {
+            self.examples_host
+                .complete_bootstrap(old, help.embedded_layer, help.embedded_focus);
+            if let Some(text) = help.copy {
+                delivered.push(CalculationPadDialogEffect::CopyText(text));
+            }
+        }
+        if needs_repaint {
+            ctx.request_repaint_of(help.viewport_id);
+        }
+    }
+
+    fn complete_pad_host(
+        &mut self,
+        ctx: &egui::Context,
+        mut host: HostEffects,
+    ) -> Vec<CalculationPadDialogEffect> {
+        let mut delivered = Vec::new();
         let host_pass_retained = host.pass_accepted
             && host.identity == self.host_identity()
             && self.open
@@ -1097,7 +1481,10 @@ impl CalculationPadDialog {
                 _ => None,
             };
             self.apply_intent(intent);
-            if show_root && self.examples_open {
+            if show_root
+                && self.examples_open
+                && self.examples_host.presentation() == PadHost::Docked
+            {
                 delivered.push(CalculationPadDialogEffect::ShowRoot);
             }
             if let Some(enabled) = requested_recovery_preference
@@ -1634,77 +2021,111 @@ impl CalculationPadDialog {
         }
     }
 
-    fn examples_ui(&mut self, ui: &mut egui::Ui, effect: &mut Option<CalculationPadDialogEffect>) {
-        ui.label(
-            "One expression or name = expression per physical line; # starts a full-line comment.",
+    fn examples_ui(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
+        let mut query = self.examples_search.clone();
+        #[cfg(test)]
+        let mut controls = (
+            egui::Rect::NOTHING,
+            egui::Rect::NOTHING,
+            egui::Rect::NOTHING,
         );
-        ui.label(
-            "Results can be finite f64 scalars, exact fixed-width integers, dimensional quantities, or exact base conversions.",
-        );
-
-        ui.collapsing("Operator and function reference", |ui| {
-            ui.label("Operators: +, -, *, /, ^, and % (remainder keeps the dividend sign). Unary + and - are supported; scientific notation accepts e or E, such as 1.25e-2.");
-            ui.label("mod(a, b) gives a non-negative Euclidean remainder. Division and remainder by zero are errors.");
-            ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, and max.");
-            ui.label("Constants: PI, π, E, e, TAU, and τ. Trigonometric functions use radians.");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Search");
+            let width = (ui.available_width() - 170.0).max(80.0);
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut query)
+                    .desired_width(width)
+                    .hint_text("Function, keyword, or example"),
+            );
+            let clear = ui.button("Clear");
+            if clear.clicked() {
+                query.clear();
+            }
+            let (button, requested) = super::utility_host::presentation_button(
+                ui,
+                self.examples_host.presentation(),
+                true,
+            );
+            #[cfg(test)]
+            {
+                controls = (search.rect, clear.rect, button.rect);
+            }
+            #[cfg(not(test))]
+            let _ = search;
+            if button.clicked() {
+                effects.host_request = Some(requested);
+            }
         });
-        ui.collapsing("Exact integer and bit operations", |ui| {
-            ui.label("Programmer operators, helpers, typed constructors, and exact-integer references select fixed-width integer arithmetic. Untyped programmer expressions default to u64; signed and unsigned widths from 8 to 128 bits are available.");
-            ui.label("Checked arithmetic includes +, -, *, ^, idiv, rem, and %. Bitwise operators are &, |, ~, and word aliases and/or/xor/not; shifts use << and >>. / remains scalar division and is unavailable in typed integer expressions.");
-            ui.label("Precedence (tight to loose): calls/grouping, ^, unary + - ~ not, * idiv rem %, + -, shifts, &/and, xor, |/or. Binary operators associate left except right-associative ^.");
-            ui.label("Left shifts discard bits above the width, signed right shifts extend the sign, and shift counts are 0 through width-1. Nonnegative rotl/rotr counts reduce modulo width; popcount, mask, and extract operate on exact bit patterns.");
-            ui.label("Integer overflow, division by zero, invalid shifts, and mixed modes are errors. Decimal and 0x/0o/0b integer tokens are parsed exactly; explicit constructors are required to convert scalar references safely.");
-            ui.label("Select Inspect bits on an integer result to open the separate Inspector. Bit 0 is least significant. Edits stay private until Insert; Undo restores the source. Checked cast validates the numeric value; Reinterpret bits keeps low bits and zero-extends. Stale work requires Refresh before Insert. Copy options control prefixes, padding, and grouping.");
-            ui.label("Choose Select for comparison on a Pad result, then Use selected result in either Inspector comparison slot, or type an expression. Both sides use the same frozen Pad context; comparisons never edit the source. Compatible units are normalized, while incompatible dimensions and integer modes are reported.");
-        });
-        ui.collapsing("Dimensional unit arithmetic", |ui| {
-            ui.label("Catalog units support compatible sums and differences, scalar scaling, linear products and quotients, and small integer powers. Examples: 10 m + 20 cm, (2 m) * (3 m), and (5 m) / (2 s).");
-            ui.label("Targets use 'to', for example area = (2 m) * (3 m) followed by area to cm^2. Dimensions and month/year approximation metadata survive named and rN references and compatible conversions.");
-            ui.label("Addition and subtraction require matching dimensions; scalars can combine with dimensionless quantities but not dimensioned quantities. Nonlinear temperature and fuel-economy units remain conversion-only; semantic catalog categories such as energy/torque and angle/data stay distinct.");
-            ui.label("Quantity expressions are limited to 256 tokens, nesting depth 32, and unit powers from -8 through 8. The source expression limit is 2,048 bytes.");
-        });
-        ui.collapsing("Names, lines, units, and limits", |ui| {
-            ui.label("Use earlier assignments by name. Braced names may contain spaces and Unicode.");
-            ui.label("rN refers to the one-based physical source line N; blank and comment lines count.");
-            ui.label("Physical quantities retain their dimensions: addition and subtraction require matching dimensions, with scalars treated as dimensionless.");
-            ui.label("0x, 0b, and 0o are scalar integer prefixes, accepted only through 2^53. Exact base conversion remains a separate u128 path.");
-            ui.label("Programmer integer literals are exact and are separate from scalar numeric literals.");
-            ui.label("Finite f64 operands and intermediate results are required; source expressions are limited to 2,048 bytes, normalized expressions to 8 KiB, and nesting to 32 parentheses.");
-            ui.label("Documents are limited to 64 KiB and 256 physical lines; names to 128 UTF-8 bytes; identifiers to 64 per line and 512 per document.");
-        });
-
+        if query != self.examples_search {
+            effects.search = Some(query.clone());
+        }
         ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt("calculation-pad-example-catalog")
-            .max_height(ui.available_height())
+        let active = !query.trim().is_empty();
+        let scroll = egui::ScrollArea::vertical().id_salt("calculation-pad-reference-content")
+            .vertical_scroll_offset(self.examples_scroll).max_height(ui.available_height())
             .show(ui, |ui| {
+                if !active {
+                    ui.label("One expression or name = expression per physical line; # starts a full-line comment.");
+                    ui.label("Results include scalars, vectors, exact integers, quantities, and exact base conversions.");
+                    ui.collapsing("Operator and function reference", |ui| {
+                        ui.label("Functions are case-insensitive in call position. Unbound pi and pie mean PI. Infix mod matches signed %, while mod(a, b) is Euclidean.");
+                        ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, max.");
+                        ui.label("Vectors contain 1–128 finite scalar components; +, -, *, / are element-wise, dot/· returns a scalar, and cross/× requires three components.");
+                    });
+                    ui.collapsing("Exact integers, units, and limits", |ui| {
+                        ui.label("Integer constructors and programmer operators use checked exact values and widths from 8 to 128 bits; Inspect bits opens the separate Inspector.");
+                        ui.label("Use +, -, *, ^, idiv, rem and % for checked integer arithmetic; &, |, ~, and/or/xor/not and shifts operate on bits. Shift counts must fit the width; rotl, rotr, popcount, mask and extract use the selected mode.");
+                        ui.label("Checked cast validates a value; Reinterpret bits preserves the low bits. Inspector changes remain private until Insert, and Undo restores the Pad source.");
+                        ui.label("Quantities preserve dimensions and support compatible arithmetic and conversions. Names and rN references use earlier physical source lines.");
+                        ui.label("Compatible units can be added, scaled, multiplied, divided and converted using 'to'. Temperature and fuel-economy units remain conversion-only; month/year conversions may be approximate.");
+                        ui.label("Braced names may contain spaces and Unicode. rN counts physical source lines, including comments and blanks; forward or failed references are diagnosed.");
+                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, documents to 64 KiB and 256 lines, and identifiers to 64 per line and 512 per document.");
+                        ui.label("Quantity expressions are limited to 256 tokens and unit powers from -8 through 8. Finite operands and intermediate values are required.");
+                    });
+                    ui.separator();
+                }
+                let mut matches = 0;
                 for (group_index, group) in EXAMPLE_GROUPS.iter().enumerate() {
-                    egui::CollapsingHeader::new(group.title)
-                        .id_salt(("calculation-pad-example-group", group_index))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for example in group.examples {
-                                ui.group(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.strong(example.title);
-                                        let copy = ui.small_button("Copy example");
-                                        #[cfg(test)]
-                                        if self.test_examples_copy_rect.is_none() {
-                                            self.test_examples_copy_rect = Some(copy.rect);
-                                        }
-                                        if copy.clicked() {
-                                            *effect = Some(CalculationPadDialogEffect::CopyText(
-                                                example.source.to_owned(),
-                                            ));
-                                        }
-                                    });
-                                    ui.code(example.source);
-                                    ui.weak(example.explanation);
+                    let examples = group.examples.iter().filter(|example| example.matches(group.title, &query)).collect::<Vec<_>>();
+                    if examples.is_empty() { continue; }
+                    matches += examples.len();
+                    let mut body = |ui: &mut egui::Ui| {
+                        for example in &examples {
+                            #[cfg(test)] self.test_examples_rendered_sources.push(example.source);
+                            ui.group(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.strong(example.title);
+                                    let copy = ui.small_button("Copy example");
+                                    #[cfg(test)] if self.test_examples_copy_rect.is_none() {
+                                        self.test_examples_copy_rect = Some(copy.rect);
+                                        self.test_examples_copy_state = Some((copy.enabled(), ui.clip_rect()));
+                                    }
+                                    if copy.clicked() { effects.copy = Some(example.source.to_owned()); }
                                 });
-                            }
-                        });
+                                ui.code(example.source);
+                                ui.label(format!("→ {}", example.result_text()));
+                                ui.weak(example.explanation);
+                            });
+                        }
+                    };
+                    if active { ui.strong(group.title); body(ui); }
+                    else {
+                        let header = egui::CollapsingHeader::new(group.title).id_salt(("calculation-pad-example-group", group_index)).default_open(true).show(ui, &mut body);
+                        #[cfg(test)] if self.test_examples_group_rect.is_none() { self.test_examples_group_rect = Some(header.header_response.rect); }
+                        #[cfg(not(test))] let _ = header;
+                    }
+                }
+                if matches == 0 {
+                    ui.label("No matching examples.");
+                    if ui.button("Clear search").clicked() { effects.search = Some(String::new()); }
                 }
             });
+        effects.scroll = Some(scroll.state.offset.y);
+        #[cfg(test)]
+        {
+            self.test_examples_controls =
+                Some((controls.0, controls.1, controls.2, scroll.inner_rect));
+        }
     }
 
     fn editor_ui(
@@ -2030,7 +2451,7 @@ impl CalculationPadDialog {
             DialogIntent::CancelSaveAs => self.save_as_open = false,
             DialogIntent::Save => self.save_current(),
             DialogIntent::SaveAs(name) => self.save_as(&name),
-            DialogIntent::OpenExamples => self.examples_open = true,
+            DialogIntent::OpenExamples => self.open_examples(),
             DialogIntent::Decision(decision) => self.decide_pending(decision),
             DialogIntent::SetRememberSource(_) => {}
         }
@@ -2252,7 +2673,12 @@ impl CalculationPadDialog {
 
     #[cfg(test)]
     pub(crate) fn test_open_examples(&mut self) {
-        self.examples_open = true;
+        self.open_examples();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_popout_pad(&mut self, ctx: &egui::Context) {
+        self.apply_host_request(ctx, PadHost::Popout);
     }
 
     #[cfg(test)]
@@ -2403,13 +2829,357 @@ mod tests {
         let output = ctx.run_ui(input(egui::vec2(1200.0, 900.0), Vec::new()), |_| {});
         dialog.pending_root_effects = Some(super::RootEffects {
             pass: root_pass,
-            root_effect: None,
-            close_examples_requested: false,
+            help: None,
             host: Some(host),
         });
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+    fn complete_help_effects(
+        dialog: &mut CalculationPadDialog,
+        ctx: &egui::Context,
+        mut help: super::HelpEffects,
+        mut host: Option<super::HostEffects>,
+    ) -> Vec<CalculationPadDialogEffect> {
+        let pass = super::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        help.pass = help.accepted.then_some(pass);
+        if let Some(host) = host.as_mut() {
+            host.pass = host.pass_accepted.then_some(pass);
+        }
+        let output = ctx.run_ui(input(egui::vec2(1200.0, 900.0), Vec::new()), |_| {});
+        dialog.pending_root_effects = Some(super::RootEffects {
+            pass,
+            help: Some(help),
+            host,
+        });
+        let effects = dialog.on_ui_frame_complete(ctx);
+        output.drop_without_applying_deltas();
+        effects
+    }
+
+    #[test]
+    fn reference_host_preserves_pad_and_rejects_retired_effects() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 1\nx + 2");
+        dialog.test_replace_source("x = 2\nx + 2");
+        let before = (
+            dialog.session.source().unwrap().to_owned(),
+            dialog.session.revision(),
+            dialog.session.is_dirty(),
+            dialog.session.can_undo(),
+            dialog.session.can_redo(),
+        );
+        dialog.open_examples();
+        let mut pop = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        pop.accepted = true;
+        pop.search = Some("sqrt".into());
+        pop.scroll = Some(42.0);
+        pop.host_request = Some(super::PadHost::Popout);
+        assert!(complete_help_effects(&mut dialog, &ctx, pop, None).is_empty());
+        assert_eq!(dialog.examples_host.presentation(), super::PadHost::Popout);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
+        assert_eq!(dialog.examples_search, "sqrt");
+        assert_eq!(dialog.examples_scroll, 42.0);
+
+        let mut discarded = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        discarded.copy = Some("bad".into());
+        discarded.close = true;
+        discarded.native_close = true;
+        assert!(complete_help_effects(&mut dialog, &ctx, discarded, None).is_empty());
+        assert!(dialog.examples_open);
+        let mut dock = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        dock.accepted = true;
+        dock.host_request = Some(super::PadHost::Docked);
+        assert_eq!(
+            complete_help_effects(&mut dialog, &ctx, dock, None),
+            vec![CalculationPadDialogEffect::ShowRoot]
+        );
+        assert_eq!(dialog.examples_search, "sqrt");
+        assert_eq!(dialog.examples_scroll, 42.0);
+
+        let mut old = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        old.accepted = true;
+        old.copy = Some("stale".into());
+        let mut close = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        close.accepted = true;
+        close.close = true;
+        assert!(complete_help_effects(&mut dialog, &ctx, close, None).is_empty());
+        assert!(!dialog.examples_open);
+        dialog.open_examples();
+        assert!(complete_help_effects(&mut dialog, &ctx, old, None).is_empty());
+        let after = (
+            dialog.session.source().unwrap().to_owned(),
+            dialog.session.revision(),
+            dialog.session.is_dirty(),
+            dialog.session.can_undo(),
+            dialog.session.can_redo(),
+        );
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn reference_owner_retirement_precedes_same_frame_copy() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 4");
+        dialog.open_examples();
+        let mut new = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        new.pass_accepted = true;
+        new.intent = Some(super::DialogIntent::New);
+        complete_host_effects(&mut dialog, &ctx, new);
+        assert!(
+            dialog.examples_open,
+            "a pending dirty decision keeps help open"
+        );
+        let mut help = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        help.accepted = true;
+        help.copy = Some("old owner".into());
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.intent = Some(super::DialogIntent::Decision(
+            crate::calculation_pad::TransitionDecision::Discard,
+        ));
+        assert!(complete_help_effects(&mut dialog, &ctx, help, Some(host)).is_empty());
+        assert!(!dialog.examples_open);
+        assert_eq!(dialog.session.source(), Some(""));
+    }
+
+    #[test]
+    fn reference_stays_open_across_save_as_of_same_session() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 4");
+        dialog.open_examples();
+        dialog.examples_search = "floor".into();
+        dialog.examples_scroll = 25.0;
+        let incarnation = dialog.session.document_incarnation();
+        let old_id = dialog.session.current_id();
+        let mut help = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        help.accepted = true;
+        help.copy = Some("Floor(2.9)".into());
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.intent = Some(super::DialogIntent::SaveAs("same session".into()));
+        assert_eq!(
+            complete_help_effects(&mut dialog, &ctx, help, Some(host)),
+            vec![CalculationPadDialogEffect::CopyText("Floor(2.9)".into())]
+        );
+        assert_ne!(dialog.session.current_id(), old_id);
+        assert_eq!(dialog.session.document_incarnation(), incarnation);
+        assert!(dialog.examples_open);
+        assert_eq!(dialog.examples_search, "floor");
+        assert_eq!(dialog.examples_scroll, 25.0);
+    }
+
+    #[test]
+    fn reference_small_window_keeps_search_actions_and_scroll_visible() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.open_examples();
+        let size = egui::vec2(420.0, 360.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let window = dialog.test_examples_window_rect.unwrap();
+        let (search, clear, host, body) = dialog.test_examples_controls.unwrap();
+        for control in [search, clear, host] {
+            assert!(
+                window.contains_rect(control),
+                "control {control:?} outside {window:?}"
+            );
+        }
+        assert!(body.is_positive());
+        assert!(
+            search.bottom() <= body.top()
+                && clear.bottom() <= body.top()
+                && host.bottom() <= body.top()
+        );
+        frame(
+            &mut dialog,
+            &ctx,
+            size,
+            vec![
+                egui::Event::PointerMoved(body.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -180.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let offset = dialog.examples_scroll;
+        assert!(
+            offset > 0.0,
+            "wheel should scroll the reference body, got {offset}"
+        );
+        let mut pop = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        pop.accepted = true;
+        pop.host_request = Some(super::PadHost::Popout);
+        complete_help_effects(&mut dialog, &ctx, pop, None);
+        let mut dock = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        dock.accepted = true;
+        dock.host_request = Some(super::PadHost::Docked);
+        complete_help_effects(&mut dialog, &ctx, dock, None);
+        assert_eq!(dialog.examples_scroll, offset);
+        dialog.examples_scroll = 0.0;
+        dialog.examples_search = "floor".into();
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        assert!(
+            dialog.test_examples_copy_rect.is_some(),
+            "active search shows matching examples without opening groups"
+        );
+        dialog.examples_search = "no-such-result".into();
+        frame(&mut dialog, &ctx, size, Vec::new());
+        let clear = dialog.test_examples_controls.unwrap().1;
+        click(&mut dialog, &ctx, size, clear.center());
+        assert_eq!(dialog.examples_search, "");
+    }
+
+    #[test]
+    fn reference_search_reveals_matches_from_a_closed_group() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        dialog.open();
+        dialog.open_examples();
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let header = dialog.test_examples_group_rect.expect("first group header");
+        click(&mut dialog, &ctx, size, header.center());
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(
+            !dialog
+                .test_examples_rendered_sources
+                .contains(&"radius = 3\nPI * radius ^ 2")
+        );
+        dialog.examples_search = "radius".into();
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(
+            dialog
+                .test_examples_rendered_sources
+                .contains(&"radius = 3\nPI * radius ^ 2")
+        );
+    }
+
+    #[test]
+    fn reference_docked_copy_recovers_after_discarded_root_pass() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        dialog.open();
+        dialog.open_examples();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let copy = dialog
+            .test_examples_copy_rect
+            .expect("reference copy button");
+        frame(&mut dialog, &ctx, size, click_events(copy.center(), true));
+        assert!(
+            frame_requesting_late_discard(
+                &mut dialog,
+                &ctx,
+                size,
+                click_events(copy.center(), false)
+            )
+            .is_none()
+        );
+        assert_eq!(
+            click(&mut dialog, &ctx, size, copy.center()),
+            Some(CalculationPadDialogEffect::CopyText(
+                "radius = 3\nPI * radius ^ 2".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn reference_native_callback_runs_with_hidden_root_and_os_close_keeps_pad() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 5");
+        dialog.open_examples();
+        dialog.examples_host.transition(super::PadHost::Popout);
+        let before = (
+            dialog.session.source().unwrap().to_owned(),
+            dialog.session.revision(),
+            dialog.session.is_dirty(),
+        );
+        let run = |dialog: &mut CalculationPadDialog| {
+            super::super::render::with_immediate_viewport_renderer(&ctx, || {
+                let output = ctx.run_ui(input(egui::vec2(900.0, 700.0), Vec::new()), |ui| {
+                    dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, false);
+                });
+                output.drop_without_applying_deltas();
+                dialog.on_ui_frame_complete(&ctx)
+            })
+        };
+        for _ in 0..3 {
+            run(&mut dialog);
+        }
+        assert!(dialog.test_examples_window_rect.is_some());
+        assert!(!dialog.examples_host.bootstrap_pending());
+        let copy = dialog
+            .test_examples_copy_rect
+            .expect("native reference copy button");
+        let copy_state = dialog.test_examples_copy_state.unwrap();
+        assert!(
+            copy_state.0 && copy_state.1.contains(copy.center()),
+            "native copy button is disabled or clipped: {copy:?}, {copy_state:?}"
+        );
+        let click_native = |dialog: &mut CalculationPadDialog, pressed| {
+            super::super::render::with_immediate_viewport_test_events_for(
+                super::reference_viewport_id(),
+                click_events(copy.center(), pressed),
+                || run(dialog),
+            )
+        };
+        click_native(&mut dialog, true);
+        let first_copy = click_native(&mut dialog, false);
+        assert_eq!(
+            first_copy,
+            vec![CalculationPadDialogEffect::CopyText(
+                "radius = 3\nPI * radius ^ 2".into()
+            )]
+        );
+        click_native(&mut dialog, true);
+        super::super::render::IMMEDIATE_VIEWPORT_TEST_DISCARD
+            .with(|discard| discard.set(Some(super::reference_viewport_id())));
+        assert!(click_native(&mut dialog, false).is_empty());
+        click_native(&mut dialog, true);
+        let copied = click_native(&mut dialog, false);
+        assert_eq!(
+            copied,
+            vec![CalculationPadDialogEffect::CopyText(
+                "radius = 3\nPI * radius ^ 2".into()
+            )]
+        );
+        super::super::render::with_immediate_viewport_test_close_request(
+            super::reference_viewport_id(),
+            || run(&mut dialog),
+        );
+        assert!(!dialog.examples_open);
+        assert!(dialog.open);
+        assert_eq!(
+            before,
+            (
+                dialog.session.source().unwrap().to_owned(),
+                dialog.session.revision(),
+                dialog.session.is_dirty()
+            )
+        );
     }
 
     fn immediate_viewport_frame(
@@ -2712,6 +3482,36 @@ mod tests {
         assert!(summary.find("r1 total = 5").unwrap() < summary.find("r2 = 20").unwrap());
         assert!(summary.contains("r3: error:"));
         assert_eq!(dialog.test_source(), Some("total = 2 + 3\nr1 * 4\n1 / 0"));
+    }
+
+    #[test]
+    fn vector_copy_buttons_return_pasteable_line_and_summary() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("v = [1, 2, 3]\nv * 2");
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let line_copy = dialog
+            .test_line_copy_rects
+            .iter()
+            .find(|(line, _)| *line == 1)
+            .map(|(_, rect)| *rect)
+            .expect("vector row exposes copy");
+        assert_eq!(
+            click(&mut dialog, &ctx, size, line_copy.center()),
+            Some(CalculationPadDialogEffect::CopyText("[2, 4, 6]".into()))
+        );
+        let all_copy = dialog.test_copy_all_rect.expect("copy all is available");
+        let Some(CalculationPadDialogEffect::CopyText(summary)) =
+            click(&mut dialog, &ctx, size, all_copy.center())
+        else {
+            panic!("copy all effect")
+        };
+        assert!(summary.contains("r1 v = [1, 2, 3]"));
+        assert!(summary.contains("r2 = [2, 4, 6]"));
     }
 
     #[test]
@@ -3525,8 +4325,7 @@ mod tests {
         host_effects.close_requested = true;
         dialog.pending_root_effects = Some(super::RootEffects {
             pass,
-            root_effect: None,
-            close_examples_requested: false,
+            help: None,
             host: Some(host_effects),
         });
         let output = ctx.run_ui(input(size, Vec::new()), |_| {});

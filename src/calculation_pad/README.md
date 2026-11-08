@@ -6,6 +6,14 @@ line-ending bytes. Direct document evaluation always reads the current source.
 The UI session caches its evaluation for the current source revision and
 recomputes after an edit, undo, or redo changes that revision.
 
+The Pad's **Examples & reference** window has a pinned search and executable
+examples with expected results. Use **Pop Out** to keep it in a separate native
+window, or **Dock** to return it to the launcher; its search and scroll position
+are retained when moving between presentations. Search matches group names,
+titles, source, and keywords without regard to case; matching examples are
+shown even if their group was collapsed. Copy an example's source to try it
+in the Pad. Clearing search restores the ordinary groups.
+
 ## Lines and names
 
 * An empty or whitespace-only line is blank.
@@ -34,9 +42,10 @@ cyclic references are diagnosed.
 
 Scalar expressions use the `exmex` expression grammar with finite `f64`
 results. Scientific notation is supported, for example `1.25e-2` and
-`6.02E23`. Scalar integer literals may use `0x`, `0b`, or `0o` prefixes;
-their values are deliberately bounded to 2^53, the exactly representable
-integer range endpoint (larger even integers are also rejected). The engine
+`6.02E23`. Scalar integer literals may use decimal, `0x`, `0b`, or `0o`
+notation; their values are deliberately bounded to 2^53, the exactly representable
+integer range endpoint (larger even integers are also rejected). Decimal-point
+and scientific-notation literals retain floating-point semantics. The engine
 supports `+`, `-`, `*`, `/`, `^`, and `%`; unary `+` and `-`; the functions
 `abs`, `signum`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
 `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `floor`, `round`, `ceil`,
@@ -52,11 +61,27 @@ PI * radius ^ 2
 Non-finite operands and intermediate results remain invalid even when a later
 operation could otherwise hide them, as in `min(sqrt(-1), 1)`.
 
-`a % b` returns the remainder with the dividend's sign (`-7 % 3` is `-1`).
+`a % b` and infix `a mod b` return the remainder with the dividend's sign
+(`-7 mod 3` is `-1`). Built-in function names are case-insensitive in call
+position. Unbound `pi` and `pie` (case-insensitively) mean `PI`; declared names
+and braced references retain their ordinary meaning.
 `mod(a, b)` returns the non-negative Euclidean remainder (`mod(-7, 3)` is
 `2`). Both forms reject a zero divisor. When `%` or contextual `mod(a, b)` is
 used, `*`, `/`, and `%` group left to right; expressions without these forms
 keep the original operator precedence.
+
+## Vectors
+
+Vectors contain one to 128 finite dimensionless scalar components, for example
+`v = [1, 2, sqrt(16)]`. Components may use scalar expressions and earlier named
+or physical-line references. Equal-length vectors support element-wise `+`,
+`-`, `*`, and `/`; either order of scalar multiplication and vector divided by
+a scalar are also supported. Scalar addition and subtraction are not broadcast.
+`dot(v, w)` or `v · w` gives a scalar; `cross(v, w)` or `v × w` gives a three-component vector
+and requires three components on each side. Vector `*` remains element-wise.
+Dimension mismatch, zero divisors, typed integers, quantities and non-finite
+intermediate values produce line-local errors. Results use the shared scalar
+display precision and can be pasted back as vector expressions.
 
 ## Exact integer expressions
 
@@ -212,11 +237,18 @@ Open **Inspect bits…** beside an exact integer result. Bit 0 is the least
 significant bit. The working bits and optional labels are private until you
 choose **Insert at Pad selection**; Undo restores the previous source in one
 step. If the selected result changes, dirty work remains visible and must be
-refreshed explicitly before insertion. A checked cast validates the numeric
-value; reinterpretation preserves the low bit pattern and zero-extends when
-widening. Copy provides decimal, binary, octal and hexadecimal, with optional
+refreshed explicitly before insertion. Selecting a width or signedness immediately
+checks whether the value fits. If it does not, the working value and mode remain
+unchanged; choose **Reinterpret bits** to apply the attempted mode using the low
+bit pattern (zero-extended when widening). **Bit grouping** changes only the
+transient grid layout. Named spans show inclusive bit numbers such as
+`Status [7:0]`; their input ranges use an exclusive end. Copy provides decimal,
+binary, octal and hexadecimal, with optional
 prefixes, width padding and digit grouping. Only these format preferences are
 saved; working bits, labels, expressions and comparison results are transient.
+Spans extending beyond the current width remain in the draft and are marked
+invalid until the width or span is changed. The grid's bit grouping is separate
+from the grouping preference used for copied numbers.
 
 For example, `123 >> 12` uses the default `u64` mode and yields zero;
 `i8(-1) >> 1` stays negative, and `u8(255) << 1` masks to 254. A value such

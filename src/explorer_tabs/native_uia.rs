@@ -17,6 +17,48 @@ use windows::core::Interface;
 const MAX_UIA_NODES: usize = 1024;
 const MAX_UIA_DEPTH: usize = 24;
 const MAX_RUNTIME_ID_PARTS: usize = 64;
+const UIA_TIMEOUT_MS: u32 = 500;
+
+fn checked_setup_step<T>(
+    check: &impl Fn() -> Result<(), String>,
+    context: &str,
+    call: impl FnOnce() -> windows::core::Result<T>,
+) -> Result<T, String> {
+    check()?;
+    let result = call();
+    check()?;
+    result.map_err(|error| {
+        format!(
+            "{context}: {error} (HRESULT {:#010X})",
+            error.code().0 as u32
+        )
+    })
+}
+
+fn initialize_automation<T, U>(
+    check: &impl Fn() -> Result<(), String>,
+    activate: impl FnOnce() -> windows::core::Result<T>,
+    set_connection_timeout: impl FnOnce(&T) -> windows::core::Result<()>,
+    set_transaction_timeout: impl FnOnce(&T) -> windows::core::Result<()>,
+    base_interface: impl FnOnce(&T) -> windows::core::Result<U>,
+) -> Result<U, String> {
+    let modern = checked_setup_step(
+        check,
+        "CUIAutomation8 activation requesting IUIAutomation2",
+        activate,
+    )?;
+    checked_setup_step(check, "IUIAutomation2 SetConnectionTimeout(500 ms)", || {
+        set_connection_timeout(&modern)
+    })?;
+    checked_setup_step(
+        check,
+        "IUIAutomation2 SetTransactionTimeout(500 ms)",
+        || set_transaction_timeout(&modern),
+    )?;
+    checked_setup_step(check, "IUIAutomation2 base IUIAutomation interface", || {
+        base_interface(&modern)
+    })
+}
 
 /// A root-wide HWND does not establish which tab owns a view. The caller
 /// supplies live descendant checks; equality with the content pane is valid.
@@ -89,21 +131,15 @@ impl ExplorerUia {
                 Ok(())
             }
         };
-        check()?;
-        let automation: IUIAutomation =
-            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
-                .map_err(|e| format!("UI Automation unavailable: {e}"))?;
-        check()?;
-        let v2: IUIAutomation2 = automation
-            .cast()
-            .map_err(|_| "UI Automation timeout capability unavailable".to_owned())?;
-        check()?;
-        unsafe { v2.SetConnectionTimeout(500) }
-            .map_err(|e| format!("UI Automation connection timeout: {e}"))?;
-        check()?;
-        unsafe { v2.SetTransactionTimeout(500) }
-            .map_err(|e| format!("UI Automation transaction timeout: {e}"))?;
-        check()?;
+        let automation = initialize_automation(
+            &check,
+            || unsafe {
+                CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+            },
+            |uia| unsafe { uia.SetConnectionTimeout(UIA_TIMEOUT_MS) },
+            |uia| unsafe { uia.SetTransactionTimeout(UIA_TIMEOUT_MS) },
+            |uia| uia.cast::<IUIAutomation>(),
+        )?;
         Ok(Self {
             automation,
             cancelled,
@@ -456,7 +492,151 @@ impl ExplorerUia {
 
 #[cfg(test)]
 mod tests {
-    use super::{invoke_with_marker, merge_related_pane, pane_view_relation};
+    use super::{
+        initialize_automation, invoke_with_marker, merge_related_pane, pane_view_relation,
+    };
+
+    #[test]
+    fn explorer_tabs_uia_setup_checks_each_stage_and_preserves_hresult() {
+        use std::cell::{Cell, RefCell};
+        use windows::core::{Error, HRESULT};
+        let calls = RefCell::new(Vec::new());
+        let check = || Ok(());
+        let result = initialize_automation(
+            &check,
+            || {
+                calls.borrow_mut().push("activate");
+                Ok(7)
+            },
+            |_| {
+                calls.borrow_mut().push("connection");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("transaction");
+                Ok(())
+            },
+            |value| {
+                calls.borrow_mut().push("base");
+                Ok(*value)
+            },
+        );
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(
+            *calls.borrow(),
+            ["activate", "connection", "transaction", "base"]
+        );
+
+        calls.borrow_mut().clear();
+        let result = initialize_automation(
+            &check,
+            || {
+                calls.borrow_mut().push("activate");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("connection");
+                Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)))
+            },
+            |_| {
+                calls.borrow_mut().push("transaction");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("base");
+                Ok(())
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("SetConnectionTimeout(500 ms)"));
+        assert!(error.contains("0x80004005"));
+        assert_eq!(*calls.borrow(), ["activate", "connection"]);
+
+        calls.borrow_mut().clear();
+        let result = initialize_automation(
+            &check,
+            || {
+                calls.borrow_mut().push("activate");
+                Err::<(), _>(Error::from_hresult(HRESULT(0x80040154u32 as i32)))
+            },
+            |_| {
+                calls.borrow_mut().push("connection");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("transaction");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("base");
+                Ok(())
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("CUIAutomation8 activation requesting IUIAutomation2"));
+        assert!(error.contains("0x80040154"));
+        assert_eq!(*calls.borrow(), ["activate"]);
+
+        let cancelled = Cell::new(false);
+        calls.borrow_mut().clear();
+        let check = || {
+            if cancelled.get() {
+                Err("cancelled".to_owned())
+            } else {
+                Ok(())
+            }
+        };
+        let result = initialize_automation(
+            &check,
+            || {
+                calls.borrow_mut().push("activate");
+                cancelled.set(true);
+                Err::<(), _>(Error::from_hresult(HRESULT(0x80004005u32 as i32)))
+            },
+            |_| {
+                calls.borrow_mut().push("connection");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("transaction");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("base");
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert_eq!(*calls.borrow(), ["activate"]);
+    }
+
+    #[test]
+    fn explorer_tabs_uia_modern_activation_and_timeouts_on_worker_apartment() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        use std::time::{Duration, Instant};
+        use windows::Win32::UI::Accessibility::IUIAutomation2;
+        use windows::core::Interface;
+        std::thread::spawn(|| {
+            let _apartment =
+                crate::mkmacro::uia::initialize_com_apartment().expect("MTA initialization");
+            let uia = super::ExplorerUia::connect(
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("CUIAutomation8 initialization");
+            let modern: IUIAutomation2 = uia.automation.cast().expect("timeout interface");
+            assert_eq!(
+                unsafe { modern.ConnectionTimeout() }.unwrap(),
+                super::UIA_TIMEOUT_MS
+            );
+            assert_eq!(
+                unsafe { modern.TransactionTimeout() }.unwrap(),
+                super::UIA_TIMEOUT_MS
+            );
+        })
+        .join()
+        .expect("COM-only worker");
+    }
 
     #[test]
     fn explorer_tabs_backend_shared_root_pane_cannot_authorize_unique_shell_view() {

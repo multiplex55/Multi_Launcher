@@ -20,6 +20,55 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
+#[derive(Default)]
+struct RecorderRegionOverlay {
+    service: Option<crate::gui::mkmacro_dialog::visual_overlay::NativeVisualOverlayService>,
+    next_id: u64,
+    preview: Option<(u64, u64)>,
+    active: Option<(u64, u64)>,
+    failed_generation: Option<u64>,
+}
+
+impl RecorderRegionOverlay {
+    fn start(&mut self, ctx: &egui::Context, rect: ScreenRect, persistent: bool) -> Result<u64, String> {
+        use crate::gui::mkmacro_dialog::visual_overlay::{NativeVisualOverlayService, VisualOverlayCommand};
+        if self.service.is_none() {
+            let context = ctx.clone();
+            self.service = Some(NativeVisualOverlayService::start_notifying(Arc::new(move || {
+                context.request_repaint_of(egui::ViewportId::ROOT);
+            })).map_err(|error| format!("Could not start recording outline: {error}"))?);
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.next_id;
+        self.service.as_ref().ok_or_else(|| "Recording outline service unavailable".to_owned())?.commands.send(VisualOverlayCommand::RecordingRectangle {
+            operation_id: id, rect, persistent,
+        }).map_err(|error| format!("Could not show recording outline: {error}"))?;
+        Ok(id)
+    }
+
+    fn cancel(&mut self, id: u64) {
+        if let Some(service) = &self.service {
+            let _ = service.commands.send(crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(id),
+            });
+        }
+    }
+
+    fn cancel_preview(&mut self) {
+        if let Some((id, _)) = self.preview.take() { self.cancel(id); }
+    }
+
+    fn cancel_active(&mut self) {
+        if let Some((_, id)) = self.active.take() { self.cancel(id); }
+    }
+}
+
+impl Drop for RecorderRegionOverlay {
+    fn drop(&mut self) {
+        if let Some(service) = &mut self.service { service.shutdown_and_join(); }
+    }
+}
+
 struct TargetRefreshWorker {
     result_rx: Receiver<Result<Vec<crate::recording::RecordingDisplayTarget>, String>>,
     result: Option<Result<Vec<crate::recording::RecordingDisplayTarget>, String>>,
@@ -120,6 +169,7 @@ enum RecordingUiCommand {
     ChoosePath { revision: u64 },
     PickRegion { revision: u64 },
     RefreshTargets { revision: u64 },
+    ShowRegion { revision: u64 },
     Stop { generation: u64 },
     Discard { generation: u64 },
     CloseSetup,
@@ -171,6 +221,8 @@ pub(crate) struct RecordingDialogState {
     displays: Vec<crate::recording::RecordingDisplayTarget>,
     windows: Vec<WindowDescriptor>,
     windows_generation: Option<u64>,
+    windows_status: Option<crate::window_catalog::WindowDiscoveryStatus>,
+    initial_target_request: bool,
     targets_loaded: bool,
     target_error: Option<String>,
     target_refresh: Option<TargetRefreshWorker>,
@@ -181,6 +233,9 @@ pub(crate) struct RecordingDialogState {
     region_operation_revision: Option<u64>,
     compact_was_open: bool,
     preview_cache: Option<(u64, u64, CaptureTarget)>,
+    recorder_overlay: RecorderRegionOverlay,
+    outline_error: Option<String>,
+    selector_conflict: bool,
     #[cfg(test)]
     compact_stop_button_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -206,6 +261,8 @@ pub(crate) enum RetainedRecordingAction {
     ChoosePath { selection_revision: u64 },
     PickRegion { selection_revision: u64 },
     RefreshTargets { selection_revision: u64 },
+    RefreshWindows,
+    ShowRegion { selection_revision: u64 },
     Stop { generation: u64 },
     Discard { generation: u64 },
     CloseSetup,
@@ -218,6 +275,7 @@ impl RecordingDialogState {
     pub(crate) fn open(&mut self) {
         if !self.open {
             self.setup_epoch = self.setup_epoch.wrapping_add(1);
+            self.initial_target_request = true;
         }
         self.open = true;
     }
@@ -225,11 +283,21 @@ impl RecordingDialogState {
     pub(crate) fn close(&mut self) {
         self.setup_epoch = self.setup_epoch.wrapping_add(1);
         self.open = false;
+        self.initial_target_request = false;
         self.setup_pass = None;
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.pending_region = None;
         self.pending_region_revision = None;
         self.preview_cache = None;
+        self.recorder_overlay.cancel_preview();
+    }
+
+    pub(crate) fn retire_recording_outline(&mut self) {
+        self.recorder_overlay.cancel_preview();
+        self.recorder_overlay.cancel_active();
+        if let Some(service) = &self.recorder_overlay.service {
+            service.request_shutdown();
+        }
     }
 
     pub(crate) fn selection_revision(&self) -> u64 {
@@ -287,6 +355,7 @@ impl RecordingDialogState {
         if !self.open {
             return;
         }
+        window_catalog.request_refresh();
         self.refresh_window_snapshot(window_catalog);
         if self.target_refresh.is_some() {
             return;
@@ -379,6 +448,10 @@ impl RecordingDialogState {
         };
         self.target_refresh = None;
         if setup_epoch != self.setup_epoch || !self.open {
+            if self.open && setup_epoch != self.setup_epoch {
+                self.initial_target_request = true;
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
             return;
         }
         if unavailable {
@@ -419,13 +492,16 @@ impl RecordingDialogState {
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
-    fn refresh_window_snapshot(&mut self, window_catalog: &WindowCatalog) {
-        let generation = window_catalog.generation();
-        if self.windows_generation == Some(generation) {
-            return;
+    fn refresh_window_snapshot(&mut self, window_catalog: &WindowCatalog) -> bool {
+        let snapshot = window_catalog.discovery_snapshot();
+        if self.windows_generation == Some(snapshot.generation)
+            && self.windows_status == Some(snapshot.status)
+        {
+            return false;
         }
-        self.windows = window_catalog.snapshot().as_ref().clone();
-        self.windows_generation = Some(generation);
+        self.windows = snapshot.windows.as_ref().clone();
+        self.windows_generation = Some(snapshot.generation);
+        self.windows_status = Some(snapshot.status);
         if self.selection.window.is_none()
             && let Some(first) = self.windows.first()
         {
@@ -433,6 +509,7 @@ impl RecordingDialogState {
             self.selection_revision = self.selection_revision.wrapping_add(1);
             self.preview_cache = None;
         }
+        true
     }
 
     fn target_refresh_pending(&self) -> bool {
@@ -459,9 +536,6 @@ impl RecordingDialogState {
         Vec<String>,
     ) {
         self.refresh_window_snapshot(window_catalog);
-        if !self.targets_loaded && self.target_refresh.is_none() {
-            self.refresh_targets(ctx, window_catalog);
-        }
         let mut draft = self.selection.clone();
         if let Some(Ok(region)) = self
             .pending_region
@@ -528,11 +602,6 @@ impl RecordingDialogState {
                                 });
                             self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
                             #[cfg(test)] { self.test_controls.insert("source", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
-                            if ui.small_button("Refresh").clicked() {
-                                commands.push(RecordingUiCommand::RefreshTargets {
-                                    revision: self.selection_revision,
-                                });
-                            }
                         });
                         match draft.target_kind {
                             RecordingTargetKind::Display => {
@@ -569,6 +638,14 @@ impl RecordingDialogState {
                                         revision: self.selection_revision,
                                     });
                                 }
+                                let show_region = ui.add_enabled(
+                                    draft.region.is_some() && !has_job && !self.selector_conflict && !self.has_selector_operation() && preview.is_some(),
+                                    egui::Button::new("Show region"),
+                                );
+                                #[cfg(test)] { self.test_controls.insert("show-region", (show_region.rect, ui.clip_rect(), show_region.enabled())); }
+                                if show_region.clicked() {
+                                    commands.push(RecordingUiCommand::ShowRegion { revision: self.selection_revision });
+                                }
                                 if let Some(region) = draft.region {
                                     ui.label(format!(
                                         "Region: {} × {} at {}, {}",
@@ -586,7 +663,7 @@ impl RecordingDialogState {
                                         self.windows.iter().find(|window| window_key(window) == key)
                                     })
                                     .map(|window| window.title.as_str())
-                                    .unwrap_or("Select window");
+                                    .unwrap_or(if draft.window.is_some() { "Selected window unavailable" } else { "Select window" });
                                 let combo = egui::ComboBox::from_id_salt("recording-window")
                                     .selected_text(label)
                                     .show_ui(ui, |ui| {
@@ -600,6 +677,12 @@ impl RecordingDialogState {
                                     });
                             self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
                             #[cfg(test)] { self.test_controls.insert("window", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
+                                match self.windows_status {
+                                    Some(crate::window_catalog::WindowDiscoveryStatus::Never | crate::window_catalog::WindowDiscoveryStatus::Loading) | None => { ui.label("Loading windows…"); }
+                                    Some(crate::window_catalog::WindowDiscoveryStatus::Failed) => { ui.colored_label(ui.visuals().error_fg_color, "Window discovery unavailable"); }
+                                    Some(crate::window_catalog::WindowDiscoveryStatus::Ready) if self.windows.is_empty() => { ui.label("No windows available"); }
+                                    _ => {}
+                                }
                                 if draft.region.take().is_some() {
                                     // Region selection belongs to display capture.
                                 }
@@ -654,6 +737,13 @@ impl RecordingDialogState {
                         #[cfg(not(test))] let _ = cursor;
                     });
 
+                    let refresh = ui.add_enabled(!has_job, egui::Button::new("Refresh"));
+                    #[cfg(test)]
+                    self.test_controls.insert("refresh", (refresh.rect, ui.clip_rect(), refresh.enabled()));
+                    if refresh.clicked() {
+                        commands.push(RecordingUiCommand::RefreshTargets { revision: self.selection_revision });
+                    }
+
                     if self.target_refresh_pending() {
                         ui.label("Refreshing display targets…");
                     }
@@ -661,6 +751,10 @@ impl RecordingDialogState {
                     if let Some(error) = self.target_error.as_deref() {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
+                    if let Some(error) = self.outline_error.as_deref() {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    ui.label("The yellow outline marks the selected display region. Windows may also show its own capture border; this app does not suppress it.");
                     if let Some(Ok(region)) = self.pending_region.as_ref() {
                         ui.label(format!(
                             "Selected region: {} × {} at {}, {}",
@@ -1268,6 +1362,7 @@ impl RecordingDialogState {
     ) -> Vec<RetainedRecordingAction> {
         let mut accepted = Vec::new();
         let mut committed_selection_pass = None;
+        let mut switched_to_window = false;
         if let Some(pending) = self.pending_selection.take() {
             if pending.provenance.was_retained(ctx)
                 && pending.setup.is_none_or(|receipt| {
@@ -1276,6 +1371,8 @@ impl RecordingDialogState {
             {
                 if pending.selection != self.selection {
                     let previous_revision = self.selection_revision;
+                    switched_to_window = self.selection.target_kind != RecordingTargetKind::Window
+                        && pending.selection.target_kind == RecordingTargetKind::Window;
                     self.selection = pending.selection;
                     self.selection_revision = self.selection_revision.wrapping_add(1);
                     if self.pending_region_revision == Some(previous_revision) {
@@ -1328,6 +1425,9 @@ impl RecordingDialogState {
                 None
             }
         });
+        if switched_to_window && !close_setup && host_move.is_none() {
+            accepted.push(RetainedRecordingAction::RefreshWindows);
+        }
         if let Some(frame) = self.setup_pass.take() {
             if self.setup_receipt_retained(ctx, frame.owner, frame.receipt) {
                 let identity = self.native_identity(frame.receipt.host);
@@ -1429,6 +1529,7 @@ impl RecordingDialogState {
                 RecordingUiCommand::ChoosePath { revision }
                 | RecordingUiCommand::PickRegion { revision }
                 | RecordingUiCommand::RefreshTargets { revision }
+                | RecordingUiCommand::ShowRegion { revision }
                 | RecordingUiCommand::RegionAcknowledged { revision } => Some(revision),
                 _ => None,
             };
@@ -1461,6 +1562,9 @@ impl RecordingDialogState {
                         selection_revision: effective_revision.unwrap_or(self.selection_revision),
                     }
                 }
+                RecordingUiCommand::ShowRegion { .. } => RetainedRecordingAction::ShowRegion {
+                    selection_revision: effective_revision.unwrap_or(self.selection_revision),
+                },
                 RecordingUiCommand::Stop { generation } => {
                     RetainedRecordingAction::Stop { generation }
                 }
@@ -1536,6 +1640,9 @@ impl RecordingDialogState {
                 let (hwnd, pid) = selection
                     .window
                     .ok_or_else(|| "select a window before recording".to_owned())?;
+                if !self.windows.iter().any(|window| window_key(window) == (hwnd, pid)) {
+                    return Err("the selected window is no longer available".to_owned());
+                }
                 let live = window_catalog
                     .describe_current(hwnd)
                     .filter(|window| window.pid == pid)
@@ -1708,6 +1815,75 @@ impl RecordingDialogState {
 }
 
 impl LauncherApp {
+    pub(crate) fn reconcile_recording_outline(&mut self, ctx: &egui::Context) {
+        use crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent;
+        use crate::recording::RecorderState;
+        let selector_conflict = self.mkmacro_dialog.visual_overlay_controller().has_pending_selector();
+        self.recording_dialog.selector_conflict = selector_conflict;
+        let snapshot = self.recording_controller.snapshot();
+        let desired = if !snapshot.session.stop_pending()
+            && matches!(snapshot.session.state(), RecorderState::Countdown { .. } | RecorderState::Recording { .. })
+        {
+            snapshot.active_generation.and_then(|generation| snapshot.session.request().and_then(|request| {
+                matches!(request.target().identity(), CaptureIdentity::Display { .. })
+                    .then_some((generation, request.region()))
+            }))
+        } else { None };
+        let overlay = &mut self.recording_dialog.recorder_overlay;
+        let mut error_changed = false;
+        let mut failure_to_report = None;
+        if overlay.preview.is_some_and(|(_, revision)| {
+            !self.recording_dialog.open || revision != self.recording_dialog.selection_revision || selector_conflict || desired.is_some()
+        }) {
+            overlay.cancel_preview();
+        }
+        let events: Vec<_> = overlay.service.as_ref().map(|service| service.events.try_iter().collect()).unwrap_or_default();
+        for event in events {
+            match event {
+                VisualOverlayEvent::Error { operation_id, error } => {
+                    if overlay.active.is_some_and(|(_, id)| id == operation_id) {
+                        overlay.failed_generation = overlay.active.take().map(|(generation, _)| generation);
+                        self.recording_dialog.outline_error = Some(format!("Recording outline unavailable: {error}"));
+                        failure_to_report = self.recording_dialog.outline_error.clone();
+                        error_changed = true;
+                    } else if overlay.preview.is_some_and(|(id, _)| id == operation_id) {
+                        overlay.preview = None;
+                        self.recording_dialog.outline_error = Some(format!("Region preview unavailable: {error}"));
+                        failure_to_report = self.recording_dialog.outline_error.clone();
+                        error_changed = true;
+                    }
+                }
+                VisualOverlayEvent::Expired { operation_id } | VisualOverlayEvent::Cancelled { operation_id }
+                    if overlay.preview.is_some_and(|(id, _)| id == operation_id) => {
+                    overlay.preview = None;
+                }
+                _ => {}
+            }
+        }
+        if overlay.active.map(|(generation, _)| generation) != desired.map(|(generation, _)| generation) {
+            overlay.cancel_active();
+        }
+        if let Some((generation, rect)) = desired
+            && overlay.active.is_none()
+            && overlay.failed_generation != Some(generation)
+        {
+            overlay.cancel_preview();
+            match overlay.start(ctx, rect, true) {
+                Ok(id) => { overlay.active = Some((generation, id)); self.recording_dialog.outline_error = None; }
+                Err(error) => { overlay.failed_generation = Some(generation); self.recording_dialog.outline_error = Some(error.clone()); failure_to_report = Some(error); error_changed = true; }
+            }
+        }
+        if error_changed && self.recording_dialog.open {
+            let host = self.recording_dialog.host.identity();
+            if host.host == super::utility_host::UtilityPresentation::Popout {
+                ctx.request_repaint_of(self.recording_dialog.native_identity(host).viewport_id);
+            }
+        }
+        if let Some(error) = failure_to_report {
+            self.report_error_message("recording.outline", error);
+        }
+    }
+
     pub(crate) fn open_recording_setup(&mut self) {
         self.recording_dialog.open();
         self.focus_panel(super::Panel::RecordingDialog);
@@ -1762,6 +1938,20 @@ impl LauncherApp {
     }
 
     pub(crate) fn poll_recording_targets(&mut self, ctx: &egui::Context) {
+        if self.recording_dialog.open && self.recording_dialog.initial_target_request {
+            self.recording_dialog.initial_target_request = false;
+            let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+            self.recording_dialog.refresh_targets(ctx, &catalog);
+        }
+        if self.recording_dialog.open {
+            let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+            if self.recording_dialog.refresh_window_snapshot(&catalog) {
+                let owner = self.recording_dialog.host.identity();
+                if owner.host == super::utility_host::UtilityPresentation::Popout {
+                    ctx.request_repaint_of(self.recording_dialog.native_identity(owner).viewport_id);
+                }
+            }
+        }
         if !self.recording_dialog.target_refresh_pending_for_shutdown() {
             return;
         }
@@ -1822,6 +2012,35 @@ impl LauncherApp {
                         self.recording_dialog.refresh_targets(ctx, &catalog);
                     }
                 }
+                RetainedRecordingAction::RefreshWindows => {
+                    let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+                    catalog.request_refresh();
+                    self.recording_dialog.refresh_window_snapshot(&catalog);
+                }
+                RetainedRecordingAction::ShowRegion { selection_revision } => {
+                    if selection_revision != self.recording_dialog.selection_revision()
+                        || self.recording_dialog.selection.target_kind != RecordingTargetKind::Display
+                        || self.recording_dialog.selection.region.is_none()
+                        || self.recording_controller.has_active_job()
+                        || self.recording_dialog.has_selector_operation()
+                        || self.mkmacro_dialog.visual_overlay_controller().has_pending_selector()
+                    { continue; }
+                    let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+                    match self.recording_dialog.build_request(&catalog) {
+                        Ok(request) => {
+                            self.recording_dialog.recorder_overlay.cancel_preview();
+                            match self.recording_dialog.recorder_overlay.start(ctx, request.region(), false) {
+                                Ok(id) => { self.recording_dialog.recorder_overlay.preview = Some((id, selection_revision)); self.recording_dialog.outline_error = None; }
+                                Err(error) => self.recording_dialog.outline_error = Some(error),
+                            }
+                        }
+                        Err(error) => self.recording_dialog.outline_error = Some(error),
+                    }
+                    let host = self.recording_dialog.host.identity();
+                    if host.host == super::utility_host::UtilityPresentation::Popout {
+                        ctx.request_repaint_of(self.recording_dialog.native_identity(host).viewport_id);
+                    }
+                }
                 RetainedRecordingAction::Stop { generation } => {
                     match self.recording_controller.stop_generation(generation) {
                         Ok(true) => ctx.request_repaint(),
@@ -1851,6 +2070,7 @@ impl LauncherApp {
                 RetainedRecordingAction::RegionAcknowledged { .. } => {}
             }
         }
+        self.reconcile_recording_outline(ctx);
     }
 
     fn choose_recording_output(&mut self, selection_revision: u64) {
@@ -1947,6 +2167,7 @@ impl LauncherApp {
             self.report_error_message("recording.start", error);
             return;
         }
+        self.recording_dialog.recorder_overlay.cancel_preview();
         match self
             .recording_controller
             .prepare(request, path, &self.activity_center)
@@ -2147,6 +2368,222 @@ mod tests {
             Some(std::collections::HashSet::new()),
             Some(std::collections::HashMap::new()),
         )
+    }
+
+    #[test]
+    fn recording_outline_tracks_frozen_generation_and_retires_preview() {
+        use crate::gui::mkmacro_dialog::visual_overlay::{NativeVisualOverlayService, ServiceTestObserver, ServiceTestRenderer, VisualOverlayCommand, VisualOverlayController};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(&ctx, directory.path());
+        let (mut draft, catalog) = selected_display_state();
+        draft.open();
+        draft.selection.format = RecordingFormat::Gif;
+        draft.selection.frames_per_second = 10;
+        let request = draft.build_request(&catalog).unwrap();
+        let frozen_region = request.region();
+        app.recording_dialog = draft;
+        app.recording_controller = crate::recording::RecordingController::new(Arc::new(UiBackend), || {});
+        let observer = Arc::new(ServiceTestObserver::default());
+        let renderer = Arc::clone(&observer);
+        app.recording_dialog.recorder_overlay.service = Some(NativeVisualOverlayService::start_with_observer(
+            move || VisualOverlayController::new(Box::new(ServiceTestRenderer(renderer))), Arc::clone(&observer),
+        ).unwrap());
+        app.recording_dialog.set_region_operation(Some(999), app.recording_dialog.selection_revision);
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let provenance = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+            let receipt = RecordingSetupReceipt { root: provenance, host: app.recording_dialog.host.identity(), epoch: app.recording_dialog.setup_epoch, native: false };
+            app.recording_dialog.pending_actions.push(PendingAction { provenance, setup: Some(receipt), command: RecordingUiCommand::ShowRegion { revision: app.recording_dialog.selection_revision } });
+        }).drop_without_applying_deltas();
+        app.complete_recording_dialog(&ctx);
+        assert!(observer.commands.lock().unwrap().is_empty());
+        assert!(app.recording_dialog.recorder_overlay.preview.is_none());
+        app.recording_dialog.set_region_operation(None, app.recording_dialog.selection_revision);
+        let preview_id = app.recording_dialog.recorder_overlay.start(&ctx, frozen_region, false).unwrap();
+        app.recording_dialog.recorder_overlay.preview = Some((preview_id, app.recording_dialog.selection_revision));
+        observer.wait_for_commands(1);
+        app.recording_dialog.selection_revision += 1;
+        app.reconcile_recording_outline(&ctx);
+        observer.wait_for_commands(2);
+        assert!(app.recording_dialog.recorder_overlay.preview.is_none());
+        let generation = app.recording_controller.prepare(request.clone(), directory.path().join("outline.gif"), &app.activity_center).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(app.recording_controller.snapshot().session.state(), crate::recording::RecorderState::Countdown { .. } | crate::recording::RecorderState::Recording { .. }) {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.reconcile_recording_outline(&ctx);
+        observer.wait_for_commands(3);
+        let active = app.recording_dialog.recorder_overlay.active.unwrap();
+        assert_eq!(active.0, generation);
+        assert!(matches!(observer.commands.lock().unwrap()[2], VisualOverlayCommand::RecordingRectangle { rect, persistent: true, .. } if rect == frozen_region));
+        app.recording_dialog.close();
+        for _ in 0..4 { app.reconcile_recording_outline(&ctx); }
+        assert_eq!(app.recording_dialog.recorder_overlay.active, Some(active));
+        assert_eq!(observer.commands.lock().unwrap().len(), 3);
+        app.recording_controller.discard(generation).unwrap();
+        app.reconcile_recording_outline(&ctx);
+        observer.wait_for_commands(4);
+        assert!(app.recording_dialog.recorder_overlay.active.is_none());
+        assert!(matches!(observer.commands.lock().unwrap()[3], VisualOverlayCommand::Cancel { expected_operation_id: Some(id) } if id == active.1));
+        while app.recording_controller.has_active_job() {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let window = CaptureTarget::window(11, 22, 33, ScreenRect::new(-40, -20, 32, 24)).unwrap();
+        let window_request = RecordingRequest::new(window, ScreenRect::new(-40, -20, 32, 24), request.options().clone()).unwrap();
+        let next = app.recording_controller.prepare(window_request, directory.path().join("window.gif"), &app.activity_center).unwrap();
+        assert_ne!(generation, next);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(app.recording_controller.snapshot().session.state(), crate::recording::RecorderState::Countdown { .. } | crate::recording::RecorderState::Recording { .. }) {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.reconcile_recording_outline(&ctx);
+        assert!(app.recording_dialog.recorder_overlay.active.is_none());
+        assert_eq!(observer.commands.lock().unwrap().len(), 4);
+        app.recording_controller.discard(next).unwrap();
+        while app.recording_controller.has_active_job() {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let third = app.recording_controller.prepare(request, directory.path().join("again.gif"), &app.activity_center).unwrap();
+        assert_ne!(third, generation);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(app.recording_controller.snapshot().session.state(), crate::recording::RecorderState::Countdown { .. } | crate::recording::RecorderState::Recording { .. }) {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.reconcile_recording_outline(&ctx);
+        observer.wait_for_commands(5);
+        let newer = app.recording_dialog.recorder_overlay.active.unwrap();
+        assert_eq!(newer.0, third);
+        assert_ne!(newer.1, active.1);
+        app.recording_dialog.recorder_overlay.cancel(active.1);
+        observer.wait_for_commands(6);
+        app.reconcile_recording_outline(&ctx);
+        assert_eq!(app.recording_dialog.recorder_overlay.active, Some(newer));
+        app.recording_controller.discard(third).unwrap();
+        app.reconcile_recording_outline(&ctx);
+        observer.wait_for_commands(7);
+        assert!(app.recording_dialog.recorder_overlay.active.is_none());
+        while app.recording_controller.has_active_job() {
+            app.recording_controller.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn recorder_window_snapshot_preserves_identity_and_rejects_reused_handle() {
+        let window = |hwnd, pid, title: &str| WindowDescriptor {
+            hwnd, pid, title: title.into(), executable: None, process_path: None, class_name: None,
+        };
+        let original = window(42, 7, "Original");
+        let mut state = RecordingDialogState::default();
+        state.open();
+        assert!(state.initial_target_request);
+        let first = WindowCatalog::from_snapshot(vec![original.clone(), window(99, 8, "Other")]);
+        state.refresh_window_snapshot(&first);
+        assert_eq!(state.selection.window, Some((42, 7)));
+        let updated = WindowCatalog::from_snapshot_with_descriptor(
+            vec![window(99, 8, "Other"), window(42, 7, "Renamed")],
+            move |_| Some(window(42, 88, "Reused")),
+        );
+        state.windows_generation = None;
+        state.refresh_window_snapshot(&updated);
+        assert_eq!(state.selection.window, Some((42, 7)));
+        state.selection.target_kind = RecordingTargetKind::Window;
+        assert!(state.build_request(&updated).unwrap_err().contains("no longer available"));
+        let missing = WindowCatalog::from_snapshot(Vec::new());
+        state.windows_generation = None;
+        state.refresh_window_snapshot(&missing);
+        assert_eq!(state.selection.window, Some((42, 7)));
+        assert!(state.build_request(&missing).is_err());
+    }
+
+    #[test]
+    fn recorder_open_and_retained_refresh_use_shared_cold_catalog() {
+        struct Provider {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<Vec<WindowDescriptor>>,
+        }
+        impl crate::window_catalog::WindowProvider for Provider {
+            fn enumerate(&mut self) -> Vec<WindowDescriptor> {
+                self.started.send(()).unwrap();
+                self.release.recv().unwrap()
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(&ctx, directory.path());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let updates = Arc::new(crate::plugin::PluginSearchUpdates::default());
+        let wake_ctx = ctx.clone();
+        updates.set_repaint_callback(Arc::new(move || {
+            wake_ctx.request_repaint_of(egui::ViewportId::ROOT);
+            let _ = wake_tx.send(());
+        }));
+        let catalog = Arc::new(WindowCatalog::start(Provider { started: started_tx, release: release_rx }, updates));
+        app.plugins.set_window_catalog_for_test(Arc::clone(&catalog));
+        app.open_recording_setup();
+        let (display_tx, display_rx) = mpsc::sync_channel(1);
+        app.recording_dialog.target_refresh = Some(TargetRefreshWorker {
+            result_rx: display_rx, result: None, setup_epoch: app.recording_dialog.setup_epoch,
+            joined: Arc::new(AtomicBool::new(false)), settled: Arc::new(AtomicBool::new(false)),
+            retirement_unavailable: Arc::new(AtomicBool::new(false)),
+        });
+        app.poll_recording_targets(&ctx);
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(catalog.discovery_snapshot().status, crate::window_catalog::WindowDiscoveryStatus::Loading);
+        assert!(app.recording_dialog.host.transition(super::super::utility_host::UtilityPresentation::Popout));
+        let native = app.recording_dialog.native_identity(app.recording_dialog.host.identity()).viewport_id;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let context = ui.ctx().clone();
+            app.recording_dialog.render_setup_body(&context, &catalog, &app.recording_controller, true, true, Some(ui), None);
+        }).drop_without_applying_deltas();
+        assert!(app.recording_dialog.test_control("refresh").unwrap().2);
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx();
+            let provenance = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            let receipt = RecordingSetupReceipt { root: provenance, host: app.recording_dialog.host.identity(), epoch: app.recording_dialog.setup_epoch, native: false };
+            let mut selection = app.recording_dialog.selection.clone();
+            selection.target_kind = RecordingTargetKind::Window;
+            app.recording_dialog.pending_selection = Some(PendingSelection { provenance, setup: Some(receipt), selection });
+        }).drop_without_applying_deltas();
+        app.complete_recording_dialog(&ctx);
+        release_tx.send(vec![WindowDescriptor { title: "Editor".into(), hwnd: 42, pid: 7, executable: None, process_path: None, class_name: None }]).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        app.poll_recording_targets(&ctx);
+        assert_eq!(app.recording_dialog.selection.window, Some((42, 7)));
+        assert!(ctx.has_requested_repaint_for(&native));
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx();
+            let provenance = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            let receipt = RecordingSetupReceipt { root: provenance, host: app.recording_dialog.host.identity(), epoch: app.recording_dialog.setup_epoch, native: false };
+            app.recording_dialog.pending_actions.push(PendingAction { provenance, setup: Some(receipt), command: RecordingUiCommand::RefreshTargets { revision: app.recording_dialog.selection_revision } });
+        }).drop_without_applying_deltas();
+        app.complete_recording_dialog(&ctx);
+        release_tx.send(Vec::new()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        release_tx.send(Vec::new()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        app.poll_recording_targets(&ctx);
+        assert_eq!(app.recording_dialog.selection.window, Some((42, 7)));
+        assert!(app.recording_dialog.windows.is_empty());
+        app.recording_dialog.target_refresh = None;
+        drop(display_tx);
     }
 
     #[test]

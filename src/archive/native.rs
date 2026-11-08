@@ -504,6 +504,17 @@ impl NativeArchiveDestination {
         self.root.identity
     }
 
+    pub(crate) fn contains_ancestor(&self, identity: NativeFileIdentity) -> bool {
+        let mut current = Some(self.root.as_ref());
+        while let Some(directory) = current {
+            if directory.identity == identity {
+                return true;
+            }
+            current = directory.parent.as_deref();
+        }
+        false
+    }
+
     pub(crate) fn verify_identity(&self) -> Result<NativeFileIdentity, NativeArchiveError> {
         self.root.verify_identity()
     }
@@ -746,6 +757,252 @@ impl NativeDirectoryHandle {
     }
 }
 
+struct OrdinaryFileAdmission {
+    file: VerifiedOverlappedFile,
+    ancestors: Arc<HeldDirectory>,
+    identity: NativeFileIdentity,
+    len: u64,
+    modified: u64,
+    created: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CreationFileEvidence {
+    identity: NativeFileIdentity,
+    len: u64,
+    modified: u64,
+    created: u64,
+    changed: i64,
+}
+
+fn creation_change_time(
+    file: &File,
+    identity: NativeFileIdentity,
+) -> Result<i64, NativeArchiveError> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+    };
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: the held file handle is live and info is a writable buffer of
+    // exactly the size required for FileBasicInfo.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle() as _),
+            FileBasicInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .map_err(|error| {
+        NativeArchiveError::from_win32("creation FILE_BASIC_INFO", error, Some(identity))
+    })?;
+    Ok(info.ChangeTime)
+}
+
+pub(crate) struct NativeCreationFile {
+    path: PathBuf,
+    admission: OrdinaryFileAdmission,
+    changed: i64,
+}
+
+impl NativeCreationFile {
+    pub(crate) fn open(path: &Path) -> Result<Self, NativeArchiveError> {
+        let admission = open_ordinary_file(path)?;
+        let changed = creation_change_time(admission.file.as_file(), admission.identity)?;
+        Ok(Self {
+            path: path.to_owned(),
+            admission,
+            changed,
+        })
+    }
+    pub(crate) fn identity(&self) -> NativeFileIdentity {
+        self.admission.identity
+    }
+    pub(crate) fn len(&self) -> u64 {
+        self.admission.len
+    }
+    pub(crate) fn evidence(&self) -> CreationFileEvidence {
+        CreationFileEvidence {
+            identity: self.admission.identity,
+            len: self.admission.len,
+            modified: self.admission.modified,
+            created: self.admission.created,
+            changed: self.changed,
+        }
+    }
+    pub(crate) fn verified_file(&self) -> &VerifiedOverlappedFile {
+        &self.admission.file
+    }
+    pub(crate) fn verify(&self) -> Result<(), NativeArchiveError> {
+        let current = open_ordinary_file(&self.path)?;
+        let metadata = self.admission.file.as_file().metadata().map_err(|error| {
+            NativeArchiveError::from_io("creation source metadata", error, Some(self.identity()))
+        })?;
+        if current.identity != self.admission.identity
+            || current.len != self.admission.len
+            || current.modified != self.admission.modified
+            || current.created != self.admission.created
+            || metadata.len() != self.admission.len
+            || metadata.last_write_time() != self.admission.modified
+            || metadata.creation_time() != self.admission.created
+            || creation_change_time(current.file.as_file(), current.identity)? != self.changed
+            || creation_change_time(self.admission.file.as_file(), self.identity())? != self.changed
+        {
+            return Err(NativeArchiveError::validation(
+                "creation source changed",
+                io::ErrorKind::InvalidData,
+                Some(self.identity()),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CreationDirectoryEvidence {
+    identity: NativeFileIdentity,
+    modified: u64,
+    changed: i64,
+}
+pub(crate) struct NativeCreationDirectory {
+    path: PathBuf,
+    directory: Arc<HeldDirectory>,
+    evidence: CreationDirectoryEvidence,
+}
+impl NativeCreationDirectory {
+    pub(crate) fn open(path: &Path) -> Result<Self, NativeArchiveError> {
+        let directory = open_directory_path(path, false)?;
+        let metadata = directory.file.metadata().map_err(|e| {
+            NativeArchiveError::from_io("creation directory metadata", e, Some(directory.identity))
+        })?;
+        Ok(Self {
+            path: path.to_owned(),
+            evidence: CreationDirectoryEvidence {
+                identity: directory.identity,
+                modified: metadata.last_write_time(),
+                changed: creation_change_time(&directory.file, directory.identity)?,
+            },
+            directory,
+        })
+    }
+    pub(crate) fn identity(&self) -> NativeFileIdentity {
+        self.directory.identity
+    }
+    pub(crate) fn evidence(&self) -> CreationDirectoryEvidence {
+        self.evidence
+    }
+    pub(crate) fn verify(&self) -> Result<(), NativeArchiveError> {
+        self.directory.verify_identity()?;
+        let current = Self::open(&self.path)?;
+        let held = self.directory.file.metadata().map_err(|e| {
+            NativeArchiveError::from_io(
+                "creation directory metadata",
+                e,
+                Some(self.directory.identity),
+            )
+        })?;
+        if current.evidence != self.evidence
+            || held.last_write_time() != self.evidence.modified
+            || creation_change_time(&self.directory.file, self.directory.identity)?
+                != self.evidence.changed
+        {
+            return Err(NativeArchiveError::validation(
+                "creation source directory changed",
+                io::ErrorKind::InvalidData,
+                Some(self.directory.identity),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn open_ordinary_file(path: &Path) -> Result<OrdinaryFileAdmission, NativeArchiveError> {
+    let (volume_root, mut components) = split_local_absolute_path(path)?;
+    let leaf = components.pop().ok_or_else(|| {
+        NativeArchiveError::validation(
+            "archive source path has no filename",
+            io::ErrorKind::InvalidInput,
+            None,
+        )
+    })?;
+    let ancestors = open_directory_parts(&volume_root, &components, false)?;
+    let (file, _) = open_relative(
+        &ancestors,
+        &leaf,
+        windows::Win32::Storage::FileSystem::FILE_READ_DATA
+            | windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
+            | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
+        windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        windows::Wdk::Storage::FileSystem::FILE_OPEN,
+        windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
+            | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
+        windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+        "NtCreateFile(FILE_OPEN held archive source)",
+        || Ok(()),
+    )?;
+    let metadata = file.metadata().map_err(|error| {
+        NativeArchiveError::from_io(
+            "File::metadata(archive source)",
+            error,
+            Some(ancestors.identity),
+        )
+    })?;
+    let identity = native_file_identity(&file).map_err(|error| {
+        NativeArchiveError::from_io(
+            "FILE_ID_INFO(archive source)",
+            error,
+            Some(ancestors.identity),
+        )
+    })?;
+    if metadata.file_attributes()
+        & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+        != 0
+        || !metadata.is_file()
+    {
+        return Err(NativeArchiveError::validation(
+            "archive source is not an ordinary file",
+            io::ErrorKind::InvalidData,
+            Some(identity),
+        ));
+    }
+    if identity.volume_serial_number() != ancestors.identity.volume_serial_number() {
+        return Err(NativeArchiveError::validation(
+            "archive source crossed the held local volume",
+            io::ErrorKind::InvalidData,
+            Some(identity),
+        ));
+    }
+    let archive_len = metadata.len();
+    let modified = metadata.last_write_time();
+    let created = metadata.creation_time();
+    let file = VerifiedOverlappedFile::verify(file).map_err(|error| {
+        NativeArchiveError::validation(
+            match error {
+                super::native_io::NativeIoStartError::HandleModeQueryFailed { .. } => {
+                    "verify overlapped archive source mode"
+                }
+                super::native_io::NativeIoStartError::SynchronousHandle { .. } => {
+                    "archive source was opened synchronously"
+                }
+                super::native_io::NativeIoStartError::InvalidBufferLength => {
+                    "verify overlapped archive source mode"
+                }
+            },
+            io::ErrorKind::InvalidData,
+            Some(identity),
+        )
+    })?;
+    Ok(OrdinaryFileAdmission {
+        file,
+        ancestors,
+        identity,
+        len: archive_len,
+        modified,
+        created,
+    })
+}
+
 /// One opened archive source. Catalog verification reads through an
 /// explicit-offset adapter over this held handle; it never reopens the path.
 pub(crate) struct NativeArchiveSource {
@@ -764,79 +1021,14 @@ impl NativeArchiveSource {
         revision: ArchiveRevision,
         limits: ArchiveLimits,
     ) -> Result<Self, NativeArchiveError> {
-        let (volume_root, mut components) = split_local_absolute_path(path)?;
-        let leaf = components.pop().ok_or_else(|| {
-            NativeArchiveError::validation(
-                "archive source path has no filename",
-                io::ErrorKind::InvalidInput,
-                None,
-            )
-        })?;
-        let ancestors = open_directory_parts(&volume_root, &components, false)?;
-        let (file, _) = open_relative(
-            &ancestors,
-            &leaf,
-            windows::Win32::Storage::FileSystem::FILE_READ_DATA
-                | windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
-                | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
-            windows::Wdk::Storage::FileSystem::FILE_OPEN,
-            windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            "NtCreateFile(FILE_OPEN held archive source)",
-            || Ok(()),
-        )?;
-        let metadata = file.metadata().map_err(|error| {
-            NativeArchiveError::from_io(
-                "File::metadata(archive source)",
-                error,
-                Some(ancestors.identity),
-            )
-        })?;
-        let identity = native_file_identity(&file).map_err(|error| {
-            NativeArchiveError::from_io(
-                "FILE_ID_INFO(archive source)",
-                error,
-                Some(ancestors.identity),
-            )
-        })?;
-        if metadata.file_attributes()
-            & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
-            != 0
-            || !metadata.is_file()
-        {
-            return Err(NativeArchiveError::validation(
-                "archive source is not an ordinary file",
-                io::ErrorKind::InvalidData,
-                Some(identity),
-            ));
-        }
-        if identity.volume_serial_number() != ancestors.identity.volume_serial_number() {
-            return Err(NativeArchiveError::validation(
-                "archive source crossed the held local volume",
-                io::ErrorKind::InvalidData,
-                Some(identity),
-            ));
-        }
-        let archive_len = metadata.len();
-        let file = VerifiedOverlappedFile::verify(file).map_err(|error| {
-            NativeArchiveError::validation(
-                match error {
-                    super::native_io::NativeIoStartError::HandleModeQueryFailed { .. } => {
-                        "verify overlapped archive source mode"
-                    }
-                    super::native_io::NativeIoStartError::SynchronousHandle { .. } => {
-                        "archive source was opened synchronously"
-                    }
-                    super::native_io::NativeIoStartError::InvalidBufferLength => {
-                        "verify overlapped archive source mode"
-                    }
-                },
-                io::ErrorKind::InvalidData,
-                Some(identity),
-            )
-        })?;
+        let admitted = open_ordinary_file(path)?;
+        let OrdinaryFileAdmission {
+            file,
+            ancestors,
+            identity,
+            len: archive_len,
+            ..
+        } = admitted;
         Ok(Self {
             file,
             _ancestors: ancestors,
@@ -1458,11 +1650,12 @@ fn rename_open_file_relative_no_replace(
                 io::ErrorKind::InvalidInput,
                 Some(identity),
             )
-        })?;
+        })?
+        .max(std::mem::size_of::<FILE_RENAME_INFO>());
     let mut buffer = vec![0_u64; buffer_bytes.div_ceil(std::mem::size_of::<u64>())];
     let buffer_ptr = buffer.as_mut_ptr().cast::<u8>();
-    // SAFETY: the aligned buffer has the exact FILE_RENAME_INFO prefix and
-    // UTF-16 leaf length. RootDirectory is the held same-parent handle, and
+    // SAFETY: the aligned buffer contains the full FILE_RENAME_INFO and
+    // UTF-16 leaf. RootDirectory is the held same-parent handle, and
     // ReplaceIfExists=false makes the namespace operation no-replace.
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -1533,6 +1726,9 @@ pub(crate) struct OwnedStage {
 }
 
 impl OwnedStage {
+    pub(crate) fn verified_file(&self) -> &VerifiedOverlappedFile {
+        &self.file
+    }
     fn create(parent: Arc<HeldDirectory>) -> Result<Self, NativeArchiveError> {
         parent.verify_identity()?;
         Self::create_after_parent_validation(parent, || Ok(()))

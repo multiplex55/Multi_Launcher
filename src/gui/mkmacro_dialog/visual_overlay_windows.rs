@@ -33,6 +33,7 @@ use windows::{
                 DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos,
                 GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST,
                 IsWindow, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE,
+                GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
                 PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
@@ -56,6 +57,18 @@ const LABEL_COLOR: COLORREF = COLORREF(0x00ffffff);
 const OCR_LINE_COLOR: COLORREF = COLORREF(0x0000a5ff); // orange
 const OCR_WORD_COLOR: COLORREF = COLORREF(0x00ffbf50); // light blue
 const OCR_SELECTED_COLOR: COLORREF = COLORREF(0x0000ff00); // green
+
+fn verify_recording_affinity(
+    set: impl FnOnce() -> Result<(), String>,
+    get: impl FnOnce() -> Result<u32, String>,
+) -> Result<(), String> {
+    set().map_err(|error| format!("Could not exclude recording outline from capture: {error}"))?;
+    let affinity = get().map_err(|error| format!("Could not verify recording outline capture exclusion: {error}"))?;
+    if affinity != WDA_EXCLUDEFROMCAPTURE.0 {
+        return Err("Recording outline capture exclusion was not applied".into());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowRole {
@@ -832,7 +845,7 @@ impl NativeOverlayRenderer {
             OverlayVisual::RectanglePicker {
                 virtual_desktop, ..
             } => Some(*virtual_desktop),
-            OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => Some(*r),
+            OverlayVisual::RectanglePreview(r) | OverlayVisual::RecordingRectangle(r) | OverlayVisual::Window { rect: r, .. } => Some(*r),
             OverlayVisual::Monitor(d) => Some(d.bounds),
             OverlayVisual::Monitors(ds) => monitor_union(ds),
             OverlayVisual::Desktop(_) => None,
@@ -1294,9 +1307,12 @@ impl NativeOverlayRenderer {
             });
             let width = match i32::try_from(bounds.width) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} width exceeds Win32 range")) };
             let height = match i32::try_from(bounds.height) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} height exceeds Win32 range")) };
+            let recording_edge = matches!(visual, OverlayVisual::RecordingRectangle(_));
+            let mut extended_style = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+            if recording_edge { extended_style |= WS_EX_LAYERED; }
             let hwnd = match unsafe {
                 CreateWindowExW(
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                    extended_style,
                     class,
                     PCWSTR::null(),
                     WS_POPUP,
@@ -1324,6 +1340,21 @@ impl NativeOverlayRenderer {
                 self.passive_badges.push(window);
             } else {
                 self.passive_edges.push(window);
+            }
+            if recording_edge {
+                if let Err(error) = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) } {
+                    return self.fail(format!("Could not configure recording outline opacity: {error}"));
+                }
+                if let Err(error) = verify_recording_affinity(
+                    || unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.map_err(|error| error.to_string()),
+                    || {
+                        let mut affinity = 0;
+                        unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.map_err(|error| error.to_string())?;
+                        Ok(affinity)
+                    },
+                ) {
+                    return self.fail(error);
+                }
             }
             if let Err(e) = unsafe {
                 SetWindowPos(
@@ -2038,6 +2069,13 @@ impl Drop for NativeOverlayRenderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_affinity_requires_successful_set_and_exact_readback() {
+        assert!(super::verify_recording_affinity(|| Err("denied".into()), || Ok(17)).is_err());
+        assert!(super::verify_recording_affinity(|| Ok(()), || Err("unavailable".into())).is_err());
+        assert!(super::verify_recording_affinity(|| Ok(()), || Ok(1)).is_err());
+        assert!(super::verify_recording_affinity(|| Ok(()), || Ok(17)).is_ok());
+    }
     use super::*;
 
     fn shield_probe_for(bounds: ScreenRect, ex: u32) -> ShieldProbe {

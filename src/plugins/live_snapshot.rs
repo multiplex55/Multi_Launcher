@@ -60,9 +60,17 @@ impl<T: Clone> LiveSnapshotRegistry<T> {
                 .clone(),
         )
     }
+
+    pub(crate) fn get_existing(&self, path: &str) -> Option<Arc<Mutex<Vec<T>>>> {
+        self.snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&normalized_path(Path::new(path)))
+            .cloned()
+    }
 }
 
-fn normalized_path(path: &Path) -> PathBuf {
+pub(crate) fn normalized_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

@@ -96,7 +96,13 @@ impl HelpWindow {
                             ui.label(
                                 "Type dff to open Duplicate Finder, select folders, and explicitly start a read-only scan. It is bounded to 32 roots, 250,000 files, 350,000 entries, 100,000 directories, depth 256, and 64 MiB of path metadata. Reparse points and cloud placeholders are excluded. Same-sized files are checked with streamed hashes and exact byte comparison; hard-link aliases count as one file identity. Matches without reliable identity are separated from verified totals. Open, Reveal, and Copy Paths revalidate each exact displayed alias; logical duplicate bytes are not guaranteed recoverable disk space. No files are changed.",
                             );
-                            ui.label("Older query: Ctrl+Up");
+                            let older_query = ui.label("Older query: Ctrl+Up");
+                            #[cfg(test)]
+                            {
+                                content_targets[0] = Some(older_query.rect);
+                            }
+                            #[cfg(not(test))]
+                            let _ = older_query;
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.label(egui::RichText::new("Jump Mode").strong());
                             ui.label(
@@ -188,7 +194,7 @@ impl HelpWindow {
                             );
                             ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
-                            let dashboard_guidance = ui.add(
+                            ui.add(
                                 egui::Label::new(
                                     "Open Settings → Dashboard → Customize Dashboard... to edit \
                                      widget layout plus plugin-aware settings such as note/todo queries, \
@@ -196,12 +202,6 @@ impl HelpWindow {
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                             );
-                            #[cfg(test)]
-                            {
-                                content_targets[0] = Some(dashboard_guidance.rect);
-                            }
-                            #[cfg(not(test))]
-                            let _ = dashboard_guidance;
                             ui.separator();
                             ui.label(egui::RichText::new("Linked context").strong());
                             ui.monospace("todo add Draft release @note:release-plan");
@@ -304,47 +304,13 @@ impl HelpWindow {
                     .min_scrolled_height(0.0)
                     .max_height(ui.available_height().max(0.0))
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Query filters").strong());
-                        ui.label("Use filters to narrow results across plugins and widgets:");
-                        let tag_filters = ui.monospace("  tag:<label>   !tag:<label>");
-                        #[cfg(test)]
-                        {
-                            content_targets[0] = Some(tag_filters.rect);
-                        }
-                        #[cfg(not(test))]
-                        let _ = tag_filters;
-                        ui.monospace("  kind:<kind>   id:<action_id>");
-                        ui.monospace("  Quotes for spaces: tag:\"high priority\"");
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new("Linked note/todo/calendar references").strong(),
-                        );
-                        ui.label("Use lightweight entity refs in command text:");
-                        ui.monospace(
-                            "  todo add <text> [p=<priority>] [#tag] @note:<id> @event:<id>",
-                        );
-                        ui.monospace("  note add <title/text> @todo:<id>");
-                        ui.monospace(
-                            "  cal add <date> <time|all-day> <title> @todo:<id> @note:<id>",
-                        );
-                        ui.separator();
-                        ui.label(egui::RichText::new("Search and Replace").strong());
-                        ui.label("Type replace to open the explicit-root dialog. Opening it never starts a search. Approve stable individual match IDs, inspect each selected match's original and proposed text plus the bounded file diff, then explicitly confirm the frozen candidate. Long match previews disclose truncation. Search and preview do not write files; Apply rechecks captured sources and records durable backups and receipts. Partial outcomes remain available for explicit Restore or recovery.");
-                        ui.label("Search / Refresh and the action footer stay visible while the body scrolls. Open Advanced Filters for scope details; fold Files with Matches, File Approvals, and Original vs. Proposed Preview independently. Preview panes scroll both ways. Restore / Recovery reveals receipts. Confirmation reviews scroll above fixed Confirm and Cancel buttons.");
-                        ui.label("UI linking:");
-                        ui.monospace("  Notes dialog → right-click note → Link to todo");
-                        ui.monospace("  Todos dialog → right-click todo → Link note");
-                        ui.separator();
-                        ui.label(egui::RichText::new("Launcher actions").strong());
-                        ui.label("Use these action IDs in custom actions, macros, or gestures:");
-                        ui.monospace("  launcher:toggle  launcher:show  launcher:hide");
-                        ui.monospace("  launcher:focus   launcher:restore");
-                        ui.separator();
+                        let mut matched = false;
                         for (name, desc, capabilities) in infos {
                             let commands = command_map.get(&name).cloned().unwrap_or_default();
                             if !matches_filter(&filt, &name, &desc, &capabilities, &commands) {
                                 continue;
                             }
+                            matched = true;
                             let prefixes = command_prefixes(&commands);
                             ui.label(egui::RichText::new(&name).strong());
                             ui.add(egui::Label::new(desc).wrap_mode(egui::TextWrapMode::Wrap));
@@ -370,6 +336,12 @@ impl HelpWindow {
                                         )
                                         .wrap_mode(egui::TextWrapMode::Wrap),
                                     );
+                                    #[cfg(test)]
+                                    if name == "Help fixture plugin 00"
+                                        && command.label == "fixture:early-command-marker"
+                                    {
+                                        content_targets[0] = Some(command_label.rect);
+                                    }
                                     #[cfg(test)]
                                     if name == "Help fixture plugin 11"
                                         && command.label == "fixture:long-command-marker"
@@ -404,6 +376,9 @@ impl HelpWindow {
                                 }
                             }
                             ui.separator();
+                        }
+                        if !matched && !filt.is_empty() {
+                            ui.label("No commands match the filter.");
                         }
                     });
                 #[cfg(test)]
@@ -510,7 +485,14 @@ mod tests {
         }
 
         fn commands(&self) -> Vec<Action> {
-            if self.index == 11 {
+            if self.index == 0 {
+                vec![Action {
+                    label: "fixture:early-command-marker".to_owned(),
+                    desc: "Early command for bounded help content".to_owned(),
+                    action: "query:fixture-early".to_owned(),
+                    args: None,
+                }]
+            } else if self.index == 11 {
                 vec![Action {
                     label: "fixture:long-command-marker".to_owned(),
                     desc: "Long command for bounded help content".to_owned(),
@@ -531,6 +513,9 @@ mod tests {
                 name: format!("Help fixture plugin {index:02}"),
             }));
         }
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         crate::gui::LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -538,7 +523,7 @@ mod tests {
             plugins,
             root.join("actions.json").to_string_lossy().into_owned(),
             root.join("settings.json").to_string_lossy().into_owned(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -681,6 +666,65 @@ mod tests {
     }
 
     #[test]
+    fn command_help_filters_real_plugin_commands_without_static_tutorials() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        app.plugins
+            .register(Box::new(crate::plugins::folder_size::FolderSizePlugin));
+        app.plugins
+            .register(Box::new(crate::plugins::search_replace::SearchReplacePlugin));
+        let mut help = HelpWindow {
+            open: true,
+            show_examples: true,
+            ..Default::default()
+        };
+        let size = egui::vec2(700.0, 650.0);
+        for (query, expected, absent) in [
+            ("OPEN FOLDER SIZE", "folder_size", "search_replace"),
+            ("RePlAcE", "search_replace", "folder_size"),
+            ("no such command qzx", "", "folder_size"),
+            ("", "Help fixture plugin 00", "Query filters"),
+        ] {
+            help.filter = query.into();
+            let mut texts = Vec::new();
+            for _ in 0..2 {
+                let output = render(&ctx, &mut help, &mut app, size);
+                texts.clear();
+                for shape in &output.shapes {
+                    collect_text_shapes(&shape.shape, shape.clip_rect, &mut texts);
+                }
+                output.drop_without_applying_deltas();
+            }
+            if !expected.is_empty() {
+                assert!(
+                    texts.iter().any(|(text, ..)| text.contains(expected)),
+                    "missing {expected} for {query:?}"
+                );
+            }
+            if query == "no such command qzx" {
+                assert!(
+                    texts
+                        .iter()
+                        .any(|(text, ..)| text == "No commands match the filter.")
+                );
+            }
+            assert!(
+                !texts.iter().any(|(text, ..)| text.contains(absent)),
+                "unexpected {absent} for {query:?}"
+            );
+            for tutorial in [
+                "Query filters",
+                "Linked note/todo/calendar references",
+                "Search and Replace",
+                "Launcher actions",
+            ] {
+                assert!(!texts.iter().any(|(text, ..)| text == tutorial));
+            }
+        }
+    }
+
+    #[test]
     fn bounded_help_scroll_keeps_controls_and_full_content_reachable() {
         let directory = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
@@ -728,7 +772,7 @@ mod tests {
         for (target_index, expected) in [
             (
                 0,
-                "Open Settings → Dashboard → Customize Dashboard... to edit widget layout plus plugin-aware settings such as note/todo queries, context links, or weather location.",
+                "Older query: Ctrl+Up",
             ),
             (
                 1,
@@ -747,7 +791,13 @@ mod tests {
             let target_rect = layout.content_targets[target_index]
                 .expect("the target label reports its actual widget bounds");
             let max_offset = (layout.content_size.y - layout.inner_rect.height()).max(0.0);
-            assert!(layout.inner_rect.contains_rect(target_rect));
+            assert!(
+                layout.inner_rect.contains_rect(target_rect),
+                "quick target {target_index}: target={target_rect:?} viewport={:?} offset={:?} content={:?}",
+                layout.inner_rect,
+                layout.offset,
+                layout.content_size
+            );
             assert!(layout.offset.y >= -f32::EPSILON);
             assert!(layout.offset.y <= max_offset + f32::EPSILON);
             assert!(
@@ -805,7 +855,7 @@ mod tests {
         );
         assert!(command_layout.content_targets.iter().all(Option::is_some));
         for (target_index, expected) in [
-            (0, "  tag:<label>   !tag:<label>"),
+            (0, "  fixture:early-command-marker"),
             (1, "  fixture:long-command-marker"),
             (2, "  fixture-example-marker"),
         ] {

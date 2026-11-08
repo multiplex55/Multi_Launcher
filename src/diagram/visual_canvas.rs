@@ -50,6 +50,7 @@ impl CanvasMapping {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasHandleKind {
+    ConnectorPoint { object_id: VisualObjectId, index: usize },
     ResizeCorner {
         object_id: VisualObjectId,
         sign_x: i8,
@@ -745,6 +746,23 @@ pub fn selection_handles(
     painted_item_prefix: usize,
     mapping: CanvasMapping,
 ) -> Vec<CanvasHandle> {
+    if selection.len() == 1
+        && let Some(id) = selection.first().copied()
+        && let Some(object) = scene.objects.iter().find(|object| object.id == id)
+        && let VisualObjectKind::Connector { connector } = &object.kind
+        && owners_fully_painted(projection, selection, painted_item_prefix)
+        && let Some(item) = projection.items.iter().find(|item| item.object_id == id)
+        && let Some(route) = super::visual_scene::seed_manual_route(connector, item)
+    {
+        let points = match route {
+            super::visual::VisualManualRoute::Polyline { points } => points,
+            super::visual::VisualManualRoute::Cubic { control1, control2 } => vec![control1, control2],
+        };
+        return points.into_iter().enumerate().map(|(index, point)| CanvasHandle {
+            kind: CanvasHandleKind::ConnectorPoint { object_id: id, index },
+            center: ScenePoint { x: point.x, y: point.y },
+        }).collect();
+    }
     let Some(resolved) = resolve_visual_membership(scene, selection) else {
         return Vec::new();
     };
@@ -1744,6 +1762,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
@@ -1832,6 +1851,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoint_ids[0],
                             anchor: VisualAnchor::East,
@@ -2177,6 +2197,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: ids[2],
                             anchor: VisualAnchor::East,

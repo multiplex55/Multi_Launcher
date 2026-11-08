@@ -63,20 +63,46 @@ not evaluated again.
 ## Visual Canvas authoring
 
 Use the shape picker and **Add shape** to place a primitive, and **Add text**
-for labels, notes, or callouts. **Add connector** creates a connection between
+for independent notes or callouts. Double-click a primitive or its centered
+label to edit its owned label. Enter commits, Shift+Enter adds a line, and
+Escape cancels. The label moves, resizes, rotates, copies, and deletes with its
+shape; existing free text stays independent. Labelled primitives cannot be
+converted to presets because preset components cannot preserve their labels.
+The font picker offers Sans serif and Monospace; an imported family is retained
+until you choose a replacement.
+
+**Add connector** creates a connection between
 the first two eligible objects. Use the connector's properties to choose
 endpoints, anchors, a route, arrow direction, and a label. Endpoints stay
 attached as objects move. A route the canvas could not resolve is shown as a
 fallback.
+
+Select a connector to drag its route handles, use **Add bend** or
+**Remove last bend**, or choose **Reset automatic**. Manual interior points and
+curved controls stay at their world positions when an endpoint moves; the
+endpoints remain attached. Copying and pasting a connected selection translates
+its manual points with the copied objects. Curved controls and polyline bends
+use their respective route types.
 
 Drag or marquee-select on the canvas, and use the handles to resize or
 rotate. A completed gesture is one undo step. Grid snapping, alignment
 guides, Align, Distribute, layer and stack controls, and a minimap help
 arrange the scene.
 
+With the writable Visual Canvas focused, Ctrl+C, Ctrl+X, and Ctrl+V copy, cut,
+and paste selected objects as a structured fragment; repeated pastes are offset
+so they remain visible. Ctrl+A selects the canvas objects except the protected
+document title; Delete or Backspace
+deletes the selection, and Ctrl+Z, Ctrl+Y, or Ctrl+Shift+Z undo or redo. A
+copied connector requires both endpoints in the selection. Text editing and
+menus keep their own keyboard shortcuts.
+
 Use **Add image…** to embed a bounded local PNG or JPEG. **Create preset from
 selection** reuses a selection of supported primitives. Visual Canvas supports
-containers, swimlanes and membership, and offers visual starter templates.
+containers, swimlanes and membership. Its nine visual starters are Flowchart,
+Architecture, Mind map, Sequence-style, Dependencies, Organization Chart,
+Network Topology, Decision Tree, and Swimlane Workflow. Replacing a modified
+document with a starter offers Save, Discard, or Cancel.
 The existing Mermaid templates remain available in Mermaid documents. Visual
 Canvas also offers PNG and SVG export from its committed scene.
 For supported visual documents, see [draw.io interchange](DIAGRAM_EXPORT.md#drawio-interchange).
@@ -127,6 +153,10 @@ current document, showing the shared Visual Canvas scene, native Mermaid graph,
 or current and stale source-rendered preview. The viewer has its own camera:
 wheel, middle-button drag, Ctrl+Arrow, and Ctrl+=/Ctrl+- affect only that view
 while it has focus.
+Open and **Fit** make the visual viewer follow its available size; a manual
+pan, zoom, or minimap move keeps that camera until Fit is chosen again. Drag
+inside the minimap viewport to pan continuously, or click outside it to
+recenter. Editor and viewer cameras are independent.
 Closing the viewer window leaves Diagram Studio and its draft open. Saving or
 discarding an accepted Diagram Studio close also closes the viewer; Cancel keeps
 both windows open. The viewer remains synchronized while the launcher is hidden.

@@ -10,7 +10,7 @@ impl Plugin for ZipExtractorPlugin {
         }
         vec![Action {
             label: "Open ZIP Extractor".into(),
-            desc: "Preview and selectively extract supported ZIP entries".into(),
+            desc: "Create ZIPs or preview and extract Stored and Deflated entries".into(),
             action: "zip:open".into(),
             args: None,
         }]
@@ -21,7 +21,7 @@ impl Plugin for ZipExtractorPlugin {
     }
 
     fn description(&self) -> &str {
-        "Preview and selectively extract supported ZIP entries (prefix: `zip`)"
+        "Create ZIPs or preview and extract Stored and Deflated entries (prefix: `zip`)"
     }
 
     fn capabilities(&self) -> &[&str] {

@@ -12,7 +12,7 @@ use super::visual::{
     MAX_VISUAL_OBJECTS, MAX_VISUAL_TEXT_BYTES, MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor,
     VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
     VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError, VisualLayer, VisualLayerId,
-    VisualLineStyle, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveShape,
+    VisualLineStyle, VisualManualRoute, VisualRoutePoint, VisualObject, VisualObjectId, VisualObjectKind, VisualOwnedLabel, VisualPrimitiveShape,
     VisualScene, VisualStyle, VisualSwimlaneOrientation, VisualTransform,
 };
 
@@ -630,6 +630,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         _ => unreachable!(),
                     };
                     pending.push(PendingVisualObject::Ready(VisualObject {
+                        owned_label: None,
                         id,
                         layer_id,
                         transform,
@@ -640,6 +641,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         let label_id = allocate_object_id(&mut next_object_id)?;
                         scene.parent_by_child.insert(label_id, id);
                         pending.push(PendingVisualObject::Ready(VisualObject {
+                            owned_label: None,
                             id: label_id,
                             layer_id,
                             transform,
@@ -652,6 +654,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                 } else if shape == VertexShape::Text {
                     let id = allocate_object_id(&mut next_object_id)?;
                     let object = VisualObject {
+                        owned_label: None,
                         id,
                         layer_id,
                         transform,
@@ -671,6 +674,10 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                 } else {
                     let shape_id = allocate_object_id(&mut next_object_id)?;
                     let primitive = VisualObject {
+                        owned_label: (!cell.value.is_empty()).then(|| VisualOwnedLabel {
+                            text: cell.value.clone(),
+                            style: style.text_style(),
+                        }),
                         id: shape_id,
                         layer_id,
                         transform,
@@ -689,29 +696,16 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                     }
                     source_transforms.insert(cell.id.clone(), transform);
                     pending.push(PendingVisualObject::Ready(primitive));
-                    if !cell.value.is_empty() {
-                        report.add(Some(&cell.id), "vertex-label-split-to-text");
-                        let label_id = allocate_object_id(&mut next_object_id)?;
-                        if let Some(parent) = ancestry.frames.last() {
-                            scene
-                                .parent_by_child
-                                .insert(label_id, source_object_ids[&parent.id]);
-                        }
-                        let label = VisualObject {
-                            id: label_id,
-                            layer_id,
-                            transform,
-                            style: style.text_style(),
-                            kind: VisualObjectKind::Text {
-                                text: cell.value.clone(),
-                            },
-                        };
-                        pending.push(PendingVisualObject::Ready(label));
-                    }
                 }
             }
             ParsedCellKind::Edge => {
                 let connector_id = allocate_object_id(&mut next_object_id)?;
+                let mut waypoint_origin = (0.0, 0.0);
+                for frame in &ancestry.frames {
+                    let parent = parse_vertex_transform(frame.node, 0.0)?;
+                    waypoint_origin.0 += parent.x - parent.width / 2.0;
+                    waypoint_origin.1 += parent.y - parent.height / 2.0;
+                }
                 if let (Some(source), Some(target)) = (
                     cell.node.attr("source").and_then(|id| indexed.get(id)),
                     cell.node.attr("target").and_then(|id| indexed.get(id)),
@@ -752,6 +746,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                     source: cell.node.attr("source").map(str::to_owned),
                     target: cell.node.attr("target").map(str::to_owned),
                     node: cell.node,
+                    waypoint_origin,
                 }));
             }
         }
@@ -762,6 +757,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
 
     {
         pending.push(PendingVisualObject::Ready(VisualObject {
+            owned_label: None,
             id: TITLE_OBJECT_ID,
             layer_id: DEFAULT_LAYER_ID,
             transform: inert_title_transform(),
@@ -970,6 +966,7 @@ struct PendingConnector<'a> {
     source: Option<String>,
     target: Option<String>,
     node: &'a XmlNode,
+    waypoint_origin: (f64, f64),
 }
 
 fn select_graph_model(root: &XmlNode) -> Result<(&XmlNode, Option<&str>), DrawioWireError> {
@@ -1634,14 +1631,14 @@ fn geometry_child(node: &XmlNode) -> Result<&XmlNode, DrawioWireError> {
     Ok(&node.children[0])
 }
 
-fn validate_edge_geometry(node: &XmlNode) -> Result<(), DrawioWireError> {
+fn validate_edge_geometry(
+    node: &XmlNode,
+    origin: (f64, f64),
+) -> Result<Option<Vec<VisualRoutePoint>>, DrawioWireError> {
     let geometry = geometry_child(node)?;
     ensure_attributes(geometry, &["as", "relative", "x", "y", "width", "height"])?;
-    if geometry.attr("as") != Some("geometry")
-        || geometry.attr("relative") != Some("1")
-        || !geometry.children.is_empty()
-    {
-        return Err(DrawioWireError::Unsupported("custom connector waypoints"));
+    if geometry.attr("as") != Some("geometry") || geometry.attr("relative") != Some("1") {
+        return Err(DrawioWireError::Unsupported("connector geometry"));
     }
     ensure_whitespace(&geometry.text)?;
     for dimension in ["x", "y", "width", "height"] {
@@ -1649,7 +1646,56 @@ fn validate_edge_geometry(node: &XmlNode) -> Result<(), DrawioWireError> {
             return Err(DrawioWireError::Unsupported("connector label offset"));
         }
     }
-    Ok(())
+    if geometry.children.is_empty() {
+        return Ok(None);
+    }
+    if geometry.children.len() != 1 || geometry.children[0].name != "Array" {
+        return Err(DrawioWireError::Unsupported("custom connector geometry"));
+    }
+    let array = &geometry.children[0];
+    ensure_attributes(array, &["as"])?;
+    ensure_whitespace(&array.text)?;
+    if array.attr("as") != Some("points")
+        || array.children.is_empty()
+        || array.children.len() > super::visual::MAX_VISUAL_CONNECTOR_POINTS
+    {
+        return Err(DrawioWireError::Unsupported(
+            "invalid connector waypoint array",
+        ));
+    }
+    let mut points = Vec::with_capacity(array.children.len());
+    for node in &array.children {
+        if node.name != "mxPoint" || !node.children.is_empty() {
+            return Err(DrawioWireError::Unsupported("invalid connector waypoint"));
+        }
+        ensure_attributes(node, &["x", "y"])?;
+        ensure_whitespace(&node.text)?;
+        let x = parse_number(
+            Some(
+                node.attr("x")
+                    .ok_or(DrawioWireError::Unsupported("missing waypoint x"))?,
+            ),
+            0.0,
+            "waypoint x",
+        )? + origin.0;
+        let y = parse_number(
+            Some(
+                node.attr("y")
+                    .ok_or(DrawioWireError::Unsupported("missing waypoint y"))?,
+            ),
+            0.0,
+            "waypoint y",
+        )? + origin.1;
+        if !x.is_finite()
+            || !y.is_finite()
+            || x.abs() > MAX_VISUAL_COORDINATE_ABS
+            || y.abs() > MAX_VISUAL_COORDINATE_ABS
+        {
+            return Err(DrawioWireError::LimitExceeded("visual geometry"));
+        }
+        points.push(VisualRoutePoint { x, y });
+    }
+    Ok(Some(points))
 }
 
 fn allocate_object_id(next: &mut u64) -> Result<VisualObjectId, DrawioWireError> {
@@ -1665,7 +1711,13 @@ fn resolve_connector(
     source_object_ids: &HashMap<String, VisualObjectId>,
     source_transforms: &HashMap<String, VisualTransform>,
 ) -> Result<VisualObject, DrawioWireError> {
-    validate_edge_geometry(pending.node)?;
+    let points = validate_edge_geometry(pending.node, pending.waypoint_origin)?;
+    if points.is_some() && pending.style.route == VisualConnectorRoute::Curved {
+        return Err(DrawioWireError::Unsupported("manual curved connector controls are not supported"));
+    }
+    if points.is_some() && pending.style.route != VisualConnectorRoute::Straight {
+        return Err(DrawioWireError::Unsupported("manual waypoints require straight edge style"));
+    }
     if pending.label.len() > MAX_VISUAL_CONNECTOR_LABEL_BYTES {
         return Err(DrawioWireError::LimitExceeded("connector-label-bytes"));
     }
@@ -1695,12 +1747,14 @@ fn resolve_connector(
         .target_anchor
         .unwrap_or_else(|| infer_compass_anchor(target_transform, source_transform));
     Ok(VisualObject {
+        owned_label: None,
         id: pending.id,
         layer_id: pending.layer_id,
         transform: VisualTransform::default(),
         style: pending.style.visual_style,
         kind: VisualObjectKind::Connector {
             connector: VisualConnector {
+                manual_route: points.map(|points| VisualManualRoute::Polyline { points }),
                 from: VisualConnectorEndpoint {
                     object_id: source_id,
                     anchor: source_anchor,
@@ -1882,6 +1936,10 @@ pub(crate) fn export_drawio_scene(
         }
         match &object.kind {
             VisualObjectKind::Primitive { shape } => {
+                if object.owned_label.as_ref().is_some_and(|label| label.text.is_empty()) {
+                    result.report.add(Some(&object_wire_id(object.id)), "empty-owned-label-not-exportable");
+                    continue;
+                }
                 let Some(shape) = primitive_to_wire(*shape) else {
                     result.report.add(
                         Some(&object_wire_id(object.id)),
@@ -1893,7 +1951,7 @@ pub(crate) fn export_drawio_scene(
                     &mut writer,
                     object,
                     shape,
-                    None,
+                    object.owned_label.as_ref().map(|label| label.text.as_str()),
                     parents[&object.id],
                     &objects,
                     &mut result.report,
@@ -1911,6 +1969,14 @@ pub(crate) fn export_drawio_scene(
                 )?;
             }
             VisualObjectKind::Connector { connector } => {
+                if matches!(connector.manual_route, Some(VisualManualRoute::Cubic { .. })) {
+                    result.report.add(Some(&object_wire_id(object.id)), "manual-cubic-controls-not-exportable");
+                    continue;
+                }
+                if connector.manual_route.is_some() && connector.route != VisualConnectorRoute::Straight {
+                    result.report.add(Some(&object_wire_id(object.id)), "manual-polyline-route-style-not-exportable");
+                    continue;
+                }
                 if !exportable_vertices.contains(&connector.from.object_id)
                     || !exportable_vertices.contains(&connector.to.object_id)
                 {
@@ -1925,6 +1991,7 @@ pub(crate) fn export_drawio_scene(
                     object,
                     connector,
                     parents[&object.id],
+                    &objects,
                     &mut result.report,
                 )?;
             }
@@ -2160,18 +2227,30 @@ fn vertex_style(
     if object.transform.rotation_degrees != 0.0 {
         properties.push(("rotation", object.transform.rotation_degrees.to_string()));
     }
-    let font_family = if font_family_uses_style_delimiter(&object.style.font_family) {
+    let label_style = object
+        .owned_label
+        .as_ref()
+        .map_or(&object.style, |label| &label.style);
+    if object.owned_label.is_some()
+        && (label_style.opacity != object.style.opacity || label_style.border.alpha != 255)
+    {
+        report.add(
+            Some(&object_wire_id(object.id)),
+            "independent-label-opacity-not-exported",
+        );
+    }
+    let font_family = if font_family_uses_style_delimiter(&label_style.font_family) {
         report.add(
             Some(&object_wire_id(object.id)),
             "font-family-not-representable",
         );
         "sans-serif"
     } else {
-        &object.style.font_family
+        &label_style.font_family
     };
     properties.push(("fontFamily", font_family.to_owned()));
-    properties.push(("fontSize", object.style.font_size.to_string()));
-    properties.push(("fontColor", color_value(object.style.border)));
+    properties.push(("fontSize", label_style.font_size.to_string()));
+    properties.push(("fontColor", color_value(label_style.border)));
     properties.push(("fontStyle", "0".to_owned()));
     if text {
         for (key, value) in &mut properties {
@@ -2199,6 +2278,7 @@ fn write_connector(
     object: &VisualObject,
     connector: &VisualConnector,
     parent: Option<VisualObjectId>,
+    objects: &HashMap<VisualObjectId, &VisualObject>,
     report: &mut DrawioReport,
 ) -> Result<(), DrawioWireError> {
     writer.push("<mxCell id=\"")?;
@@ -2217,7 +2297,34 @@ fn write_connector(
     writer.push(&object_wire_id(connector.from.object_id))?;
     writer.push("\" target=\"")?;
     writer.push(&object_wire_id(connector.to.object_id))?;
-    writer.push("\"><mxGeometry relative=\"1\" as=\"geometry\"/></mxCell>")
+    if let Some(VisualManualRoute::Polyline { points }) = &connector.manual_route {
+        let (origin_x, origin_y) = parent
+            .map(|id| {
+                let frame = objects[&id].transform;
+                (frame.x - frame.width / 2.0, frame.y - frame.height / 2.0)
+            })
+            .unwrap_or((0.0, 0.0));
+        if points.iter().any(|point| {
+            (point.x - origin_x) + origin_x != point.x || (point.y - origin_y) + origin_y != point.y
+        }) {
+            report.add(
+                Some(&object_wire_id(object.id)),
+                "waypoint-parent-relative-precision-not-exportable",
+            );
+            return Ok(());
+        }
+        writer.push("\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\">")?;
+        for point in points {
+            writer.push("<mxPoint x=\"")?;
+            writer.push_number(point.x - origin_x)?;
+            writer.push("\" y=\"")?;
+            writer.push_number(point.y - origin_y)?;
+            writer.push("\"/>")?;
+        }
+        writer.push("</Array></mxGeometry></mxCell>")
+    } else {
+        writer.push("\"><mxGeometry relative=\"1\" as=\"geometry\"/></mxCell>")
+    }
 }
 
 fn connector_style(
@@ -2603,6 +2710,103 @@ mod tests {
         import_drawio_xml(xml.as_bytes())
     }
 
+        #[test]
+        fn visual_manual_route_drawio_parent_coordinates_and_refusals() {
+            let xml = r#"
+    <mxCell id="group" parent="layer" vertex="1" style="group;"><mxGeometry x="100" y="200" width="300" height="200" as="geometry"/></mxCell>
+    <mxCell id="a" parent="group" vertex="1" style="shape=rectangle;"><mxGeometry x="10" y="10" width="50" height="40" as="geometry"/></mxCell>
+    <mxCell id="b" parent="group" vertex="1" style="shape=ellipse;"><mxGeometry x="200" y="10" width="50" height="40" as="geometry"/></mxCell>
+    <mxCell id="e" parent="layer" edge="1" source="a" target="b" style="edgeStyle=none;curved=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="180" y="270"/></Array></mxGeometry></mxCell>"#;
+            let imported = import_minimal(xml).unwrap();
+            let route = imported
+                .document
+                .scene()
+                .objects
+                .iter()
+                .find_map(|object| match &object.kind {
+                    VisualObjectKind::Connector { connector } => connector.manual_route.clone(),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                route,
+                VisualManualRoute::Polyline {
+                    points: vec![VisualRoutePoint { x: 180.0, y: 270.0 }]
+                }
+            );
+            let wire = export_drawio_xml(&imported.document).unwrap();
+            let text = std::str::from_utf8(&wire.bytes).unwrap();
+            assert!(text.contains("<mxPoint x=\"80\" y=\"70\"/>"));
+            let reopened = import_drawio_xml(&wire.bytes).unwrap();
+            assert!(reopened.document.scene().objects.iter().any(|object| matches!(&object.kind, VisualObjectKind::Connector { connector } if connector.manual_route == Some(route.clone()))));
+            let malformed = [
+                "<Array as=\"points\"><mxPoint x=\"1\"/></Array>",
+                "<Array as=\"points\"><mxPoint x=\"NaN\" y=\"2\"/></Array>",
+                "<Array as=\"points\"><mxPoint x=\"1\" y=\"2\"/></Array><Array as=\"points\"/>",
+            ];
+            for child in malformed {
+                let changed = xml.replace(
+                    "<Array as=\"points\"><mxPoint x=\"180\" y=\"270\"/></Array>",
+                    child,
+                );
+                assert!(import_minimal(&changed).is_err());
+            }
+            let many = format!(
+                "<Array as=\"points\">{}</Array>",
+                "<mxPoint x=\"1\" y=\"2\"/>"
+                    .repeat(super::super::visual::MAX_VISUAL_CONNECTOR_POINTS + 1)
+            );
+            assert!(
+                import_minimal(&xml.replace(
+                    "<Array as=\"points\"><mxPoint x=\"180\" y=\"270\"/></Array>",
+                    &many
+                ))
+                .is_err()
+            );
+            assert!(matches!(
+                import_minimal(&xml.replace("edgeStyle=none;curved=0;", "curved=1;")),
+                Err(DrawioWireError::Unsupported(
+                    "manual curved connector controls are not supported"
+                ))
+            ));
+            let mut document = imported.document.clone();
+            let mut object = document
+                .scene()
+                .objects
+                .iter()
+                .find(|object| matches!(object.kind, VisualObjectKind::Connector { .. }))
+                .unwrap()
+                .clone();
+            let VisualObjectKind::Connector { connector } = &mut object.kind else {
+                unreachable!()
+            };
+            connector.manual_route = Some(VisualManualRoute::Polyline {
+                points: vec![VisualRoutePoint { x: 0.1, y: 270.0 }],
+            });
+            document
+                .apply_transaction(&[super::super::visual::VisualOperation::ReplaceObject(
+                    object.clone(),
+                )])
+                .unwrap();
+            assert!(
+                matches!(export_drawio_xml(&document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "waypoint-parent-relative-precision-not-exportable"))
+            );
+            let VisualObjectKind::Connector { connector } = &mut object.kind else {
+                unreachable!()
+            };
+            connector.route = VisualConnectorRoute::Curved;
+            connector.manual_route = Some(VisualManualRoute::Cubic {
+                control1: VisualRoutePoint { x: 1.0, y: 2.0 },
+                control2: VisualRoutePoint { x: 3.0, y: 4.0 },
+            });
+            document
+                .apply_transaction(&[super::super::visual::VisualOperation::ReplaceObject(object)])
+                .unwrap();
+            assert!(
+                matches!(export_drawio_xml(&document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "manual-cubic-controls-not-exportable"))
+            );
+        }
+
     #[test]
     fn diagram_drawio_wire_nested_group_import_resolves_parent_local_geometry() {
         // Child before parent is legal: cell order must not determine ancestry.
@@ -2896,6 +3100,7 @@ mod tests {
 
     fn primitive(id: u64, shape: VisualPrimitiveShape) -> VisualObject {
         VisualObject {
+            owned_label: None,
             id: VisualObjectId::from_raw(id),
             layer_id: DEFAULT_LAYER_ID,
             transform: VisualTransform {
@@ -2992,10 +3197,7 @@ mod tests {
         assert_eq!(scene.layers.len(), 2);
         assert_eq!(scene.layers[0].name, "Background");
         assert_eq!(scene.layers[1].name, "Labels");
-        assert!(imported.report.issues.iter().any(|issue| {
-            issue.source_id.as_deref() == Some("start")
-                && issue.property == "vertex-label-split-to-text"
-        }));
+        assert!(!imported.report.issues.iter().any(|issue| issue.property == "vertex-label-split-to-text"));
         assert!(
             imported
                 .report
@@ -3022,6 +3224,7 @@ mod tests {
         assert_eq!(start.style.fill, VisualColor::rgba(224, 240, 255, 255));
         assert_eq!(start.style.border, VisualColor::rgba(18, 52, 86, 255));
         assert_eq!(start.style.opacity, 0.85);
+        assert!(start.owned_label.as_ref().is_some_and(|label| !label.text.is_empty()));
 
         let free_text = scene
             .objects
@@ -3062,11 +3265,29 @@ mod tests {
         assert!(xml.contains("fontFamily=A&amp;B"));
         assert!(xml.contains("First&#13;&#10;東京 &amp; more &lt;&quot;"));
         assert!(xml.contains("value=\"A &amp; one\""));
-        assert!(xml.contains("source=\"v2\" target=\"v4\""));
+        assert!(xml.contains("source=\"v2\" target=\"v3\""));
 
         let second_document = import_drawio_xml(&first.bytes).unwrap().document;
         let second = export_drawio_xml(&second_document).unwrap();
         assert_eq!(first.bytes, second.bytes);
+
+        let mut empty_label_document = imported.document.clone();
+        let mut labeled = empty_label_document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.owned_label.is_some())
+            .unwrap()
+            .clone();
+        labeled.owned_label.as_mut().unwrap().text.clear();
+        empty_label_document
+            .apply_transaction(&[super::super::visual::VisualOperation::ReplaceObject(
+                labeled,
+            )])
+            .unwrap();
+        assert!(
+            matches!(export_drawio_xml(&empty_label_document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "empty-owned-label-not-exportable"))
+        );
 
         let direct_model = b"<mxGraphModel><root><mxCell id='0'/></root></mxGraphModel>";
         assert_eq!(

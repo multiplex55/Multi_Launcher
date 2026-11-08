@@ -64,6 +64,88 @@ pub struct FolderEntry {
     pub alias: Option<String>,
 }
 
+const PICKER_MAX_ENTRIES: usize = 4096;
+const PICKER_MAX_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub(crate) struct SavedFoldersSnapshot {
+    path: std::path::PathBuf,
+    pub version: u64,
+    pub entries: Arc<Vec<FolderEntry>>,
+}
+
+fn bounded_picker_entries(entries: &[FolderEntry]) -> anyhow::Result<Vec<FolderEntry>> {
+    if entries.len() > PICKER_MAX_ENTRIES {
+        anyhow::bail!("Saved folders exceed the picker limit");
+    }
+    let bytes = entries.iter().try_fold(0usize, |total, entry| {
+        total
+            .checked_add(entry.label.len())?
+            .checked_add(entry.path.len())?
+            .checked_add(entry.alias.as_ref().map_or(0, String::len))
+    });
+    if bytes.is_none_or(|n| n > PICKER_MAX_BYTES) {
+        anyhow::bail!("Saved folders exceed the picker limit");
+    }
+    Ok(entries.to_vec())
+}
+
+/// Capture a coherent, bounded view of the folder owner's last-good state.
+pub(crate) fn saved_folders_snapshot(path: &str) -> anyhow::Result<SavedFoldersSnapshot> {
+    {
+        let _transaction = folders_transaction_guard();
+        if let Some(live) = LIVE_FOLDERS.get_existing(path) {
+            let entries = live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return Ok(SavedFoldersSnapshot {
+                path: super::live_snapshot::normalized_path(Path::new(path)),
+                version: folders_version(),
+                entries: Arc::new(bounded_picker_entries(&entries)?),
+            });
+        }
+    }
+    // Read admission precedes the transaction, matching folder writers' lock order.
+    let _permit = crate::common::repair_watch::require_persisted_read(Path::new(path))?;
+    let _transaction = folders_transaction_guard();
+    let entries = if let Some(live) = LIVE_FOLDERS.get_existing(path) {
+        let entries = live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        bounded_picker_entries(&entries)?
+    } else {
+        let entries = match load_folders_typed_unfenced(path)? {
+            LoadState::Missing | LoadState::Empty => default_folders(),
+            LoadState::Loaded(entries) => entries,
+        };
+        bounded_picker_entries(&entries)?
+    };
+    Ok(SavedFoldersSnapshot {
+        path: super::live_snapshot::normalized_path(Path::new(path)),
+        version: folders_version(),
+        entries: Arc::new(entries),
+    })
+}
+
+pub(crate) fn revalidate_saved_folder(
+    path: &str,
+    snapshot: &SavedFoldersSnapshot,
+    index: usize,
+) -> anyhow::Result<FolderEntry> {
+    if snapshot.path != super::live_snapshot::normalized_path(Path::new(path)) {
+        anyhow::bail!("Saved folder store changed; refresh the picker");
+    }
+    let current = saved_folders_snapshot(path)?;
+    let selected = snapshot
+        .entries
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("Saved folder is unavailable"))?;
+    if current.version != snapshot.version || current.entries.get(index) != Some(selected) {
+        anyhow::bail!("Saved folders changed; refresh the picker");
+    }
+    Ok(selected.clone())
+}
+
 /// Return a set of default commonly used folders.
 pub fn default_folders() -> Vec<FolderEntry> {
     let mut out = Vec::new();
@@ -427,6 +509,40 @@ mod tests {
             path: path.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn saved_folder_picker_bounds_and_revalidates_live_and_fallback_records() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("picker.json");
+        let path = path.to_str().unwrap();
+        let entries = vec![
+            folder("Same", r"C:\one", Some("alias")),
+            folder("Same", r"C:\two", None),
+        ];
+        std::fs::write(path, serde_json::to_vec(&entries).unwrap()).unwrap();
+        let fallback = saved_folders_snapshot(path).unwrap();
+        let other = directory.path().join("other.json");
+        std::fs::write(&other, serde_json::to_vec(&entries).unwrap()).unwrap();
+        assert!(revalidate_saved_folder(other.to_str().unwrap(), &fallback, 0).is_err());
+        assert_eq!(
+            revalidate_saved_folder(path, &fallback, 1).unwrap(),
+            entries[1]
+        );
+        std::fs::write(path, serde_json::to_vec(&entries[..1]).unwrap()).unwrap();
+        assert!(revalidate_saved_folder(path, &fallback, 1).is_err());
+        save_folders(path, &entries).unwrap();
+        let live = saved_folders_snapshot(path).unwrap();
+        std::fs::write(path, "invalid").unwrap();
+        assert_eq!(*saved_folders_snapshot(path).unwrap().entries, entries);
+        assert_eq!(revalidate_saved_folder(path, &live, 0).unwrap(), entries[0]);
+        assert!(
+            bounded_picker_entries(&vec![folder("x", "y", None); PICKER_MAX_ENTRIES + 1]).is_err()
+        );
+        assert!(
+            bounded_picker_entries(&[folder("x", &"y".repeat(PICKER_MAX_BYTES), None)]).is_err()
+        );
     }
 
     #[test]

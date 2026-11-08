@@ -17,6 +17,7 @@ pub(crate) struct CalculationExampleGroup {
 #[derive(Clone, Copy, Debug)]
 enum ExampleExpectation {
     Scalar(f64),
+    Vector(&'static [f64]),
     Physical {
         value: f64,
         unit: Unit,
@@ -31,6 +32,42 @@ enum ExampleExpectation {
         approximate: bool,
     },
     ErrorContains(&'static str),
+}
+
+impl CalculationExample {
+    pub(crate) fn matches(&self, group: &str, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || [group, self.title, self.source, self.explanation]
+                .iter()
+                .any(|text| text.to_lowercase().contains(&query))
+    }
+
+    pub(crate) fn result_text(&self) -> String {
+        use crate::common::number_format::format_number;
+        match self.expected {
+            ExampleExpectation::Scalar(value) => format_number(value).unwrap_or_default(),
+            ExampleExpectation::Vector(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .filter_map(|value| format_number(*value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ExampleExpectation::Physical { value, unit } => format!(
+                "{} {}",
+                format_number(value).unwrap_or_default(),
+                unit.symbol()
+            ),
+            ExampleExpectation::ExactBase(digits) => digits.into(),
+            ExampleExpectation::ExactInteger { value, .. } => value.into(),
+            ExampleExpectation::Dimensional {
+                formatted_result, ..
+            } => formatted_result.into(),
+            ExampleExpectation::ErrorContains(message) => format!("Error: {message}"),
+        }
+    }
 }
 
 const EXAMPLES: &[CalculationExampleGroup] = &[
@@ -68,8 +105,8 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
             CalculationExample {
                 title: "Remainder keeps the dividend sign",
-                source: "-7 % 3",
-                explanation: "% is the signed remainder operator.",
+                source: "-7 mod 3",
+                explanation: "Infix mod and % share signed remainder semantics.",
                 expected: ExampleExpectation::Scalar(-1.0),
             },
             CalculationExample {
@@ -108,6 +145,24 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 explanation: "min, max, and atan2 are available for two scalar arguments.",
                 expected: ExampleExpectation::Scalar(12.0),
             },
+            CalculationExample {
+                title: "Trigonometric function families",
+                source: "sin(0) + cos(0) + tan(0)\nasin(0) + acos(1) + atan(0)\nsinh(0) + cosh(0) + tanh(0)\nasinh(0) + acosh(1) + atanh(0)",
+                explanation: "sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh use radians.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "More scalar functions",
+                source: "signum(-2) + trunc(2.9) + fract(1.5)\nexp(0) + log2(8) + log(E) + atan2(0, 1)",
+                explanation: "signum trunc fract exp log log2 and atan2 complement the other scalar functions.",
+                expected: ExampleExpectation::Scalar(5.0),
+            },
+            CalculationExample {
+                title: "Case-insensitive function and constant aliases",
+                source: "Floor(2.9)\npi + pie - PI",
+                explanation: "Floor, FLOOR and floor share a function; unbound pi and pie mean PI.",
+                expected: ExampleExpectation::Scalar(std::f64::consts::PI),
+            },
         ],
     },
     CalculationExampleGroup {
@@ -123,9 +178,9 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
             CalculationExample {
                 title: "Mix scalar integer bases",
-                source: "0x1235 + 0b0101010101",
-                explanation: "0x, 0b, and 0o literals are scalar inputs, limited to exactly representable integers through 2^53.",
-                expected: ExampleExpectation::Scalar(5002.0),
+                source: "0b10101\n0x10 + 0o10 + 0b10",
+                explanation: "Binary 0b, octal 0o and hexadecimal 0x can be mixed through 2^53.",
+                expected: ExampleExpectation::Scalar(26.0),
             },
             CalculationExample {
                 title: "Convert an exact unsigned base value",
@@ -141,6 +196,35 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                     value: 187.96,
                     unit: Unit::Centimeter,
                 },
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Vectors",
+        examples: &[
+            CalculationExample {
+                title: "Scale a vector",
+                source: "v = [1, 2, 3]\nv * 3",
+                explanation: "Multiply a vector by a scalar in either order.",
+                expected: ExampleExpectation::Vector(&[3.0, 6.0, 9.0]),
+            },
+            CalculationExample {
+                title: "Element-wise operations",
+                source: "[1, 2, 3] * [4, 5, 6]",
+                explanation: "Equal-length vector +, -, *, and / act element by element.",
+                expected: ExampleExpectation::Vector(&[4.0, 10.0, 18.0]),
+            },
+            CalculationExample {
+                title: "Dot product",
+                source: "dot([1, 2, 3], [4, 5, 6])",
+                explanation: "dot(a, b) or a · b returns a scalar.",
+                expected: ExampleExpectation::Scalar(32.0),
+            },
+            CalculationExample {
+                title: "Cross product",
+                source: "cross([1, 0, 0], [0, 1, 0])",
+                explanation: "cross(a, b) or a × b requires three components.",
+                expected: ExampleExpectation::Vector(&[0.0, 0.0, 1.0]),
             },
         ],
     },
@@ -234,6 +318,24 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 },
             },
             CalculationExample {
+                title: "Rotate, count, and mask bits",
+                source: "rotl(u8(129), 1)\nrotr(u8(129), 1)\npopcount(u8(0xb5))\nmask(u8(0), 2, 3)",
+                explanation: "rotl, rotr, popcount and mask operate on exact-width integers.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u8",
+                    value: "28",
+                },
+            },
+            CalculationExample {
+                title: "Integer width constructors",
+                source: "int(7)\nu16(255)",
+                explanation: "int, i8, i16, i32, i64, i128, u8, u16, u32, u64, and u128 select checked modes.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u16",
+                    value: "255",
+                },
+            },
+            CalculationExample {
                 title: "Overflow is diagnosed",
                 source: "u8(255) + 1",
                 explanation: "Checked arithmetic reports overflow instead of wrapping.",
@@ -307,6 +409,16 @@ mod tests {
             for example in group.examples {
                 let document = CalculationDocument::new(example.source);
                 let evaluation = document.evaluate();
+                if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
+                    assert!(
+                        evaluation
+                            .lines
+                            .iter()
+                            .all(|line| !matches!(line.outcome, LineOutcome::Error(_))),
+                        "{} has an invalid source line",
+                        example.title
+                    );
+                }
                 let outcome = evaluation
                     .lines
                     .iter()
@@ -322,6 +434,12 @@ mod tests {
                     ) => {
                         let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
                         assert!((actual - expected).abs() <= tolerance, "{}", example.title);
+                    }
+                    (
+                        ExampleExpectation::Vector(expected),
+                        LineOutcome::Value(CalculationValue::Vector(actual)),
+                    ) => {
+                        assert_eq!(actual.components(), expected, "{}", example.title);
                     }
                     (
                         ExampleExpectation::Physical {
@@ -399,6 +517,39 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 31);
+        assert_eq!(checked, 40);
+    }
+
+    #[test]
+    fn catalogue_search_finds_function_keywords_and_vector_examples() {
+        for keyword in [
+            "ceil", "floor", "sqrt", "binary", "dot", "cross", "atanh", "rotl", "mask", "u128",
+        ] {
+            assert!(
+                EXAMPLE_GROUPS.iter().any(|group| group
+                    .examples
+                    .iter()
+                    .any(|example| example.matches(group.title, keyword))),
+                "missing {keyword}"
+            );
+        }
+        assert!(EXAMPLE_GROUPS.iter().any(|group| {
+            group
+                .examples
+                .iter()
+                .any(|example| example.matches(group.title, "VeCtOrS"))
+        }));
+        assert!(!EXAMPLE_GROUPS.iter().any(|group| {
+            group
+                .examples
+                .iter()
+                .any(|example| example.matches(group.title, "no such example"))
+        }));
+        assert!(EXAMPLE_GROUPS.iter().all(|group| {
+            group
+                .examples
+                .iter()
+                .all(|example| example.matches(group.title, ""))
+        }));
     }
 }

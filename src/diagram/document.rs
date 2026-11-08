@@ -2109,6 +2109,21 @@ mod tests {
             })])
             .unwrap()
             .created_objects[0];
+        let mut labeled = original
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == first)
+            .unwrap()
+            .clone();
+        labeled.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "Saved shape label".into(),
+            style: VisualStyle::default(),
+        });
+        original
+            .apply_visual_transaction(&[VisualOperation::ReplaceObject(labeled)])
+            .unwrap();
         assert!(original.is_dirty());
         original.save_as(&path).unwrap();
         assert!(!original.is_dirty());
@@ -2119,6 +2134,20 @@ mod tests {
             TransitionOutcome::Applied
         );
         assert_eq!(reopened.visual_scene().unwrap().objects.len(), 2);
+        assert_eq!(
+            reopened
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == first)
+                .unwrap()
+                .owned_label
+                .as_ref()
+                .unwrap()
+                .text,
+            "Saved shape label"
+        );
         assert!(reopened.can_undo());
         assert!(!reopened.is_dirty());
         assert!(reopened.undo().unwrap());
@@ -2126,6 +2155,7 @@ mod tests {
         assert!(reopened.can_redo());
         assert!(reopened.redo().unwrap());
         assert!(!reopened.is_dirty());
+        assert!(reopened.undo().unwrap());
         assert!(reopened.undo().unwrap());
         let next = reopened
             .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
@@ -2141,6 +2171,67 @@ mod tests {
         assert_eq!(next.get(), first.get() + 1);
         assert!(!reopened.can_redo());
         assert_eq!(reopened.visual_scene().unwrap().objects.len(), 2);
+    }
+
+    #[test]
+    fn visual_manual_route_save_reopen_and_undo() {
+        use crate::diagram::{
+            VisualAnchor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
+            VisualConnectorRoute, VisualManualRoute, VisualRoutePoint,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bent.mld");
+        let mut document = DiagramDocumentController::new();
+        document.request_new_visual().unwrap();
+        let add = |x| {
+            VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x,
+                    ..VisualTransform::default()
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })
+        };
+        let ids = document
+            .apply_visual_transaction(&[add(-200.0), add(200.0)])
+            .unwrap()
+            .created_objects;
+        let connector = VisualConnector {
+            from: VisualConnectorEndpoint {
+                object_id: ids[0],
+                anchor: VisualAnchor::East,
+            },
+            to: VisualConnectorEndpoint {
+                object_id: ids[1],
+                anchor: VisualAnchor::West,
+            },
+            route: VisualConnectorRoute::Straight,
+            direction: VisualConnectorDirection::Forward,
+            label: String::new(),
+            manual_route: Some(VisualManualRoute::Polyline {
+                points: vec![VisualRoutePoint { x: 0.0, y: 120.0 }],
+            }),
+        };
+        document
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector { connector },
+            })])
+            .unwrap();
+        let scene = document.visual_scene().unwrap().clone();
+        document.save_as(&path).unwrap();
+        let mut reopened = DiagramDocumentController::new();
+        reopened.request_open(&path).unwrap();
+        assert_eq!(reopened.visual_scene(), Some(&scene));
+        assert!(reopened.undo().unwrap());
+        assert!(reopened.redo().unwrap());
+        assert_eq!(reopened.visual_scene(), Some(&scene));
     }
 
     #[test]

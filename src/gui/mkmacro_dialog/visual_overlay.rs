@@ -6,13 +6,16 @@
 use crate::mkmacro::{MkPoint, MonitorDescriptor, OcrDocument, OcrMatch, ScreenRect};
 #[cfg(test)]
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::{
     collections::VecDeque,
     fmt,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -216,6 +219,10 @@ pub enum VisualOverlayState {
         rect: ScreenRect,
         expires_at: Duration,
     },
+    RecordingRectangle {
+        rect: ScreenRect,
+        expires_at: Option<Duration>,
+    },
     HighlightingMonitor {
         descriptor: MonitorDescriptor,
         expires_at: Duration,
@@ -311,6 +318,11 @@ pub(crate) enum VisualOverlayCommand {
     PreviewRectangle {
         operation_id: OperationId,
         rect: ScreenRect,
+    },
+    RecordingRectangle {
+        operation_id: OperationId,
+        rect: ScreenRect,
+        persistent: bool,
     },
     HighlightMonitor {
         operation_id: OperationId,
@@ -454,6 +466,18 @@ impl NativeVisualOverlayService {
         Self::start_with(VisualOverlayController::default)
     }
 
+    pub(crate) fn start_notifying(
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, std::io::Error> {
+        Self::start_with_wait_interval_and_observer(
+            VisualOverlayController::default,
+            Duration::from_millis(12),
+            Some(notify),
+            #[cfg(test)]
+            None,
+        )
+    }
+
     pub(crate) fn start_with<F>(factory: F) -> Result<Self, std::io::Error>
     where
         F: FnOnce() -> VisualOverlayController + Send + 'static,
@@ -472,6 +496,7 @@ impl NativeVisualOverlayService {
         Self::start_with_wait_interval_and_observer(
             factory,
             Duration::from_millis(12),
+            None,
             Some(observer),
         )
     }
@@ -487,17 +512,18 @@ impl NativeVisualOverlayService {
     {
         #[cfg(test)]
         {
-            Self::start_with_wait_interval_and_observer(factory, active_wait, None)
+            Self::start_with_wait_interval_and_observer(factory, active_wait, None, None)
         }
         #[cfg(not(test))]
         {
-            Self::start_with_wait_interval_and_observer(factory, active_wait)
+            Self::start_with_wait_interval_and_observer(factory, active_wait, None)
         }
     }
 
     fn start_with_wait_interval_and_observer<F>(
         factory: F,
         active_wait: Duration,
+        notify: Option<Arc<dyn Fn() + Send + Sync>>,
         #[cfg(test)] observer: Option<Arc<ServiceTestObserver>>,
     ) -> Result<Self, std::io::Error>
     where
@@ -590,6 +616,9 @@ impl NativeVisualOverlayService {
                     }
                     for event in controller.drain_events() {
                         let _ = event_tx.send(event);
+                        if let Some(notify) = &notify {
+                            notify();
+                        }
                     }
                 }
                 controller.shutdown();
@@ -664,6 +693,11 @@ fn apply_command(controller: &mut VisualOverlayController, command: VisualOverla
         VisualOverlayCommand::PreviewRectangle { operation_id, rect } => {
             controller.preview_rectangle_with_id(operation_id, rect)
         }
+        VisualOverlayCommand::RecordingRectangle {
+            operation_id,
+            rect,
+            persistent,
+        } => controller.recording_rectangle_with_id(operation_id, rect, persistent),
         VisualOverlayCommand::HighlightMonitor {
             operation_id,
             monitor,
@@ -733,6 +767,7 @@ pub enum OverlayVisual {
         tooltip: RectangleTooltip,
     },
     RectanglePreview(ScreenRect),
+    RecordingRectangle(ScreenRect),
     Monitor(MonitorDescriptor),
     Monitors(Vec<MonitorDescriptor>),
     /// Ordinary desktop coverage preview: outlines only, never identification labels.
@@ -847,9 +882,9 @@ pub(crate) fn passive_overlay_plan(
         return None;
     }
     let (targets, badges): (Vec<_>, Vec<_>) = match visual {
-        OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => {
-            (vec![*r], vec![])
-        }
+        OverlayVisual::RectanglePreview(r)
+        | OverlayVisual::RecordingRectangle(r)
+        | OverlayVisual::Window { rect: r, .. } => (vec![*r], vec![]),
         OverlayVisual::Monitor(d) => (vec![d.bounds], vec![]),
         OverlayVisual::Desktop(ds) => (ds.iter().map(|d| d.bounds).collect(), vec![]),
         OverlayVisual::OcrDebug(_) => return Some(vec![]),
@@ -948,9 +983,9 @@ pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive
                 frame.push(OverlayFramePrimitive::Outline(*rect));
             }
         }
-        OverlayVisual::RectanglePreview(rect) | OverlayVisual::Window { rect, .. } => {
-            frame.push(OverlayFramePrimitive::Outline(*rect))
-        }
+        OverlayVisual::RectanglePreview(rect)
+        | OverlayVisual::RecordingRectangle(rect)
+        | OverlayVisual::Window { rect, .. } => frame.push(OverlayFramePrimitive::Outline(*rect)),
         OverlayVisual::Monitor(monitor) => {
             frame.push(OverlayFramePrimitive::Outline(monitor.bounds));
             frame.push(OverlayFramePrimitive::MonitorLabel {
@@ -1319,6 +1354,12 @@ impl VisualOverlayController {
         // A passive replacement may have waited behind a held transaction.
         // Its visible lifetime begins when actually shown, not when requested.
         match &mut state {
+            VisualOverlayState::RecordingRectangle {
+                expires_at: Some(expires_at),
+                ..
+            } => {
+                *expires_at = started_at + PASSIVE_OVERLAY_DURATION;
+            }
             VisualOverlayState::PreviewingRectangle { expires_at, .. }
             | VisualOverlayState::HighlightingMonitor { expires_at, .. }
             | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
@@ -1476,6 +1517,17 @@ impl VisualOverlayController {
                 expires_at: self.deadline(),
             },
             OverlayVisual::RectanglePreview(rect),
+        );
+    }
+
+    fn recording_rectangle_with_id(&mut self, id: OperationId, rect: ScreenRect, persistent: bool) {
+        self.start_passive_with_id(
+            id,
+            VisualOverlayState::RecordingRectangle {
+                rect,
+                expires_at: (!persistent).then(|| self.deadline()),
+            },
+            OverlayVisual::RecordingRectangle(rect),
         );
     }
     pub(crate) fn highlight_monitor_with_id(
@@ -1664,6 +1716,10 @@ impl VisualOverlayController {
             }
         }
         let expired = match &self.state {
+            VisualOverlayState::RecordingRectangle {
+                expires_at: Some(expires_at),
+                ..
+            } => self.clock.now() >= *expires_at,
             VisualOverlayState::PreviewingRectangle { expires_at, .. }
             | VisualOverlayState::HighlightingMonitor { expires_at, .. }
             | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
@@ -1892,6 +1948,7 @@ impl VisualOverlayController {
 
 fn passive_expiry(state: &VisualOverlayState) -> Option<Duration> {
     match state {
+        VisualOverlayState::RecordingRectangle { expires_at, .. } => *expires_at,
         VisualOverlayState::PreviewingRectangle { expires_at, .. }
         | VisualOverlayState::HighlightingMonitor { expires_at, .. }
         | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
@@ -1919,7 +1976,9 @@ impl Drop for VisualOverlayController {
 
 fn geometry_of(visual: &OverlayVisual) -> Option<ScreenRect> {
     match visual {
-        OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => Some(*r),
+        OverlayVisual::RectanglePreview(r)
+        | OverlayVisual::RecordingRectangle(r)
+        | OverlayVisual::Window { rect: r, .. } => Some(*r),
         OverlayVisual::Monitor(d) => Some(d.bounds),
         OverlayVisual::OcrDebug(plan) => Some(plan.region),
         _ => None,
@@ -3314,6 +3373,60 @@ mod tests {
         assert_eq!(close_count(&fake), 1);
         assert!(advance_and_drain(&mut c).is_empty());
         assert_eq!(close_count(&fake), 1);
+    }
+
+    #[test]
+    fn recording_rectangle_preview_expires_and_persistent_is_generation_owned() {
+        let (mut controller, fake, now) = controller();
+        let rect = ScreenRect::new(-800, -200, 320, 240);
+        apply_command(
+            &mut controller,
+            VisualOverlayCommand::RecordingRectangle {
+                operation_id: 10,
+                rect,
+                persistent: false,
+            },
+        );
+        *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION;
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::Expired { operation_id: 10 }]
+        );
+        apply_command(
+            &mut controller,
+            VisualOverlayCommand::RecordingRectangle {
+                operation_id: 11,
+                rect,
+                persistent: true,
+            },
+        );
+        *now.lock().unwrap() += PASSIVE_OVERLAY_DURATION * 3;
+        assert!(advance_and_drain(&mut controller).is_empty());
+        assert_eq!(controller.operation_id(), Some(11));
+        apply_command(
+            &mut controller,
+            VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(10),
+            },
+        );
+        assert_eq!(controller.operation_id(), Some(11));
+        assert_eq!(
+            fake.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| matches!(call, RecordedCall::Show { .. }))
+                .count(),
+            2
+        );
+        apply_command(
+            &mut controller,
+            VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(11),
+            },
+        );
+        assert_eq!(controller.operation_id(), None);
+        assert_eq!(close_count(&fake), 2);
     }
 
     #[test]

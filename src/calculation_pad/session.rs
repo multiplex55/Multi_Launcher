@@ -1451,6 +1451,39 @@ mod tests {
     }
 
     #[test]
+    fn vector_values_follow_edits_history_save_reopen_and_inspector_rules() {
+        use crate::calculation_pad::InspectorSourceOrigin;
+        let (_directory, root, mut session) = fixture();
+        session
+            .replace_source("v = [1, 2, 3]\nr1 * 2\n9007199254740993 dec to hex\nu8(7)")
+            .unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert_eq!(formatted(&mut session, 1), "[2, 4, 6]");
+        assert!(session.inspector_source(ids[0]).is_none());
+        assert!(session.inspector_source(ids[1]).is_none());
+        assert_eq!(
+            session.inspector_source(ids[2]).unwrap().origin,
+            InspectorSourceOrigin::LegacyExactBase
+        );
+        assert_eq!(
+            session.inspector_source(ids[3]).unwrap().origin,
+            InspectorSourceOrigin::TypedInteger
+        );
+        session.replace_line(ids[0], "v = [3, 4, 5]").unwrap();
+        assert_eq!(formatted(&mut session, 1), "[6, 8, 10]");
+        assert!(session.undo());
+        assert_eq!(formatted(&mut session, 1), "[2, 4, 6]");
+        assert!(session.redo());
+        assert_eq!(formatted(&mut session, 1), "[6, 8, 10]");
+        session.save_as("vector history").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        assert_eq!(formatted(&mut reopened, 1), "[6, 8, 10]");
+    }
+
+    #[test]
     fn dimensional_quantities_survive_session_cache_edit_undo_and_redo() {
         let (_directory, _root, mut session) = fixture();
         session

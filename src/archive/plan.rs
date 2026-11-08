@@ -38,6 +38,23 @@ impl ArchiveSelection {
         &self.targets
     }
 
+    pub(crate) fn all_physical(catalog: &ArchiveCatalog) -> Result<Self, SelectionAddError> {
+        let entries = catalog.entries();
+        if entries.len() > catalog.limits().max_selection_entries {
+            return Err(SelectionAddError::LimitExceeded);
+        }
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(entries.len())
+            .map_err(|_| SelectionAddError::Allocation)?;
+        targets.extend(
+            entries
+                .iter()
+                .map(|entry| SelectionTarget::Entry(entry.id())),
+        );
+        Ok(Self { targets })
+    }
+
     pub fn add(
         &mut self,
         target: SelectionTarget,
@@ -520,7 +537,9 @@ fn build_extraction_plan_with_finalization(
         };
 
         if entry.kind() == EntryKind::Directory
-            && (entry.compressed_size() != 0 || entry.uncompressed_size() != 0)
+            && (entry.uncompressed_size() != 0
+                || (entry.compression() == super::model::EntryCompression::Stored
+                    && entry.compressed_size() != 0))
         {
             report.record(
                 PlanIssue {

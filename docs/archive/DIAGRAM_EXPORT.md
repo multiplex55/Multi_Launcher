@@ -38,8 +38,9 @@ Diagram session, native path, or saved content baseline.
 In a Visual Canvas document, open **Visual export** to choose scale and a
 transparent, white, or custom RGBA background, then choose **Export SVG…** or
 **Export PNG…**. The current committed scene is captured independently of
-Viewer pan and zoom, including supported rotated geometry, text, frame headers,
-shadows, and embedded raster images.
+Viewer pan and zoom, including supported rotated geometry, owned shape labels,
+manual connector routes, text, frame headers, shadows, and embedded raster
+images. The editor, viewer, and image exports use the same projected route.
 
 Encoding and staging run in the background. A current accepted owner pass
 publishes with the same atomic no-clobber protection. **Cancel export** is
@@ -63,8 +64,9 @@ a partial file.
 Use a single uncompressed `.drawio` page. XML is limited to 4 MiB. The subset
 includes layers, nested transparent groups, compatible containers and horizontal
 or vertical swimlanes, rectangles, rounded rectangles, ellipses, diamonds, text,
-basic styles, and labeled connectors with compass anchors. Group labels and
-labels on shapes may become independent editable text. Frame headers must match
+basic styles, and labeled connectors with compass anchors. Supported primitive
+vertex labels become owned shape labels; group labels and independently authored
+text remain separate. Frame headers must match
 the native header geometry, with a transparent body and matching text and
 border colors. The inert `mlFrame=container` style preserves native Container
 kind when standard swimlane styling is used; inconsistent markers are refused.
@@ -76,8 +78,13 @@ coordinates must resolve within native geometry bounds.
 The review identifies unsupported content, inferred anchors, and connector
 routing parents that will normalize to the endpoints' common frame. Cross-layer
 membership or connectors, frame stacking that cannot be represented by a tree, relative
-vertex ports, custom connector waypoints, multiple or compressed pages, active
+vertex ports, multiple or compressed pages, active
 HTML, external resources, and other unsupported geometry or styles are refused.
+Straight-style polyline waypoints can round-trip when their coordinates are
+representable exactly. Manual curved controls, incompatible waypoint routing
+styles, and waypoint coordinates that cannot be represented without precision
+loss are refused rather than flattened. Export also refuses empty owned labels
+and owned-label opacity or alpha combinations the draw.io subset cannot preserve.
 Visual exports also refuse embedded images, presets, shadows, and shapes outside
 the supported subset. No partial file is published on refusal.
 Independent draw.io reader verification is still outstanding.

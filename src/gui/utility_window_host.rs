@@ -1793,6 +1793,7 @@ pub(super) enum ProgrammerInspectorHostCommand {
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
     const KEY: &'static str = "programmer-inspector";
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     const TITLE: &'static str = "Programmer Inspector";
     const SIZE: egui::Vec2 = egui::vec2(720.0, 650.0);
     const MINIMUM: egui::Vec2 = egui::vec2(360.0, 280.0);

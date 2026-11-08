@@ -23,6 +23,9 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         &std::collections::HashMap::new(),
         Arc::clone(&actions_arc),
     );
+    let mut settings = Settings::default();
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     LauncherApp::new(
         ctx,
         actions_arc,
@@ -30,7 +33,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         plugins,
         "actions.json".into(),
         "settings.json".into(),
-        Settings::default(),
+        settings,
         None,
         None,
         None,
@@ -44,10 +47,25 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 #[test]
 fn search_returns_action() {
     let plugin = RecyclePlugin;
-    let results = plugin.search("rec");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].label, "Clean Recycle Bin");
-    assert_eq!(results[0].action, "recycle:clean");
+    for query in ["rec", "REC", " \tReC\r\n"] {
+        let results = plugin.search(query);
+        assert_eq!(results.len(), 1, "{query:?}");
+        assert_eq!(results[0].label, "Clean Recycle Bin");
+        assert_eq!(results[0].action, "recycle:clean");
+    }
+    for query in [
+        "record",
+        "recorder",
+        "recent",
+        "recycle",
+        "rec extra",
+        "rec:clean",
+        "xrec",
+    ] {
+        assert!(plugin.search(query).is_empty(), "{query:?}");
+    }
+    assert_eq!(plugin.query_prefixes(), &["rec"]);
+    assert_eq!(plugin.commands()[0].action, "query:rec");
 }
 
 #[test]

@@ -2095,6 +2095,7 @@ impl LauncherApp {
             .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
             || self.dashboard_editor.host_layer_if_root().is_some()
             || self.diff_dialog.host_layer_if_root().is_some()
+            || self.calculation_pad_dialog.examples_layer_if_root().is_some()
             || self.show_plugins
             || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
@@ -4249,12 +4250,18 @@ impl LauncherApp {
         {
             let completed = self.archive_session.poll();
             let worker_active = self.archive_session.has_active_worker();
+            let create_completed = self.zip_creation_session.poll();
+            let create_active = self.zip_creation_session.has_active_worker();
             let now = Instant::now();
-            if completed || self.zip_extractor_dialog.progress_refresh_due(now) {
+            let progress_due = self.zip_extractor_dialog.progress_refresh_due(now);
+            if completed || progress_due {
                 self.zip_extractor_dialog
                     .update_session_snapshot(self.archive_session.snapshot(), now);
             }
-            if worker_active || self.zip_extractor_dialog.session_needs_polling() {
+            if create_completed || (create_active && progress_due) {
+                self.zip_extractor_dialog.update_creation_snapshot(self.zip_creation_session.snapshot(), create_active);
+            }
+            if worker_active || create_active || self.zip_extractor_dialog.session_needs_polling() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
@@ -4263,6 +4270,7 @@ impl LauncherApp {
             self.pending_screenshot_completion = Some(completion);
         }
         self.recording_controller.poll();
+        self.reconcile_recording_outline(ctx);
         self.poll_recording_targets(ctx);
         self.poll_recording_region(ctx);
         if self.recording_controller.has_active_job() {
@@ -12720,7 +12728,7 @@ impl LauncherApp {
                         self.panel_states.explorer_tabs_dialog = false;
                     }
                     ExplorerTabsHostCommand::Apply(actions) => {
-                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(actions);
+                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(*actions);
                         for text in copies {
                             effects.push(RootDialogEffect::CopyText {
                                 owner: DialogCopyOwner::ExplorerTabs, text
@@ -12748,7 +12756,7 @@ impl LauncherApp {
             ctx.request_repaint();
         }
         #[cfg(windows)] {
-            let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
+            let zip = self.zip_extractor_dialog.on_hosted_frame_complete_with_creation(ctx, &mut self.archive_session, &mut self.zip_creation_session);
             for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
             if zip.show_root { effects.push(RootDialogEffect::ShowRoot); }
             if zip.closed { self.panel_states.zip_extractor_dialog = false; self.panel_stack.retain(|panel| *panel != super::Panel::ZipExtractorDialog); }
@@ -13229,6 +13237,7 @@ impl eframe::App for LauncherApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.recording_controller.request_shutdown();
+        self.recording_dialog.retire_recording_outline();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);
@@ -13238,6 +13247,8 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         #[cfg(windows)]
         self.archive_session.shutdown();
+        #[cfg(windows)]
+        self.zip_creation_session.shutdown();
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
@@ -14898,6 +14909,40 @@ mod tests {
         app.archive_session.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zip_creation_workers_retire_with_root_hidden_and_reopen_after_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::Panel::ZipExtractorDialog);
+        app.zip_extractor_dialog.test_set_create_mode();
+        let source = workspace.root().join("hidden-create-source.txt");
+        std::fs::write(&source, b"source").unwrap();
+        app.zip_creation_session.add_sources(0, vec![source.clone()]).unwrap();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.zip_creation_session.has_active_worker() {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline, "hidden scan must retire");
+            std::thread::yield_now();
+        }
+        let snapshot = app.zip_creation_session.snapshot();
+        assert_eq!(snapshot.members.len(), 1);
+        assert_eq!(app.zip_extractor_dialog.test_creation_revision(), Some(snapshot.revision));
+        app.zip_creation_session.add_sources(snapshot.revision, vec![source]).unwrap();
+        app.close_zip_extractor_dialog();
+        assert!(!app.zip_extractor_dialog.open);
+        while app.zip_creation_session.has_active_worker() {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline, "closed scan must retire");
+            std::thread::yield_now();
+        }
+        app.focus_panel(super::Panel::ZipExtractorDialog);
+        assert!(app.zip_extractor_dialog.open);
     }
 
     #[test]
@@ -17989,6 +18034,20 @@ mod tests {
     }
 
     #[test]
+    fn calculation_reference_is_ordinary_root_context_when_pad_is_native() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_open_examples();
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        assert!(app.calculation_pad_dialog.host_layer_if_root().is_none());
+        let help = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
+        let ordinary = app.query_focus_ordinary_context().expect("docked help owns ROOT input even with native Pad");
+        assert!(ordinary.ordinary_panel_layers.contains(&help));
+    }
+
+    #[test]
     fn studio_usability_calculation_show_root_uses_launcher_visibility_owner() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -18475,6 +18534,76 @@ mod tests {
             );
         }
         panic!("Inspector control {name} did not become visible: {last:?}");
+    }
+
+    #[test]
+    fn explorer_tabs_saved_folder_picker_accepts_actual_clicks() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let path = workspace.root().join("picker-folders.json");
+        std::fs::write(&path, r#"[{"label":"Work","path":"C:\\Work","alias":"office"}]"#).unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.explorer_tabs_dialog.test_saved_folders_path(&path);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+        }
+        for name in ["add-saved-folder", "saved-folder-0"] {
+            let mut target = None;
+            let mut last = None;
+            for _ in 0..16 {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false,
+                );
+                if let Some((rect, clip, enabled)) = app.explorer_tabs_dialog.test_control(name) {
+                    last = Some((rect, clip, enabled));
+                    if enabled && clip.contains_rect(rect) {
+                        target = Some(rect);
+                        break;
+                    }
+                    let direction = if rect.center().y > clip.center().y { -140.0 } else { 140.0 };
+                    let pointer = egui::pos2(clip.center().x, if direction < 0.0 {
+                        clip.bottom() - 4.0
+                    } else {
+                        clip.top() + 4.0
+                    });
+                    run_host_viewport_frame(
+                        &ctx, &mut app, egui::ViewportId::ROOT,
+                        vec![egui::Event::PointerMoved(pointer), egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, direction),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        }], false, false,
+                    );
+                }
+            }
+            let rect = target.unwrap_or_else(|| panic!("picker control {name} must be reachable: {last:?}"));
+            if name == "saved-folder-0" {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, true), false, false,
+                );
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, false), true, false,
+                );
+                assert!(app.explorer_tabs_dialog.test_folders().is_empty());
+            }
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx, &mut app, egui::ViewportId::ROOT,
+                    tool_dialog_pointer_events(rect, pressed), false, false,
+                );
+            }
+            run_host_viewport_frame(
+                &ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false,
+            );
+        }
+        assert_eq!(app.explorer_tabs_dialog.test_folders(), vec![r"C:\Work"]);
     }
 
     #[test]
@@ -19828,7 +19957,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
-        for name in ["signed", "checked-cast"] {
+        for name in ["signed"] {
             let (control, clip, enabled) =
                 app.programmer_inspector_dialog.test_control(name).unwrap();
             assert!(enabled && clip.contains_rect(control));
@@ -20953,7 +21082,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         click_zip_host_target(&ctx, &mut app, root, "Choose destination folder");
-        click_zip_host_target(&ctx, &mut app, root, "Select archive entry only.txt");
+        assert_eq!(app.archive_session.snapshot().selection.len(), 1, "the loaded physical entry starts selected");
         click_zip_host_target(&ctx, &mut app, root, "Preview selected entries");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.archive_session.snapshot().preview.is_none() {

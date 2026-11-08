@@ -4201,6 +4201,156 @@ mod tests {
         )
     }
 
+    #[test]
+    fn visual_owned_label_exports_in_svg_and_png() {
+        let mut document = VisualDiagramDocument::new();
+        let mut title = document.scene().objects[0].clone();
+        title.kind = VisualObjectKind::Text {
+            text: String::new(),
+        };
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(title)])
+            .unwrap();
+        let id = add_visual_object(
+            &mut document,
+            VisualTransform::default(),
+            VisualStyle::default(),
+            VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Rectangle,
+            },
+        );
+        let (without_label, _) = visual_export_snapshot(&document);
+        let without_label = without_label
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        let mut shape = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        shape.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "Owned label".into(),
+            style: VisualStyle {
+                border: VisualColor::rgba(0, 0, 0, 255),
+                ..VisualStyle::default()
+            },
+        });
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(shape)])
+            .unwrap();
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        assert!(
+            projection
+                .items
+                .iter()
+                .any(|item| item.object_id == id && item.text.is_some())
+        );
+        let svg = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert_ne!(svg.bytes(), without_label.bytes());
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        let pixels = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        let label = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id && item.text.is_some())
+            .unwrap();
+        let transform = super::ExportTransform::new(projection.bounds, 1.0).unwrap();
+        assert!(dark_ink_bounds_in(&pixels, transform.rect(label.bounds)).is_some());
+    }
+
+    #[test]
+    fn visual_manual_route_exports_shared_svg_and_png_geometry() {
+        use crate::diagram::{
+            VisualAnchor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
+            VisualConnectorRoute, VisualManualRoute, VisualRoutePoint,
+        };
+        let mut document = VisualDiagramDocument::new();
+        let first = add_visual_object(
+            &mut document,
+            VisualTransform {
+                x: -200.0,
+                ..VisualTransform::default()
+            },
+            VisualStyle::default(),
+            VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Rectangle,
+            },
+        );
+        let second = add_visual_object(
+            &mut document,
+            VisualTransform {
+                x: 200.0,
+                ..VisualTransform::default()
+            },
+            VisualStyle::default(),
+            VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Rectangle,
+            },
+        );
+        let connector = VisualConnector {
+            from: VisualConnectorEndpoint {
+                object_id: first,
+                anchor: VisualAnchor::East,
+            },
+            to: VisualConnectorEndpoint {
+                object_id: second,
+                anchor: VisualAnchor::West,
+            },
+            route: VisualConnectorRoute::Straight,
+            direction: VisualConnectorDirection::Forward,
+            label: String::new(),
+            manual_route: None,
+        };
+        let id = add_visual_object(
+            &mut document,
+            VisualTransform::default(),
+            VisualStyle {
+                border: VisualColor::rgba(0, 0, 0, 255),
+                ..VisualStyle::default()
+            },
+            VisualObjectKind::Connector { connector },
+        );
+        let (automatic, _) = visual_export_snapshot(&document);
+        let automatic_svg = automatic
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        document
+            .apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+                id,
+                route: Some(VisualManualRoute::Polyline {
+                    points: vec![VisualRoutePoint { x: 0.0, y: 180.0 }],
+                }),
+            }])
+            .unwrap();
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        let item = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id)
+            .unwrap();
+        assert!(item.open_paths[0].contains(&ScenePoint { x: 0.0, y: 180.0 }));
+        let svg = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert_ne!(svg.bytes(), automatic_svg.bytes());
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        let pixels = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        let transform = super::ExportTransform::new(projection.bounds, 1.0).unwrap();
+        let waypoint_bounds = SceneRect {
+            min: ScenePoint { x: -4.0, y: 176.0 },
+            max: ScenePoint { x: 4.0, y: 184.0 },
+        };
+        assert!(dark_ink_bounds_in(&pixels, transform.rect(waypoint_bounds)).is_some());
+    }
+
     fn visual_style(fill: VisualColor, border: VisualColor, opacity: f64) -> VisualStyle {
         VisualStyle {
             fill,
