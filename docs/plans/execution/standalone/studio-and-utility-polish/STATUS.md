@@ -32,7 +32,7 @@ Goal section F contains the authoritative objective, ownership, scope, invariant
 | M4-A | Native persisted Mermaid styling semantics | implemented/tested |
 | M4-B | Qualified generic family colors and narrow Timeline patch | implemented/tested |
 | M4-C | Color controls, templates and offline help | implemented/tested; native limited |
-| M5-A | Independent cumulative review, scoped lint/native smoke and handoff | in_progress |
+| M5-A | Independent cumulative review, scoped lint/native smoke and handoff | terminal LIMITED; native acceptance unavailable |
 
 Keep native evidence separate from automated state evidence. Missing native checks do not stop independent implementation and require LIMITED final disposition. No full-suite or historical acceptance campaign.
 
@@ -138,7 +138,29 @@ Initial focused batch passed 14/15 including style/history/export/control covera
 
 Corrective scoped Clippy passed with 115 library and 3 binary warnings, matching historical baseline categories; all seven introduced findings are gone. Final log target/studio-and-utility-polish/evidence/m5-clippy-triple-final.log. Parent inspected final source diff, stale paths and diff whitespace; only three intended source files plus this ledger changed. Cargo lane released for the current runnable build/native smoke.
 
-## Remaining implementation notes
+## M5-A final disposition: LIMITED
+
+All planned source checkpoints and review remediation are implemented, verified at their affected automated boundaries, committed and pushed. M5-R1 is c46387fe7d927979e171b2b68a679b12a39fb115. No known feature-related implementation defect remains after the one cumulative independent review and its bounded confirmation. F1's pre-existing reveal route has only automated/path-trace evidence: native correctness was not established and no speculative shell change was made. Full acceptance remains incomplete for the consolidated native workflows below.
+
+Current runnable build `cargo build --profile fast-dev --bin multi_launcher` passed in 3m34s; log target/studio-and-utility-polish/evidence/m5-native-build.log. Executable SHA-256 53082FB64BEA8E0288A0BB2E6121F42AF641D84BAB9D536F40199EEC324C6707. Final launch used the isolated synthetic profile, empty arguments, Normal window style and explicit supported activation. Window 1837230 was observed for the exact executable. Capture and one refreshed-selection retry both failed `window capture timed out: timed out waiting on channel`. This disproves the proposed launch-style change as a sufficient remedy; the underlying capture cause is unknown.
+
+Supported keyboard/accessibility actions entered foldersize through Search, opened Folder Size and confirmed the actual Reveal in Explorer label and explicit no-scan initial state. Keyboard navigation opened Select Folder. The returned Folder element 226 could not be used: `element 226 is not available in cached app state for multi_launcher.exe`; fresh observation followed by Alt+D and Escape did not change the reported native-dialog focus/state. No scan/reveal was dispatched. No screenshots or pointer geometry were available; no guessed coordinates or alternate automation bridge was used. Root typing is observed, but popped-out pointer focus coexistence is only automated-test evidence.
+
+Task-owned PID 5204/path/start 2026-11-08T23:34:28.2142604Z was verified and explicitly stopped. Runner exited -1 from deliberate cleanup (not a demonstrated crash), elapsed 167.333s, no deadline timeout, cleanup/output drain verified, root absent. Receipt target/studio-and-utility-polish/evidence/m5-native-current/result.json SHA-256 9BD2E048EB141FFFA65627438CD2D19083EF37BC581C47E797C987FA63515DB6. Synthetic fixture/profile remain under target and the task's temporary directory; no user work was discarded. Existing empty-profile dashboard-store diagnostics are unrelated to the tested input/capture boundary.
+
+| Requirements | Implemented/automated evidence | Missing native acceptance |
+| --- | --- | --- |
+| F1/F2 | Retained exact-path/root routing guards and six focused tests; actual label observed | Cross-drive and same-drive context selection, root open and toolbar opening |
+| P1–P3/C1–C2 | Typed/selected truth, exact bit toggles/layout/retention, result actions, complete report and same-frame copy | Physical compact layout, Dock/Pop Out, pasted report |
+| V1–V5 | Adjustable sizing/header, editor/viewer/reset ownership, imported/empty bounds, batching and mixed buttons | Real resize/pan/reset/chrome/object drag and no-dirty observation |
+| MD1–MD5 | Tab/history/status/menu guards, native/generic persisted colors and actual SVG/PNG, qualified Help | Physical editor/menu/color/save/reopen/export/Help workflow |
+| Shared host | Exact popped-out query/Unicode regression passed | Real pointer return to launcher query beside utility |
+
+Final scope checks: cumulative first-party/document/fixture diff whitespace passed; parent inspected intended files and obsolete comparison/template paths. Local renderer delta remains only Timeline config/render color consumption with exact default fallback; unchanged upstream vendor formatting/lints were not rewritten. No full suite, release build, screenshot-diff suite, benchmark or historical native campaign was run. Corrective Clippy matches baseline 115 library/3 binary warnings; new findings resolved. Stop report: [native acceptance limit](stalls/2026-11-08T233800Z.md).
+
+Git handoff: parent codex/launcher-utility-fixes at d691888584d531d9167f035dd48e47d15dced483; baseline 1158f09a5dbb75affa9ba5c71aa24b4ab031f963 is its verified direct child. All checkpoints stay on feat/studio-and-utility-polish, tracking origin/feat/studio-and-utility-polish. Prior to this report commit both tips equal c46387fe7d927979e171b2b68a679b12a39fb115 and tree was clean. No worktrees, auxiliary checkouts/clones, agent branches, merges, rebase or cherry-picks. The final response records final_tip_sha after this M5-A report commit and its one normal push attempt. The next Goal must create its fresh branch directly from that exact final tip, not master/main. Native completion is deferred; repeating identical capture attempts is outside the exhausted bounded attempt budget. Smallest follow-up is the five-workflow manual smoke in a working Windows capture/input session, preserving this committed implementation.
+
+## Historical planning notes (completed; reference only)
 
 Goal section F remains the milestone contract. Planner completed bounded packets for M3-B and M4-A/B/C; keep sequential writes and checkpoint commits on this branch.
 
