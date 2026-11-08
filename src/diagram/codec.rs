@@ -815,6 +815,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::NorthEast,

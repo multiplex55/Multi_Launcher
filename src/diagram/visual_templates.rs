@@ -141,6 +141,7 @@ impl VisualAuthoringTemplate {
                 },
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: from,
                             anchor: from_anchor,

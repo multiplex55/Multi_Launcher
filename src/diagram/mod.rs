@@ -19,6 +19,7 @@ mod templates;
 mod visual;
 mod visual_canvas;
 mod visual_scene;
+pub(crate) use visual_scene::seed_manual_route;
 mod visual_templates;
 
 pub(crate) use assets::{
@@ -53,7 +54,7 @@ pub use export::{
 pub use visual::{
     DEFAULT_LAYER_ID, MAX_VISUAL_ASSET_BYTES, MAX_VISUAL_ASSET_DIMENSION, MAX_VISUAL_ASSET_PIXELS,
     MAX_VISUAL_ASSET_TOTAL_BYTES, MAX_VISUAL_ASSETS, MAX_VISUAL_CONNECTOR_LABEL_BYTES,
-    MAX_VISUAL_CONTAINMENT_DEPTH, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION,
+    MAX_VISUAL_CONTAINMENT_DEPTH, MAX_VISUAL_CONNECTOR_POINTS, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION,
     MAX_VISUAL_FRAME_LABEL_BYTES, MAX_VISUAL_HISTORY_BYTES, MAX_VISUAL_HISTORY_ENTRIES,
     MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS, MAX_VISUAL_PRESET_COMPONENTS,
     MAX_VISUAL_PRESETS, MAX_VISUAL_SCENE_BYTES, MAX_VISUAL_TEXT_BYTES,
@@ -61,7 +62,7 @@ pub use visual::{
     VisualAsset, VisualAssetFormat, VisualAssetId, VisualClipboardFragment, VisualColor, VisualConnector,
     VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument,
     VisualDocumentError, VisualLayer, VisualLayerId, VisualLineStyle, VisualObject,
-    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualOwnedLabel, VisualPreset,
+    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualOwnedLabel, VisualManualRoute, VisualRoutePoint, VisualPreset,
     VisualPresetDraft, VisualPresetId, VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene,
     VisualShadow, VisualStyle, VisualSwimlaneOrientation, VisualTransactionOutcome,
     VisualTransform,

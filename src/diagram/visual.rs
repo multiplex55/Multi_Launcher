@@ -27,6 +27,7 @@ pub const MAX_VISUAL_ASSET_TOTAL_BYTES: usize = 512 * 1024;
 pub const MAX_VISUAL_ASSET_PIXELS: usize = 4_194_304;
 pub const MAX_VISUAL_ASSET_DIMENSION: u32 = 4_096;
 pub const MAX_VISUAL_COORDINATE_ABS: f64 = 1_000_000.0;
+pub const MAX_VISUAL_CONNECTOR_POINTS: usize = 32;
 pub const MAX_VISUAL_DIMENSION: f64 = 1_000_000.0;
 pub const MIN_VISUAL_DIMENSION: f64 = 0.1;
 pub const TITLE_OBJECT_ID: VisualObjectId = VisualObjectId(1);
@@ -328,7 +329,28 @@ pub enum VisualConnectorDirection {
     Both,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A manually placed point in visual-document world coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualRoutePoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VisualManualRoute {
+    Polyline {
+        #[serde(deserialize_with = "deserialize_manual_route_points")]
+        points: Vec<VisualRoutePoint>,
+    },
+    Cubic {
+        control1: VisualRoutePoint,
+        control2: VisualRoutePoint,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisualConnector {
     pub from: VisualConnectorEndpoint,
@@ -337,6 +359,8 @@ pub struct VisualConnector {
     pub direction: VisualConnectorDirection,
     #[serde(deserialize_with = "deserialize_connector_label")]
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_route: Option<VisualManualRoute>,
 }
 
 /// Text and style owned by one primitive, centered using that primitive's transform.
@@ -775,6 +799,7 @@ impl VisualClipboardFragment {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisualOperation {
+    SetConnectorManualRoute { id: VisualObjectId, route: Option<VisualManualRoute> },
     InsertClipboard {
         fragment: VisualClipboardFragment,
         offset: f64,
@@ -848,6 +873,7 @@ pub enum VisualDocumentError {
     UnknownConnectorEndpoint(VisualObjectId),
     ConnectorEndpointIsConnector(VisualObjectId),
     InvalidConnectorGeometry,
+    InvalidManualConnectorRoute,
     MembershipChildNotFound(VisualObjectId),
     MembershipParentNotFound(VisualObjectId),
     MembershipParentMustBeFrame(VisualObjectId),
@@ -947,6 +973,9 @@ impl fmt::Display for VisualDocumentError {
             ),
             Self::InvalidConnectorGeometry => formatter.write_str(
                 "connector transform is not editable; use its attached endpoint objects",
+            ),
+            Self::InvalidManualConnectorRoute => formatter.write_str(
+                "manual connector points are invalid, exceed their limit, or do not match the route style",
             ),
             Self::MembershipChildNotFound(id) => {
                 write!(formatter, "visual frame member {} was not found", id.get())
@@ -1387,6 +1416,20 @@ fn apply_visual_operation(
     outcome: &mut VisualTransactionOutcome,
 ) -> Result<(), VisualDocumentError> {
     match operation {
+        VisualOperation::SetConnectorManualRoute { id, route } => {
+            let object = scene
+                .objects
+                .iter_mut()
+                .find(|object| object.id == *id)
+                .ok_or(VisualDocumentError::UnknownObject(*id))?;
+            let VisualObjectKind::Connector { connector } = &mut object.kind else {
+                return Err(VisualDocumentError::InvalidState(
+                    "Manual routes require a connector.".into(),
+                ));
+            };
+            validate_manual_connector_route(connector.route, route.as_ref())?;
+            connector.manual_route = route.clone();
+        }
         VisualOperation::InsertClipboard { fragment, offset } => {
             fragment.scene.validate()?;
             if fragment.version != 1 || !offset.is_finite() {
@@ -1455,6 +1498,22 @@ fn apply_visual_operation(
                         *preset_id = presets[&*preset_id]
                     }
                     VisualObjectKind::Connector { connector } => {
+                        if let Some(route) = &mut connector.manual_route {
+                            match route {
+                                VisualManualRoute::Polyline { points } => {
+                                    for point in points {
+                                        point.x += offset;
+                                        point.y += offset;
+                                    }
+                                }
+                                VisualManualRoute::Cubic { control1, control2 } => {
+                                    control1.x += offset;
+                                    control1.y += offset;
+                                    control2.x += offset;
+                                    control2.y += offset;
+                                }
+                            }
+                        }
                         connector.from.object_id =
                             *objects.get(&connector.from.object_id).ok_or_else(|| {
                                 VisualDocumentError::InvalidState(
@@ -1522,6 +1581,9 @@ fn apply_visual_operation(
                 .retain(|child, parent| !removed.contains(child) && !removed.contains(parent));
         }
         VisualOperation::AddObject(draft) => {
+            if let VisualObjectKind::Connector { connector } = &draft.kind {
+                validate_manual_connector_route(connector.route, connector.manual_route.as_ref())?;
+            }
             let id = allocate_object_id(allocator)?;
             let object = VisualObject {
                 owned_label: None,
@@ -2369,12 +2431,46 @@ fn validate_object(object: &VisualObject) -> Result<(), VisualDocumentError> {
                     max_bytes: MAX_VISUAL_CONNECTOR_LABEL_BYTES,
                 });
             }
+            validate_manual_connector_route(connector.route, connector.manual_route.as_ref())?;
         }
         VisualObjectKind::Container { label } | VisualObjectKind::Swimlane { label, .. } => {
             validate_frame_label(label)?
         }
     }
     Ok(())
+}
+
+fn validate_manual_connector_route(
+    route_kind: VisualConnectorRoute,
+    route: Option<&VisualManualRoute>,
+) -> Result<(), VisualDocumentError> {
+    let Some(route) = route else {
+        return Ok(());
+    };
+    let valid_point = |point: &VisualRoutePoint| {
+        point.x.is_finite()
+            && point.y.is_finite()
+            && point.x.abs() <= MAX_VISUAL_COORDINATE_ABS
+            && point.y.abs() <= MAX_VISUAL_COORDINATE_ABS
+    };
+    let valid = match route {
+        VisualManualRoute::Polyline { points } => {
+            route_kind != VisualConnectorRoute::Curved
+                && !points.is_empty()
+                && points.len() <= MAX_VISUAL_CONNECTOR_POINTS
+                && points.iter().all(valid_point)
+        }
+        VisualManualRoute::Cubic { control1, control2 } => {
+            route_kind == VisualConnectorRoute::Curved
+                && valid_point(control1)
+                && valid_point(control2)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(VisualDocumentError::InvalidManualConnectorRoute)
+    }
 }
 
 fn validate_frame_label(label: &str) -> Result<(), VisualDocumentError> {
@@ -2615,6 +2711,13 @@ where
     deserialize_bounded_vec::<D, _, MAX_VISUAL_OBJECTS>(deserializer)
 }
 
+fn deserialize_manual_route_points<'de, D>(deserializer: D) -> Result<Vec<VisualRoutePoint>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_VISUAL_CONNECTOR_POINTS>(deserializer)
+}
+
 fn deserialize_bounded_presets<'de, D>(deserializer: D) -> Result<Vec<VisualPreset>, D::Error>
 where
     D: Deserializer<'de>,
@@ -2718,6 +2821,174 @@ mod tests {
             style: VisualStyle::default(),
             kind,
         }
+    }
+
+    #[test]
+    fn visual_manual_routes_clipboard_translation_validation_and_history() {
+        let mut doc = VisualDiagramDocument::new();
+        let mut other = draft(VisualObjectKind::Primitive {
+            shape: VisualPrimitiveShape::Rectangle,
+        });
+        other.transform.x = 400.0;
+        other.transform.rotation_degrees = 30.0;
+        let ids = doc
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Ellipse,
+                })),
+                VisualOperation::AddObject(other),
+            ])
+            .unwrap()
+            .created_objects;
+        let connector = doc
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: ids[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: ids[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::Forward,
+                        label: "route".into(),
+                        manual_route: Some(super::VisualManualRoute::Polyline {
+                            points: vec![super::VisualRoutePoint { x: 200.0, y: 100.0 }],
+                        }),
+                    },
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let before = doc.scene().clone();
+        let fragment = super::VisualClipboardFragment::capture(
+            doc.scene(),
+            &[ids[0], ids[1], connector].into_iter().collect(),
+        )
+        .unwrap();
+        for offset in [24.0, 48.0] {
+            let pasted = doc
+                .apply_transaction(&[VisualOperation::InsertClipboard {
+                    fragment: fragment.clone(),
+                    offset,
+                }])
+                .unwrap()
+                .created_objects;
+            let object = doc
+                .scene()
+                .objects
+                .iter()
+                .find(|object| object.id == pasted[2])
+                .unwrap();
+            let VisualObjectKind::Connector { connector: copied } = &object.kind else {
+                panic!("connector expected")
+            };
+            assert_eq!(copied.from.object_id, pasted[0]);
+            assert_eq!(copied.to.object_id, pasted[1]);
+            assert_eq!(
+                copied.manual_route,
+                Some(super::VisualManualRoute::Polyline {
+                    points: vec![super::VisualRoutePoint {
+                        x: 200.0 + offset,
+                        y: 100.0 + offset
+                    }]
+                })
+            );
+            assert_eq!(object.transform, VisualTransform::default());
+        }
+        let source = doc
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == connector)
+            .unwrap();
+        assert_eq!(
+            source,
+            before
+                .objects
+                .iter()
+                .find(|object| object.id == connector)
+                .unwrap()
+        );
+        let VisualObjectKind::Connector {
+            connector: automatic,
+        } = &source.kind
+        else {
+            unreachable!()
+        };
+        let mut automatic = automatic.clone();
+        automatic.manual_route = None;
+        let old_json = serde_json::to_string(&automatic).unwrap();
+        assert!(!old_json.contains("manual_route"));
+        assert_eq!(
+            serde_json::from_str::<VisualConnector>(&old_json)
+                .unwrap()
+                .manual_route,
+            None
+        );
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&doc)).unwrap();
+        let DiagramFileDocument::Visual(mut reopened) = decode_document(&bytes).unwrap() else {
+            panic!("visual document expected")
+        };
+        assert_eq!(reopened.scene(), doc.scene());
+        assert!(reopened.undo().unwrap());
+        assert!(reopened.undo().unwrap());
+        assert_eq!(reopened.scene(), &before);
+        let invalid = Some(super::VisualManualRoute::Polyline {
+            points: vec![super::VisualRoutePoint {
+                x: f64::NAN,
+                y: 0.0,
+            }],
+        });
+        assert!(matches!(
+            reopened.apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+                id: connector,
+                route: invalid
+            }]),
+            Err(VisualDocumentError::InvalidManualConnectorRoute)
+        ));
+        let too_many = Some(super::VisualManualRoute::Polyline {
+            points: vec![
+                super::VisualRoutePoint { x: 0.0, y: 0.0 };
+                super::MAX_VISUAL_CONNECTOR_POINTS + 1
+            ],
+        });
+        let mut oversized = match &source.kind {
+            VisualObjectKind::Connector { connector } => connector.clone(),
+            _ => unreachable!(),
+        };
+        oversized.manual_route = too_many.clone();
+        assert!(matches!(
+            reopened.apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Connector {
+                    connector: oversized
+                }
+            ))]),
+            Err(VisualDocumentError::InvalidManualConnectorRoute)
+        ));
+        assert!(
+            reopened
+                .apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+                    id: connector,
+                    route: too_many
+                }])
+                .is_err()
+        );
+        let wrong_kind = Some(super::VisualManualRoute::Cubic {
+            control1: super::VisualRoutePoint { x: 0.0, y: 0.0 },
+            control2: super::VisualRoutePoint { x: 1.0, y: 1.0 },
+        });
+        assert!(matches!(
+            reopened.apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+                id: connector,
+                route: wrong_kind
+            }]),
+            Err(VisualDocumentError::InvalidManualConnectorRoute)
+        ));
+        assert_eq!(reopened.scene(), &before);
     }
 
     #[test]
@@ -2846,6 +3117,7 @@ mod tests {
                 },
                 VisualOperation::AddObject(draft(VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: ids[0],
                             anchor: VisualAnchor::East,
@@ -3147,6 +3419,7 @@ mod tests {
     fn connector_draft(from: VisualObjectId, to: VisualObjectId) -> VisualObjectDraft {
         draft(VisualObjectKind::Connector {
             connector: VisualConnector {
+                manual_route: None,
                 from: VisualConnectorEndpoint {
                     object_id: from,
                     anchor: VisualAnchor::East,
@@ -3874,6 +4147,7 @@ mod tests {
         assert_eq!(document.allocator(), unknown_before);
 
         let self_loop = VisualConnector {
+            manual_route: None,
             from: VisualConnectorEndpoint {
                 object_id: first,
                 anchor: VisualAnchor::North,

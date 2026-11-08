@@ -786,6 +786,7 @@ struct VisualSelectionState {
 enum VisualGestureMode {
     Transform(VisualTransformMode),
     Marquee { extend: bool },
+    ConnectorPoint { object_id: VisualObjectId, index: usize },
 }
 
 #[derive(Clone)]
@@ -8703,11 +8704,11 @@ impl DiagramStudioDialog {
                             .objects
                             .iter()
                             .filter(|object| {
-                                transformable_ids.contains(&object.id)
-                                    && !matches!(
-                                        &object.kind,
-                                        VisualObjectKind::Connector { .. }
-                                    )
+                                match mode {
+                                    VisualGestureMode::ConnectorPoint { object_id, .. } => object.id == object_id,
+                                    _ => transformable_ids.contains(&object.id)
+                                        && !matches!(&object.kind, VisualObjectKind::Connector { .. }),
+                                }
                             })
                             .cloned()
                             .collect::<Vec<_>>();
@@ -8862,6 +8863,32 @@ impl DiagramStudioDialog {
                     {
                         match active.mode {
                             VisualGestureMode::Marquee { .. } => {}
+                            VisualGestureMode::ConnectorPoint { object_id, index } if pointer_changed => {
+                                let world = active
+                                    .mapping
+                                    .screen_to_world(scene_point_from_screen(pointer));
+                                if let (Some(original), Some(item), Some(scene)) = (
+                                    active.initial_objects.first(),
+                                    base_projection.and_then(|projection| {
+                                        projection
+                                            .items
+                                            .iter()
+                                            .find(|item| item.object_id == object_id)
+                                    }),
+                                    scene_snapshot.as_deref(),
+                                ) {
+                                    let mut edited = original.clone();
+                                    if let VisualObjectKind::Connector { connector } = &mut edited.kind
+                                        && let Some(mut route) = crate::diagram::seed_manual_route(connector, item)
+                                    {
+                                        let target = match &mut route {
+                                            crate::diagram::VisualManualRoute::Polyline { points } => {
+                                                points.get_mut(index)
+                                            }
+                                            crate::diagram::VisualManualRoute::Cubic { control1, control2 } => {
+                                                match index {
+                                                    0 => Some(control1),
+                                                    1 => Some(control2),
                             VisualGestureMode::Transform(mode) if pointer_changed => {
                                 let mut current_world = active
                                     .mapping
@@ -8921,7 +8948,7 @@ impl DiagramStudioDialog {
                                         active.preview_guides.clear();
                                 }
                             }
-                            VisualGestureMode::Transform(_) => {}
+                            VisualGestureMode::Transform(_) | VisualGestureMode::ConnectorPoint { .. } => {}
                         }
                         active.last_pointer = pointer;
                     }
@@ -8947,7 +8974,7 @@ impl DiagramStudioDialog {
                                         working_object = None;
                                     }
                                 }
-                                VisualGestureMode::Transform(_) => {
+                                VisualGestureMode::Transform(_) | VisualGestureMode::ConnectorPoint { .. } => {
                                     let operations = active
                                         .preview_objects
                                         .iter()
@@ -9590,6 +9617,7 @@ impl DiagramStudioDialog {
                                 style: VisualStyle::default(),
                                 kind: VisualObjectKind::Connector {
                                     connector: VisualConnector {
+                                        manual_route: None,
                                         from: VisualConnectorEndpoint {
                                             object_id: source.id,
                                             anchor: nearest_visual_anchor(source, target_point),
@@ -10109,7 +10137,7 @@ impl DiagramStudioDialog {
                                 );
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Route");
-                                    let _route_combo = egui::ComboBox::from_id_salt("diagram-visual-connector-route")
+                                    let _route_combo = ui.add_enabled_ui(connector.manual_route.is_none(), |ui| egui::ComboBox::from_id_salt("diagram-visual-connector-route")
                                         .selected_text(visual_connector_route_label(connector.route))
                                         .show_ui(ui, |ui| {
                                             for route in [
@@ -10132,7 +10160,7 @@ impl DiagramStudioDialog {
                                                     ui.clip_rect(),
                                                 ));
                                             }
-                                        });
+                                        })).inner;
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         "visual_connector_route".into(),
@@ -10174,6 +10202,43 @@ impl DiagramStudioDialog {
                                         ui.clip_rect(),
                                     ));
                                 });
+                                    ui.horizontal_wrapped(|ui| {
+                                    let item = base_projection.and_then(|projection| projection.items.iter().find(|item| item.object_id == selected_id));
+                                    let seeded = item.and_then(|item| crate::diagram::seed_manual_route(connector, item));
+                                    let can_add = matches!(&seeded, Some(crate::diagram::VisualManualRoute::Polyline { points }) if points.len() < crate::diagram::MAX_VISUAL_CONNECTOR_POINTS);
+                                    let add = ui.add_enabled(structural_edits_allowed && can_add, egui::Button::new("Add bend"));
+                                    let remove = ui.add_enabled(structural_edits_allowed && matches!(&connector.manual_route, Some(crate::diagram::VisualManualRoute::Polyline { .. })), egui::Button::new("Remove last bend"));
+                                    let reset = ui.add_enabled(structural_edits_allowed && connector.manual_route.is_some(), egui::Button::new("Reset automatic"));
+                                    #[cfg(test)] {
+                                        self.test_action_rects.push(("visual_connector_add_bend".into(), add.rect, ui.clip_rect()));
+                                        self.test_action_rects.push(("visual_connector_remove_bend".into(), remove.rect, ui.clip_rect()));
+                                        self.test_action_rects.push(("visual_connector_reset_route".into(), reset.rect, ui.clip_rect()));
+                                    }
+                                    if add.clicked() && let Some(item) = item
+                                        && let Some(mut route) = seeded
+                                    {
+                                        if let crate::diagram::VisualManualRoute::Polyline { points } = &mut route
+                                            && points.len() < crate::diagram::MAX_VISUAL_CONNECTOR_POINTS
+                                            && let Some(end) = item.open_paths.first().and_then(|path| path.last())
+                                            && let Some(last) = points.last().copied()
+                                        {
+                                            let midpoint = if (last.x - end.x).hypot(last.y - end.y) < 1e-9 {
+                                                crate::diagram::VisualRoutePoint { x: last.x + if last.x > 0.0 { -16.0 } else { 16.0 }, y: last.y }
+                                            } else {
+                                                crate::diagram::VisualRoutePoint { x: (last.x + end.x) / 2.0, y: (last.y + end.y) / 2.0 }
+                                            };
+                                            points.push(midpoint);
+                                        }
+                                        staged_operations = Some((vec![VisualOperation::SetConnectorManualRoute { id: selected_id, route: Some(route) }], Some(selected_id)));
+                                    } else if remove.clicked() && let Some(crate::diagram::VisualManualRoute::Polyline { mut points }) = connector.manual_route.clone() {
+                                        points.pop();
+                                        let route = (!points.is_empty()).then_some(crate::diagram::VisualManualRoute::Polyline { points });
+                                        staged_operations = Some((vec![VisualOperation::SetConnectorManualRoute { id: selected_id, route }], Some(selected_id)));
+                                    } else if reset.clicked() {
+                                        staged_operations = Some((vec![VisualOperation::SetConnectorManualRoute { id: selected_id, route: None }], Some(selected_id)));
+                                    }
+                                });
+                                ui.weak("Manual points stay fixed when endpoints move; copying a connected selection moves the whole route.");
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Line");
                                     egui::ComboBox::from_id_salt("diagram-visual-connector-line-style")
@@ -11193,6 +11258,11 @@ fn canvas_gesture_mode(
         return None;
     }
     match hit {
+        CanvasHit::Handle(CanvasHandleKind::ConnectorPoint { object_id, index })
+            if selection.objects.len() == 1 && selection.objects.contains(&object_id) =>
+        {
+            Some(VisualGestureMode::ConnectorPoint { object_id, index })
+        }
         CanvasHit::Handle(CanvasHandleKind::ResizeCorner {
             object_id,
             sign_x,
@@ -11265,6 +11335,10 @@ fn paint_visual_canvas_handles(
         let center = mapping.world_to_screen(handle.center);
         let position = egui::pos2(center.x as f32, center.y as f32);
         match handle.kind {
+            CanvasHandleKind::ConnectorPoint { .. } => {
+                painter.circle_filled(position, 5.0, fill);
+                painter.circle_stroke(position, 5.0, stroke);
+            }
             CanvasHandleKind::ResizeCorner { .. } | CanvasHandleKind::ResizeSelection => {
                 painter.rect_filled(
                     egui::Rect::from_center_size(position, egui::vec2(8.0, 8.0)),
@@ -15461,6 +15535,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: child_id,
                             anchor: VisualAnchor::East,
@@ -21890,6 +21965,234 @@ mod tests {
     }
 
     #[test]
+    fn visual_manual_route_canvas_drag_cancel_and_controls() {
+        let mut dialog = initialized_visual_dialog();
+        let add = |x| {
+            VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x,
+                    width: 100.0,
+                    height: 60.0,
+                    ..VisualTransform::default()
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })
+        };
+        let ids = dialog
+            .documents
+            .apply_visual_transaction(&[add(-180.0), add(180.0)])
+            .unwrap()
+            .created_objects;
+        let id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: crate::diagram::VisualConnector {
+                        from: crate::diagram::VisualConnectorEndpoint {
+                            object_id: ids[0],
+                            anchor: crate::diagram::VisualAnchor::East,
+                        },
+                        to: crate::diagram::VisualConnectorEndpoint {
+                            object_id: ids[1],
+                            anchor: crate::diagram::VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::Forward,
+                        label: String::new(),
+                        manual_route: None,
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        dialog.visual_selection = Some(id);
+        dialog.visual_selected_objects = [id].into_iter().collect();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_fit");
+        frame(&mut dialog, &ctx);
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let mapping = pure_canvas_mapping(
+            dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+            dialog.camera,
+        );
+        let handles = visual_canvas_selection_handles(
+            dialog.documents.visual_scene().unwrap(),
+            &projection,
+            &dialog.visual_selected_objects,
+            projection.items.len(),
+            mapping,
+        );
+        let handle = handles
+            .iter()
+            .find(|handle| matches!(handle.kind, CanvasHandleKind::ConnectorPoint { .. }))
+            .unwrap();
+        let original_control = handle.center;
+        let start = mapping.world_to_screen(handle.center);
+        let start = egui::pos2(start.x as f32 + 3.0, start.y as f32 + 2.0);
+        let end = start + egui::vec2(0.0, 55.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let before = dialog.documents.visual_scene().unwrap().clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        assert!(
+            dialog
+                .visual_gesture
+                .as_ref()
+                .is_some_and(|gesture| gesture.preview_projection.is_some())
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![button(end, false)]);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        let bent = dialog.documents.visual_scene().unwrap().clone();
+        assert!(bent.objects.iter().any(|object| matches!(&object.kind, VisualObjectKind::Connector { connector } if connector.manual_route.is_some())));
+        let VisualObjectKind::Connector { connector } = &bent
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        let Some(crate::diagram::VisualManualRoute::Polyline { points }) = &connector.manual_route
+        else {
+            unreachable!()
+        };
+        assert!((points[0].x - original_control.x).abs() < 0.01);
+        assert!((points[0].y - original_control.y - 55.0 / mapping.zoom).abs() < 0.01);
+        assert!(dialog.documents.undo().unwrap());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        assert!(dialog.documents.redo().unwrap());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &bent);
+        frame(&mut dialog, &ctx);
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let mapping = pure_canvas_mapping(
+            dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+            dialog.camera,
+        );
+        let handle = visual_canvas_selection_handles(
+            dialog.documents.visual_scene().unwrap(),
+            &projection,
+            &dialog.visual_selected_objects,
+            projection.items.len(),
+            mapping,
+        )[0];
+        let start = mapping.world_to_screen(handle.center);
+        let start = egui::pos2(start.x as f32, start.y as f32);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start + egui::vec2(20.0, 20.0))],
+        );
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![button(start + egui::vec2(20.0, 20.0), false)],
+        );
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &bent);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start + egui::vec2(20.0, 20.0))],
+        );
+        frame_with_retired_owner_generation(&mut dialog, &ctx);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![button(start + egui::vec2(20.0, 20.0), false)],
+        );
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &bent);
+        for (name, expected) in [
+            ("visual_connector_add_bend", Some(2)),
+            ("visual_connector_remove_bend", Some(1)),
+            ("visual_connector_reset_route", None),
+        ] {
+            reveal_visual_action(&mut dialog, &ctx, name);
+            click_action(&mut dialog, &ctx, name);
+            let VisualObjectKind::Connector { connector } = &dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .unwrap()
+                .kind
+            else {
+                unreachable!()
+            };
+            let count = match &connector.manual_route {
+                Some(crate::diagram::VisualManualRoute::Polyline { points }) => Some(points.len()),
+                None => None,
+                _ => panic!("polyline expected"),
+            };
+            assert_eq!(count, expected, "{name}");
+        }
+        let VisualObjectKind::Connector { connector } = &dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        assert!(connector.manual_route.is_none());
+        reveal_visual_action(&mut dialog, &ctx, "visual_connector_add_bend");
+        click_action(&mut dialog, &ctx, "visual_connector_add_bend");
+        let VisualObjectKind::Connector { connector } = &dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(&connector.manual_route, Some(crate::diagram::VisualManualRoute::Polyline { points }) if points.len() == 2)
+        );
+    }
+
+    #[test]
     fn diagram_studio_visual_connector_endpoint_drag_previews_and_commits() {
         let mut dialog = initialized_visual_dialog();
         let endpoints = dialog
@@ -21934,6 +22237,7 @@ mod tests {
                 style: VisualStyle::default(),
                 kind: VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,

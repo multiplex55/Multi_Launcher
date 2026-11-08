@@ -164,6 +164,7 @@ pub fn mermaid_visual_copy(
             style: VisualStyle::default(),
             kind: VisualObjectKind::Connector {
                 connector: VisualConnector {
+                    manual_route: None,
                     from: VisualConnectorEndpoint {
                         object_id: from,
                         anchor: from_anchor,

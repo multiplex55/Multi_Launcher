@@ -34,7 +34,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M4-A | Visual navigation, fonts, marquee and viewer sizing | complete |
 | M4-B | Structural clipboard and keyboard ownership | complete |
 | M4-C | Owned persistent inline labels | complete |
-| M4-D | Persistent editable connector bends | pending |
+| M4-D | Persistent editable connector bends | complete |
 | M4-E | Four additional editable templates | pending |
 | M5-A | Timeout-capable UIA activation | pending |
 | M5-B | Saved folder snapshot picker | pending |
@@ -385,3 +385,50 @@ M4-C actual common prefix: `cargo nextest run -p multi_launcher --cargo-profile 
 - Finala828 selector: `test(visual_owned_label_inline_edit_commit_reedit_cancel_and_stale) | test(diagram_document_visual_scene_save_reopen_undo_and_branch_keep_allocator_monotonic)`.
 
 All egui input is simulated, native M8 pending. Stale split-label search now finds only its negative regression assertion. Final formatting/comments only after tests; no jobs/writers remain. Parent checked disk fixture's extra intentional label history edit/undo and original allocator assertion. Intended source paths: diagram conversion/document(test)/drawio/export(test)/mod/visual/visual_scene/visual_templates plus gui/diagram_studio. No unrelated files or debug code found; git diff --check passed.
+
+
+M4-C checkpointe11ee01d95ca08530a7395bef5b3253ece1e0574 committed; its one normal push succeeded. Tree clean before sole-writer M4-D assignment using existing prepared handoff; no concurrent source/Cargo writer. New templates remain M4-E after canonical label/route ownership is complete.
+
+### M4-D approved implementation boundary
+
+Typed optional world-space polyline interiors or two cubic controls on VisualConnector; finite/count/coordinate validation through existing scene transactions, None retains automatic router. Canonical projection resolves endpoint anchors before manual route and owns path/arrows/label/hits/bounds/outputs plus editable seed/control geometry. Extend existing qualified VisualGesture preview/release, typed add/remove/reset, no object-gesture fallback/GUI routing formulas. Interior points fixed on endpoint movement; canonical paste translates all points while connector transform stays default. Old fields default omitted, no new clipboard system.
+
+Read-only wire handoff: validate_edge_geometry accepts only strict bounded single Array(as=points) with mxPoint(x,y); retain all other child/offset refusals. Capture edge ORIGINAL ancestry world origin before common-endpoint parent normalization; add ancestor local top-left sum to imported points. Export write_connector subtracts chosen parent world origin from objects map, same computation used by write_vertex. Manual cubic needs exact mapping or specific refusal, never flatten/orthogonal-reinterpret/reset-mode loss. Tests nested/mismatched parent origins, malformed/bounded points, curve refusal and existing strict/group/export-no-partial anchors only. Planner no writes/builds.
+
+Disposable M8 profile additionally configures recorder Stop Ctrl+Alt+Shift+F10 alongside launcher Ctrl+Alt+Shift+F11, allowing owned-fixture stop-hotkey verification. Paste Sequence next/cancel remain null; no app constructed or existing profile changed.
+
+M4-D incremental parent review: handle drag now preserves off-center press using original control + captured world delta; add/remove visibly changes point counts and Add disables at32, including automatic seeds. Canonical cubic seed inversion requires samples1/3,2/3 (24segments); divisibility/fallback guard and automatic→seed parity are tested. Wire supports Straight-style manual polyline only, refusing cubic and other reset-route styles rather than losing geometry/reset semantics.
+
+Parent found a real interaction introduced by M4-C same-owner text projection: project_connector_anchor includes all owner item outlines, so owned rectangular text frame can attract an ellipse/diamond anchor. First responsible anchor boundary will ignore decorative Text when a primitive item exists, while retaining standalone free Text anchoring and preset components. Labeled/unlabeled rotated-shape anchor parity joins directly affected geometry test after current compile. This is required endpoint correctness, not a general renderer cleanup.
+
+M4-D first scoped run433f5908-67f3-455d-a8f3-66d5897d2296 passed13/13. Exact selector: `test(visual_manual_route) | test(visual_connector_uses_rotated_local_side_anchors_and_open_arrowheads) | test(visual_connector_rotated_parallel_elbows_keep_orthogonal_egress) | test(visual_connector_parallel_edges_and_self_loops_are_distinguishable) | test(diagram_drawio_wire_grouped_export_reimport_preserves_supported_scene) | test(diagram_drawio_wire_refuses_hostile_and_unrepresentable_xml) | test(diagram_drawio_wire_export_fails_closed_without_partial_bytes) | test(diagram_drawio_wire_export_is_a_lossless_escaped_canonical_roundtrip)`, using explicit application package/fast-dev/lib/no-fail-fast/serial prefix.
+
+Coverage includes actual egui off-center handle drag/preview/no model history until single release, Escape/stale guards/add-remove-reset; model limits/clipboard/disk; projected manual routes/output; original/grouped draw.io and automatic routing anchors. Before final acceptance, localized label-anchor filter and terminal duplicate-point arrow correction are queued. Valid manual waypoint can coincide with endpoint; arrow direction must use nearest non-coincident path point, and fully degenerate paths should omit arrows rather than invent direction. Both assertions join existing geometry test; only affected checks will rerun. Native remains M8.
+
+M4-D affected runbccf672a-633a-410b-9b72-73efb4dd3f1d passed5/5: manual draw.io original-parent/relative precision cases, labeled-shape anchor parity, nearest non-coincident terminal arrow behavior and directly affected rotated/parallel/fail-closed anchors. Manual parent-relative export now specifically refuses a value that subtract/re-add cannot preserve, without changing automatic/vertex export policy. Final geometry assertion will make fallback-seed refusal deterministic (rather than conditional on fixture routing), then only that case reruns before final cleanup. No additional production scope.
+
+M4-D deterministic fallback geometry run4d321c98-138e-4949-b2f7-11e8022188c1 passed1/1. Final diagnostic corrections remain bounded: invalid point/count/kind returns distinct InvalidManualConnectorRoute rather than old transform-only error; curved waypoint import explicitly reports unsupported controls, consistent with export's specific refusal. Only model/wire diagnostic checks rerun after these changes, then final diff/commit. No new behavior initiative or broad regression.
+
+M4-D diagnostic model run8c4f184f-15d8-4d7b-993e-606dd76f3ffe passed1/1. Last concrete input-boundary correction shares manual-route validation across Add/Set before cloning an invalid external Vec and ordinary candidate validation; Replace already validates before clone. Curved waypoint import now identifies unsupported controls explicitly. Final two-case model/wire job running; no further optional work planned before scoped diff/commit.
+
+### M4-D result
+
+VisualConnector owns optional bounded typed Polyline interiors/Cubic controls, serde defaults/omission preserve old automatic data. Shared validation checks finite coordinates/count/route kind before new Add/Set clones and candidate commit; specific InvalidManualConnectorRoute diagnostics. Existing document transaction/history/codec own changes. Endpoint anchors resolve from owner shapes; manual world points remain fixed on endpoint movement, canonical clipboard translates all points with pasted graph/fresh IDs. Projection is shared path/arrows/labels/bounds/hits/viewer/minimap/SVG/PNG owner; automatic None preserves router.
+
+Selected connector gets useful projected seed/control handles; existing fixed-mapping qualified VisualGesture previews without model mutation, off-center press delta preserved, single release transaction. Escape/stale/discard/close cancel. Add appends visible editable point and disables at32, Remove last/Reset typed and undoable; mode editing disabled until Reset. Automatic seed inversion is bounded/divisibility/fallback guarded. Label text frames no longer attract primitive anchors; standalone Text anchoring retained. Duplicate terminal points use nearest non-coincident arrow direction; fully degenerate route omits arrows.
+
+Strict draw.io single Array(as=points)/mxPoint path preserves original parent origin on import and parent-relative output. Supported manual Straight polyline round-trips; manual cubic, other reset-route styles, and unrepresentable relative precision specifically refuse export rather than drop/flatten data. Existing XML/group/style/no-partial guards remain.
+
+Final model/wire run06983144-57e4-426e-9e84-1bdfb5560aa5 passed2/2 after pre-clone validation and curved import message. Earlier13/13, affected5/5, deterministic1/1 and model-diagnostic1/1 passed. All requested focused checks have passing evidence, no broad suite. Parent reviewed actual model/route/handle/clipboard/wire boundaries, constructor migration, labels/anchors and scope. Native bend/save/reopen/export remains M8; all egui interactions simulated. Source cleanup only formatting/comments after passes. Exact command receipts follow.
+M4-D actual common prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E`.
+
+- Initial433f13/13 selector recorded above.
+- Affectedbccf5/5 selector: `test(visual_manual_route_projection_keeps_anchors_and_seed_parity) | test(visual_manual_route_drawio_parent_coordinates_and_refusals) | test(visual_connector_uses_rotated_local_side_anchors_and_open_arrowheads) | test(visual_connector_parallel_edges_and_self_loops_are_distinguishable) | test(diagram_drawio_wire_export_fails_closed_without_partial_bytes)`.
+- Fallback4d321/1 selector: `test(visual_manual_route_projection_keeps_anchors_and_seed_parity)`.
+- Diagnostic8c4f1/1 selector: `test(visual_manual_routes_clipboard_translation_validation_and_history)`.
+- Final06982/2 selector: `test(visual_manual_routes_clipboard_translation_validation_and_history) | test(visual_manual_route_drawio_parent_coordinates_and_refusals)`.
+
+GUI interactions are simulated egui; no native bend/export claim. Constructor additions in codec/conversion/templates and tests are necessary None migration; no new serializer/clipboard/output path. Parent checked actual stale-owner gesture case and add/remove counts. New debug/panic-placeholder search found none. Final formatting/comments only, git diff --check clean; source-write retirement confirmation pending before Git staging.
+
+M4-D sole writer confirmed source writes/formatting finished and no Cargo/rustc job active; parent inspected final hunk scope, only intentional files remain. Source-write retirement confirmed before staging.
+

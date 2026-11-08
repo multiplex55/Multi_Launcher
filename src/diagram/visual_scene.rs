@@ -4,7 +4,7 @@ use super::scene::{PreparedText, PreparedTextLine, ScenePoint, SceneRect};
 use super::visual::{
     VisualAnchor, VisualAsset, VisualColor, VisualConnector, VisualConnectorDirection,
     VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError,
-    VisualLayerId, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveComponent,
+    VisualLayerId, VisualManualRoute, VisualRoutePoint, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveComponent,
     VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle, VisualSwimlaneOrientation,
     VisualTransform,
 };
@@ -662,15 +662,18 @@ fn project_connector_anchor(
     ));
     let tangent = point(-normal.y, normal.x);
     let items = items?;
-    let support = items
-        .iter()
+    // Owned text is painted as a second item with the same owner; its
+    // rectangular text frame is not part of the primitive's outline.
+    let primitive_owner = items.iter().any(|item| matches!(item.kind, VisualProjectedKind::Primitive(_)));
+    let anchor_items = || items.iter().filter(|item| !primitive_owner || item.kind != VisualProjectedKind::Text);
+    let support = anchor_items()
         .flat_map(|item| item.outline.iter())
         .map(|candidate| dot(*candidate, normal))
         .max_by(f64::total_cmp)?;
     let epsilon = support.abs().max(1.0) * 1.0e-10;
     let mut tangent_min = f64::INFINITY;
     let mut tangent_max = f64::NEG_INFINITY;
-    for item in items {
+    for item in anchor_items() {
         for candidate in &item.outline {
             if support - dot(*candidate, normal) <= epsilon {
                 let coordinate = dot(*candidate, tangent);
@@ -689,7 +692,7 @@ fn project_connector_anchor(
         y: normal.y * support + tangent.y * desired_tangent,
     };
     let mut best: Option<(f64, usize, usize, ScenePoint)> = None;
-    for (component_order, item) in items.iter().enumerate() {
+    for (component_order, item) in anchor_items().enumerate() {
         for edge in 0..item.outline.len() {
             let start = item.outline[edge];
             let end = item.outline[(edge + 1) % item.outline.len()];
@@ -729,6 +732,19 @@ fn route_connector(
     obstacle_bounds: &BTreeMap<VisualObjectId, SceneRect>,
     remaining_work: &mut usize,
 ) -> (Vec<ScenePoint>, bool) {
+    if let Some(manual) = &connector.manual_route {
+        let convert = |point: &VisualRoutePoint| ScenePoint { x: point.x, y: point.y };
+        let path = match manual {
+            VisualManualRoute::Polyline { points } => std::iter::once(from.point)
+                .chain(points.iter().map(convert))
+                .chain(std::iter::once(to.point))
+                .collect(),
+            VisualManualRoute::Cubic { control1, control2 } => sample_cubic(
+                from.point, convert(control1), convert(control2), to.point, CONNECTOR_CURVE_SEGMENTS,
+            ),
+        };
+        return (path, false);
+    }
     let route_obstacles = ConnectorObstacleView::new(obstacle_bounds, owner_bounds, connector);
     if connector.from.object_id == connector.to.object_id {
         return match connector.route {
@@ -818,6 +834,66 @@ fn route_connector(
             route_obstacles,
             remaining_work,
         ),
+    }
+}
+
+/// Seed editable geometry from the already projected route, so the editor
+/// never needs a second implementation of automatic routing.
+pub(crate) fn seed_manual_route(
+    connector: &VisualConnector,
+    item: &ProjectedVisualItem,
+) -> Option<VisualManualRoute> {
+    if let Some(route) = &connector.manual_route {
+        return Some(route.clone());
+    }
+    let path = item.open_paths.first()?;
+    if path.len() < 2 {
+        return None;
+    }
+    let start = *path.first()?;
+    let end = *path.last()?;
+    let route_point = |point: ScenePoint| VisualRoutePoint {
+        x: point.x,
+        y: point.y,
+    };
+    if connector.route == VisualConnectorRoute::Curved {
+        // Inversion below uses exact samples at one and two thirds of a single cubic.
+        if item.route_fallback
+            || CONNECTOR_CURVE_SEGMENTS % 3 != 0
+            || path.len() != CONNECTOR_CURVE_SEGMENTS + 1
+        {
+            return None;
+        }
+        let a = path[CONNECTOR_CURVE_SEGMENTS / 3];
+        let b = path[CONNECTOR_CURVE_SEGMENTS * 2 / 3];
+        let control = |p0: f64, p1: f64, p2: f64, p3: f64| {
+            let a = 27.0 * p1 - 8.0 * p0 - p3;
+            let b = 27.0 * p2 - p0 - 8.0 * p3;
+            ((2.0 * a - b) / 18.0, (2.0 * b - a) / 18.0)
+        };
+        let (x1, x2) = control(start.x, a.x, b.x, end.x);
+        let (y1, y2) = control(start.y, a.y, b.y, end.y);
+        Some(VisualManualRoute::Cubic {
+            control1: VisualRoutePoint { x: x1, y: y1 },
+            control2: VisualRoutePoint { x: x2, y: y2 },
+        })
+    } else {
+        if path.len().saturating_sub(2) > super::visual::MAX_VISUAL_CONNECTOR_POINTS {
+            return None;
+        }
+        let mut points = path[1..path.len().saturating_sub(1)]
+            .iter()
+            .copied()
+            .map(route_point)
+            .collect::<Vec<_>>();
+        if points.is_empty() {
+            points.push(route_point(ScenePoint {
+                x: (start.x + end.x) / 2.0,
+                y: (start.y + end.y) / 2.0,
+            }));
+        }
+        (points.len() <= super::visual::MAX_VISUAL_CONNECTOR_POINTS)
+            .then_some(VisualManualRoute::Polyline { points })
     }
 }
 
@@ -1354,12 +1430,11 @@ fn connector_arrowhead(path: &[ScenePoint], at_start: bool) -> Vec<ScenePoint> {
         *path.last().unwrap_or(&ScenePoint::default())
     };
     let neighbor = if at_start {
-        path.get(1).copied().unwrap_or(tip)
+        path.iter().copied().find(|point| distance(*point, tip) > f64::EPSILON)
     } else {
-        path.get(path.len().saturating_sub(2))
-            .copied()
-            .unwrap_or(tip)
+        path.iter().rev().copied().find(|point| distance(*point, tip) > f64::EPSILON)
     };
+    let Some(neighbor) = neighbor else { return Vec::new(); };
     let direction = normalize(point(tip.x - neighbor.x, tip.y - neighbor.y));
     let base = offset(tip, direction, -10.0);
     let tangent = point(-direction.y, direction.x);
@@ -2410,6 +2485,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
@@ -2462,6 +2538,247 @@ mod tests {
             height,
             ..VisualTransform::default()
         }
+    }
+
+    #[test]
+    fn visual_manual_route_projection_keeps_anchors_and_seed_parity() {
+        let a = ScenePoint { x: 0.0, y: 0.0 };
+        let b = ScenePoint { x: 10.0, y: 0.0 };
+        assert_eq!(
+            super::connector_arrowhead(&[a, b, b], false),
+            super::connector_arrowhead(&[a, b], false)
+        );
+        assert!(super::connector_arrowhead(&[a, a], false).is_empty());
+        let mut doc = VisualDiagramDocument::new();
+        let ids = doc
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: -200.0,
+                        rotation_degrees: 35.0,
+                        ..base_transform(100.0, 70.0)
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Diamond,
+                    },
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: 250.0,
+                        ..base_transform(100.0, 70.0)
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Ellipse,
+                    },
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        let make_connector = |to| VisualObjectKind::Connector {
+            connector: VisualConnector {
+                from: VisualConnectorEndpoint {
+                    object_id: ids[0],
+                    anchor: VisualAnchor::NorthEast,
+                },
+                to: VisualConnectorEndpoint {
+                    object_id: to,
+                    anchor: VisualAnchor::West,
+                },
+                route: VisualConnectorRoute::Curved,
+                direction: VisualConnectorDirection::Forward,
+                label: "curve".into(),
+                manual_route: None,
+            },
+        };
+        let edges = doc
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(
+                    VisualTransform::default(),
+                    VisualStyle::default(),
+                    make_connector(ids[1]),
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform::default(),
+                    VisualStyle::default(),
+                    make_connector(ids[1]),
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform::default(),
+                    VisualStyle::default(),
+                    make_connector(ids[0]),
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        let automatic = project_visual_scene(doc.scene()).unwrap();
+        let mut labeled = doc.clone();
+        let mut shape = labeled
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        shape.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "Owned".into(),
+            style: VisualStyle::default(),
+        });
+        labeled
+            .apply_transaction(&[VisualOperation::ReplaceObject(shape)])
+            .unwrap();
+        let labeled_projection = project_visual_scene(labeled.scene()).unwrap();
+        for id in [edges[0], edges[1], edges[2]] {
+            let unlabeled_path = &automatic
+                .items
+                .iter()
+                .find(|item| item.object_id == id)
+                .unwrap()
+                .open_paths[0];
+            let labeled_path = &labeled_projection
+                .items
+                .iter()
+                .find(|item| item.object_id == id)
+                .unwrap()
+                .open_paths[0];
+            assert_eq!(unlabeled_path.first(), labeled_path.first());
+            assert_eq!(unlabeled_path.last(), labeled_path.last());
+        }
+        let mut free_text = doc.clone();
+        let mut text_object = free_text
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        text_object.kind = VisualObjectKind::Text {
+            text: "independent".into(),
+        };
+        free_text
+            .apply_transaction(&[VisualOperation::ReplaceObject(text_object)])
+            .unwrap();
+        assert!(
+            project_visual_scene(free_text.scene())
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.object_id == edges[0] && !item.open_paths[0].is_empty())
+        );
+        for id in [edges[0], edges[2]] {
+            let item = automatic
+                .items
+                .iter()
+                .find(|item| item.object_id == id)
+                .unwrap();
+            let VisualObjectKind::Connector { connector } = &doc
+                .scene()
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .unwrap()
+                .kind
+            else {
+                unreachable!()
+            };
+            if item.route_fallback {
+                assert!(super::seed_manual_route(connector, item).is_none());
+                continue;
+            }
+            let route = super::seed_manual_route(connector, item).unwrap();
+            let mut candidate = doc.clone();
+            candidate
+                .apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+                    id,
+                    route: Some(route),
+                }])
+                .unwrap();
+            let manual = project_visual_scene(candidate.scene()).unwrap();
+            let path = &manual
+                .items
+                .iter()
+                .find(|item| item.object_id == id)
+                .unwrap()
+                .open_paths[0];
+            for (left, right) in path.iter().zip(&item.open_paths[0]) {
+                assert!((left.x - right.x).abs() < 1e-7 && (left.y - right.y).abs() < 1e-7);
+            }
+        }
+        let item = automatic
+            .items
+            .iter()
+            .find(|item| item.object_id == edges[0])
+            .unwrap();
+        let VisualObjectKind::Connector { connector } = &doc
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == edges[0])
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        let mut fallback = item.clone();
+        fallback.route_fallback = true;
+        assert!(super::seed_manual_route(connector, &fallback).is_none());
+        let route = super::seed_manual_route(connector, item).unwrap();
+        doc.apply_transaction(&[VisualOperation::SetConnectorManualRoute {
+            id: edges[0],
+            route: Some(route.clone()),
+        }])
+        .unwrap();
+        let before = project_visual_scene(doc.scene()).unwrap();
+        let mut endpoint = doc
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        endpoint.transform.x -= 50.0;
+        doc.apply_transaction(&[VisualOperation::ReplaceObject(endpoint)])
+            .unwrap();
+        let after = project_visual_scene(doc.scene()).unwrap();
+        let before_path = &before
+            .items
+            .iter()
+            .find(|item| item.object_id == edges[0])
+            .unwrap()
+            .open_paths[0];
+        let after_path = &after
+            .items
+            .iter()
+            .find(|item| item.object_id == edges[0])
+            .unwrap()
+            .open_paths[0];
+        assert_ne!(before_path[0], after_path[0]);
+        let VisualObjectKind::Connector { connector } = &doc
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == edges[0])
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(connector.manual_route, Some(route));
+        assert_ne!(
+            after
+                .items
+                .iter()
+                .find(|item| item.object_id == edges[0])
+                .unwrap()
+                .open_paths[0],
+            after
+                .items
+                .iter()
+                .find(|item| item.object_id == edges[1])
+                .unwrap()
+                .open_paths[0]
+        );
     }
 
     #[test]
@@ -2777,6 +3094,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
@@ -2873,6 +3191,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: source[0],
                             anchor: VisualAnchor::East,
@@ -2963,6 +3282,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: ids[0],
                             anchor: VisualAnchor::East,
@@ -3046,6 +3366,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
@@ -3127,6 +3448,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
@@ -3194,6 +3516,7 @@ mod tests {
                 VisualStyle::default(),
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: from,
                             anchor: from_anchor,
@@ -3345,6 +3668,7 @@ mod tests {
                 },
                 VisualObjectKind::Connector {
                     connector: VisualConnector {
+                        manual_route: None,
                         from: VisualConnectorEndpoint {
                             object_id: endpoints[0],
                             anchor: VisualAnchor::East,
