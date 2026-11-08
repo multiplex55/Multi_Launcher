@@ -27,8 +27,8 @@ Goal section F contains the authoritative objective, ownership, scope, invariant
 | M2-A | Truthful comparison input and result actions | implemented/tested |
 | M2-B | Compact grouped bit Inspector | implemented/tested; native limited |
 | M2-C | Three-section source/result Copy All | implemented/tested |
-| M3-A | Diagram menus, header and stable source editing | in_progress |
-| M3-B | Adjustable Visual canvas, reset and viewer pan | pending |
+| M3-A | Diagram menus, header and stable source editing | implemented/tested; native limited |
+| M3-B | Adjustable Visual canvas, reset and viewer pan | in_progress |
 | M4-A | Native persisted Mermaid styling semantics | pending |
 | M4-B | Qualified generic family colors and narrow Timeline patch | pending |
 | M4-C | Color controls, templates and offline help | pending |
@@ -73,3 +73,11 @@ M2-B commit dcd4f1f86f4d09ce3b0cc936d94faf6d0279f01d pushed successfully; clean 
 Copy All emits the requested three labeled sections from actual source ranges and matching evaluation. A narrow session accessor returns source plus evaluation after refreshing the current revision. Assignments, Unicode, genuine embedded rN, physical row indices, comments/blanks, CRLF/trailing structure and explicit errors are preserved. Results-only excludes comments/blanks; per-result Copy stays result-only. Accepted copy still resolves after same-frame source/history edits.
 
 Separate `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-run` passed in 1m47s with existing unrelated warnings. Six selected copy/same-frame/host tests passed 6/6, 7702 skipped, run fd199c0f-98ec-42a1-b88f-5415cd9e6e04, execution 0.344s. Owned 100s runner exit 0 after 2.27s, cleanup/output drain verified; receipt target/studio-and-utility-polish/evidence/m2c-focused/result.json. Whole report/empty/vector/per-result/same-frame All/undo/host retention covered. Final post-test edits were whitespace only. Parent inspected source/accessor/test diff; stale formatter search and diff check passed.
+
+M2-C commit 01e9ddf0abcfc957e997237427476ad45265f1b1 pushed successfully; clean checkpoint tree. M3-A is the sole active writer/Cargo lane.
+
+## M3-A result
+
+Both authoring modes expose File/Edit/View/Templates/Help. Flat scrollable File menus retain accepted intents, enablement, dirty decisions, export options and focus scopes. Source editor locks Tab/Shift+Tab using TextEdit behavior and application undo. A compact reserved status beside Direction exposes full detail on hover; notices/cache diagnostics sit below the workspace. Visual recents header and bounded title share a wrapping row, entries below; long title text is preserved.
+
+Final source-changing fast-dev library test compilation passed in 1m00s with six existing unrelated warnings. Initial run 87e91ef8-d335-4e5e-b067-6e7baf67dcaa passed five Tab/undo/status/header/focus/pending-decision cases; menu failures identified obsolete test focus setup and a clipped Visual export item. Fixed export layout; keyboard setup now leaves the locked editor via real menu click/Escape before navigation, retaining unchanged-source/history assertions. Full-rect status/newline/Visual PNG cases passed run 43af6979-c93f-489f-a0f6-362c9d6aff3c. Final keyboard 3/3 passed run f720438a-7023-46ff-8ca0-45050e1821bc. Directly affected menu routes 7/7 passed run 802be457-dff8-4edb-97ef-e3fb3f8f35fe, including SVG/PNG, discarded options, dirty template, Draw.io and narrow width. Owned execution batches <=100s with cleanup/drain verified; receipts under target/studio-and-utility-polish/evidence/{m3a-focused,m3a-retry,m3a-keyboard-final2,m3a-menu-routes}/result.json. Final formatting was scoped whitespace only. Parent inspected menu/status/header ownership and diff; diff check passed. Native gestures remain separate/unverified.

@@ -7251,51 +7251,130 @@ impl DiagramStudioDialog {
                         draw_effects.open_viewer_requested = true;
                     }
                     ui.separator();
-                    for (_name, label, intent, enabled) in [
-                        (
-                            "document_new",
-                            "New",
-                            DocumentIntent::New,
-                            document_actions_allowed,
-                        ),
-                        (
-                            "document_new_visual",
-                            "New Visual",
-                            DocumentIntent::NewVisual,
-                            document_actions_allowed,
-                        ),
-                        (
-                            "document_open",
-                            "Open…",
-                            DocumentIntent::Open,
-                            document_actions_allowed,
-                        ),
-                        (
-                            "document_save",
-                            "Save",
-                            DocumentIntent::Save,
-                            document_actions_allowed,
-                        ),
-                        (
-                            "document_save_as",
-                            "Save As…",
-                            DocumentIntent::SaveAs,
-                            document_actions_allowed,
-                        ),
-                        (
-                            "document_close",
-                            "Close",
-                            DocumentIntent::Close,
-                            document_actions_allowed,
-                        ),
-                    ] {
-                        let response = ui.add_enabled(enabled, egui::Button::new(label));
-                        #[cfg(test)]
-                        test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked() && document_intent.is_none() {
-                            *document_intent = Some(intent);
-                        }
+                    let mut file_item_ids = Vec::new();
+                    let mut file_sizing = false;
+                    let file_menu = ui.menu_button("File", |menu_ui| {
+                        file_sizing = menu_ui.is_sizing_pass();
+                        egui::ScrollArea::vertical()
+                            .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
+                            .show(menu_ui, |menu_ui| {
+                                for (_name, label, intent) in [
+                                    ("document_new", "New Mermaid", DocumentIntent::New),
+                                    (
+                                        "document_new_visual",
+                                        "New Visual",
+                                        DocumentIntent::NewVisual,
+                                    ),
+                                    ("document_open", "Open…", DocumentIntent::Open),
+                                    ("document_save", "Save", DocumentIntent::Save),
+                                    ("document_save_as", "Save As…", DocumentIntent::SaveAs),
+                                    ("document_close", "Close", DocumentIntent::Close),
+                                    (
+                                        "import_mermaid",
+                                        "Import Mermaid source…",
+                                        DocumentIntent::ImportMermaid,
+                                    ),
+                                    (
+                                        "drawio_import",
+                                        "Import Draw.io diagram…",
+                                        DocumentIntent::DrawioImport,
+                                    ),
+                                ] {
+                                    let enabled = menu_actions_allowed
+                                        && (_name != "drawio_import" || drawio_controls_available);
+                                    let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                    if response.enabled() {
+                                        file_item_ids.push(response.id);
+                                    }
+                                    #[cfg(test)]
+                                    {
+                                        test_action_rects.push((_name.into(), response.rect, menu_ui.clip_rect()));
+                                        test_action_focus_ids.push((_name.into(), response.id));
+                                        test_action_enabled.push((
+                                            _name.into(),
+                                            response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass(),
+                                        ));
+                                    }
+                                    if response.clicked() && document_intent.is_none() {
+                                        *document_intent = Some(intent);
+                                        menu_ui.close();
+                                    }
+                                }
+                                menu_ui.separator();
+                                for (format, label, _name) in [
+                                    (
+                                        DiagramExportFormat::Mermaid,
+                                        "Export Mermaid source…",
+                                        "mermaid",
+                                    ),
+                                    (DiagramExportFormat::Svg, "Export SVG image…", "svg"),
+                                    (DiagramExportFormat::Png, "Export PNG image…", "png"),
+                                ] {
+                                    let enabled = menu_actions_allowed
+                                        && (format == DiagramExportFormat::Mermaid || image_export_available);
+                                    let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                    if response.enabled() {
+                                        file_item_ids.push(response.id);
+                                    }
+                                    #[cfg(test)]
+                                    {
+                                        test_action_enabled.push((format!("export_{_name}"), enabled));
+                                        test_action_rects.push((
+                                            format!("export_{_name}"),
+                                            response.rect,
+                                            menu_ui.clip_rect(),
+                                        ));
+                                        test_action_focus_ids.push((format!("export_{_name}"), response.id));
+                                    }
+                                    if response.clicked() && document_intent.is_none() {
+                                        *document_intent = Some(DocumentIntent::Export(format, *export_scale));
+                                        menu_ui.close();
+                                    }
+                                }
+                                menu_ui.separator();
+                                menu_ui.label("Image scale");
+                                menu_ui.horizontal_wrapped(|menu_ui| {
+                                    for (scale, label, _name) in ExportScale::ALL {
+                                        let response = menu_ui.add_enabled(
+                                            menu_actions_allowed,
+                                            egui::Button::selectable(*export_scale == scale, label),
+                                        );
+                                        if response.enabled() {
+                                            file_item_ids.push(response.id);
+                                        }
+                                        #[cfg(test)]
+                                        {
+                                            test_action_rects.push((
+                                                format!("export_scale_{_name}"),
+                                                response.rect,
+                                                menu_ui.clip_rect(),
+                                            ));
+                                            test_action_focus_ids
+                                                .push((format!("export_scale_{_name}"), response.id));
+                                        }
+                                        if response.clicked() && menu_actions_allowed {
+                                            draw_effects.export_scale_requested = Some(scale);
+                                            menu_ui.close();
+                                        }
+                                    }
+                                });
+                            });
+                    });
+                    #[cfg(test)]
+                    {
+                        test_action_rects.push(("menu_file".into(), file_menu.response.rect, ui.clip_rect()));
+                        test_action_focus_ids.push(("menu_file".into(), file_menu.response.id));
                     }
+                    let file_popup = egui::Popup::default_response_id(&file_menu.response);
+                    if egui::Popup::is_id_open(ui.ctx(), file_popup) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: file_popup,
+                            trigger_id: file_menu.response.id,
+                            item_ids: file_item_ids,
+                            sizing_pass: file_sizing,
+                        });
+                    }
+
                     if let Some(origin) = documents.source_copy_origin().cloned() {
                         let response = ui.add_enabled(
                             document_actions_allowed,
@@ -7314,7 +7393,7 @@ impl DiagramStudioDialog {
                     let convert = ui.add_enabled(
                         document_actions_allowed && can_convert_visual,
                         egui::Button::new("Copy as Visual…"),
-                    );
+                    ).on_hover_text("Visual copy requires a valid native flowchart without groups.");
                     #[cfg(test)]
                     {
                         test_action_rects.push((
@@ -7330,68 +7409,6 @@ impl DiagramStudioDialog {
                     if convert.clicked() && document_intent.is_none() {
                         *document_intent = Some(DocumentIntent::ConvertMermaidCopy);
                     }
-                    if !can_convert_visual {
-                        ui.weak("Visual copy requires a valid native flowchart without groups.");
-                    }
-                    let mut import_item_ids = Vec::new();
-                    let mut import_sizing_pass = false;
-                    let _import_menu = ui.menu_button("Import", |menu_ui| {
-                        import_sizing_pass = menu_ui.is_sizing_pass();
-                        let response = menu_ui.add_enabled(
-                            menu_actions_allowed,
-                            egui::Button::new("Mermaid source…"),
-                        );
-                        if response.enabled() {
-                            import_item_ids.push(response.id);
-                        }
-                        #[cfg(test)]
-                        test_action_rects.push((
-                            "import_mermaid".into(),
-                            response.rect,
-                            menu_ui.clip_rect(),
-                        ));
-                        #[cfg(test)]
-                        test_action_focus_ids.push(("import_mermaid".into(), response.id));
-                        if response.clicked() && document_intent.is_none() {
-                            *document_intent = Some(DocumentIntent::ImportMermaid);
-                            menu_ui.close();
-                        }
-                        let drawio = menu_ui.add_enabled(
-                            menu_actions_allowed && drawio_controls_available,
-                            egui::Button::new("Draw.io diagram…"),
-                        );
-                        #[cfg(test)]
-                        test_action_rects.push((
-                            "drawio_import".into(),
-                            drawio.rect,
-                            menu_ui.clip_rect(),
-                        ));
-                        if drawio.enabled() {
-                            import_item_ids.push(drawio.id);
-                        }
-                        if drawio.clicked() && document_intent.is_none() {
-                            *document_intent = Some(DocumentIntent::DrawioImport);
-                            menu_ui.close();
-                        }
-                    });
-                    #[cfg(test)]
-                    test_action_rects.push((
-                        "menu_import".into(),
-                        _import_menu.response.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    test_action_focus_ids.push(("menu_import".into(), _import_menu.response.id));
-                    let import_popup_id = egui::Popup::default_response_id(&_import_menu.response);
-                    if egui::Popup::is_id_open(ui.ctx(), import_popup_id) {
-                        active_menu_scope = Some(MenuFocusScope {
-                            popup_id: import_popup_id,
-                            trigger_id: _import_menu.response.id,
-                            item_ids: import_item_ids,
-                            sizing_pass: import_sizing_pass,
-                        });
-                    }
-
                     let mut template_item_ids = Vec::new();
                     let mut templates_sizing_pass = false;
                     let _templates_menu = ui.menu_button("Templates", |menu_ui| {
@@ -7441,84 +7458,15 @@ impl DiagramStudioDialog {
                         });
                     }
 
-                    let mut export_item_ids = Vec::new();
-                    let mut export_sizing_pass = false;
-                    let _export_menu = ui.menu_button("Export", |menu_ui| {
-                        export_sizing_pass = menu_ui.is_sizing_pass();
-                        for (format, label, _name) in [
-                            (DiagramExportFormat::Mermaid, "Mermaid source…", "mermaid"),
-                            (DiagramExportFormat::Svg, "SVG image…", "svg"),
-                            (DiagramExportFormat::Png, "PNG image…", "png"),
-                        ] {
-                            let enabled = menu_actions_allowed
-                                && (format == DiagramExportFormat::Mermaid
-                                    || image_export_available);
-                            let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
-                            #[cfg(test)]
-                            test_action_enabled.push((format!("export_{_name}"), enabled));
-                            if response.enabled() {
-                                export_item_ids.push(response.id);
-                            }
-                            #[cfg(test)]
-                            test_action_rects.push((
-                                format!("export_{_name}"),
-                                response.rect,
-                                menu_ui.clip_rect(),
-                            ));
-                            #[cfg(test)]
-                            test_action_focus_ids.push((format!("export_{_name}"), response.id));
-                            if response.clicked() && document_intent.is_none() {
-                                *document_intent =
-                                    Some(DocumentIntent::Export(format, *export_scale));
-                                menu_ui.close();
-                            }
-                        }
-                        menu_ui.separator();
-                        menu_ui.label("Image scale");
-                        menu_ui.horizontal_wrapped(|menu_ui| {
-                            for (scale, label, _name) in ExportScale::ALL {
-                                let response = menu_ui.add_enabled(
-                                    menu_actions_allowed,
-                                    egui::Button::selectable(*export_scale == scale, label),
-                                );
-                                if response.enabled() {
-                                    export_item_ids.push(response.id);
-                                }
-                                #[cfg(test)]
-                                test_action_rects.push((
-                                    format!("export_scale_{_name}"),
-                                    response.rect,
-                                    menu_ui.clip_rect(),
-                                ));
-                                #[cfg(test)]
-                                test_action_focus_ids
-                                    .push((format!("export_scale_{_name}"), response.id));
-                                if response.clicked() && menu_actions_allowed {
-                                    draw_effects.export_scale_requested = Some(scale);
-                                    menu_ui.close();
-                                }
-                            }
-                        });
-                    });
-                    #[cfg(test)]
-                    test_action_rects.push((
-                        "menu_export".into(),
-                        _export_menu.response.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    test_action_focus_ids.push(("menu_export".into(), _export_menu.response.id));
-                    let export_popup_id = egui::Popup::default_response_id(&_export_menu.response);
-                    if egui::Popup::is_id_open(ui.ctx(), export_popup_id) {
-                        active_menu_scope = Some(MenuFocusScope {
-                            popup_id: export_popup_id,
-                            trigger_id: _export_menu.response.id,
-                            item_ids: export_item_ids,
-                            sizing_pass: export_sizing_pass,
-                        });
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, menu_actions_allowed);
+                    #[cfg(test)] {
+                        test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
+                        test_action_focus_ids.push(("menu_help".into(), help.id));
                     }
-                    let background_actions_allowed =
-                        base_editing_allowed && active_menu_scope.is_none();
+                    let help_popup = egui::Popup::default_response_id(&help);
+                    if egui::Popup::is_id_open(ui.ctx(), help_popup) {
+                        active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
+                    }
                     if let Some(path) = document_path.as_deref() {
                         ui.weak(
                             path.file_name()
@@ -7532,63 +7480,110 @@ impl DiagramStudioDialog {
                         ui.weak("Modified");
                     }
                     ui.separator();
-                    let source_mode = ui.selectable_label(view_mode.is_source(), "Source");
-                    #[cfg(test)]
-                    test_action_rects.push((
-                        "view_source".into(),
-                        source_mode.rect,
-                        ui.clip_rect(),
-                    ));
-                    if background_actions_allowed && source_mode.clicked() {
-                        *view_mode = view_mode.hide_preview();
-                    }
-                    for (mode, label) in [
-                        (PreviewMode::Visual, "Visual"),
-                        (PreviewMode::Split, "Split"),
-                    ] {
-                        let selected = !view_mode.is_source()
-                            && *view_mode == ViewMode::from_preview_mode(mode);
-                        let response = ui.selectable_label(selected, label);
-                        #[cfg(test)]
-                        test_action_rects.push((
-                            format!("view_{}", label.to_lowercase()),
-                            response.rect,
-                            ui.clip_rect(),
-                        ));
-                        if background_actions_allowed && response.clicked() {
-                            *view_mode = ViewMode::from_preview_mode(mode);
-                        }
-                    }
-                    if view_mode.is_source() {
-                        let response = ui.add_enabled(
-                            background_actions_allowed,
-                            egui::Button::new("Show preview"),
+                    let mut view_items = Vec::new();
+                    let mut view_sizing = false;
+                    let view = ui.menu_button("View", |menu_ui| {
+                        view_sizing = menu_ui.is_sizing_pass();
+                        let source = menu_ui.add_enabled(
+                            menu_actions_allowed,
+                            egui::Button::selectable(view_mode.is_source(), "Source"),
                         );
-                        #[cfg(test)]
-                        test_action_rects.push((
-                            "show_preview".into(),
-                            response.rect,
-                            ui.clip_rect(),
-                        ));
-                        if response.clicked() {
-                            *view_mode = view_mode.shows_preview();
+                        if source.enabled() {
+                            view_items.push(source.id);
                         }
+                        #[cfg(test)]
+                        test_action_rects.push(("view_source".into(), source.rect, menu_ui.clip_rect()));
+                        if source.clicked() {
+                            *view_mode = view_mode.hide_preview();
+                            menu_ui.close();
+                        }
+                        for (mode, label) in [
+                            (PreviewMode::Visual, "Visual"),
+                            (PreviewMode::Split, "Split"),
+                        ] {
+                            let selected =
+                                !view_mode.is_source() && *view_mode == ViewMode::from_preview_mode(mode);
+                            let response = menu_ui.add_enabled(
+                                menu_actions_allowed,
+                                egui::Button::selectable(selected, label),
+                            );
+                            if response.enabled() {
+                                view_items.push(response.id);
+                            }
+                            #[cfg(test)]
+                            test_action_rects.push((
+                                format!("view_{}", label.to_lowercase()),
+                                response.rect,
+                                menu_ui.clip_rect(),
+                            ));
+                            if response.clicked() {
+                                *view_mode = ViewMode::from_preview_mode(mode);
+                                menu_ui.close();
+                            }
+                        }
+                        if view_mode.is_source() {
+                            let response =
+                                menu_ui.add_enabled(menu_actions_allowed, egui::Button::new("Show preview"));
+                            if response.enabled() {
+                                view_items.push(response.id);
+                            }
+                            #[cfg(test)]
+                            test_action_rects.push(("show_preview".into(), response.rect, menu_ui.clip_rect()));
+                            if response.clicked() {
+                                *view_mode = view_mode.shows_preview();
+                                menu_ui.close();
+                            }
+                        }
+                    });
+                    #[cfg(test)]
+                    {
+                        test_action_rects.push(("menu_view".into(), view.response.rect, ui.clip_rect()));
+                        test_action_focus_ids.push(("menu_view".into(), view.response.id));
                     }
-                    ui.separator();
-                    let undo = ui.add_enabled(
-                        background_actions_allowed && can_undo,
-                        egui::Button::new("Undo"),
-                    );
-                    if undo.clicked() && pending.is_none() {
-                        *pending = Some(PendingMutation::Undo);
+                    let view_popup = egui::Popup::default_response_id(&view.response);
+                    if egui::Popup::is_id_open(ui.ctx(), view_popup) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: view_popup,
+                            trigger_id: view.response.id,
+                            item_ids: view_items,
+                            sizing_pass: view_sizing,
+                        });
                     }
-                    let redo = ui.add_enabled(
-                        background_actions_allowed && can_redo,
-                        egui::Button::new("Redo"),
-                    );
-                    if redo.clicked() && pending.is_none() {
-                        *pending = Some(PendingMutation::Redo);
+                    let mut edit_items = Vec::new();
+                    let mut edit_sizing = false;
+                    let edit = ui.menu_button("Edit", |menu_ui| {
+                        edit_sizing = menu_ui.is_sizing_pass();
+                        for (label, enabled, mutation) in [
+                            ("Undo", can_undo, PendingMutation::Undo),
+                            ("Redo", can_redo, PendingMutation::Redo),
+                        ] {
+                            let response =
+                                menu_ui.add_enabled(menu_actions_allowed && enabled, egui::Button::new(label));
+                            if response.enabled() {
+                                edit_items.push(response.id);
+                            }
+                            if response.clicked() && pending.is_none() {
+                                *pending = Some(mutation);
+                                menu_ui.close();
+                            }
+                        }
+                    });
+                    #[cfg(test)]
+                    {
+                        test_action_rects.push(("menu_edit".into(), edit.response.rect, ui.clip_rect()));
+                        test_action_focus_ids.push(("menu_edit".into(), edit.response.id));
                     }
+                    let edit_popup = egui::Popup::default_response_id(&edit.response);
+                    if egui::Popup::is_id_open(ui.ctx(), edit_popup) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: edit_popup,
+                            trigger_id: edit.response.id,
+                            item_ids: edit_items,
+                            sizing_pass: edit_sizing,
+                        });
+                    }
+                    let background_actions_allowed = base_editing_allowed && active_menu_scope.is_none();
+
                     let zoom_out =
                         ui.add_enabled(background_actions_allowed, egui::Button::new("−"));
                     #[cfg(test)]
@@ -7796,7 +7791,40 @@ impl DiagramStudioDialog {
                         revision,
                         pending,
                     );
+                    let (color, detail) = if let Some((color, text)) = generic_status.as_ref() {
+                        (*color, text.clone())
+                    } else if generic_family.is_some() || status.preview == PreviewState::Current {
+                        (ui.visuals().text_color(), "Preview ready".to_owned())
+                    } else if status.preview == PreviewState::Stale {
+                        (
+                            egui::Color32::from_rgb(190, 104, 18),
+                            format!(
+                                "STALE PREVIEW — {} Visual changes are disabled.",
+                                status
+                                    .diagnostic
+                                    .as_ref()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| "The source has changed.".into())
+                            ),
+                        )
+                    } else {
+                        (
+                            egui::Color32::from_rgb(185, 65, 65),
+                            status
+                                .diagnostic
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "No valid preview is available.".into()),
+                        )
+                    };
+                    let available = ui.available_width().max(1.0);
+                    ui.add_sized(
+                        [available, ui.spacing().interact_size.y],
+                        egui::Label::new(egui::RichText::new(&detail).color(color)).truncate(),
+                    )
+                    .on_hover_text(detail);
                 });
+
                 #[cfg(test)]
                 test_action_rects.push((
                     "direction".into(),
@@ -7810,46 +7838,8 @@ impl DiagramStudioDialog {
                 );
                 draw_effects.active_menu_scope = active_menu_scope;
 
-                if generic_family.is_some() {
-                    #[cfg(test)]
-                    {
-                        *test_preview_status_text =
-                            generic_status.as_ref().map(|(_, text)| text.clone());
-                    }
-                    if let Some((color, text)) = generic_status.as_ref() {
-                        ui.colored_label(*color, text);
-                    }
-                } else if status.preview == PreviewState::Stale {
-                    let diagnostic = status
-                        .diagnostic
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "The source has changed.".into());
-                    ui.colored_label(
-                        egui::Color32::from_rgb(190, 104, 18),
-                        format!("STALE PREVIEW — {diagnostic} Visual changes are disabled."),
-                    );
-                } else if status.preview == PreviewState::NoPreview {
-                    let diagnostic = status
-                        .diagnostic
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "No valid preview is available.".into());
-                    ui.colored_label(egui::Color32::from_rgb(185, 65, 65), diagnostic);
-                }
-                if let Some(error) = message.as_ref() {
-                    match error {
-                        StudioNotice::Info(_) => {
-                            ui.label(error.text());
-                        }
-                        StudioNotice::Error(_) => {
-                            ui.colored_label(egui::Color32::from_rgb(185, 65, 65), error.text());
-                        }
-                    }
-                }
-                if let Some(error) = cache.scene_error.as_ref() {
-                    ui.colored_label(egui::Color32::from_rgb(185, 65, 65), error);
-                }
+                #[cfg(test)]
+                { *test_preview_status_text = generic_status.as_ref().map(|(_, text)| text.clone()); }
                 ui.separator();
 
                 match *view_mode {
@@ -8090,6 +8080,15 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
+                if let Some(notice) = message.as_ref() {
+                    match notice {
+                        StudioNotice::Info(_) => { ui.label(notice.text()); }
+                        StudioNotice::Error(_) => { ui.colored_label(egui::Color32::from_rgb(185, 65, 65), notice.text()); }
+                    }
+                }
+                if let Some(error) = cache.scene_error.as_ref() {
+                    ui.colored_label(egui::Color32::from_rgb(185, 65, 65), error);
+                }
             });
         #[cfg(test)]
         { *test_body_scroll_id = Some(_body_scroll.id); }
@@ -8242,74 +8241,305 @@ impl DiagramStudioDialog {
                     if viewer.clicked() {
                         effects.open_viewer_requested = true;
                     }
-                    let _drawio_menu = ui.menu_button("Draw.io", |menu_ui| {
-                        let menu_allowed = actions_allowed
-                            && !closing_requested
-                            && pending_transition.is_none()
-                            && pending.is_none()
-                            && !visual_draft_active;
-                        let available = self.drawio_work.is_none()
-                            && self.drawio_review.is_none()
-                            && self.visual_asset_work.is_none()
-                            && self.completed_visual_asset_import.is_none()
-                            && self.completed_visual_export.is_none();
-                        let import = menu_ui.add_enabled(
-                            menu_allowed && available,
-                            egui::Button::new("Import diagram…"),
-                        );
-                        #[cfg(test)]
-                        self.test_action_rects.push((
-                            "drawio_import".into(),
-                            import.rect,
-                            menu_ui.clip_rect(),
-                        ));
-                        if import.clicked() && document_intent.is_none() {
-                            *document_intent = Some(DocumentIntent::DrawioImport);
-                            menu_ui.close();
+                    let export_busy = self.visual_asset_work.is_some()
+                        || self.completed_visual_asset_import.is_some()
+                        || self.completed_visual_export.is_some()
+                        || self.drawio_work.is_some()
+                        || self.drawio_review.is_some();
+                    let file_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
+                    let export_allowed = file_allowed && pending.is_none() && !visual_draft_active;
+                    let drawio_allowed = export_allowed && !export_busy;
+                    let mut file_items = Vec::new();
+                    let mut file_sizing = false;
+                    let (file_response, _) = egui::containers::menu::MenuButton::new("File")
+                        .config(
+                            egui::containers::menu::MenuConfig::new()
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                        )
+                        .ui(ui, |menu_ui| {
+                            file_sizing = menu_ui.is_sizing_pass();
+                            egui::ScrollArea::vertical()
+                                .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
+                                .show(menu_ui, |menu_ui| {
+                                    for (_name, label, intent, enabled) in [
+                                        (
+                                            "document_new",
+                                            "New Mermaid",
+                                            DocumentIntent::New,
+                                            file_allowed,
+                                        ),
+                                        (
+                                            "document_new_visual",
+                                            "New Visual",
+                                            DocumentIntent::NewVisual,
+                                            file_allowed,
+                                        ),
+                                        ("document_open", "Open…", DocumentIntent::Open, file_allowed),
+                                        ("document_save", "Save", DocumentIntent::Save, file_allowed),
+                                        (
+                                            "document_save_as",
+                                            "Save As…",
+                                            DocumentIntent::SaveAs,
+                                            file_allowed,
+                                        ),
+                                        (
+                                            "document_close",
+                                            "Close",
+                                            DocumentIntent::Close,
+                                            file_allowed,
+                                        ),
+                                        (
+                                            "drawio_import",
+                                            "Import Draw.io diagram…",
+                                            DocumentIntent::DrawioImport,
+                                            drawio_allowed,
+                                        ),
+                                        (
+                                            "drawio_export",
+                                            "Export Draw.io diagram…",
+                                            DocumentIntent::DrawioExport,
+                                            drawio_allowed,
+                                        ),
+                                    ] {
+                                        let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                                        if response.enabled() {
+                                            file_items.push(response.id);
+                                        }
+                                        #[cfg(test)]
+                                        {
+                                            self.test_action_rects.push((
+                                                _name.into(),
+                                                response.rect,
+                                                menu_ui.clip_rect(),
+                                            ));
+                                            self.test_action_focus_ids.push((_name.into(), response.id));
+                                            self.test_action_enabled.push((
+                                                _name.into(),
+                                                response.enabled()
+                                                    && menu_ui.is_visible()
+                                                    && !menu_ui.is_sizing_pass(),
+                                            ));
+                                        }
+                                        if response.clicked() && document_intent.is_none() {
+                                            *document_intent = Some(intent);
+                                            menu_ui.close();
+                                        }
+                                    }
+                                    menu_ui.separator();
+                                    menu_ui.label("Image scale");
+                                    menu_ui.horizontal_wrapped(|menu_ui| {
+                                        for (scale, label, _name) in ExportScale::ALL {
+                                            let response = menu_ui.add_enabled(
+                                                export_allowed,
+                                                egui::Button::selectable(self.export_scale == scale, label),
+                                            );
+                                            if response.enabled() {
+                                                file_items.push(response.id);
+                                            }
+                                            #[cfg(test)]
+                                            {
+                                                let action = format!("visual_export_scale_{_name}");
+                                                self.test_action_enabled.push((
+                                                    action.clone(),
+                                                    response.enabled()
+                                                        && menu_ui.is_visible()
+                                                        && !menu_ui.is_sizing_pass(),
+                                                ));
+                                                self.test_action_rects.push((
+                                                    action,
+                                                    response.rect,
+                                                    menu_ui.clip_rect(),
+                                                ));
+                                            }
+                                            if response.clicked() {
+                                                effects.visual_export_scale_requested = Some(scale);
+                                            }
+                                        }
+                                    });
+                                    menu_ui.label("Background");
+                                    menu_ui.horizontal_wrapped(|menu_ui| {
+                                        for (_name, label, color) in [
+                                            ("transparent", "Transparent", None),
+                                            (
+                                                "white",
+                                                "White",
+                                                Some(VisualColor::rgba(255, 255, 255, 255)),
+                                            ),
+                                            (
+                                                "charcoal",
+                                                "Charcoal",
+                                                Some(VisualColor::rgba(34, 39, 46, 255)),
+                                            ),
+                                        ] {
+                                            let response = menu_ui.add_enabled(
+                                                export_allowed,
+                                                egui::Button::selectable(
+                                                    self.visual_export_background == color,
+                                                    label,
+                                                ),
+                                            );
+                                            if response.enabled() {
+                                                file_items.push(response.id);
+                                            }
+                                            #[cfg(test)]
+                                            {
+                                                let action = format!("visual_export_background_{_name}");
+                                                self.test_action_enabled.push((
+                                                    action.clone(),
+                                                    response.enabled()
+                                                        && menu_ui.is_visible()
+                                                        && !menu_ui.is_sizing_pass(),
+                                                ));
+                                                self.test_action_rects.push((
+                                                    action,
+                                                    response.rect,
+                                                    menu_ui.clip_rect(),
+                                                ));
+                                            }
+                                            if response.clicked() {
+                                                effects.visual_export_background_requested = Some(color);
+                                            }
+                                        }
+                                    });
+                                    let color = self
+                                        .visual_export_background
+                                        .unwrap_or(VisualColor::rgba(255, 255, 255, 255));
+                                    let mut rgba = [color.red, color.green, color.blue, color.alpha];
+                                    let color_response = menu_ui
+                                        .add_enabled_ui(export_allowed, |ui| {
+                                            ui.color_edit_button_srgba_unmultiplied(&mut rgba)
+                                        })
+                                        .inner;
+                                    if color_response.changed() {
+                                        effects.visual_export_background_requested =
+                                            Some(Some(VisualColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3])));
+                                    }
+                                    for (_name, label, format) in [
+                                        ("visual_export_svg", "Export SVG…", DiagramExportFormat::Svg),
+                                        ("visual_export_png", "Export PNG…", DiagramExportFormat::Png),
+                                    ] {
+                                        let response = menu_ui
+                                            .add_enabled(export_allowed && !export_busy, egui::Button::new(label));
+                                        if response.enabled() {
+                                            file_items.push(response.id);
+                                        }
+                                        #[cfg(test)]
+                                        {
+                                            self.test_action_rects.push((
+                                                _name.into(),
+                                                response.rect,
+                                                menu_ui.clip_rect(),
+                                            ));
+                                            self.test_action_enabled.push((
+                                                _name.into(),
+                                                response.enabled()
+                                                    && menu_ui.is_visible()
+                                                    && !menu_ui.is_sizing_pass(),
+                                            ));
+                                        }
+                                        if response.clicked() && document_intent.is_none() {
+                                            *document_intent =
+                                                Some(DocumentIntent::Export(format, self.export_scale));
+                                            menu_ui.close();
+                                        }
+                                    }
+                                });
+                        });
+                    #[cfg(test)]
+                    {
+                        self.test_action_rects
+                            .push(("menu_file".into(), file_response.rect, ui.clip_rect()));
+                        self.test_action_focus_ids
+                            .push(("menu_file".into(), file_response.id));
+                    }
+                    let file_popup = egui::Popup::default_response_id(&file_response);
+                    if egui::Popup::is_id_open(ui.ctx(), file_popup) {
+                        effects.active_menu_scope = Some(MenuFocusScope {
+                            popup_id: file_popup,
+                            trigger_id: file_response.id,
+                            item_ids: file_items,
+                            sizing_pass: file_sizing,
+                        });
+                    }
+                    let mut edit_items = Vec::new();
+                    let mut edit_sizing = false;
+                    let edit = ui.menu_button("Edit", |menu_ui| {
+                        edit_sizing = menu_ui.is_sizing_pass();
+                        let allowed =
+                            file_allowed && pending.is_none() && !visual_draft_active && inline_label.is_none();
+                        for (_name, label, redo, enabled) in [
+                            ("visual_undo", "Undo", false, self.documents.can_undo()),
+                            ("visual_redo", "Redo", true, self.documents.can_redo()),
+                        ] {
+                            let response = menu_ui.add_enabled(allowed && enabled, egui::Button::new(label));
+                            if response.enabled() {
+                                edit_items.push(response.id);
+                            }
+                            #[cfg(test)]
+                            {
+                                self.test_action_rects
+                                    .push((_name.into(), response.rect, menu_ui.clip_rect()));
+                                self.test_action_focus_ids.push((_name.into(), response.id));
+                            }
+                            if response.clicked() && document_intent.is_none() {
+                                stage_history = Some(redo);
+                                menu_ui.close();
+                            }
                         }
-                        let export = menu_ui.add_enabled(
-                            menu_allowed && available,
-                            egui::Button::new("Export diagram…"),
+                    });
+                    #[cfg(test)]
+                    {
+                        self.test_action_rects
+                            .push(("menu_edit".into(), edit.response.rect, ui.clip_rect()));
+                        self.test_action_focus_ids
+                            .push(("menu_edit".into(), edit.response.id));
+                    }
+                    let edit_popup = egui::Popup::default_response_id(&edit.response);
+                    if egui::Popup::is_id_open(ui.ctx(), edit_popup) {
+                        effects.active_menu_scope = Some(MenuFocusScope {
+                            popup_id: edit_popup,
+                            trigger_id: edit.response.id,
+                            item_ids: edit_items,
+                            sizing_pass: edit_sizing,
+                        });
+                    }
+                    let mut view_items = Vec::new();
+                    let mut view_sizing = false;
+                    let view = ui.menu_button("View", |menu_ui| {
+                        view_sizing = menu_ui.is_sizing_pass();
+                        let response = menu_ui.add_enabled(
+                            file_allowed,
+                            egui::Button::new(if self.viewer_open {
+                                "Focus viewer"
+                            } else {
+                                "Open viewer"
+                            }),
                         );
-                        #[cfg(test)]
-                        self.test_action_rects.push((
-                            "drawio_export".into(),
-                            export.rect,
-                            menu_ui.clip_rect(),
-                        ));
-                        if export.clicked() && document_intent.is_none() {
-                            *document_intent = Some(DocumentIntent::DrawioExport);
+                        if response.enabled() {
+                            view_items.push(response.id);
+                        }
+                        if response.clicked() {
+                            effects.open_viewer_requested = true;
                             menu_ui.close();
                         }
                     });
                     #[cfg(test)]
-                    self.test_action_rects.push((
-                        "menu_drawio".into(),
-                        _drawio_menu.response.rect,
-                        ui.clip_rect(),
-                    ));
-                    for (_name, label, intent) in [
-                        ("document_new", "New Mermaid", DocumentIntent::New),
-                        ("document_new_visual", "New Visual", DocumentIntent::NewVisual),
-                        ("document_open", "Open…", DocumentIntent::Open),
-                        ("document_save", "Save", DocumentIntent::Save),
-                        ("document_save_as", "Save As…", DocumentIntent::SaveAs),
-                        ("document_close", "Close", DocumentIntent::Close),
-                    ] {
-                        let response = ui.add_enabled(
-                            document_actions_allowed,
-                            egui::Button::new(label),
-                        );
-                        #[cfg(test)]
-                        self.test_action_rects.push((
-                            _name.to_owned(),
-                            response.rect,
-                            ui.clip_rect(),
-                        ));
-                        if response.clicked() && document_intent.is_none() {
-                            *document_intent = Some(intent);
-                        }
+                    {
+                        self.test_action_rects
+                            .push(("menu_view".into(), view.response.rect, ui.clip_rect()));
+                        self.test_action_focus_ids
+                            .push(("menu_view".into(), view.response.id));
                     }
+                    let view_popup = egui::Popup::default_response_id(&view.response);
+                    if egui::Popup::is_id_open(ui.ctx(), view_popup) {
+                        effects.active_menu_scope = Some(MenuFocusScope {
+                            popup_id: view_popup,
+                            trigger_id: view.response.id,
+                            item_ids: view_items,
+                            sizing_pass: view_sizing,
+                        });
+                    }
+
                     let template_allowed = actions_allowed && !closing_requested && pending_transition.is_none() && pending.is_none() && !visual_draft_active;
                     let mut template_item_ids = Vec::new();
                     let mut template_sizing_pass = false;
@@ -8338,89 +8568,14 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
                     }
-                    let export_busy = self.visual_asset_work.is_some()
-                        || self.completed_visual_asset_import.is_some()
-                        || self.completed_visual_export.is_some()
-                        || self.drawio_work.is_some()
-                        || self.drawio_review.is_some();
-                    let export_allowed = actions_allowed
-                        && !closing_requested
-                        && pending_transition.is_none()
-                        && pending.is_none()
-                        && !visual_draft_active;
-                    let mut export_items = Vec::new();
-                    let mut export_sizing = false;
-                    let export_menu = ui.add_enabled_ui(export_allowed, |ui| {
-                        let (response, inner) = egui::containers::menu::MenuButton::new("Visual export")
-                            .config(egui::containers::menu::MenuConfig::new().close_behavior(
-                                egui::PopupCloseBehavior::CloseOnClickOutside,
-                            ))
-                            .ui(ui, |menu_ui| {
-                                export_sizing = menu_ui.is_sizing_pass();
-                                menu_ui.label("Scale");
-                                for (scale, label, _name) in ExportScale::ALL {
-                                    let response = menu_ui.selectable_label(self.export_scale == scale, label);
-                                    if response.enabled() { export_items.push(response.id); }
-                                    #[cfg(test)] {
-                                        let action = format!("visual_export_scale_{_name}");
-                                        self.test_action_enabled.push((action.clone(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
-                                        self.test_action_rects.push((action, response.rect, menu_ui.clip_rect()));
-                                    }
-                                    if response.clicked() { effects.visual_export_scale_requested = Some(scale); }
-                                }
-                                menu_ui.separator();
-                                menu_ui.label("Background");
-                                for (_name, label, color) in [
-                                    ("transparent", "Transparent", None),
-                                    ("white", "White", Some(VisualColor::rgba(255, 255, 255, 255))),
-                                    ("charcoal", "Charcoal", Some(VisualColor::rgba(34, 39, 46, 255))),
-                                ] {
-                                    let response = menu_ui.selectable_label(self.visual_export_background == color, label);
-                                    if response.enabled() { export_items.push(response.id); }
-                                    #[cfg(test)] {
-                                        let action = format!("visual_export_background_{_name}");
-                                        self.test_action_enabled.push((action.clone(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
-                                        self.test_action_rects.push((action, response.rect, menu_ui.clip_rect()));
-                                    }
-                                    if response.clicked() { effects.visual_export_background_requested = Some(color); }
-                                }
-                                let color = self.visual_export_background.unwrap_or(VisualColor::rgba(255, 255, 255, 255));
-                                let mut rgba = [color.red, color.green, color.blue, color.alpha];
-                                let color_response = menu_ui.color_edit_button_srgba_unmultiplied(&mut rgba);
-                                if color_response.changed() {
-                                    effects.visual_export_background_requested = Some(Some(VisualColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3])));
-                                }
-                                menu_ui.separator();
-                                for (_name, label, format) in [
-                                    ("visual_export_svg", "Export SVG…", DiagramExportFormat::Svg),
-                                    ("visual_export_png", "Export PNG…", DiagramExportFormat::Png),
-                                ] {
-                                    let response = menu_ui.add_enabled(!export_busy, egui::Button::new(label));
-                                    if response.enabled() { export_items.push(response.id); }
-                                    #[cfg(test)] {
-                                        self.test_action_rects.push((_name.into(), response.rect, menu_ui.clip_rect()));
-                                        self.test_action_enabled.push((_name.into(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
-                                    }
-                                    if response.clicked() && document_intent.is_none() {
-                                        *document_intent = Some(DocumentIntent::Export(format, self.export_scale));
-                                        menu_ui.close();
-                                    }
-                                }
-                            });
-                        egui::InnerResponse::new(inner.map(|result| result.inner), response)
-                    }).inner;
+                    let (help, help_items, help_sizing) = studio_help_menu(ui, file_allowed);
                     #[cfg(test)] {
-                        self.test_action_rects.push(("visual_export_options".into(), export_menu.response.rect, ui.clip_rect()));
-                        self.test_action_focus_ids.push(("visual_export_options".into(), export_menu.response.id));
+                        self.test_action_rects.push(("menu_help".into(), help.rect, ui.clip_rect()));
+                        self.test_action_focus_ids.push(("menu_help".into(), help.id));
                     }
-                    let export_popup = egui::Popup::default_response_id(&export_menu.response);
-                    if egui::Popup::is_id_open(ui.ctx(), export_popup) {
-                        effects.active_menu_scope = Some(MenuFocusScope {
-                            popup_id: export_popup,
-                            trigger_id: export_menu.response.id,
-                            item_ids: export_items,
-                            sizing_pass: export_sizing,
-                        });
+                    let help_popup = egui::Popup::default_response_id(&help);
+                    if egui::Popup::is_id_open(ui.ctx(), help_popup) {
+                        effects.active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
                     }
                     let export_cancellable = self.completed_visual_export.is_some()
                         || self.visual_asset_work.as_ref().is_some_and(|work| {
@@ -8495,7 +8650,41 @@ impl DiagramStudioDialog {
                     &mut self.test_action_rects,
                 );
 
-                effects.recent_panel = draw_recent_documents(
+                let mut label = self.documents.visual_label().unwrap_or_default().to_owned();
+                let label_editor_id = ui.make_persistent_id("diagram-studio-visual-label-editor");
+                clear_text_edit_undoer(ui.ctx(), label_editor_id);
+                let mut recent_open = None;
+                ui.horizontal_wrapped(|ui| {
+                    recent_open = draw_recent_header(
+                        ui,
+                        self.recent_panel_open,
+                        document_actions_allowed,
+                        #[cfg(test)]
+                        &mut self.test_action_rects,
+                    );
+                    let width = ui.available_width().clamp(120.0, 320.0);
+                    let label_response = ui.add_enabled(
+                        document_actions_allowed && pending.is_none() && !visual_draft_active,
+                        egui::TextEdit::singleline(&mut label)
+                            .id(label_editor_id)
+                            .hint_text("Visual canvas label")
+                            .desired_width(width),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects
+                        .push(("visual_label".into(), label_response.rect, ui.clip_rect()));
+                    #[cfg(test)]
+                    self.test_action_focus_ids
+                        .push(("visual_label".into(), label_response.id));
+                    if label_response.changed() && pending.is_none() {
+                        *pending = Some(PendingMutation::ReplaceVisualLabel {
+                            label: label.clone(),
+                            expected_document: visual_identity.clone(),
+                            expected_revision: visual_revision,
+                        });
+                    }
+                });
+                effects.recent_panel = draw_recent_body(
                     ui,
                     self.recent_index.as_ref(),
                     self.recent_index_loaded,
@@ -8505,36 +8694,10 @@ impl DiagramStudioDialog {
                     self.recent_panel_open,
                     document_actions_allowed,
                     document_intent,
+                    recent_open,
                     #[cfg(test)]
                     &mut self.test_action_rects,
                 );
-
-                let mut label = self.documents.visual_label().unwrap_or_default().to_owned();
-                let label_editor_id = ui.make_persistent_id("diagram-studio-visual-label-editor");
-                clear_text_edit_undoer(ui.ctx(), label_editor_id);
-                let label_response = ui.add_enabled(
-                    document_actions_allowed && pending.is_none() && !visual_draft_active,
-                    egui::TextEdit::singleline(&mut label)
-                        .id(label_editor_id)
-                        .hint_text("Visual canvas label")
-                        .desired_width(f32::INFINITY),
-                );
-                #[cfg(test)]
-                self.test_action_rects.push((
-                    "visual_label".into(),
-                    label_response.rect,
-                    ui.clip_rect(),
-                ));
-                #[cfg(test)]
-                self.test_action_focus_ids
-                    .push(("visual_label".into(), label_response.id));
-                if label_response.changed() && pending.is_none() {
-                    *pending = Some(PendingMutation::ReplaceVisualLabel {
-                        label: label.clone(),
-                        expected_document: visual_identity.clone(),
-                        expected_revision: visual_revision,
-                    });
-                }
 
                 ui.label("Canvas (drag objects or handles; wheel or middle-drag to navigate)");
                 if let Some((id, error)) = self
@@ -9859,24 +10022,6 @@ impl DiagramStudioDialog {
                             })],
                             None,
                         ));
-                    }
-                    let undo = ui.add_enabled(
-                        structural_edits_allowed && self.documents.can_undo(),
-                        egui::Button::new("Undo"),
-                    );
-                    #[cfg(test)]
-                    self.test_action_rects.push(("visual_undo".into(), undo.rect, ui.clip_rect()));
-                    if undo.clicked() && document_intent.is_none() {
-                        stage_history = Some(false);
-                    }
-                    let redo = ui.add_enabled(
-                        structural_edits_allowed && self.documents.can_redo(),
-                        egui::Button::new("Redo"),
-                    );
-                    #[cfg(test)]
-                    self.test_action_rects.push(("visual_redo".into(), redo.rect, ui.clip_rect()));
-                    if redo.clicked() && document_intent.is_none() {
-                        stage_history = Some(true);
                     }
                     });
                 });
@@ -12079,7 +12224,7 @@ fn source_editor(
             .desired_width(f32::INFINITY)
             .desired_rows(14)
             .code_editor()
-            .lock_focus(false),
+            .lock_focus(true),
     );
     #[cfg(test)]
     {
@@ -13729,6 +13874,26 @@ fn menu_focus_request_for_ui(
     }
 }
 
+fn studio_help_menu(ui: &mut egui::Ui, enabled: bool) -> (egui::Response, Vec<egui::Id>, bool) {
+    let mut items = Vec::new();
+    let mut sizing = false;
+    let menu = ui.add_enabled_ui(enabled, |ui| {
+    ui.menu_button("Help", |ui| {
+        sizing = ui.is_sizing_pass();
+        ui.strong("Diagram Studio");
+        ui.label("Mermaid source is retained as text. Use Templates for supported examples.");
+        ui.label("Flowcharts support visual node and edge editing. Other families use source rendering.");
+        ui.monospace("flowchart TD\n    A --> B");
+        ui.label("Tab indents in the source editor; Shift+Tab removes indentation.");
+        ui.label("A stale preview shows the last valid result until the source renders successfully.");
+        let close = ui.button("Close help");
+        if close.enabled() { items.push(close.id); }
+        if close.clicked() { ui.close(); }
+    })
+}).inner;
+    (menu.response, items, sizing)
+}
+
 fn consume_menu_key(
     input: &mut egui::InputState,
     key: egui::Key,
@@ -14087,6 +14252,25 @@ fn draw_drawio_report(ui: &mut egui::Ui, report: &DrawioReport) {
     }
 }
 
+fn draw_recent_header(
+    ui: &mut egui::Ui,
+    expanded: bool,
+    actions_allowed: bool,
+    #[cfg(test)] action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) -> Option<bool> {
+    let toggle = ui.add_enabled(
+        actions_allowed,
+        egui::Button::new(if expanded {
+            "Recent diagrams ▾"
+        } else {
+            "Recent diagrams ▸"
+        }),
+    );
+    #[cfg(test)]
+    action_rects.push(("recent_panel".into(), toggle.rect, ui.clip_rect()));
+    toggle.clicked().then_some(!expanded)
+}
+
 fn draw_recent_documents(
     ui: &mut egui::Ui,
     index: Option<&RecentDiagramIndex>,
@@ -14099,18 +14283,26 @@ fn draw_recent_documents(
     intent: &mut Option<DocumentIntent>,
     #[cfg(test)] action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) -> Option<RecentPanelEffects> {
-    let toggle = ui.add_enabled(
-        actions_allowed,
-        egui::Button::new(if expanded {
-            "Recent diagrams ▾"
-        } else {
-            "Recent diagrams ▸"
-        }),
-    );
-    #[cfg(test)]
-    action_rects.push(("recent_panel".into(), toggle.rect, ui.clip_rect()));
+    let open = draw_recent_header(ui, expanded, actions_allowed, #[cfg(test)] action_rects);
+    draw_recent_body(ui, index, loaded, load_error, status, search, expanded, actions_allowed,
+        intent, open, #[cfg(test)] action_rects)
+}
+
+fn draw_recent_body(
+    ui: &mut egui::Ui,
+    index: Option<&RecentDiagramIndex>,
+    loaded: bool,
+    load_error: Option<&str>,
+    status: Option<&str>,
+    search: &mut String,
+    expanded: bool,
+    actions_allowed: bool,
+    intent: &mut Option<DocumentIntent>,
+    open: Option<bool>,
+    #[cfg(test)] action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) -> Option<RecentPanelEffects> {
     let mut effects = RecentPanelEffects {
-        open: toggle.clicked().then_some(!expanded),
+        open,
         search: None,
     };
     if !expanded {
@@ -14227,12 +14419,12 @@ mod tests {
     }
 
     fn click_mermaid_drawio_import(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
-        click_action(dialog, ctx, "menu_import");
+        click_action(dialog, ctx, "menu_file");
         click_action(dialog, ctx, "drawio_import");
     }
 
     fn click_visual_drawio_export(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
-        click_action(dialog, ctx, "menu_drawio");
+        click_action(dialog, ctx, "menu_file");
         click_action(dialog, ctx, "drawio_export");
     }
 
@@ -16950,10 +17142,10 @@ mod tests {
         assert!(dialog.test_source_editor_enabled());
         assert_eq!(dialog.test_preview_status_text(), None);
 
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         assert_eq!(dialog.test_action_enabled("export_svg"), Some(true));
         assert_eq!(dialog.test_action_enabled("export_png"), Some(true));
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         frame(&mut dialog, &ctx);
         assert_eq!(dialog.test_action_enabled("add_node"), Some(false));
         assert_eq!(dialog.test_action_enabled("auto_layout"), Some(false));
@@ -17285,6 +17477,15 @@ mod tests {
 
     fn click_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
         frame(dialog, ctx);
+        if name.starts_with("document_") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
+            click_action(dialog, ctx, "menu_file");
+        }
+        if matches!(name, "visual_undo" | "visual_redo") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
+            click_action(dialog, ctx, "menu_edit");
+        }
+        if (name.starts_with("view_") || name == "show_preview") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
+            click_action(dialog, ctx, "menu_view");
+        }
         let click = action_center(dialog, name);
         for pressed in [true, false] {
             frame_with_child_events(
@@ -17363,6 +17564,9 @@ mod tests {
         name: &str,
     ) {
         frame(dialog, ctx);
+        if name.starts_with("document_") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
+            click_action(dialog, ctx, "menu_file");
+        }
         let click = action_center(dialog, name);
         for pressed in [true, false] {
             if !pressed {
@@ -17440,16 +17644,11 @@ mod tests {
         ctx: &egui::Context,
         name: &str,
     ) {
-        for _ in 0..40 {
-            if dialog.test_action_has_focus(name) {
-                return;
-            }
-            send_child_key(dialog, ctx, egui::Key::Tab, egui::Modifiers::NONE);
-        }
-        assert!(
-            dialog.test_action_has_focus(name),
-            "Tab should reach {name}"
-        );
+        // Focus-lock keeps Tab in the source editor. Use a pointer to leave it,
+        // then verify keyboard opening/traversal from the restored menu trigger.
+        click_action(dialog, ctx, name);
+        send_child_key(dialog, ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(dialog.test_action_has_focus(name), "Escape restores {name}");
     }
 
     fn open_menu_with_keyboard(
@@ -17458,15 +17657,19 @@ mod tests {
         trigger: &str,
         first_item: &str,
     ) {
+        let before = dialog.test_session().draft().to_owned();
         focus_action_with_keyboard(dialog, ctx, trigger);
+        assert_eq!(dialog.test_session().draft(), before, "focusing menu trigger changed source");
         send_child_key(dialog, ctx, egui::Key::Space, egui::Modifiers::NONE);
         for _ in 0..4 {
             frame(dialog, ctx);
         }
-        assert!(
-            dialog.test_action_has_focus(first_item),
-            "menu should focus {first_item}"
-        );
+        for _ in 0..32 {
+            if dialog.test_action_has_focus(first_item) { return; }
+            send_child_key(dialog, ctx, egui::Key::Tab, egui::Modifiers::NONE);
+            assert_eq!(dialog.test_session().draft(), before, "menu traversal changed source; scope {:?}", dialog.active_menu_scope);
+        }
+        assert!(dialog.test_action_has_focus(first_item), "menu should focus {first_item}");
     }
 
     #[test]
@@ -17555,52 +17758,11 @@ mod tests {
         ));
         assert!(dialog.test_source_editor_has_focus(&ctx));
 
-        let source = dialog.test_session().draft().to_owned();
         let revision = dialog.test_session().revision();
         let undo_depth = dialog.test_session().undo_depth();
-        let editor_id = dialog
-            .test_source_editor_id
-            .expect("source editor was rendered");
         let key_event = |key, modifiers, pressed| egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed,
-            repeat: false,
-            modifiers,
+            key, physical_key: None, pressed, repeat: false, modifiers,
         };
-
-        frame_with_child_events(
-            &mut dialog,
-            &ctx,
-            vec![key_event(egui::Key::Tab, egui::Modifiers::NONE, true)],
-        );
-        frame_with_child_events(
-            &mut dialog,
-            &ctx,
-            vec![key_event(egui::Key::Tab, egui::Modifiers::NONE, false)],
-        );
-        assert!(!dialog.test_source_editor_has_focus(&ctx));
-        let following_widget = crate::gui::render::immediate_viewport_test_focused_id()
-            .and_then(|(viewport, focused)| {
-                (viewport == viewport_id()).then_some(focused).flatten()
-            })
-            .expect("Tab moves focus to a following live control in the child");
-        assert_ne!(following_widget, editor_id);
-
-        frame_with_child_events(
-            &mut dialog,
-            &ctx,
-            vec![key_event(egui::Key::Tab, egui::Modifiers::SHIFT, true)],
-        );
-        frame_with_child_events(
-            &mut dialog,
-            &ctx,
-            vec![key_event(egui::Key::Tab, egui::Modifiers::SHIFT, false)],
-        );
-        assert!(dialog.test_source_editor_has_focus(&ctx));
-        assert_eq!(dialog.test_session().draft(), source);
-        assert_eq!(dialog.test_session().revision(), revision);
-        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
 
         frame_with_child_events(
             &mut dialog,
@@ -18516,9 +18678,9 @@ mod tests {
             "canvas must stay inside viewport width: canvas={canvas:?}, viewport={viewport:?}, actions={action_rects:#?}"
         );
         for name in [
-            "menu_import",
+            "menu_file",
             "menu_templates",
-            "menu_export",
+            "menu_file",
             "auto_layout",
             "direction",
             "zoom_out",
@@ -18552,7 +18714,7 @@ mod tests {
             frame(&mut dialog, &ctx);
         }
 
-        click_action(&mut dialog, &ctx, "menu_import");
+        click_action(&mut dialog, &ctx, "menu_file");
         assert!(
             dialog
                 .test_action_rects
@@ -18590,13 +18752,15 @@ mod tests {
         let original_redo = dialog.test_session().redo_depth();
         dialog.test_set_next_file_picker_result(Some(import_path));
 
-        open_menu_with_keyboard(&mut dialog, &ctx, "menu_import", "import_mermaid");
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_file", "import_mermaid");
         send_child_key(
             &mut dialog,
             &ctx,
             egui::Key::ArrowDown,
             egui::Modifiers::NONE,
         );
+        assert!(dialog.test_action_has_focus("drawio_import"));
+        send_child_key(&mut dialog, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
         assert!(dialog.test_action_has_focus("import_mermaid"));
         assert_eq!(dialog.test_file_picker_calls(), 0);
         assert_eq!(dialog.test_session().draft(), original_source.as_str());
@@ -18656,7 +18820,7 @@ mod tests {
         let template_undo = dialog.test_session().undo_depth();
         let template_redo = dialog.test_session().redo_depth();
         dialog.test_set_next_file_picker_result(Some(export_path.clone()));
-        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_file", "export_mermaid");
         assert_eq!(dialog.test_file_picker_calls(), 0);
         assert_eq!(dialog.test_session().draft(), template_source.as_str());
         assert_eq!(dialog.test_session().revision(), template_revision);
@@ -18691,7 +18855,7 @@ mod tests {
         let undo = dialog.test_session().undo_depth();
         let redo = dialog.test_session().redo_depth();
 
-        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_file", "document_new");
         assert!(dialog.deferred_menu_focus.is_none());
 
         frame_with_events_and_root_discard(
@@ -18735,10 +18899,10 @@ mod tests {
         assert_eq!(dialog.test_session().undo_depth(), undo);
         assert_eq!(dialog.test_session().redo_depth(), redo);
 
-        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_file", "document_new");
         send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(dialog.open, "Escape should close the menu, not the Studio");
-        assert!(dialog.test_action_has_focus("menu_export"));
+        assert!(dialog.test_action_has_focus("menu_file"));
         assert_eq!(dialog.test_session().draft(), source.as_str());
         assert_eq!(dialog.test_session().revision(), revision);
         assert_eq!(dialog.test_session().undo_depth(), undo);
@@ -19472,6 +19636,169 @@ mod tests {
     }
 
     #[test]
+    fn diagram_studio_source_tab_indents_and_app_undo_restores_it() {
+        let source = "flowchart TD\nA[\"Alpha\"]";
+        let mut dialog = initialized_dialog();
+        dialog.test_replace_source(source);
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let id = dialog.test_source_editor_id.unwrap();
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        install_text_edit_cursor(&ctx, id, "flowchart TD\n".chars().count());
+        send_child_key(&mut dialog, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            dialog.test_session().draft(),
+            "flowchart TD\n\tA[\"Alpha\"]"
+        );
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        send_child_key(&mut dialog, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            dialog.test_session().draft(),
+            "flowchart TD\n\tA[\"Alpha\"]"
+        );
+        send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(dialog.test_session().draft(), source);
+    }
+
+    #[test]
+    fn diagram_studio_source_position_stays_stable_across_preview_status() {
+        fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) -> egui::Rect {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100.0, 900.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            dialog.test_source_editor_rect.unwrap()
+        }
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        let ctx = egui::Context::default();
+        let ready = draw(&mut dialog, &ctx);
+        dialog.test_replace_source("flowchart TD\nA -->");
+        dialog.message = Some(StudioNotice::error("long diagnostic ".repeat(100)));
+        let stale = draw(&mut dialog, &ctx);
+        assert_eq!(ready, stale);
+        dialog.test_replace_source("sequenceDiagram\nAlice->>Bob: hello");
+        let key = RenderKey::new(
+            dialog.render_document.clone(),
+            dialog.test_session().revision(),
+            dialog.render_options,
+        );
+        let raster_size = RasterSize::new(200, 100).unwrap();
+        dialog.generic_preview = GenericPreviewStatus::Pending {
+            key: key.clone(),
+            raster_size,
+        };
+        let pending = draw(&mut dialog, &ctx);
+        dialog.generic_preview = GenericPreviewStatus::Failed {
+            key,
+            raster_size,
+            error: crate::diagram::DiagramRenderError::WorkerUnavailable,
+        };
+        let failed = draw(&mut dialog, &ctx);
+        assert_eq!(ready, pending);
+        assert_eq!(ready, failed);
+    }
+
+    #[test]
+    fn visual_recents_header_and_title_are_compact_and_preserve_long_text() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let title = "A long visual document title ".repeat(12);
+        click_action(&mut dialog, &ctx, "visual_label");
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+                egui::Event::Text(title.clone()),
+            ],
+        );
+        assert_eq!(dialog.documents.visual_label(), Some(title.as_str()));
+        for width in [900.0, 360.0] {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            let recent = dialog.test_action_rect("recent_panel").unwrap().0;
+            let label = dialog.test_action_rect("visual_label").unwrap().0;
+            assert!(label.width() <= 320.0 && label.right() <= width);
+            if width == 900.0 {
+                assert_eq!(recent.top(), label.top());
+            }
+            assert_eq!(dialog.documents.visual_label(), Some(title.as_str()));
+        }
+    }
+
+    #[test]
     fn diagram_studio_pointer_drag_moves_selection_once_and_supports_undo_redo() {
         let mut dialog = DiagramStudioDialog::default();
         dialog.test_replace_source("flowchart LR\n    A[\"Alpha\"]\n    B[\"Beta\"]");
@@ -19770,7 +20097,7 @@ mod tests {
         }
 
         dialog.test_set_next_file_picker_result(Some(import_path));
-        click_action(&mut dialog, &ctx, "menu_import");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action(&mut dialog, &ctx, "import_mermaid");
         assert_eq!(dialog.test_file_picker_calls(), 1);
         assert_eq!(dialog.test_session().draft(), source);
@@ -19786,7 +20113,7 @@ mod tests {
         let dirty = dialog.documents.is_dirty();
         let disk_digest = dialog.documents.disk_digest();
         dialog.test_set_next_file_picker_result(Some(export_path.clone()));
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action(&mut dialog, &ctx, "export_mermaid");
 
         assert_eq!(dialog.test_file_picker_calls(), 2);
@@ -19915,7 +20242,7 @@ mod tests {
         let original_digest = dialog.documents.disk_digest();
 
         dialog.test_set_next_file_picker_result(Some(png_path.clone()));
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action(&mut dialog, &ctx, "export_png");
         let png = std::fs::read(&png_path).expect("read published PNG");
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
@@ -19929,7 +20256,7 @@ mod tests {
         ));
 
         dialog.test_set_next_file_picker_result(None);
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action(&mut dialog, &ctx, "export_svg");
         assert!(matches!(
             &dialog.message,
@@ -19937,7 +20264,7 @@ mod tests {
         ));
 
         dialog.test_set_next_file_picker_result(Some(occupied_path.clone()));
-        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action(&mut dialog, &ctx, "export_mermaid");
         assert_eq!(std::fs::read(&occupied_path).unwrap(), occupied_bytes);
         assert!(matches!(
@@ -21305,7 +21632,7 @@ mod tests {
         let viewer_camera = dialog.viewer_camera;
         assert_ne!(viewer_camera.center, viewer_before.center);
         assert_ne!(viewer_camera.zoom, viewer_before.zoom);
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..20 {
             frame(&mut dialog, &ctx);
         }
@@ -21421,7 +21748,7 @@ mod tests {
         .encode_svg(DiagramVisualExportOptions::default())
         .unwrap();
         dialog.test_set_next_file_picker_result(Some(svg_path.clone()));
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..2 {
             frame(&mut dialog, &ctx);
         }
@@ -21438,7 +21765,7 @@ mod tests {
         assert!(svg.contains("<svg"));
         assert!(svg.contains("<path"));
         dialog.test_set_next_file_picker_result(Some(png_path.clone()));
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..2 {
             frame(&mut dialog, &ctx);
         }
@@ -21467,7 +21794,7 @@ mod tests {
         for _ in 0..3 {
             frame(&mut dialog, &ctx);
         }
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..2 {
             frame(&mut dialog, &ctx);
         }
@@ -21700,7 +22027,7 @@ mod tests {
         frame(&mut dialog, &ctx);
         dialog.test_set_next_file_picker_result(Some(destination.clone()));
 
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..2 {
             frame(&mut dialog, &ctx);
         }
@@ -21723,7 +22050,7 @@ mod tests {
         dialog.test_set_next_file_picker_result(Some(destination.clone()));
         dialog.test_set_picker_visual_change("Changed inside the picker hook");
 
-        click_action(&mut dialog, &ctx, "visual_export_options");
+        click_action(&mut dialog, &ctx, "menu_file");
         for _ in 0..2 {
             frame(&mut dialog, &ctx);
         }
@@ -22912,7 +23239,7 @@ mod tests {
         let original_source = dialog.test_session().draft().to_owned();
 
         dialog.test_set_next_file_picker_result(Some(source_path.clone()));
-        click_action(&mut dialog, &ctx, "menu_import");
+        click_action(&mut dialog, &ctx, "menu_file");
         click_action_with_child_discard(&mut dialog, &ctx, "drawio_import");
         assert_eq!(dialog.test_file_picker_calls(), 0);
         assert!(dialog.drawio_work.is_none());
