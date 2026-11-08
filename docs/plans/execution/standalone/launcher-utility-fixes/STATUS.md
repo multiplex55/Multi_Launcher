@@ -21,7 +21,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | --- | --- | --- |
 | M0-A | Exact-parent child, own baseline, initial push | complete |
 | M1-A | A: root query and intentional focus transfer | complete (native pending C smoke) |
-| M2-A | B: root-results-local fade override | pending |
+| M2-A | B: root-results-local fade override | complete (native pending C smoke) |
 | M3-A | C: release profile and bounded feature audit | pending |
 | M3-B | C: idle capability work and ordinary release build | pending |
 | M3-R | Independent A-C review/report/GitHub publication | pending |
@@ -63,3 +63,11 @@ Verification: RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --car
 ```text
 test(studio_usability_query_focus_) | test(studio_usability_diagram_viewer_embedded_fallback_keeps_root_host_identity) | test(notes_query_mouse_) | test(notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft) | test(jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass) | test(notes_query_activation_mouse_workflow_runs_current_result_beside_notes) | test(notes_query_activation_autocomplete_tab_keeps_focus_through_discarded_pass) | test(launcher_show_focus_waits_for_root_focus_and_never_refocuses_an_already_visible_query) | test(launcher_show_focus_cancels_on_click_tab_and_protected_owner_takeover) | test(launcher_show_focus_rejects_replaced_root_generation)
 ```
+
+M1-A commit 6ec61e5b1d765022ee06381cd419d6acd15455b8; ordinary git push succeeded; clean checkpoint tree. M2-A planning active.
+
+## M2-A result
+
+The existing root-results UI saves its fade strength, sets scroll.fade.strength=0 immediately before the shared list/grid ScrollArea, and restores it immediately afterward. No new child UI/widget identity, global/vendor styling, selection-scroll timing or geometry changes. Parent inspected exact scoped diff; git diff --check passed.
+
+RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E 'test(root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection) | test(root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets)': 2/2 passed, 7,686 skipped, 2.962s execution, run 12b46689-66d7-4b5d-a08c-17e96e77db1d. Separate compilation 1m20s; existing100s owned runner exit0 in4.986s, cleanup/output drain verified. Receipts target/launcher-utility-fixes/evidence/m2a-root-results/{result.json,stderr.log}. Native visual check pending C release smoke; no evidence supports an extra selection-scroll change.

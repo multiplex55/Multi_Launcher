@@ -10719,6 +10719,10 @@ impl LauncherApp {
                 let root_diagnostics_enabled = self.qa_framebuffer_root_diagnostics_enabled();
                 #[cfg(feature = "qa-framebuffer-capture")]
                 let mut root_diagnostic = None;
+                // Keep the override on this UI only while building the root
+                // results, without changing the ScrollArea's widget identity.
+                let previous_fade_strength = ui.spacing().scroll.fade.strength;
+                ui.spacing_mut().scroll.fade.strength = 0.0;
                 let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
                     .show_viewport(ui, |ui, viewport| {
@@ -11217,6 +11221,7 @@ impl LauncherApp {
                             }
                         });
                     });
+                ui.spacing_mut().scroll.fade.strength = previous_fade_strength;
                 #[cfg(feature = "qa-framebuffer-capture")]
                 if let Some(mut diagnostic) = root_diagnostic {
                     diagnostic.scroll_inner_rect = [
