@@ -19,3 +19,7 @@ The final H focused selection passed 8/8 (Nextest `d06ed3b4-9370-43b6-b7d2-d0491
 The diagnosed fixes preserve complete exclusion inventory and strong action authority: input-synchronized Shell calls run on STA; direct inherited `GetWindow` avoids the documented failing base-interface query while retaining returned-HWND/root/process/thread validation. UI Automation remains MTA. An in-flight synchronous native COM call can delay cancellation/retirement until it returns; no hard interruptibility claim or abandoned thread is introduced.
 
 This review does not supply missing native acceptance. Screenshot capture timed out twice and coordinate input geometry was unavailable, so visual/physical mouse checks remain unverified. Windows 10 build 19045 cannot establish the supported Windows 11 build ≥22621 ordered-tab workflow. Native observer success is not a claim of saved-list tab completion. Final Clippy/build/native-smoke disposition is recorded in STATUS rather than inferred from review.
+
+## Publication-state readback
+
+The interim PR was externally merged through D at `2064b428783aefa06e2ed084f7fa602847d84181` before E–H finished. Its review/comment remain published; the full reviewed E–H source is pushed on the continuing task branch. The agent did not merge the PR or alter branch ancestry. Final STATUS records the live remote refs and exact final-tip lookup after the documentation follow-up.
