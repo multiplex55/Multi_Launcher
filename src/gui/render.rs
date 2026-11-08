@@ -18630,6 +18630,28 @@ mod tests {
         panic!("Inspector control {name} did not become visible: {last:?}");
     }
 
+    fn inspector_open_section(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        if !app.programmer_inspector_dialog.test_section_open(name) {
+            let button = inspector_visible_control(ctx, app, viewport, name);
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    ctx,
+                    app,
+                    viewport,
+                    tool_dialog_pointer_events(button, pressed),
+                    false,
+                    false,
+                );
+            }
+            assert!(app.programmer_inspector_dialog.test_section_open(name));
+        }
+    }
+
     #[test]
     fn explorer_tabs_saved_folder_picker_accepts_actual_clicks() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -19895,11 +19917,17 @@ mod tests {
             (1_u128 << 63) | (1_u128 << 62) | 9_007_199_254_740_993
         );
         assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
-        let (copy, clip, enabled) = app
-            .programmer_inspector_dialog
-            .test_control("copy-Decimal")
-            .expect("native decimal Copy");
-        assert!(enabled && clip.contains_rect(copy));
+        let before_low = app.programmer_inspector_dialog.test_value();
+        let low = inspector_visible_control(&ctx, &mut app, native, "bit-0");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(&ctx, &mut app, native, tool_dialog_pointer_events(low, pressed), false, false);
+            }
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_clicked_bit(), Some(0));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), before_low);
+        inspector_open_section(&ctx, &mut app, native, "section-formatting");
+        let copy = inspector_visible_control(&ctx, &mut app, native, "copy-Decimal");
         let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
         for (discard_root, discard_child) in [(true, false), (false, true)] {
             run_host_viewport_frame(
@@ -19951,6 +19979,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        assert!(app.programmer_inspector_dialog.test_section_open("section-formatting"));
         let (insert, clip, enabled) = app
             .programmer_inspector_dialog
             .test_control("insert")
@@ -20177,6 +20206,7 @@ mod tests {
             .test_control("insert")
             .unwrap();
         assert!(!enabled, "stale adopted source cannot be inserted");
+        inspector_open_section(&ctx, &mut app, root, "section-formatting");
         let copy = inspector_visible_control(&ctx, &mut app, root, "copy-Decimal");
         let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
         for pressed in [true, false] {
@@ -20269,6 +20299,7 @@ mod tests {
             output.drop_without_applying_deltas();
             assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
         }
+        inspector_open_section(&ctx, &mut app, root, "section-labels");
         for (name, text) in [
             ("label-start", "0"),
             ("label-end", "1"),
@@ -20418,6 +20449,62 @@ mod tests {
             "a genuine editor click captures the new incarnation"
         );
     }
+    #[test]
+    fn programmer_inspector_minimum_size_reaches_comparison() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("123\n345");
+        let size = egui::vec2(360.0, 280.0);
+        for _ in 0..4 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, size)
+                .drop_without_applying_deltas();
+        }
+        app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+        let mut reached = false;
+        let mut last = None;
+        for _ in 0..30 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, size)
+                .drop_without_applying_deltas();
+            let (rect, clip, enabled) = app
+                .programmer_inspector_dialog
+                .test_control("compare")
+                .unwrap();
+            last = Some((rect, clip, enabled));
+            if enabled && clip.contains_rect(rect) {
+                reached = true;
+                break;
+            }
+            let position = egui::pos2(clip.center().x, clip.bottom() - 5.0);
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -140.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                size,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(
+            reached,
+            "comparison remains reachable by scrolling at minimum size: {last:?}"
+        );
+    }
+
     #[test]
     fn programmer_inspector_typed_comparison_and_selected_result_are_truthful() {
         use crate::calculation_pad::ComparisonRelation;
@@ -20889,6 +20976,7 @@ mod tests {
                 .formatted(),
             "13"
         );
+        inspector_open_section(&ctx, &mut app, native, "section-formatting");
         let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
         for (discard_root, discard_child) in [(true, false), (false, true)] {
             run_host_viewport_frame(

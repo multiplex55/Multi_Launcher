@@ -25,8 +25,8 @@ Goal section F contains the authoritative objective, ownership, scope, invariant
 | M0-A | Exact-parent child and own baseline/push | complete; pushed |
 | M1-A | Folder Size reveal and toolbar wording | implemented/tested; native limited |
 | M2-A | Truthful comparison input and result actions | implemented/tested |
-| M2-B | Compact grouped bit Inspector | in_progress |
-| M2-C | Three-section source/result Copy All | pending |
+| M2-B | Compact grouped bit Inspector | implemented/tested; native limited |
+| M2-C | Three-section source/result Copy All | in_progress |
 | M3-A | Diagram menus, header and stable source editing | pending |
 | M3-B | Adjustable Visual canvas, reset and viewer pan | pending |
 | M4-A | Native persisted Mermaid styling semantics | pending |
@@ -57,3 +57,11 @@ M1-A commit ac1cad32fde8d7684ef3eeeb90fe21d69ed43648 pushed successfully; clean 
 Each comparison side now owns one ComparisonSlot. Selected input displays current physical rN from validated document/incarnation/LineId, unavailable references are explicit, and edits become expressions. Both accepted comparison and staleness use the same request builder. Typed-only comparison remains independent of integer adoption. Optional Select for comparison moved from always-visible results into the interactive row-label context menu; Copy/Inspect bits and toolbar entry preserved.
 
 Final separate fast-dev library test compilation passed in1m12s, existing unrelated warnings. Initial focused7 run87a6b0bf-3a2a-4529-88f5-80af2a50bc8a passed the four comparison domain cases, selected identity display case, and retained-host comparison/preferences case; the new UI test exposed an inert group context-menu target. Fixed actual target to interactive rN label. Final UI run7b94cc07-f84b-4f22-a475-443f8de6159e passed1/1 in1.348s, owned100s runner exit0 after3.123s, cleanup/drain verified. Evidence target/studio-and-utility-polish/evidence/m2a-ui-final/result.json. UI test covers no-selection physical rows/names/quantity equality, context-menu selection, discarded-frame refusal and selected-to-expression transition. Identity test uses actual source insertion/deletion and reopen. Parent inspected scoped diff and stale-field search; diff check passed. No Pad/working-bit mutation or evaluator duplication.
+
+M2-A commit9adcada1a83d2599733bcd98ebdb0b6626577f7a pushed successfully; clean checkpoint tree. M2-B is the sole active writer/Cargo lane.
+
+## M2-B result
+
+Bits are monospace0/1 cells with exact-index tooltips, group ranges/gaps, font/width-derived capacity capped at16 per row. Formatting and Bit labels initially collapse; Compare initially expands. Explicit draft section state survives accepted host moves without changing value-edit/adoption state. Current value stays visible; existing outer scroll preserved.
+
+Separate fast-dev library test compilation passed57.25s, existing unrelated warnings. Initial9 run8932e86c-2760-45a7-917c-34f1b5da14fb passed7 mapping/annotation/retention/toggle/host/comparison tests. Two new test assertions needed geometry corrections: normal/large-font row grouping uses sub-row tolerance for sub-point baselines, and minimum scroll targets the observed clip center. Minimum360x280 comparison reachability passed run06a1fed7-e6fc-4e9f-97cf-2de6cd7f47ac. After fitting128-bit group range headers, final grid2/2 passed rund4d0dd58-d84e-48d5-b8d4-56e4f547562a in0.243s; owned100s runner exit0 after2.13s, cleanup/drain verified, target/studio-and-utility-polish/evidence/m2b-final/result.json. Normal16-bit rows and enlarged-font/narrow bounds verified; real rendered high/low toggles and Dock/Pop Out state retention passed. Native physical UI remains separate/unverified. Parent reviewed diff including whitespace-insensitive block nesting; no unrelated formatting changes, diff check passed.
