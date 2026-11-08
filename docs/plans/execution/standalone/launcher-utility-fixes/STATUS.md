@@ -24,8 +24,8 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M2-A | B: root-results-local fade override | implemented/tested; native limited |
 | M3-A | C: release profile and bounded feature audit | complete |
 | M3-B | C: idle capability work and ordinary release build | complete |
-| M3-R | Independent A-C review/report/GitHub publication | in_progress |
-| M4-A | D: recovery persistence before scratch close | pending |
+| M3-R | Independent A-C review/report/GitHub publication | complete; published |
+| M4-A | D: recovery persistence before scratch close | implemented/tested; native pending |
 | M5-A | E: accepted viewer-only preview dragging | pending |
 | M6-A | F: top-level pending decision controls | pending |
 | M7-A | G: bounded details, typed cached sort/filter, reveal | pending |
@@ -120,3 +120,27 @@ Live remote ancestry audit via authorized git ls-remote confirms predecessor16b7
 ## M3-R review accepted for publication
 
 Correction commit8f4db7e10004e68bfc547832614adbc49fcee125 pushed successfully. Independent follow-up confirmed the sole P2 resolved, no additional concrete findings, no reviewer edits/tests. abc_reviewed_tip_sha=8f4db7e10004e68bfc547832614adbc49fcee125. Automated report PEER_REVIEW_ABC.md records scope, disposition, actual checks and native/release-artifact limitations. Report/status commit and GitHub publication follow; D-H remain active, with no approval/merge wait.
+
+## M3-R publication receipt / immediate D continuation
+
+Report/status commit994d8a6f2f41f44ed762678e70b312d2b23daaf4 pushed successfully. Final reviewed code remains8f4db7e10004e68bfc547832614adbc49fcee125. GitHub connector created one draft PR for the complete A-H Goal against master, and successfully posted the automated independent review summary (comment ID6722930334).
+
+- PR: https://github.com/multiplex55/Multi_Launcher/pull/1465
+- Review comment: https://github.com/multiplex55/Multi_Launcher/pull/1465#issuecomment-6722930334
+- Commit-pinned report: https://github.com/multiplex55/Multi_Launcher/blob/994d8a6f2f41f44ed762678e70b312d2b23daaf4/docs/plans/execution/standalone/launcher-utility-fixes/PEER_REVIEW_ABC.md
+
+Publication succeeded; publication_pending=false. No human reviewer was assigned, no PR merged and no approval/CI wait introduced. M4-A/taskD planning started immediately on the same branch, followed by E-H and final focused review. The report's native limitations remain open.
+
+## M4-A / D result
+
+Accepted same-frame edits/history are applied before close. Remembered unbound scratch now calls acknowledged synchronous recovery save before the session's explicit close_recovered_scratch retirement; the helper rejects saved documents and pending transitions. It clears the session/history without invoking Discard or manufacturing a disk baseline. Recovery failure leaves source/session/open state and visible error intact; existing native CancelClose runs. The successful scratch path avoids duplicate post-close writes. Saved-document prompts/conflicts, Remember-off, New/Open and companion retirement are preserved. Parent inspected the two-source-file diff; git diff --check passed.
+
+Tests cover latest same-frame Unicode/newline edit and exact reopen, recovery failure/native CancelClose/draft retention, session guard rejection, and dirty saved-document conflicts with Remember enabled. The failure fixture acknowledges/flushed pending recovery before replacing only its disposable file with a directory, avoiding debounce races. Initial selection was7/8 because the saved-document fixture enabled Remember before explicitly opening the saved document and instead restored scratch; corrected by enabling Remember after the explicit open, preserving the intended bound-document scenario.
+
+RUST_MIN_STACK=16777216; standard fast-dev lib Nextest prefix with selector below passed8/8, 7,684 skipped, execution0.548s, run23bb0938-a3e9-46a5-ba13-21668f95bfa7. Owned100s runner exit0 after2.776s, cleanup/output drain verified. After failure-fixture-only hardening, exact remembered_scratch_failed_recovery_cancels_native_close passed1/1, execution0.476s, run2e6f0d6b-6cf4-40a0-8f98-17500cd7a99f; runner exit0 after2.603s, cleanup/output drain verified. Separate compilation passed. Receipts target/launcher-utility-fixes/evidence/m4a-pad-close-corrected/ and m4a-pad-failure-fixture/.
+
+```text
+test(remembered_scratch_) | test(recovery_scratch_close_rejects_saved_or_pending_documents) | test(accepted_transition_intents_preserve_or_clear_recovery_at_lifecycle_boundaries) | test(save_and_close_follow_an_accepted_same_frame_source_edit) | test(saved_document_reopens_and_dirty_close_write_conflict_keeps_the_draft) | test(native_popout_child_discard_and_os_close_keep_the_edited_session) | test(new_and_close_transitions_handle_save_discard_and_cancel)
+```
+
+No release rebuild. Native D close/reopen remains pending feasible consolidated later smoke; current evidence is state/egui/filesystem persistence, not observed OS interaction. M3-R comment URL was independently fetched from GitHub and verified to match the successful publication receipt above.
