@@ -116,3 +116,7 @@ RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fas
 The successful release artifact/native smoke belongs to pre-correction tip2c01ab4f, not this later query correction. Its C profile/HotFolder evidence remains valid; corrected root logic is covered by focused fast-dev tests. No second release build or repeated unavailable screenshot environment was required/claimed. Final reviewer follow-up and exact abc_reviewed_tip_sha follow the corrective commit.
 
 Live remote ancestry audit via authorized git ls-remote confirms predecessor16b740fec66a3c077b63ac22a31cfb9577896e65, integration master7af8148a20559e8bd2b488dbd0510c4630b2d0fd and pre-correction task2c01ab4fa871521b93065c6bf9622e4fe06ca55a, all matching local records.
+
+## M3-R review accepted for publication
+
+Correction commit8f4db7e10004e68bfc547832614adbc49fcee125 pushed successfully. Independent follow-up confirmed the sole P2 resolved, no additional concrete findings, no reviewer edits/tests. abc_reviewed_tip_sha=8f4db7e10004e68bfc547832614adbc49fcee125. Automated report PEER_REVIEW_ABC.md records scope, disposition, actual checks and native/release-artifact limitations. Report/status commit and GitHub publication follow; D-H remain active, with no approval/merge wait.
