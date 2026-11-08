@@ -29,7 +29,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M5-A | E: accepted viewer-only preview dragging | implemented/tested; native limited |
 | M6-A | F: top-level pending decision controls | implemented/tested; native limited |
 | M7-A | G: bounded details, typed cached sort/filter, reveal | implemented/tested; native limited |
-| M7-B | G: bounded directory/path capacity | pending |
+| M7-B | G: bounded directory/path capacity | complete |
 | M8-A | H: actual Shell baseline observation correction | pending |
 | M9-A | Final independent review, scoped Clippy, exact-tip handoff | pending |
 
@@ -192,3 +192,15 @@ test(folder_size_dialog_projection_sorts_drills_and_rejects_stale_generation_sel
 ```
 
 Coverage includes all comparator directions/unknowns/filter totals, cache reuse/invalidation, bounded long-issue disclosure, actual sort/filter then selecting a different right-click row, discarded/fresh Reveal, aged-publication menu ownership, host transition rejection/fresh request, missing/hidden/refresh/close rejection and root routing. Native Explorer selection was not observed and is not claimed from dispatch. A tiny disposable final-smoke tree was prepared under target/launcher-utility-fixes/native-fixtures/folder-size; no user drive scan. No release rebuild or capture retry.
+
+M7-A commit bc8d79e5e1ac5b69bfa2c455af55875836eb670e; ordinary push succeeded and checkpoint tree clean. M7-B/G capacity planning active.
+
+## M7-B / G capacity result
+
+Folder Size directory capacity is16,384 in both accumulator admission and supplied traversal bounds. Aggregate scan path accounting is64 MiB: discovery32, result8, cumulative immutable progress8, scanner/accumulator/converted issues4 each, root/bookkeeping4. Other entry/depth/issue/message bounds remain100,000/64/64 and unchanged message bounds. Accounting is conservative/cumulative for handle paths, not total RSS or GUI allocations. Queued frames share ancestor chains; handles retire as frames/chains drop on completion/cancellation and are absent from final results. Shared scanner production/defaults unchanged. A scan-owned bounds constructor feeds both runtime and fake-backend verification via a test-only re-export, avoiding duplicate test budget definitions. README now states directory/entry/depth bounds and truthful partial results.
+
+RUST_MIN_STACK=16777216; cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast --test-threads 1 -E with selector below passed8/8, execution2.529s, runaabfe50f-2ced-422e-a325-a1b328b4d371. Existing100s owned runner exit0 after4.772s, cleanup/output drain verified; separate compile passed. Synthetic ordinary tree completes with2,223 admitted directories and subtotal41. Path-heavy fixture is Partial under old3 MiB discovery but Complete under the actual new32 MiB constructor. Small path/directory bounds preserve subtotal23 and exactly3 admitted directories. Cancellation after work keeps verified bytes and leaves zero fake handles. Existing policy/cloud/denial/progress/overflow cases pass. Evidence target/launcher-utility-fixes/evidence/m7b-capacity/. Parent inspected constants, accounting, handle/test changes and guide; git diff --check passed. No user drive scan, unrelated file-operation suite, production default changes or release rebuild.
+
+```text
+test(folder_size_scan_capacity_) | test(folder_size_scan_fake_metadata_preserves_root_subtotal_when_child_limit_hits) | test(folder_size_scan_fake_metadata_records_policy_exclusions_and_open_time_cloud_change) | test(folder_size_scan_fake_metadata_keeps_denied_and_changed_branches_incomplete) | test(folder_size_scan_progress_overlays_later_subtotals_and_cloud_omissions) | test(folder_size_scan_checked_totals_stop_before_ancestor_overflow)
+```

@@ -950,6 +950,10 @@ recalling file contents. Incomplete branches and skipped entries are marked so
 a partial subtotal is not mistaken for a complete result. Folder Size does not
 delete or change files.
 
+Scans remain bounded by 16,384 admitted directories, 100,000 entries and 64
+levels of depth, with separate path-storage limits. Reaching a limit retains
+the verified subtotal as a partial result.
+
 ## File Lock Inspector
 
 Type `filelock` and choose **Inspect File Users**, or right-click a file result
