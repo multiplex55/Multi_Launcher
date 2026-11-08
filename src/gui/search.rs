@@ -1718,6 +1718,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.dashboard.enabled = false;
         settings.enable_toasts = false;
         LauncherApp::new(
@@ -3954,6 +3956,54 @@ mod tests {
             drop(app);
         }
         drop(workspace);
+    }
+
+    #[test]
+    fn recycle_and_recording_queries_remain_distinct_through_launcher_search() {
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
+        app.plugins
+            .register(Box::new(crate::plugins::recycle::RecyclePlugin));
+        app.plugins
+            .register(Box::new(crate::plugins::recording::RecordingPlugin));
+        app.plugins.register(Box::new(crate::plugins::qr::QrPlugin));
+        app.plugins.register(Box::new(StaticSearchPlugin {
+            name: "alias_fixture",
+            result: Action {
+                label: "Saved folder".into(),
+                desc: "Folder".into(),
+                action: "fixture:folder".into(),
+                args: None,
+            },
+            always: true,
+            searched: None,
+        }));
+        app.folder_aliases_lc
+            .insert("fixture:folder".into(), Some("needle".into()));
+        for exact in [true, false] {
+            app.match_exact = exact;
+            app.query = "record".into();
+            app.search();
+            assert!(app.results.iter().any(|action| action.action == "record:open"));
+            assert!(app.results.iter().any(|action| action.action == "record:stop"));
+            assert!(!app.results.iter().any(|action| action.action == "recycle:clean"));
+            app.query = "rec".into();
+            app.search();
+            assert!(app.results.iter().any(|action| {
+                action.action == "recycle:clean" && action.label == "Clean Recycle Bin"
+            }));
+            assert!(!app.results.iter().any(|action| action.action.starts_with("record:")));
+            app.query = "qr example".into();
+            app.search();
+            assert!(app.results.iter().any(|action| {
+                action.action == "qr:open" && action.args.as_deref() == Some("example")
+            }));
+        }
+        app.match_exact = true;
+        app.query = "x needle".into();
+        app.search();
+        assert!(app.results.iter().any(|action| action.action == "fixture:folder"));
     }
 
     #[test]

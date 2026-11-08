@@ -5,9 +5,7 @@ pub struct RecyclePlugin;
 
 impl Plugin for RecyclePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        const PREFIX: &str = "rec";
-        let trimmed = query.trim_start();
-        if crate::common::strip_prefix_ci(trimmed, PREFIX).is_some() {
+        if query.trim().eq_ignore_ascii_case("rec") {
             return vec![Action {
                 label: "Clean Recycle Bin".into(),
                 desc: "Recycle Bin".into(),
@@ -28,6 +26,10 @@ impl Plugin for RecyclePlugin {
 
     fn capabilities(&self) -> &[&str] {
         &["search"]
+    }
+
+    fn query_prefixes(&self) -> &[&str] {
+        &["rec"]
     }
 
     fn commands(&self) -> Vec<Action> {
