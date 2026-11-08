@@ -1172,6 +1172,13 @@ struct PendingViewerEffects {
     native_close_requested: bool,
     canvas_focus_requested: Option<egui::Id>,
     focus_viewer: bool,
+    preview_drag: Option<ViewerPreviewDrag>,
+}
+
+#[derive(Clone, Copy)]
+struct ViewerPreviewDrag {
+    started: bool,
+    delta: egui::Vec2,
 }
 
 pub(crate) struct DiagramStudioDialog {
@@ -2385,6 +2392,7 @@ impl DiagramStudioDialog {
         let mut close_requested = false;
         let mut focus_requested = false;
         let mut canvas_focus_requested = None;
+        let mut preview_drag = None;
         let mut body_rendered = false;
         #[cfg(test)]
         {
@@ -2453,7 +2461,7 @@ impl DiagramStudioDialog {
                     self.record_host_action("viewer_presentation", ui, &control);
                     change_host = control.clicked();
                     close_requested |=
-                        self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested);
+                        self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested, &mut preview_drag);
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -2464,7 +2472,7 @@ impl DiagramStudioDialog {
                 self.record_host_action("viewer_presentation", child, &control);
                 change_host = control.clicked();
                 close_requested |=
-                    self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested);
+                    self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested, &mut preview_drag);
                 if focus_requested && canvas_focus_requested.is_none() {
                     canvas_focus_requested = Some(control.id);
                 }
@@ -2547,6 +2555,7 @@ impl DiagramStudioDialog {
                         .then_some(canvas_focus_requested)
                         .flatten(),
                     focus_viewer: focus_requested && callback_pass_accepted,
+                    preview_drag: callback_pass_accepted.then_some(preview_drag).flatten(),
                 });
         }
     }
@@ -2570,6 +2579,7 @@ impl DiagramStudioDialog {
         ui: &mut egui::Ui,
         actions_allowed: bool,
         canvas_focus_requested: &mut Option<egui::Id>,
+        preview_drag: &mut Option<ViewerPreviewDrag>,
     ) -> bool {
         if let Some(label) = self.documents.visual_label().map(str::to_owned) {
             let presentation = self.visual_projection();
@@ -2587,6 +2597,7 @@ impl DiagramStudioDialog {
                 &label,
                 projection,
                 canvas_focus_requested,
+                preview_drag,
             );
         }
         self.ensure_generic_texture(ui.ctx());
@@ -2745,9 +2756,10 @@ impl DiagramStudioDialog {
                     )
                 })
                 .inner;
+            *preview_drag = viewer_preview_drag(&_rect, actions_allowed);
             #[cfg(test)]
             {
-                *test_viewer_canvas_rect = Some(_rect);
+                *test_viewer_canvas_rect = Some(_rect.rect);
                 *test_viewer_generic_preview_drawn = viewer_generic_preview_drawn;
             }
         } else {
@@ -2775,9 +2787,10 @@ impl DiagramStudioDialog {
                 })
                 .inner;
             *canvas_focus_requested = unused_focus.or(*canvas_focus_requested);
+            *preview_drag = viewer_preview_drag(&_rect, actions_allowed);
             #[cfg(test)]
             {
-                *test_viewer_canvas_rect = Some(_rect);
+                *test_viewer_canvas_rect = Some(_rect.rect);
             }
         }
         close_requested
@@ -2790,6 +2803,7 @@ impl DiagramStudioDialog {
         label: &str,
         projection: Option<Result<Arc<VisualSceneProjection>, VisualProjectionError>>,
         canvas_focus_requested: &mut Option<egui::Id>,
+        preview_drag: &mut Option<ViewerPreviewDrag>,
     ) -> bool {
         let mut camera = self.viewer_camera;
         let mut close_requested = false;
@@ -2902,6 +2916,11 @@ impl DiagramStudioDialog {
         if let Some(rect) = minimap_rect {
             self.test_action_rects
                 .push(("visual_viewer_minimap".into(), rect, ui.clip_rect()));
+        }
+        let origin_in_minimap = ui.input(|input| input.pointer.press_origin())
+            .is_some_and(|origin| minimap_rect.is_some_and(|rect| rect.contains(origin)));
+        if !origin_in_minimap {
+            *preview_drag = viewer_preview_drag(&canvas_response, actions_allowed);
         }
         let before_minimap = camera;
         let minimap_interacting = handle_visual_minimap_drag(
@@ -3556,6 +3575,21 @@ impl DiagramStudioDialog {
                             Some(egui::Vec2::from(MIN_VIEWER_VIEWPORT_SIZE)),
                             None,
                         );
+                    }
+                }
+                if !viewer_effects.close_requested && !viewer_effects.change_host
+                    && let Some(drag) = viewer_effects.preview_drag
+                {
+                    if viewer_effects.callback_viewport_id == viewer_viewport_id() {
+                        if drag.started {
+                            ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::StartDrag);
+                        }
+                    } else if let Some(layer) = viewer_effects.embedded_root_layer
+                        && let Some(mut area) = egui::AreaState::load(ctx, layer.id)
+                    {
+                        area.set_left_top_pos(area.left_top_pos() + drag.delta);
+                        area.store(ctx, layer);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                 }
                 self.viewer_bootstrap_pending = false;
@@ -12367,7 +12401,7 @@ fn preview_workspace(
         );
         #[cfg(test)]
         {
-            *test_canvas_rect = Some(_rect);
+            *test_canvas_rect = Some(_rect.rect);
         }
     } else {
         #[cfg(test)]
@@ -12400,6 +12434,13 @@ fn preview_workspace(
     }
 }
 
+fn viewer_preview_drag(response: &egui::Response, actions_allowed: bool) -> Option<ViewerPreviewDrag> {
+    (actions_allowed && response.dragged_by(egui::PointerButton::Primary)).then(|| ViewerPreviewDrag {
+        started: response.drag_started_by(egui::PointerButton::Primary),
+        delta: response.drag_delta(),
+    })
+}
+
 fn draw_generic_canvas(
     ui: &mut egui::Ui,
     texture: Option<&GenericPreviewTexture>,
@@ -12411,7 +12452,7 @@ fn draw_generic_canvas(
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
     #[cfg(test)] test_generic_preview_drawn: &mut bool,
     #[cfg(test)] test_generic_canvas_placeholder: &mut Option<String>,
-) -> egui::Rect {
+) -> egui::Response {
     let width = ui.available_width().max(CANVAS_MIN_WIDTH);
     let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
     let (canvas_response, painter) =
@@ -12479,7 +12520,7 @@ fn draw_generic_canvas(
             *test_generic_canvas_placeholder = Some(empty_message.to_owned());
         }
     }
-    canvas_rect
+    canvas_response
 }
 
 fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut Camera) -> bool {
@@ -12590,7 +12631,7 @@ fn visual_workspace(
             .inner;
         #[cfg(test)]
         {
-            *test_canvas_rect = Some(_canvas_rect);
+            *test_canvas_rect = Some(_canvas_rect.rect);
         }
     } else {
         let available_width = ui.available_width();
@@ -12686,7 +12727,7 @@ fn visual_workspace(
                 .inner;
             #[cfg(test)]
             {
-                *test_canvas_rect = Some(_canvas_rect);
+                *test_canvas_rect = Some(_canvas_rect.rect);
             }
         });
     }
@@ -13144,7 +13185,7 @@ fn draw_canvas(
     message: &mut Option<StudioNotice>,
     canvas_focus_requested: &mut Option<egui::Id>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
-) -> egui::Rect {
+) -> egui::Response {
     let edit_actions_allowed = actions_allowed && interaction == CanvasInteraction::Editor;
     let width = ui.available_width().max(CANVAS_MIN_WIDTH);
     let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
@@ -13481,7 +13522,7 @@ fn draw_canvas(
         viewer_canvas_shortcuts(ui, canvas_id, camera);
     }
     let _ = graph_is_current;
-    canvas_rect
+    canvas_response
 }
 
 fn fit_camera(camera: &mut Camera, bounds: SceneRect, canvas_rect: egui::Rect) {
@@ -20442,6 +20483,134 @@ mod tests {
         assert_eq!(dialog.test_session().redo_depth(), redo_depth);
         assert_eq!(dialog.selection, selection);
         assert_eq!(dialog.test_scene_build_count, scene_builds);
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_moves_native_viewer_across_modes() {
+        for mode in 0..4 {
+            let mut dialog = match mode {
+                0 => initialized_dialog(),
+                1 => generic_dialog("mindmap\n  root((Preview))"),
+                2 => initialized_visual_dialog(),
+                _ => generic_dialog("mindmap\n invalid ["),
+            };
+            let ctx = egui::Context::default();
+            for _ in 0..3 { frame(&mut dialog, &ctx); }
+            open_viewer(&mut dialog, &ctx);
+            for _ in 0..2 { frame(&mut dialog, &ctx); }
+            let camera = dialog.viewer_camera;
+            let revision = dialog.documents.visual_revision().or_else(|| dialog.documents.session().map(|s| s.revision()));
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(50.0, 50.0);
+            let end = start + egui::vec2(40.0, 25.0);
+            frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }]);
+            frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+            let viewer = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+            assert!(viewer.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)), "mode {mode}");
+            let root = frame_with_viewport_commands_for(&mut dialog, &ctx, egui::ViewportId::ROOT);
+            assert!(!root.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+            assert_eq!(dialog.viewer_camera.center, camera.center);
+            assert_eq!(dialog.viewer_camera.zoom, camera.zoom);
+            assert_eq!(dialog.documents.visual_revision().or_else(|| dialog.documents.session().map(|s| s.revision())), revision);
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_moves_root_hosted_window() {
+        for embedded in [false, true] {
+            let mut dialog = initialized_dialog();
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(true);
+            if !embedded { dialog.viewer_host.transition(UtilityPresentation::Docked); }
+            dialog.viewer_open = true;
+            for _ in 0..4 { embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true); }
+            let layer = dialog.viewer_embedded_root_layer.unwrap();
+            let before = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(40.0, 40.0);
+            let end = start + egui::vec2(35.0, 25.0);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }], true);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)], true);
+            let after = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            assert_ne!(before, after, "embedded={embedded}");
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, TEST_VIEWPORT_SIZE)),
+                focused: true, ..Default::default()
+            }, |ui| dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, true));
+            let root_commands = output.viewport_output.get(&egui::ViewportId::ROOT)
+                .map(|viewport| viewport.commands.as_slice()).unwrap_or_default();
+            assert!(!root_commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)), "embedded={embedded}");
+            output.drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(&ctx);
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_rejects_stale_discarded_and_transition_effects() {
+        for rejection in 0..4 {
+            let mut dialog = initialized_dialog();
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(true);
+            dialog.viewer_open = true;
+            for _ in 0..4 { embedded_frame_with_events(&mut dialog, &ctx, Vec::new(), true); }
+            let layer = dialog.viewer_embedded_root_layer.unwrap();
+            let before = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(40.0, 40.0);
+            let end = start + egui::vec2(35.0, 25.0);
+            embedded_frame_with_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }], true);
+            if rejection == 0 { dialog.test_request_viewer_child_discard(); }
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, TEST_VIEWPORT_SIZE)),
+                focused: true, events: vec![egui::Event::PointerMoved(end)], ..Default::default()
+            }, |ui| dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, true));
+            output.drop_without_applying_deltas();
+            if rejection != 0 {
+                let effect = dialog.pending_viewer_effects.as_mut().unwrap();
+                assert!(effect.preview_drag.is_some());
+                match rejection {
+                    1 => effect.viewer_generation = effect.viewer_generation.wrapping_add(1),
+                    2 => effect.change_host = true,
+                    _ => effect.close_requested = true,
+                }
+            }
+            dialog.on_ui_frame_complete(&ctx);
+            let after = egui::AreaState::load(&ctx, layer.id).unwrap().left_top_pos();
+            assert_eq!(before, after, "rejection {rejection}");
+        }
+    }
+
+    #[test]
+    fn diagram_viewer_preview_drag_excludes_minimap_and_middle_pan() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 { frame(&mut dialog, &ctx); }
+        open_viewer(&mut dialog, &ctx);
+        let minimap = dialog.test_action_rect("visual_viewer_minimap").unwrap().0;
+        let start = minimap.center();
+        let end = start + egui::vec2(20.0, 10.0);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+            pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let commands = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+        assert!(!commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerButton {
+            pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
+        }]);
+        let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(50.0, 50.0);
+        let end = start + egui::vec2(30.0, 20.0);
+        let camera = dialog.viewer_camera;
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+            pos: start, button: egui::PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let commands = frame_with_viewport_commands_for(&mut dialog, &ctx, viewer_viewport_id());
+        assert!(!commands.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));
+        assert_ne!(dialog.viewer_camera.center, camera.center);
     }
 
     #[test]

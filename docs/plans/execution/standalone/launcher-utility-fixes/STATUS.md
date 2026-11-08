@@ -26,7 +26,7 @@ Full objective/ownership/scope/invariants/tests/acceptance packets are Goal sect
 | M3-B | C: idle capability work and ordinary release build | complete |
 | M3-R | Independent A-C review/report/GitHub publication | complete; published |
 | M4-A | D: recovery persistence before scratch close | implemented/tested; native pending |
-| M5-A | E: accepted viewer-only preview dragging | pending |
+| M5-A | E: accepted viewer-only preview dragging | implemented/tested; native limited |
 | M6-A | F: top-level pending decision controls | pending |
 | M7-A | G: bounded details, typed cached sort/filter, reveal | pending |
 | M7-B | G: bounded directory/path capacity | pending |
@@ -144,3 +144,21 @@ test(remembered_scratch_) | test(recovery_scratch_close_rejects_saved_or_pending
 ```
 
 No release rebuild. Native D close/reopen remains pending feasible consolidated later smoke; current evidence is state/egui/filesystem persistence, not observed OS interaction. M3-R comment URL was independently fetched from GitHub and verified to match the successful publication receipt above.
+
+M4-A commit 2064b428783aefa06e2ed084f7fa602847d84181; ordinary push succeeded and checkpoint tree was clean. M5-A/E planning is active.
+
+## M5-A / E implementation decision
+
+All viewer render modes now reuse their actual preview response for drag intent; accepted viewer effects remain the authorization boundary. The existing embedded viewport fallback owns its egui Window internally and ignores builder position updates. Public AreaState load/position setters lacked a storage API, so the scoped solution adds AreaState::store in vendor/egui/src/containers/area.rs as a thin wrapper over the existing memory owner. This avoids duplicate embedded windows, magic private widget IDs or a parallel window manager. The five-line vendor API change is necessary for actual accepted docked/embedded movement; no unrelated vendor changes or broad validation are planned. Native movement remains explicit viewer-only StartDrag. Focused implementation checks completed as recorded below; physical native drag remains unverified.
+
+## M5-A / E result
+
+Mermaid native/generic and Visual viewer previews reuse their existing canvas responses to collect primary drag, including placeholder/error surfaces. Visual minimap press origins are excluded. PendingViewerEffects carries the gesture; current retained ROOT/child pass, owner/viewer generation and host identity are required. Native drag starts only on viewer_viewport_id; ROOT-hosted docked/embedded presentations update their actual accepted viewer AreaState using the narrow store API. Close/host-change/stale/discarded effects do not move a viewer. Cameras/document revisions, editor behavior, middle pan, minimap and toolbar/navigation remain preserved. Parent inspected source/vendor/tests; git diff --check passed. No private widget IDs, duplicate windows, raw Windows APIs or production dependencies added.
+
+RUST_MIN_STACK=16777216; standard fast-dev lib Nextest prefix with selector below passed8/8, execution0.797s, run400442c5-ce2d-4c46-84a1-d61e056d1e70; owned100s runner exit0 after2.981s, cleanup/output drain verified. Initial5/5 passed before adding negative/control cases. A final explicit no-ROOT-StartDrag assertion for actual docked/embedded movement passed its exact case1/1, execution0.281s, run98dba42b-0489-48c3-b9b4-d0178262d96d; runner exit0 after2.380s, cleanup/output drain verified. Separate compilation succeeded, including egui consumers. Receipts target/launcher-utility-fixes/evidence/m5a-viewer-drag-focused/ and m5a-root-command/.
+
+```text
+test(diagram_viewer_preview_drag_) | test(studio_usability_diagram_viewer_discard_close_and_reopen_are_generation_scoped) | test(studio_usability_diagram_viewer_embedded_fallback_keeps_root_host_identity) | test(diagram_studio_visual_canvas_viewer_navigation_keeps_editor_camera_independent) | test(visual_minimap_drag_keeps_press_mapping_and_camera_independence)
+```
+
+Native physical preview drag is unverified due the established capture/coordinate-geometry limitation; model/egui command/position checks are not claimed as OS proof. No additional failed capture environment or release build was recreated.
