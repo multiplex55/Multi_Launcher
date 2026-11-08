@@ -257,6 +257,15 @@ fn build_render_artifact(
     counters: Option<&RenderCounters>,
 ) -> Result<Arc<RenderArtifact>, DiagramRenderError> {
     preflight_source(source)?;
+    let (_style, directive) = super::style::extract_style(source).map_err(|_| DiagramRenderError::InvalidSource)?;
+    let admitted_source = if let Some(range) = directive {
+        let mut masked = source.as_bytes().to_vec();
+        for byte in &mut masked[range] {
+            if *byte != b'\n' && *byte != b'\r' { *byte = b' '; }
+        }
+        String::from_utf8(masked).map_err(|_| DiagramRenderError::InvalidSource)?
+    } else { source.to_owned() };
+    let source = admitted_source.as_str();
     if let Some(counters) = counters {
         counters.parse_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -1562,6 +1571,18 @@ mod tests {
         assert!(!is_generic_preview_candidate(
             "classDiagramExtra\nclass Example"
         ));
+    }
+
+    #[test]
+    fn production_adapter_admits_only_valid_leading_color_envelope() {
+        let target = RasterSize::new(320, 240).unwrap();
+        let source = "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"mindmapSectionColors\":[\"#123456\",\"#abcdef\"]}}}%%\nmindmap\n  root((Root))\n    Branch\n";
+        assert!(render_mermaid_preview(source, target).is_ok());
+        for invalid in [
+            "%%{init: {\"theme\":\"dark\",\"securityLevel\":\"loose\"}}%%\nmindmap\n  root((Root))\n",
+            "%%{init: {\"themeVariables\":{\"primaryColor\":\"red\"}}}%%\nmindmap\n  root((Root))\n",
+            "mindmap\n%%{init: {\"theme\":\"dark\"}}%%\n  root((Root))\n",
+        ] { assert!(render_mermaid_preview(invalid, target).is_err()); }
     }
 
     #[test]

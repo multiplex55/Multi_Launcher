@@ -15,6 +15,7 @@ mod recents;
 mod rendering;
 mod scene;
 mod session;
+mod style;
 mod templates;
 mod visual;
 mod visual_canvas;
@@ -89,6 +90,8 @@ pub use visual_scene::{
     ProjectedVisualItem, VisualProjectedKind, VisualProjectionError, VisualSceneProjection,
     color_with_opacity, project_visual_document, project_visual_scene,
 };
+
+pub use style::{EffectiveMermaidColors, MermaidColor, MermaidNodeStyle, MermaidStyle, MermaidTheme, MermaidThemeVariables};
 
 pub use layout::{DiagramLayoutError, layout_positions};
 pub use mermaid::{

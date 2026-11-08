@@ -151,6 +151,8 @@ pub enum GraphOperation {
         label: String,
     },
     SetDirection(FlowDirection),
+    SetStyle(super::style::MermaidStyle),
+    SetNodeStyle { id: NodeId, style: super::style::MermaidNodeStyle },
 }
 
 #[derive(Debug)]
@@ -652,6 +654,8 @@ fn same_saved_content(left: &SessionSnapshot, right: &SessionSnapshot) -> bool {
 
 fn same_graph_content(left: &DiagramDocument, right: &DiagramDocument) -> bool {
     left.direction == right.direction
+        && left.style == right.style
+        && left.node_styles == right.node_styles
         && left.nodes == right.nodes
         && left.edges == right.edges
         && left.groups == right.groups
@@ -687,7 +691,7 @@ pub(super) fn semantically_equivalent(left: &DiagramDocument, right: &DiagramDoc
             )
         })
         .collect();
-    if left.direction != right.direction || left_nodes != right_nodes {
+    if left.direction != right.direction || left.style != right.style || left.node_styles != right.node_styles || left_nodes != right_nodes {
         return false;
     }
 
@@ -916,7 +920,9 @@ fn preflight_operations(operations: &[GraphOperation]) -> Result<(), DiagramSess
             | GraphOperation::RemoveEdge { .. }
             | GraphOperation::ReconnectEdge { .. }
             | GraphOperation::RemoveGroup { .. }
-            | GraphOperation::SetDirection(_) => {}
+            | GraphOperation::SetDirection(_)
+            | GraphOperation::SetStyle(_)
+            | GraphOperation::SetNodeStyle { .. } => {}
         }
     }
     Ok(())
@@ -961,6 +967,7 @@ fn apply_operations(
                     return Err(DiagramSessionError::NodeNotFound(id.clone()));
                 };
                 graph.nodes.remove(index);
+                graph.node_styles.remove(id);
                 graph
                     .edges
                     .retain(|edge| &edge.from != id && &edge.to != id);
@@ -1053,6 +1060,12 @@ fn apply_operations(
                 group.label.clone_from(label);
             }
             GraphOperation::SetDirection(direction) => graph.direction = *direction,
+            GraphOperation::SetStyle(style) => graph.style = style.clone(),
+            GraphOperation::SetNodeStyle { id, style } => {
+                if graph.node_index(id).is_none() { return Err(DiagramSessionError::NodeNotFound(id.clone())); }
+                if style.is_empty() { graph.node_styles.remove(id); }
+                else { graph.node_styles.insert(id.clone(), style.clone()); }
+            },
         }
     }
     Ok(())
@@ -1078,6 +1091,45 @@ mod tests {
 
     fn baseline(session: &DiagramSession) -> Vec<u8> {
         session.encode().unwrap()
+    }
+
+    #[test]
+    fn styled_source_is_editable_undoable_and_invalid_draft_stays_visible() {
+        let mut session = DiagramSession::new();
+        session.replace_source("flowchart TD\nA[\"Alpha\"]\n").unwrap();
+        let before = session.revision();
+        session.replace_source("%%{init: {\"theme\":\"dark\"}}%%\nflowchart TD\nA[\"Alpha\"]\nstyle A fill:#123456\n").unwrap();
+        assert!(session.revision() > before);
+        assert!(session.current_graph().unwrap().node_styles.contains_key(&crate::diagram::NodeId::new("A").unwrap()));
+        assert!(session.undo().unwrap());
+        assert!(session.current_graph().unwrap().node_styles.is_empty());
+        assert!(session.redo().unwrap());
+        session.apply_transaction(&[super::GraphOperation::SetNodeStyle {
+            id: crate::diagram::NodeId::new("A").unwrap(),
+            style: crate::diagram::MermaidNodeStyle {
+                fill: Some(crate::diagram::MermaidColor([0x12, 0x34, 0x56])),
+                stroke: Some(crate::diagram::MermaidColor([0xab, 0xcd, 0xef])),
+                ..Default::default()
+            },
+        }]).unwrap();
+        assert!(session.draft().contains("stroke:#abcdef"));
+        session.apply_transaction(&[super::GraphOperation::SetNodeLabel { id: crate::diagram::NodeId::new("A").unwrap(), label: "Changed".into() }]).unwrap();
+        session.apply_transaction(&[
+            super::GraphOperation::MoveNodes { positions: vec![super::NodePosition {
+                id: crate::diagram::NodeId::new("A").unwrap(), position: crate::diagram::Position::new(100.0, 50.0).unwrap(),
+            }] },
+            super::GraphOperation::AddNode {
+                id: crate::diagram::NodeId::new("B").unwrap(), label: "Added".into(),
+                shape: crate::diagram::NodeShape::Rectangle, position: crate::diagram::Position::default(), group: None,
+            },
+        ]).unwrap();
+        assert!(session.draft().contains("style A fill:#123456"));
+        assert!(session.draft().contains("stroke:#abcdef"));
+        let styled = session.preview_graph().unwrap().clone();
+        session.replace_source("flowchart TD\nA\nstyle A fill:not-a-color\n").unwrap();
+        assert_eq!(session.preview_graph().unwrap(), &styled);
+        assert!(session.apply_transaction(&[super::GraphOperation::SetDirection(crate::diagram::FlowDirection::LeftRight)]).is_err());
+        assert!(session.draft().contains("not-a-color"));
     }
 
     #[test]

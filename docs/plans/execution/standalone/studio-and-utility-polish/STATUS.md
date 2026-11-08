@@ -29,8 +29,8 @@ Goal section F contains the authoritative objective, ownership, scope, invariant
 | M2-C | Three-section source/result Copy All | implemented/tested |
 | M3-A | Diagram menus, header and stable source editing | implemented/tested; native limited |
 | M3-B | Adjustable Visual canvas, reset and viewer pan | implemented/tested; native limited |
-| M4-A | Native persisted Mermaid styling semantics | in_progress |
-| M4-B | Qualified generic family colors and narrow Timeline patch | pending |
+| M4-A | Native persisted Mermaid styling semantics | implemented/tested |
+| M4-B | Qualified generic family colors and narrow Timeline patch | in_progress |
 | M4-C | Color controls, templates and offline help | pending |
 | M5-A | Independent cumulative review, scoped lint/native smoke and handoff | pending |
 
@@ -89,6 +89,16 @@ M3-A commit 89cb5fdb9fdf82516f30f7b769b972d428b0dca6 pushed successfully; clean 
 Visual editor canvas width is uncapped and height derives from visible host space with an explicit ratio control. Scroll-invariant content-relative header measurement preserves lower controls. Visual viewer primary drag pans camera rather than native/embedded host. Double-middle reset fits all current projected bounds, uses finite empty defaults, restores viewer resize-follow, and wins over other same-frame camera input. New camera effects and accepted primary/middle click capture are fenced by existing owner/viewer receipts, host/generation and document/revision checks. Rejected first/second clicks cannot contribute to reset; editor object dragging and other viewers preserve existing behavior.
 
 Final separate fast-dev library test compilation passed in 1m28s. Initial 12-test run e65b3d29 exposed a real lower-control feedback loop from using the scrolled cursor for height; corrected to scroll-stable content-relative geometry. Final 12/12 passed run 7f38ac8a-e2b8-4e49-b5f5-eb12eb4e7004 in 2.869s, owned 100s runner exit 0 with cleanup/drain verified. Receipt target/studio-and-utility-polish/evidence/m3b-focused-corrected/result.json. Tests cover editor/viewer camera independence, native/root drag modes, minimap exclusions, imported bounds, empty/reset/resize follow, size control/lower controls, discarded primary/click chains and stale/transition effects. Parent inspected staged camera/press ownership and sizing; diff check passed. Native physical gestures remain unverified.
+
+M3-B commit 47048684a8a784c3070018fb2d842e83735dd66c pushed successfully; clean checkpoint tree. Owned runner elapsed 4.67s. M4-A is the sole active writer/Cargo lane.
+
+## M4-A result
+
+New diagram-owned style model validates hex colors, four presets, bounded color variables and mindmap palettes. One leading color-only JSON init envelope is admitted by native and shared adapter boundaries; unsupported configuration/directives remain errors. Native node styles live in a bounded ID-keyed document map, validated against existing nodes. Parser/formatter and exact size accounting, semantic equality, accepted graph operations, history/codec and scene/export/conversion retain styles. Absent/default fields remain omitted. Frozen pre-change nonempty history captured before model edits at tests/fixtures/diagram_session_v1_unstyled_history.json; temporary emitter removed.
+
+GUI/SVG/PNG consume effective node fill/border/text and document edge/background/group colors. Parent review identified dark edge/group label contrast and role inconsistencies; fixed styled text/background/fill/stroke while preserving legacy unstyled painting. Native preset named/translucent colors have bounded opaque equivalents. Existing Visual conversion preserves representable fill/border/label/connector colors and geometry. Effective document colors are computed once per scene rather than once per node.
+
+Integrated focused 25/25 passed run e8ba3a89-cf0f-4796-946a-2d1f58442189 after separate fast-dev test compilation (1m42s). Coverage includes frozen old history, parser limits/strictness, source formatting, style-only history, later rename/move/add, invalid draft retention, actual styled/dark-group/edge SVG/PNG, conversion and shared admission. Post-hoist compilation passed in 1m27s; directly affected color/conversion 3/3 passed run 2fcd1d87-ed3b-4e3a-ac44-29c55541010c. Owned 100s runners exit 0, no timeout, cleanup/drain verified. Receipts target/studio-and-utility-polish/evidence/{m4a-focused,m4a-scene-colors}/result.json. Formatting errors propagate rather than panic. Parent inspected model/parser/equality/paint ownership and intentional files; diff check passed. Generic family color consumption remains M4-B; UI/help remains M4-C.
 
 ## Remaining implementation notes
 

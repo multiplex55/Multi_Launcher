@@ -227,6 +227,7 @@ pub enum TextHorizontalAlignment {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneNode {
+    pub colors: super::style::EffectiveMermaidColors,
     pub id: NodeId,
     pub shape: NodeShape,
     pub bounds: SceneRect,
@@ -295,6 +296,7 @@ pub struct SceneEdge {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagramScene {
+    pub colors: super::style::EffectiveMermaidColors,
     pub direction: FlowDirection,
     pub metrics: SceneMetrics,
     pub nodes: Vec<SceneNode>,
@@ -340,6 +342,7 @@ pub fn build_scene(
     document.validate().map_err(SceneError::InvalidGraph)?;
     validate_metrics(metrics)?;
 
+    let colors = document.style.effective();
     let mut nodes = Vec::with_capacity(document.nodes.len());
     let mut bounds = None;
     let mut node_bounds = HashMap::with_capacity(document.nodes.len());
@@ -365,6 +368,7 @@ pub fn build_scene(
         include_rect(&mut bounds, node_rect);
         node_bounds.insert(node.id.clone(), node_rect);
         nodes.push(SceneNode {
+            colors: document.node_styles.get(&node.id).map_or(colors, |style| style.effective(colors)),
             id: node.id.clone(),
             shape: node.shape,
             bounds: node_rect,
@@ -379,6 +383,7 @@ pub fn build_scene(
     ensure_scene_bounds(bounds)?;
 
     Ok(DiagramScene {
+        colors,
         direction: document.direction,
         metrics,
         nodes,

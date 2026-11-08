@@ -6,7 +6,7 @@ use super::session::DiagramSession;
 use super::visual::{
     DEFAULT_LAYER_ID, MAX_VISUAL_OBJECTS, TITLE_OBJECT_ID, VisualAnchor, VisualConnector,
     VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument,
-    VisualDocumentError, VisualLayer, VisualObject, VisualObjectId, VisualObjectKind,
+    VisualColor, VisualDocumentError, VisualLayer, VisualObject, VisualObjectId, VisualObjectKind,
     VisualPrimitiveShape, VisualScene, VisualStyle, VisualTransform,
 };
 use std::collections::HashMap;
@@ -109,6 +109,7 @@ pub fn mermaid_visual_copy(
             owned_label: Some(super::visual::VisualOwnedLabel {
                 text: source_node.label.clone(),
                 style: VisualStyle {
+                    border: visual_color(node.colors.text),
                     font_size: 12.8,
                     ..VisualStyle::default()
                 },
@@ -122,7 +123,7 @@ pub fn mermaid_visual_copy(
                 height: node.bounds.height(),
                 rotation_degrees: 0.0,
             },
-            style: VisualStyle::default(),
+            style: VisualStyle { fill: visual_color(node.colors.fill), border: visual_color(node.colors.stroke), ..VisualStyle::default() },
             kind: VisualObjectKind::Primitive {
                 shape: match node.shape {
                     NodeShape::Rectangle => VisualPrimitiveShape::Rectangle,
@@ -161,7 +162,7 @@ pub fn mermaid_visual_copy(
             layer_id: DEFAULT_LAYER_ID,
             // Connector geometry is derived from endpoint references.
             transform: VisualTransform::default(),
-            style: VisualStyle::default(),
+            style: VisualStyle { border: visual_color(prepared.colors.line), ..VisualStyle::default() },
             kind: VisualObjectKind::Connector {
                 connector: VisualConnector {
                     manual_route: None,
@@ -222,12 +223,17 @@ mod tests {
     #[test]
     fn mermaid_visual_copy_preserves_native_geometry_labels_and_edges_without_editing_source() {
         let source =
-            "flowchart LR\nA[\"東京#10;Caption\"] -->|stores| B{\"Choice\"}\nB --> C(\"Cached\")\n";
+            "%%{init: {\"themeVariables\":{\"lineColor\":\"#193b5d\"}}}%%\nflowchart LR\nA[\"東京#10;Caption\"] -->|stores| B{\"Choice\"}\nB --> C(\"Cached\")\nstyle A fill:#123456,stroke:#abcdef,color:#fedcba\n";
         let session = session(source);
         let revision = session.revision();
         let draft = session.draft().to_owned();
         let copy = mermaid_visual_copy(&session).expect("build separate visual document");
         let scene = copy.scene();
+        let first = scene.objects.iter().find(|object| matches!(object.kind, VisualObjectKind::Primitive { .. })).unwrap();
+        assert_eq!(first.style.fill, crate::diagram::VisualColor::rgba(0x12, 0x34, 0x56, 255));
+        assert_eq!(first.style.border, crate::diagram::VisualColor::rgba(0xab, 0xcd, 0xef, 255));
+        assert_eq!(first.owned_label.as_ref().unwrap().style.border, crate::diagram::VisualColor::rgba(0xfe, 0xdc, 0xba, 255));
+        assert!(scene.objects.iter().any(|object| matches!(object.kind, VisualObjectKind::Connector { .. }) && object.style.border == crate::diagram::VisualColor::rgba(0x19, 0x3b, 0x5d, 255)));
 
         assert_eq!(session.revision(), revision);
         assert_eq!(session.draft(), draft);
@@ -332,4 +338,8 @@ mod tests {
             })
         ));
     }
+}
+
+fn visual_color(color: super::style::MermaidColor) -> VisualColor {
+    VisualColor::rgba(color.0[0], color.0[1], color.0[2], 255)
 }

@@ -13520,7 +13520,12 @@ fn draw_canvas(
         *test_canvas_id = Some(canvas_id);
     }
     let painter = painter.with_clip_rect(painter.clip_rect().intersect(canvas_rect));
-    painter.rect_filled(canvas_rect, 0.0, egui::Color32::from_rgb(248, 249, 251));
+    let background = scene.filter(|scene| scene.colors.explicit).map_or(
+        egui::Color32::from_rgb(248, 249, 251), |scene| {
+            let [r, g, b] = scene.colors.background.0;
+            egui::Color32::from_rgb(r, g, b)
+        });
+    painter.rect_filled(canvas_rect, 0.0, background);
 
     let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
     if actions_allowed
@@ -13553,6 +13558,10 @@ fn draw_canvas(
         for group in &scene.groups {
             let group_rect = world_rect_to_screen(group.bounds, canvas_rect, *camera);
             let selected = selection == &Some(DiagramElement::Group(group.id.clone()));
+            if scene.colors.explicit {
+                let [r, g, b] = scene.colors.group_fill.0;
+                painter.rect_filled(group_rect, 10.0, egui::Color32::from_rgb(r, g, b));
+            }
             painter.rect_stroke(
                 group_rect,
                 10.0,
@@ -13561,7 +13570,8 @@ fn draw_canvas(
                     if selected {
                         egui::Color32::from_rgb(55, 109, 189)
                     } else {
-                        egui::Color32::from_rgb(150, 160, 176)
+                        if scene.colors.explicit { let [r, g, b] = scene.colors.group_stroke.0; egui::Color32::from_rgb(r, g, b) }
+                        else { egui::Color32::from_rgb(150, 160, 176) }
                     },
                 ),
                 egui::StrokeKind::Inside,
@@ -13572,7 +13582,8 @@ fn draw_canvas(
                 label_rect,
                 &group.label,
                 group.label_alignment,
-                egui::Color32::from_rgb(85, 94, 106),
+                if scene.colors.explicit { let [r, g, b] = scene.colors.text.0; egui::Color32::from_rgb(r, g, b) }
+                else { egui::Color32::from_rgb(85, 94, 106) },
                 scene.metrics,
                 camera.zoom,
             );
@@ -13602,7 +13613,8 @@ fn draw_canvas(
                 let color = if selected {
                     egui::Color32::from_rgb(44, 105, 190)
                 } else {
-                    egui::Color32::from_rgb(85, 92, 103)
+                    if scene.colors.explicit { let [r, g, b] = scene.colors.line.0; egui::Color32::from_rgb(r, g, b) }
+                    else { egui::Color32::from_rgb(85, 92, 103) }
                 };
                 painter.add(egui::Shape::line(
                     points.clone(),
@@ -13616,14 +13628,15 @@ fn draw_canvas(
                 if let (Some(label), Some(label_bounds), Some(alignment)) =
                     (edge.label.as_ref(), edge.label_bounds, edge.label_alignment)
                 {
+                    let label_rect = world_rect_to_screen(label_bounds, canvas_rect, *camera);
+                    let label_color = if scene.colors.explicit {
+                        let [r, g, b] = scene.colors.background.0;
+                        painter.rect_filled(label_rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                        let [r, g, b] = scene.colors.text.0;
+                        egui::Color32::from_rgb(r, g, b)
+                    } else { color };
                     draw_prepared_text(
-                        &painter,
-                        world_rect_to_screen(label_bounds, canvas_rect, *camera),
-                        label,
-                        alignment,
-                        color,
-                        scene.metrics,
-                        camera.zoom,
+                        &painter, label_rect, label, alignment, label_color, scene.metrics, camera.zoom,
                     );
                 }
                 if let Some(hit_rect) = points_bounds(&points) {
@@ -13659,15 +13672,17 @@ fn draw_canvas(
                 };
                 let node_rect = world_rect_to_screen(translated, canvas_rect, *camera);
                 let selected = selected_nodes.contains(&node.id);
-                let fill = if selected {
+                let fill = if node.colors.explicit {
+                    let [r, g, b] = node.colors.fill.0; egui::Color32::from_rgb(r, g, b)
+                } else if selected {
                     egui::Color32::from_rgb(222, 235, 252)
-                } else {
-                    egui::Color32::WHITE
-                };
+                } else { egui::Color32::WHITE };
                 let stroke = if selected {
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(50, 108, 190))
                 } else {
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(81, 91, 106))
+                    let color = if node.colors.explicit { let [r, g, b] = node.colors.stroke.0; egui::Color32::from_rgb(r, g, b) }
+                    else { egui::Color32::from_rgb(81, 91, 106) };
+                    egui::Stroke::new(1.2, color)
                 };
                 match node.shape {
                     NodeShape::Rectangle => {
@@ -13702,7 +13717,8 @@ fn draw_canvas(
                     label_rect,
                     &node.label,
                     node.label_alignment,
-                    egui::Color32::from_rgb(34, 39, 47),
+                    if node.colors.explicit { let [r, g, b] = node.colors.text.0; egui::Color32::from_rgb(r, g, b) }
+                    else { egui::Color32::from_rgb(34, 39, 47) },
                     scene.metrics,
                     camera.zoom,
                 );

@@ -2,7 +2,8 @@
 
 use serde::de::{self, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use super::style::{MermaidNodeStyle, MermaidStyle};
 use std::fmt;
 
 pub const MAX_NODE_ID_BYTES: usize = 128;
@@ -167,6 +168,10 @@ pub struct DiagramEdge {
 #[serde(deny_unknown_fields)]
 pub struct DiagramDocument {
     pub direction: FlowDirection,
+    #[serde(default, skip_serializing_if = "MermaidStyle::is_empty")]
+    pub style: MermaidStyle,
+    #[serde(default, deserialize_with = "deserialize_node_styles", skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_styles: BTreeMap<NodeId, MermaidNodeStyle>,
     #[serde(deserialize_with = "deserialize_nodes")]
     pub nodes: Vec<DiagramNode>,
     #[serde(deserialize_with = "deserialize_edges")]
@@ -175,6 +180,26 @@ pub struct DiagramDocument {
     pub groups: Vec<DiagramGroup>,
     /// The next edge ID to allocate. Deleting an edge never lowers this value.
     pub next_edge_id: u64,
+}
+
+fn deserialize_node_styles<'de, D>(deserializer: D) -> Result<BTreeMap<NodeId, MermaidNodeStyle>, D::Error>
+where D: Deserializer<'de> {
+    struct StylesVisitor;
+    impl<'de> Visitor<'de> for StylesVisitor {
+        type Value = BTreeMap<NodeId, MermaidNodeStyle>;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a bounded map of node styles")
+        }
+        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut result = BTreeMap::new();
+            while let Some((id, style)) = map.next_entry()? {
+                if result.len() >= MAX_DIAGRAM_NODES { return Err(de::Error::custom("too many node styles")); }
+                if result.insert(id, style).is_some() { return Err(de::Error::custom("duplicate node style")); }
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_map(StylesVisitor)
 }
 
 fn deserialize_bounded_string<'de, D, const MAX_BYTES: usize>(
@@ -343,6 +368,8 @@ impl Default for DiagramDocument {
     fn default() -> Self {
         Self {
             direction: FlowDirection::TopDown,
+            style: MermaidStyle::default(),
+            node_styles: BTreeMap::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
             groups: Vec::new(),
@@ -369,6 +396,7 @@ impl DiagramDocument {
                 max: MAX_DIAGRAM_GROUPS,
             });
         }
+        if !self.style.is_valid() { return Err(GraphValidationError::InvalidStyle); }
         if self.next_edge_id == 0 {
             return Err(GraphValidationError::InvalidAllocator);
         }
@@ -404,6 +432,10 @@ impl DiagramDocument {
             }
         }
 
+        for (id, style) in &self.node_styles {
+            if !node_ids.contains(id) { return Err(GraphValidationError::MissingNode(id.clone())); }
+            if style.is_empty() { return Err(GraphValidationError::InvalidStyle); }
+        }
         let mut edge_ids = HashSet::with_capacity(self.edges.len());
         let mut greatest_edge_id = 0;
         for edge in &self.edges {
@@ -461,6 +493,7 @@ impl DiagramDocument {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphValidationError {
     InvalidIdentifier,
+    InvalidStyle,
     NodeGroupIdCollision(String),
     DuplicateNode(NodeId),
     DuplicateGroup(GroupId),
@@ -480,6 +513,7 @@ impl fmt::Display for GraphValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentifier => formatter.write_str("invalid graph identifier"),
+            Self::InvalidStyle => formatter.write_str("invalid empty node style"),
             Self::NodeGroupIdCollision(id) => {
                 write!(formatter, "node and subgraph IDs cannot both be {id:?}")
             }
@@ -583,6 +617,7 @@ mod tests {
                 label: "Group".into(),
             }],
             next_edge_id: 8,
+            ..DiagramDocument::default()
         };
         assert!(graph.validate().is_ok());
         assert_eq!(graph.allocate_edge_id().unwrap().get(), 8);
