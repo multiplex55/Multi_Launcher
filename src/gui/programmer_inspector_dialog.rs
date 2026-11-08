@@ -1042,8 +1042,8 @@ impl ProgrammerInspectorDialog {
                                 ui.clip_rect(),
                                 select.enabled(),
                             ));
-                            if select.clicked() {
-                                if let Some(selected) = runtime
+                            if select.clicked()
+                                && let Some(selected) = runtime
                                     .context
                                     .selected_line
                                     .zip(runtime.context.comparison.as_ref())
@@ -1054,10 +1054,9 @@ impl ProgrammerInspectorDialog {
                                             line_id,
                                         },
                                     )
-                                {
-                                    *input = ComparisonSlot::Result(selected);
-                                    changed = true;
-                                }
+                            {
+                                *input = ComparisonSlot::Result(selected);
+                                changed = true;
                             }
                             if matches!(input, ComparisonSlot::Result(_)) {
                                 ui.weak("Selected result");

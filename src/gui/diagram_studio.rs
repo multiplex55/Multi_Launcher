@@ -1023,7 +1023,7 @@ struct DrawBodyEffects {
 #[derive(Clone, Copy, Default)]
 struct VisualMiddleCapture {
     press: bool,
-    first_click: bool,
+    first_click: Option<(f64, egui::Pos2)>,
 }
 
 #[derive(Clone)]
@@ -11876,21 +11876,49 @@ fn visual_middle_capture(
     mut capture: VisualMiddleCapture,
     allowed: bool,
 ) -> (VisualMiddleCapture, bool) {
-    let (pressed, released, origin) = ui.input(|input| (
-        input.pointer.button_pressed(egui::PointerButton::Middle),
-        input.pointer.button_released(egui::PointerButton::Middle),
-        input.pointer.press_origin(),
-    ));
-    if pressed {
-        capture.press = allowed && origin.is_some_and(|point| canvas.contains(point)
-            && !excluded.is_some_and(|rect| rect.contains(point)));
-    }
-    let reset_allowed = released && capture.press && capture.first_click;
-    if released {
-        capture.first_click = capture.press && response.clicked_by(egui::PointerButton::Middle)
-            && !response.double_clicked_by(egui::PointerButton::Middle);
-        capture.press = false;
-    }
+    let valid_point = |point: egui::Pos2| {
+        canvas.contains(point) && !excluded.is_some_and(|rect| rect.contains(point))
+    };
+    let clicked = response.clicked_by(egui::PointerButton::Middle);
+    let multi_clicked = response.double_clicked_by(egui::PointerButton::Middle)
+        || response.triple_clicked_by(egui::PointerButton::Middle);
+    let (max_delay, max_distance) = ui.ctx().options(|options| {
+        (options.input_options.max_double_click_delay, options.input_options.max_click_dist)
+    });
+    let mut reset_allowed = false;
+    ui.input(|input| {
+        for event in &input.events {
+            match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed: true, .. } => {
+                    capture.press = allowed && valid_point(*pos);
+                }
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed: false, .. } => {
+                    if capture.press && allowed && valid_point(*pos) && clicked {
+                        if multi_clicked && capture.first_click.is_some_and(|(time, point)| {
+                            input.time - time < max_delay && point.distance_sq(*pos) < max_distance * max_distance
+                        }) {
+                            reset_allowed = true;
+                            capture.first_click = None;
+                        } else {
+                            capture.first_click = Some((input.time, *pos));
+                        }
+                    } else {
+                        capture.first_click = None;
+                        reset_allowed = false;
+                    }
+                    capture.press = false;
+                }
+                egui::Event::PointerMoved(pos) if capture.press && !valid_point(*pos) => capture.press = false,
+                egui::Event::PointerGone => capture.press = false,
+                egui::Event::PointerButton { button, .. } if *button != egui::PointerButton::Middle => {
+                    capture.first_click = None;
+                    capture.press = false;
+                    reset_allowed = false;
+                }
+                _ => {}
+            }
+        }
+    });
     (capture, reset_allowed)
 }
 
@@ -11909,7 +11937,7 @@ fn handle_visual_canvas_camera_input(
     let valid_origin = ui.ctx().input(|input| input.pointer.press_origin()).is_some_and(|origin| {
         visible_canvas.contains(origin) && !excluded_rect.is_some_and(|excluded| excluded.contains(origin))
     });
-    if actions_allowed && reset_allowed && response.double_clicked_by(egui::PointerButton::Middle) {
+    if actions_allowed && reset_allowed {
         return VisualNavigation::Reset;
     }
     if actions_allowed
@@ -12733,10 +12761,10 @@ fn draw_mermaid_colors(
                         Err(error) => { ui.label(error); },
                     };
                 }
-                if ui.button("Reset to app default").clicked() && pending.is_none() {
-                    if let Ok(source) = crate::diagram::edit_mermaid_style(source, &crate::diagram::MermaidStyle::default()) {
-                        *pending = Some(PendingMutation::ApplyMermaidStyle { source, expected_document: document.clone(), expected_revision: revision });
-                    }
+                if ui.button("Reset to app default").clicked() && pending.is_none()
+                    && let Ok(source) = crate::diagram::edit_mermaid_style(source, &crate::diagram::MermaidStyle::default())
+                {
+                    *pending = Some(PendingMutation::ApplyMermaidStyle { source, expected_document: document.clone(), expected_revision: revision });
                 }
             });
         });
@@ -17326,6 +17354,79 @@ mod tests {
     }
 
     #[test]
+    fn visual_batched_middle_clicks_fit_only_after_accepted_presses() {
+        for viewer in [false, true] {
+            for whole_batch in [false, true] {
+                let mut dialog = initialized_visual_dialog();
+                let ctx = egui::Context::default();
+                for _ in 0..3 { frame(&mut dialog, &ctx); }
+                if viewer { open_viewer(&mut dialog, &ctx); }
+                for _ in 0..40 { frame(&mut dialog, &ctx); }
+                let canvas = if viewer { dialog.test_viewer_canvas_rect.unwrap() } else { dialog.test_visual_canvas_rect.unwrap() };
+                let point = canvas.left_top() + egui::vec2(40.0, 40.0);
+                let pair = || vec![egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton { pos: point, button: egui::PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::NONE },
+                    egui::Event::PointerButton { pos: point, button: egui::PointerButton::Middle, pressed: false, modifiers: egui::Modifiers::NONE }];
+                let revision = dialog.documents.visual_revision();
+                let scene = dialog.documents.visual_scene().unwrap().clone();
+                let dirty = dialog.documents.is_dirty();
+                let camera = if viewer { &mut dialog.viewer_camera } else { &mut dialog.camera };
+                camera.center = ScenePoint { x: 9000.0, y: -8000.0 };
+                camera.zoom = 2.0;
+                camera.fit_next = false;
+                if viewer { dialog.visual_viewer_fit_follow = false; }
+                let before = if viewer { dialog.viewer_camera } else { dialog.camera };
+                let send = |dialog: &mut DiagramStudioDialog, events| {
+                    if viewer { frame_with_viewer_events(dialog, &ctx, events); }
+                    else { frame_with_child_events(dialog, &ctx, events); }
+                };
+                send(&mut dialog, pair());
+                for _ in 0..40 { frame(&mut dialog, &ctx); }
+                send(&mut dialog, vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                    egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+                ]);
+                send(&mut dialog, pair());
+                let mixed = if viewer { dialog.viewer_camera } else { dialog.camera };
+                assert_eq!(mixed.center, before.center, "intervening primary click, viewer={viewer}");
+                send(&mut dialog, pair());
+                let mixed_pair = if viewer { dialog.viewer_camera } else { dialog.camera };
+                assert_ne!(mixed_pair.center, before.center, "two middle clicks after primary, viewer={viewer}");
+                if viewer { dialog.viewer_camera = before; dialog.visual_viewer_fit_follow = false; }
+                else { dialog.camera = before; }
+                let selection = dialog.visual_selected_objects.clone();
+                for _ in 0..40 { frame(&mut dialog, &ctx); }
+                if viewer { dialog.test_request_viewer_child_discard(); } else { dialog.test_request_child_discard(); }
+                send(&mut dialog, pair());
+                send(&mut dialog, pair());
+                let rejected = if viewer { dialog.viewer_camera } else { dialog.camera };
+                assert_eq!(rejected.center, before.center, "discarded first batched click, viewer={viewer}");
+                for _ in 0..40 { frame(&mut dialog, &ctx); }
+                send(&mut dialog, pair());
+                if viewer { dialog.test_request_viewer_child_discard(); } else { dialog.test_request_child_discard(); }
+                send(&mut dialog, pair());
+                let rejected = if viewer { dialog.viewer_camera } else { dialog.camera };
+                assert_eq!(rejected.center, before.center, "discarded final batched click, viewer={viewer}");
+                for _ in 0..40 { frame(&mut dialog, &ctx); }
+                if whole_batch {
+                    let mut events = pair(); events.extend(pair());
+                    send(&mut dialog, events);
+                } else {
+                    send(&mut dialog, pair()); send(&mut dialog, pair());
+                }
+                let after = if viewer { dialog.viewer_camera } else { dialog.camera };
+                assert_ne!(after.center, before.center, "batched fit, viewer={viewer}, whole={whole_batch}");
+                if viewer { assert!(dialog.visual_viewer_fit_follow); }
+                assert_eq!(dialog.documents.visual_revision(), revision);
+                assert_eq!(dialog.documents.visual_scene().unwrap(), &scene);
+                assert_eq!(dialog.documents.is_dirty(), dirty);
+                assert_eq!(dialog.visual_selected_objects, selection);
+            }
+        }
+    }
+
+    #[test]
     fn visual_viewer_fit_tracks_resize_until_manual_zoom() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
@@ -17603,34 +17704,28 @@ mod tests {
         });
     }
 
-    fn wait_for_generic_preview(
+    fn wait_for_generic_settlement(
         dialog: &mut DiagramStudioDialog,
         ctx: &egui::Context,
-    ) -> std::sync::Arc<DiagramRenderOutput> {
+    ) -> Result<std::sync::Arc<DiagramRenderOutput>, crate::diagram::DiagramRenderError> {
         for _ in 0..300 {
             frame(dialog, ctx);
-            let key = dialog
-                .current_generic_key()
-                .expect("the test document uses a source-rendered family");
+            let key = dialog.current_generic_key().expect("the test document uses a source-rendered family");
             match &dialog.generic_preview {
-                GenericPreviewStatus::Ready {
-                    key: ready_key,
-                    output,
-                    ..
-                } if ready_key == &key && dialog.test_generic_preview_drawn() => {
-                    return std::sync::Arc::clone(output);
-                }
-                GenericPreviewStatus::Failed {
-                    key: failed_key,
-                    error,
-                    ..
-                } if failed_key == &key => {
-                    panic!("generic fixture failed to render: {error}");
-                }
+                GenericPreviewStatus::Ready { key: ready_key, output, .. }
+                    if ready_key == &key && dialog.test_generic_preview_drawn() => return Ok(std::sync::Arc::clone(output)),
+                GenericPreviewStatus::Failed { key: failed_key, error, .. } if failed_key == &key => return Err(*error),
                 _ => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
         }
         panic!("generic preview did not complete within the bounded test wait");
+    }
+
+    fn wait_for_generic_preview(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+    ) -> std::sync::Arc<DiagramRenderOutput> {
+        wait_for_generic_settlement(dialog, ctx).expect("generic fixture must render")
     }
 
     fn svg_root_dimensions(svg: &str) -> (u32, u32) {
@@ -21611,12 +21706,15 @@ mod tests {
                 0 => initialized_dialog(),
                 1 => generic_dialog("mindmap\n  root((Preview))"),
                 2 => initialized_visual_dialog(),
-                _ => generic_dialog("mindmap\n invalid ["),
+                _ => generic_dialog("mindmap\n%%{init: {\"theme\":\"dark\"}}%%\n  root((Rejected))"),
             };
             let ctx = egui::Context::default();
             for _ in 0..3 { frame(&mut dialog, &ctx); }
+            if mode == 1 { wait_for_generic_preview(&mut dialog, &ctx); }
+            if mode == 3 { assert!(wait_for_generic_settlement(&mut dialog, &ctx).is_err()); }
             open_viewer(&mut dialog, &ctx);
             for _ in 0..2 { frame(&mut dialog, &ctx); }
+            if mode == 1 { assert!(!dialog.viewer_camera.fit_next, "generic viewer must complete its initial fit"); }
             let camera = dialog.viewer_camera;
             let revision = dialog.documents.visual_revision().or_else(|| dialog.documents.session().map(|s| s.revision()));
             let start = dialog.test_viewer_canvas_rect.unwrap().left_top() + egui::vec2(50.0, 50.0);
@@ -21631,7 +21729,7 @@ mod tests {
                 assert_ne!(dialog.viewer_camera.center, camera.center);
             } else {
                 assert!(viewer.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)), "mode {mode}");
-                assert_eq!(dialog.viewer_camera.center, camera.center);
+                assert_eq!(dialog.viewer_camera.center, camera.center, "mode {mode}");
             }
             let root = frame_with_viewport_commands_for(&mut dialog, &ctx, egui::ViewportId::ROOT);
             assert!(!root.iter().any(|command| matches!(command, egui::ViewportCommand::StartDrag)));

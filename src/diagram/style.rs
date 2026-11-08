@@ -75,10 +75,10 @@ impl MermaidThemeVariables { pub fn is_empty(&self) -> bool { self == &Self::def
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct MermaidStyle {
     #[serde(skip_serializing_if = "Option::is_none")] pub theme: Option<MermaidTheme>,
-    #[serde(skip_serializing_if = "MermaidThemeVariables::is_empty")] pub theme_variables: MermaidThemeVariables,
+    #[serde(skip_serializing_if = "MermaidThemeVariables::is_empty")] pub theme_variables: Box<MermaidThemeVariables>,
 }
 impl MermaidStyle {
-    pub fn is_empty(&self) -> bool { self == &Self::default() }
+    pub fn is_empty(&self) -> bool { self.theme.is_none() && self.theme_variables.is_empty() }
     pub fn is_valid(&self) -> bool {
         let vars = &self.theme_variables;
         [&vars.mindmap_section_colors, &vars.mindmap_section_label_colors, &vars.mindmap_section_line_colors,
