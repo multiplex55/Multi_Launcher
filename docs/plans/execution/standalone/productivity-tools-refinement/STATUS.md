@@ -41,7 +41,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M6-A | Cold-cache recorder enumeration | complete |
 | M6-B | Frozen-region preview and active indicators | complete |
 | M7-A | Command-only help | complete |
-| M7-B | Complete Recycle command boundary | pending |
+| M7-B | Complete Recycle command boundary | in_progress |
 | M8-A | Consolidated native flows, independent review, scoped lint, handoff | pending |
 
 Use configured planner/implementer/reviewer roles, one explicitly bounded packet at a time. Parent owns Git, ledger and push attempts. One Cargo job at a time, fast-dev/targeted Nextest; disable Paste Sequence test hotkeys before application construction. Native/environmental retries follow section H. Final disposition requires actual native evidence and final SHA; pending checks are never reported passed.
@@ -536,3 +536,8 @@ Common prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --l
 - Final ae617db9 1/1: `test(help_window::tests::bounded_help_scroll_keeps_controls_and_full_content_reachable)` after test-only marker correction. Production filter/no-match code unchanged since passing67165a31. No relaxed assertion or viewport enlargement.
 
 Parent inspected complete single-source diff and exact static-block removal/test-only Quick Help marker. Diff check clean, source frozen/no jobs. Native Command Help observation remains M8.
+
+M7-A checkpoint710b15606445bc3815195e5aa5d5056263e1468c committed; one normal push succeeded (0a854003..710b1560), clean tree. Sole writer now M7-B Recycle provider/prefix and real launcher exact/fuzzy integration only. Destructive cleanup is never executed; root owns Git/ledger. M8 final native/review/lint/selected checks still pending.
+### M6-B production compilation repair discovered during M7-B
+M7-B combined library/integration build failed before tests with E0425 missing Arc at visual_overlay.rs:467/:523: notification API is production code but the import was test-only. Repair moves only Arc import outside cfg(test); no behavior/source reconstruction. Same scoped command then passed3/3 (run2c3eb5aa-199b-4bb3-90c9-13204db38510), compiling production lib and lib-test plus Recycle integration. Root isolates visual_overlay.rs and this ledger in a separate repair commit; M7-B source remains preserved unstaged until its own checkpoint. No history rewrite.
+Command: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --test recycle_plugin --no-fail-fast -j 1 -E 'test(recycle_and_recording_queries_remain_distinct_through_launcher_search) | test(search_returns_action) | test(record_query_is_exact_case_insensitive_and_lists_only_recording_controls)'`. Three tests across two binaries,7685 skipped; destructive ignored cleanup not run. Source frozen/no jobs, diff check clean.

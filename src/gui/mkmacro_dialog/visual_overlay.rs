@@ -6,13 +6,16 @@
 use crate::mkmacro::{MkPoint, MonitorDescriptor, OcrDocument, OcrMatch, ScreenRect};
 #[cfg(test)]
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::{
     collections::VecDeque,
     fmt,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
