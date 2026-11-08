@@ -257,7 +257,7 @@ fn build_render_artifact(
     counters: Option<&RenderCounters>,
 ) -> Result<Arc<RenderArtifact>, DiagramRenderError> {
     preflight_source(source)?;
-    let (_style, directive) = super::style::extract_style(source).map_err(|_| DiagramRenderError::InvalidSource)?;
+    let (style, directive) = super::style::extract_style(source).map_err(|_| DiagramRenderError::InvalidSource)?;
     let admitted_source = if let Some(range) = directive {
         let mut masked = source.as_bytes().to_vec();
         for byte in &mut masked[range] {
@@ -321,11 +321,12 @@ fn build_render_artifact(
         _ => return Err(DiagramRenderError::UnqualifiedFamily),
     };
 
-    let theme = match options.theme {
+    let mut theme = match options.theme {
         RenderTheme::Modern => Theme::modern(),
         RenderTheme::MermaidDefault => Theme::mermaid_default(),
     };
-    let config = LayoutConfig::default();
+    let mut config = LayoutConfig::default();
+    apply_source_colors(&style, &mut theme, &mut config);
     if let Some(counters) = counters {
         counters.layout_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -349,6 +350,120 @@ fn build_render_artifact(
         natural_width: dimensions.width,
         natural_height: dimensions.height,
     }))
+}
+
+/// Apply only the validated color envelope; default source keeps the existing
+/// renderer options and layout exactly as before.
+fn apply_source_colors(style: &super::style::MermaidStyle, theme: &mut Theme, config: &mut LayoutConfig) {
+    use super::style::MermaidTheme;
+    if let Some(preset) = style.theme {
+        let name = match preset {
+            MermaidTheme::Default => "default", MermaidTheme::Dark => "dark",
+            MermaidTheme::Forest => "forest", MermaidTheme::Neutral => "neutral",
+        };
+        if let Some(mut preset) = Theme::from_name(name) {
+            // The source envelope admits colors only; retain renderer options
+            // that determine typography, geometry and opacity.
+            preset.font_family = theme.font_family.clone();
+            preset.font_size = theme.font_size;
+            preset.pie_title_text_size = theme.pie_title_text_size;
+            preset.pie_section_text_size = theme.pie_section_text_size;
+            preset.pie_legend_text_size = theme.pie_legend_text_size;
+            preset.pie_stroke_width = theme.pie_stroke_width;
+            preset.pie_outer_stroke_width = theme.pie_outer_stroke_width;
+            preset.pie_opacity = theme.pie_opacity;
+            *theme = preset;
+        }
+    }
+    let variables = &style.theme_variables;
+    if let Some(color) = variables.primary_color {
+        theme.primary_color = color.hex();
+        theme.sequence_actor_fill = color.hex();
+    }
+    if let Some(color) = variables.primary_border_color {
+        theme.primary_border_color = color.hex();
+        theme.sequence_actor_border = color.hex();
+        theme.cluster_border = color.hex();
+    }
+    if let Some(color) = variables.primary_text_color {
+        let color = color.hex();
+        theme.primary_text_color = color.clone();
+        theme.text_color = color.clone();
+        theme.pie_title_text_color = color.clone();
+        theme.pie_section_text_color = color.clone();
+        theme.pie_legend_text_color = color.clone();
+        theme.git_commit_label_color = color.clone();
+        theme.git_tag_label_color = color;
+    }
+    if let Some(color) = variables.line_color {
+        theme.line_color = color.hex();
+        theme.sequence_actor_line = color.hex();
+        theme.pie_outer_stroke_color = color.hex();
+    }
+    if let Some(color) = variables.background {
+        theme.background = color.hex();
+        theme.edge_label_background = color.hex();
+        theme.git_commit_label_background = color.hex();
+        theme.git_tag_label_background = color.hex();
+    }
+    if let Some(color) = variables.secondary_color {
+        theme.secondary_color = color.hex();
+        theme.cluster_background = color.hex();
+    }
+    if let Some(color) = variables.tertiary_color { theme.tertiary_color = color.hex(); }
+    if let Some(color) = variables.primary_border_color { theme.git_tag_label_border = color.hex(); }
+
+    // These families have independent palettes, not derived from Theme by the
+    // renderer. Presets and the three common fills populate them before layout.
+    if style.theme.is_some() {
+        config.mindmap.section_colors = theme.git_colors.to_vec();
+        config.mindmap.section_label_colors = theme.git_branch_label_colors.to_vec();
+        config.mindmap.section_line_colors = theme.git_colors.to_vec();
+        config.mindmap.root_fill = Some(theme.primary_color.clone());
+        config.mindmap.root_text = Some(theme.primary_text_color.clone());
+        config.timeline.event_colors = vec![theme.primary_color.clone(), theme.secondary_color.clone(), theme.tertiary_color.clone()];
+    }
+    let custom_fills = variables.primary_color.is_some()
+        || variables.secondary_color.is_some() || variables.tertiary_color.is_some();
+    if custom_fills {
+        let colors = vec![theme.primary_color.clone(), theme.secondary_color.clone(), theme.tertiary_color.clone()];
+        config.mindmap.section_colors = colors.clone();
+        config.mindmap.section_label_colors = vec![theme.primary_text_color.clone(); colors.len()];
+        config.mindmap.section_line_colors = colors.clone();
+        config.mindmap.root_fill = Some(theme.primary_color.clone());
+        config.mindmap.root_text = Some(theme.primary_text_color.clone());
+        config.timeline.event_colors = colors.clone();
+        for (index, color) in theme.pie_colors.iter_mut().enumerate() { *color = colors[index % colors.len()].clone(); }
+        for (index, color) in theme.git_colors.iter_mut().enumerate() { *color = colors[index % colors.len()].clone(); }
+        for color in &mut theme.git_inv_colors { *color = theme.background.clone(); }
+        for color in &mut theme.git_branch_label_colors { *color = theme.primary_text_color.clone(); }
+    }
+    let palette = |values: &[super::style::MermaidColor]| values.iter().map(|color| color.hex()).collect::<Vec<_>>();
+    if let Some(color) = variables.line_color { config.mindmap.edge_color = Some(color.hex()); }
+    if let Some(color) = variables.mindmap_root_fill { config.mindmap.root_fill = Some(color.hex()); }
+    if let Some(color) = variables.mindmap_root_text { config.mindmap.root_text = Some(color.hex()); }
+    if let Some(color) = variables.mindmap_edge_color { config.mindmap.edge_color = Some(color.hex()); }
+    if !variables.mindmap_section_colors.is_empty() { config.mindmap.section_colors = palette(&variables.mindmap_section_colors); }
+    if !variables.mindmap_section_label_colors.is_empty() { config.mindmap.section_label_colors = palette(&variables.mindmap_section_label_colors); }
+    if !variables.mindmap_section_line_colors.is_empty() {
+        config.mindmap.section_line_colors = palette(&variables.mindmap_section_line_colors);
+        if variables.mindmap_edge_color.is_none() { config.mindmap.edge_color = None; }
+    }
+    if !variables.timeline_event_colors.is_empty() { config.timeline.event_colors = palette(&variables.timeline_event_colors); }
+    if !variables.pie_colors.is_empty() {
+        let colors = palette(&variables.pie_colors);
+        for (index, color) in theme.pie_colors.iter_mut().enumerate() { *color = colors[index % colors.len()].clone(); }
+    }
+    for (values, target) in [
+        (&variables.git_colors, &mut theme.git_colors),
+        (&variables.git_inv_colors, &mut theme.git_inv_colors),
+        (&variables.git_branch_label_colors, &mut theme.git_branch_label_colors),
+    ] {
+        if !values.is_empty() {
+            let colors = palette(values);
+            for (index, color) in target.iter_mut().enumerate() { *color = colors[index % colors.len()].clone(); }
+        }
+    }
 }
 
 fn make_render_output(
@@ -1583,6 +1698,75 @@ mod tests {
             "%%{init: {\"themeVariables\":{\"primaryColor\":\"red\"}}}%%\nmindmap\n  root((Root))\n",
             "mindmap\n%%{init: {\"theme\":\"dark\"}}%%\n  root((Root))\n",
         ] { assert!(render_mermaid_preview(invalid, target).is_err()); }
+        let nine_colors = std::iter::repeat_n("\"#123456\"", 9).collect::<Vec<_>>().join(",");
+        let oversized = format!("%%{{init: {{\"themeVariables\":{{\"timelineEventColors\":[{nine_colors}]}}}}}}%%\ntimeline\n2026 : Event\n");
+        assert!(render_mermaid_preview(&oversized, target).is_err());
+    }
+
+    #[test]
+    fn mindmap_source_palettes_and_presets_color_real_shapes() {
+        let target = RasterSize::new(420, 300).unwrap();
+        let prefix = "%%{init: {\"themeVariables\":{\"lineColor\":\"#a90009\",\"mindmapRootFill\":\"#a10001\",\"mindmapRootText\":\"#a20002\",\"mindmapSectionColors\":[\"#a30003\",\"#a40004\"],\"mindmapSectionLabelColors\":[\"#a50005\",\"#a60006\"],\"mindmapSectionLineColors\":[\"#a70007\",\"#a80008\"]}}}%%\n";
+        let result = render_mermaid_preview(&format!("{prefix}{MINDMAP}"), target).unwrap();
+        for (attribute, color) in [
+            ("fill", "#a10001"), ("fill", "#a20002"), ("fill", "#a30003"),
+            ("fill", "#a40004"), ("fill", "#a50005"), ("fill", "#a60006"),
+            ("stroke", "#a70007"), ("stroke", "#a80008"),
+        ] { assert!(result.svg.contains(&format!("{attribute}=\"{color}\"")), "{attribute} {color}"); }
+        let global_edge = "%%{init: {\"themeVariables\":{\"mindmapEdgeColor\":\"#b10001\"}}}%%\n";
+        let result = render_mermaid_preview(&format!("{global_edge}{MINDMAP}"), target).unwrap();
+        assert!(result.svg.contains("stroke=\"#b10001\""));
+        for (name, expected) in [("default", "#ececff"), ("dark", "#1f2020"), ("forest", "#cde498"), ("neutral", "#eeeeee")] {
+            let source = format!("%%{{init: {{\"theme\":\"{name}\"}}}}%%\n{MINDMAP}");
+            let styled = render_mermaid_preview(&source, target).unwrap();
+            assert!(styled.svg.to_ascii_lowercase().contains(&format!("fill=\"{expected}\"")), "{name}");
+        }
+    }
+
+    #[test]
+    fn timeline_palette_keeps_default_and_geometry() {
+        let source = "timeline\n  title Delivery\n  2024 : First\n  2025 : Second\n";
+        let parsed = parse_mermaid_strict(source).unwrap();
+        let theme = Theme::modern();
+        let mut config = LayoutConfig::default();
+        let before_layout = compute_layout(&parsed.graph, &theme, &config);
+        let before = render_svg(&before_layout, &theme, &config);
+        config.timeline.event_colors.clear();
+        assert_eq!(before, render_svg(&before_layout, &theme, &config));
+        for color in ["#ECECFF", "#FFE6CC"] { assert!(before.contains(&format!("fill=\"{color}\""))); }
+        config.timeline.event_colors = vec!["#b10001".into(), "#b20002".into()];
+        let after_layout = compute_layout(&parsed.graph, &theme, &config);
+        let before_size = measure_svg_dimensions(&before_layout, &config, None);
+        let after_size = measure_svg_dimensions(&after_layout, &config, None);
+        assert_eq!((before_size.width, before_size.height), (after_size.width, after_size.height));
+        let after = render_svg(&after_layout, &theme, &config);
+        for color in ["#b10001", "#b20002"] { assert!(after.contains(&format!("fill=\"{color}\""))); }
+        let boxes = |svg: &str| svg.split('<').filter(|tag| tag.starts_with("rect ") && tag.contains("rx=\"5\" ry=\"5\""))
+            .map(|tag| tag.split(" fill=").next().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(!boxes(&before).is_empty());
+        assert_eq!(boxes(&before), boxes(&after));
+        let target = RasterSize::new(320, 240).unwrap();
+        let plain = render_mermaid_preview(source, target).unwrap();
+        let dark = render_mermaid_preview(&format!("%%{{init: {{\"theme\":\"dark\"}}}}%%\n{source}"), target).unwrap();
+        assert_eq!((plain.natural_width, plain.natural_height), (dark.natural_width, dark.natural_height));
+    }
+
+    #[test]
+    fn palette_completion_is_fenced_by_revision_and_document_identity() {
+        let size = RasterSize::new(320, 240).unwrap();
+        let old_source = format!("%%{{init: {{\"themeVariables\":{{\"primaryColor\":\"#112233\"}}}}}}%%\n{SEQUENCE}");
+        let new_source = format!("%%{{init: {{\"themeVariables\":{{\"primaryColor\":\"#445566\"}}}}}}%%\n{SEQUENCE}");
+        let old = Arc::new(render_mermaid_preview(&old_source, size).unwrap());
+        let new = Arc::new(render_mermaid_preview(&new_source, size).unwrap());
+        assert!(old.svg.contains("fill=\"#112233\""));
+        assert!(new.svg.contains("fill=\"#445566\""));
+        let document = RenderDocumentIdentity::fresh();
+        let old_key = RenderKey::new(document.clone(), 7, RenderOptions::default());
+        for next_key in [RenderKey::new(document, 8, RenderOptions::default()), RenderKey::new(RenderDocumentIdentity::fresh(), 7, RenderOptions::default())] {
+            let mut state = GenericPreviewStatus::Pending { key: next_key.clone(), raster_size: size };
+            assert!(!state.apply(RenderCompletion { key: old_key.clone(), raster_size: size, result: Ok(old.clone()) }));
+            assert!(state.apply(RenderCompletion { key: next_key, raster_size: size, result: Ok(new.clone()) }));
+        }
     }
 
     #[test]

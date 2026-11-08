@@ -47,6 +47,11 @@ pub struct MermaidThemeVariables {
     #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub mindmap_section_colors: Vec<MermaidColor>,
     #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub mindmap_section_label_colors: Vec<MermaidColor>,
     #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub mindmap_section_line_colors: Vec<MermaidColor>,
+    #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub timeline_event_colors: Vec<MermaidColor>,
+    #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub pie_colors: Vec<MermaidColor>,
+    #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub git_colors: Vec<MermaidColor>,
+    #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub git_inv_colors: Vec<MermaidColor>,
+    #[serde(default, deserialize_with = "bounded_palette", skip_serializing_if = "Vec::is_empty")] pub git_branch_label_colors: Vec<MermaidColor>,
 }
 fn bounded_palette<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<MermaidColor>, D::Error> {
     struct PaletteVisitor;
@@ -76,7 +81,8 @@ impl MermaidStyle {
     pub fn is_empty(&self) -> bool { self == &Self::default() }
     pub fn is_valid(&self) -> bool {
         let vars = &self.theme_variables;
-        [&vars.mindmap_section_colors, &vars.mindmap_section_label_colors, &vars.mindmap_section_line_colors]
+        [&vars.mindmap_section_colors, &vars.mindmap_section_label_colors, &vars.mindmap_section_line_colors,
+         &vars.timeline_event_colors, &vars.pie_colors, &vars.git_colors, &vars.git_inv_colors, &vars.git_branch_label_colors]
             .iter().all(|palette| palette.len() <= 8)
     }
 }
