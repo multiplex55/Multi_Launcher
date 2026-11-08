@@ -19956,11 +19956,11 @@ mod tests {
                 "{action} should remain enabled inside its own menu"
             );
         }
-        click_action(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        click_action(&mut dialog, &ctx, "visual_authoring_template_decision_tree");
         assert_eq!(
             dialog.documents.pending_transition(),
             Some(&PendingDiagramTransition::ApplyVisualTemplate(
-                crate::diagram::VisualAuthoringTemplate::Architecture
+                crate::diagram::VisualAuthoringTemplate::DecisionTree
             )),
             "accepted visual template action failed: {:?}",
             dialog.message
@@ -19973,18 +19973,18 @@ mod tests {
 
         reveal_visual_action(&mut dialog, &ctx, "menu_visual_templates");
         click_action(&mut dialog, &ctx, "menu_visual_templates");
-        click_action(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        click_action(&mut dialog, &ctx, "visual_authoring_template_decision_tree");
         assert_eq!(
             dialog.documents.pending_transition(),
             Some(&PendingDiagramTransition::ApplyVisualTemplate(
-                crate::diagram::VisualAuthoringTemplate::Architecture
+                crate::diagram::VisualAuthoringTemplate::DecisionTree
             ))
         );
         reveal_visual_action(&mut dialog, &ctx, "decision_discard");
         click_action(&mut dialog, &ctx, "decision_discard");
         assert_eq!(
             dialog.documents.visual_label(),
-            Some("Architecture starter")
+            Some("Decision Tree starter")
         );
         assert_eq!(
             dialog.documents.authoring_kind(),
@@ -19992,6 +19992,15 @@ mod tests {
         );
         assert_ne!(dialog.render_document, original_document);
         assert!(dialog.documents.is_dirty());
+        reveal_visual_action(&mut dialog, &ctx, "open_viewer");
+        open_viewer(&mut dialog, &ctx);
+        for _ in 0..3 {
+            frame_with_viewer_size(&mut dialog, &ctx, egui::vec2(480.0, 400.0));
+        }
+        let canvas = dialog.test_viewer_canvas_rect.unwrap();
+        let bounds = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap().bounds.unwrap();
+        let projected = world_rect_to_screen(bounds, canvas, dialog.viewer_camera);
+        assert!(canvas.contains_rect(projected), "new template should fit a narrow viewer: {projected:?} in {canvas:?}");
     }
 
     #[test]

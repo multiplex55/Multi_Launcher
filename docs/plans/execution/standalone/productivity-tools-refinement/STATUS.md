@@ -35,7 +35,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M4-B | Structural clipboard and keyboard ownership | complete |
 | M4-C | Owned persistent inline labels | complete |
 | M4-D | Persistent editable connector bends | complete |
-| M4-E | Four additional editable templates | in_progress |
+| M4-E | Four additional editable templates | complete |
 | M5-A | Timeout-capable UIA activation | pending |
 | M5-B | Saved folder snapshot picker | pending |
 | M6-A | Cold-cache recorder enumeration | pending |
@@ -440,3 +440,16 @@ M4-E first compile failed before tests with a mismatched delimiter in connector-
 Repair/M4-E scoped runccc83d45-1440-491e-81ea-1aac0277389f passed5/6: restored connector drag and new catalogue/persistence passed; dirty-transition/narrow-fit test reached viewer opening but button was clipped by retained decision-panel scroll. Fix uses existing reveal_visual_action before actual click, preserving assertions. Sole writer cannot prove all M4-D formatted blocks token-equivalent from retained evidence; repeat original bounded13-case M4-D set with the one failing template test after helper correction. Concrete reason: demonstrated post-test formatter corruption across blocks, not automatic regression expansion. No full suite or new campaign. Keep source unchanged afterward.
 
 Final repair/template run3628f1d1-ad35-45e6-9079-016ecd083628 passed14/14: original bounded13 M4-D cases on FINAL formatted/restored source plus corrected template dirty-transition/narrow-fit. This establishes M4-D acceptance after the actual formatter defect. Initial M4-E compilation ran zero tests; prior ccc83d5/6 proved catalogue/save-reopen/keyboard menu/discard/drag, final clipped button uses existing reveal helper. No further formatting/source changes/Cargo jobs. Root now stages isolated25-line preview repair plus ledger only, preserving M4-E source hunks for separate checkpoint.
+M4-D repair8c875ba091184fb2a54c84cbb9e016fbdf32fe6b committed with only isolated preview hunk+ledger; its one normal push succeeded. All M4-E source work remained unstaged/preserved. Final staged repair diff inspected before commit; no history rewrite.
+
+### M4-E result
+
+Nine appended catalogue entries preserve original five names/slugs/order/identities and existing unsaved-starter/dirty-decision path. Added Organization Chart (top-down reporting), Network Topology (connected hub/monitoring), Decision Tree (top-down branching/answers), Swimlane Workflow (three real contiguous frame/member subtrees, reserved header space, cross-lane anchored connectors). All use canonical owned labels and ordinary routes, no assets/new framework.
+
+Actual common command prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E`.
+
+Initial selector: `test(visual_authoring_template_catalog_projects_all_nine_native_starters) | test(visual_authoring_new_template_edit_save_reopen_and_undo) | test(diagram_studio_visual_authoring_template_uses_accepted_dirty_transition) | test(diagram_studio_visual_template_menu_keyboard_selects_once) | test(diagram_studio_visual_authoring_template_discarded_child_pass_keeps_current_document)`. First compilation ran0 tests due inherited formatting defect. After isolated repair, same selector plus `test(visual_manual_route_canvas_drag_cancel_and_controls)` gave ccc83d45-1440-491e-81ea-1aac0277389f5/6; only Open viewer clipped from prior scroll. Existing reveal helper fixed actual button targeting.
+
+Final selector: `test(diagram_studio_visual_authoring_template_uses_accepted_dirty_transition) | test(visual_manual_route) | test(visual_connector_uses_rotated_local_side_anchors_and_open_arrowheads) | test(visual_connector_rotated_parallel_elbows_keep_orthogonal_egress) | test(visual_connector_parallel_edges_and_self_loops_are_distinguishable) | test(diagram_drawio_wire_grouped_export_reimport_preserves_supported_scene) | test(diagram_drawio_wire_refuses_hostile_and_unrepresentable_xml) | test(diagram_drawio_wire_export_fails_closed_without_partial_bytes) | test(diagram_drawio_wire_export_is_a_lossless_escaped_canonical_roundtrip)` gave3628f1d1-ad35-45e6-9079-016ecd08362814/14. Other four template cases passed unchanged in prior run. Evidence: all-nine catalogue finite meaningful structures/labels/slugs/lane order/header clearance/no assets; representative new-template edit/disk reopen/undo; actual accepted cancel/discard/keyboard/stale pass and narrow viewer Fit. All egui simulated, native M8 pending.
+
+Parent inspected remaining M4-E diff after separate repair commit: visual_templates.rs and GUI test only; no new chooser/model changes, existing five specs untouched. No source formatting or Cargo jobs after final pass; git diff --check clean. No unrelated/debug/temp files staged.
