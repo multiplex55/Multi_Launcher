@@ -699,7 +699,7 @@ impl FolderSizeDialogState {
                             }
                         }
                         if ui
-                            .add_enabled(can_copy_or_open, egui::Button::new("Open"))
+                            .add_enabled(can_copy_or_open, egui::Button::new("Reveal in Explorer"))
                             .clicked()
                         {
                             if let Some((generation, index)) = selected_target {
