@@ -40,7 +40,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M5-B | Saved folder snapshot picker | complete |
 | M6-A | Cold-cache recorder enumeration | complete |
 | M6-B | Frozen-region preview and active indicators | complete |
-| M7-A | Command-only help | pending |
+| M7-A | Command-only help | complete |
 | M7-B | Complete Recycle command boundary | pending |
 | M8-A | Consolidated native flows, independent review, scoped lint, handoff | pending |
 
@@ -522,3 +522,17 @@ Common prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --l
 - Affected81bf7b62 1/1, final b2f1fb6e-15bf-4a16-a78a-9f9b6c1cf3a5 1/1: `test(gui::recording_dialog::tests::recording_outline_tracks_frozen_generation_and_retires_preview)`. Final adds later Display fresh generation/operation and prior cancellation while retaining preview revision/selector refusal, active frozen request after setup close, discard cleanup and Window no-outline evidence. Other four cases unchanged and passed initially.
 
 Parent inspected exact five-source-file diff, shared service reuse, affinity ordering, existing native visible/bounds verification logs, app hidden polling/exit and accepted error repaint guards. Diff check clean; source frozen/no jobs. Actual native affinity, encoded crop/content/exclusion, Window movement and cleanup/OS border still pending M8. No native success inferred from fake renderer tests.
+
+M6-B checkpoint0a854003fc14d30a5bc915910938da68ffa3929d committed; one normal push succeeded (97193989..0a854003), clean tree. Sole writer assigned M7-A Command Help only, preserving actual Replace and bounded scroll assertions; Recycle remains next packet. Native M8 and final scoped/review/lint still pending.
+
+### M7-A implementation / focused checks in progress
+Only help_window.rs production four static blocks removed; real plugin metadata/Replace and Quick Help preserved. Explicit nonempty no-match feedback added after root review of blank state. Initial2fb46dc2 filter passed/bounded scroll failed; real plugins first added to shared fixture were isolated to filter test. Rerun67165a31 filter/no-match passed, Quick Help containment still failed. Diagnostic eca14593 showed existing early target80px versus76px viewport (99..179 vs99..175) with required disabled Paste hotkeys, making full containment impossible. Test-only target changes to existing short early Older query row; late/end targets, full-containment, pinned/offset/paint assertions retained, no viewport enlargement or production Quick Help change. Final affected rerun pending.
+### M7-A result
+Only src/help_window.rs changed: four fixed Command Help tutorial blocks removed, plugin metadata/commands/examples/pinned filter/Show examples preserved, explicit nonempty no-match message added. Actual Folder Size and Search Replace plugin entries tested. Quick Help production text/layout unchanged; only its test observation target moved to an existing short early row after measured impossible fit, retaining all containment/offset/paint/late-content checks. Shared fixture disables Paste shortcuts before app construction; real plugin registrations remain local to new filter test.
+
+Common prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E`.
+- 2fb46dc2 and67165a31 each1/2: `test(help_window::tests::command_help_filters_real_plugin_commands_without_static_tutorials) | test(help_window::tests::bounded_help_scroll_keeps_controls_and_full_content_reachable)`. Filter passed both; Quick Help fixture failed.
+- Diagnostic eca14593 0/1 same bounded-scroll-only selector established80px target versus76px viewport, not a production layout regression.
+- Final ae617db9 1/1: `test(help_window::tests::bounded_help_scroll_keeps_controls_and_full_content_reachable)` after test-only marker correction. Production filter/no-match code unchanged since passing67165a31. No relaxed assertion or viewport enlargement.
+
+Parent inspected complete single-source diff and exact static-block removal/test-only Quick Help marker. Diff check clean, source frozen/no jobs. Native Command Help observation remains M8.
