@@ -10,7 +10,7 @@ impl Plugin for HotFolderPlugin {
         }
         vec![action(
             "Open Hot Folder Manager",
-            "Review disabled-by-default file rules, select exact registered actions, and inspect terminal execution history.",
+            "Manage watched folders and automation rules.",
             "hotfolder:open",
         )]
     }

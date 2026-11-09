@@ -679,12 +679,16 @@ impl RootListGeometryCache {
         let spacing = ui.spacing();
         let selectable_margin = root_selectable_frame_margin(ui);
         let columns = columns.max(1);
-        let grid_spacing_x = 8.0_f32;
+        let grid_spacing_x = if columns > 1 {
+            8.0_f32.min(ui.available_width().max(0.0) / (columns - 1) as f32)
+        } else {
+            8.0
+        };
         let grid_spacing_y = 6.0_f32;
         let width = ui.available_width();
         let nominal_width = ((width - (columns.saturating_sub(1) as f32 * grid_spacing_x))
             / columns as f32)
-            .max(160.0);
+            .max(0.0);
         // Grid buttons are placed in a left-to-right child UI, whose default
         // text mode is Extend unless the style explicitly overrides it.
         let wrap_mode = ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
@@ -726,10 +730,9 @@ impl RootListGeometryCache {
             f32::from_bits(key.selectable_margin_x_bits),
             f32::from_bits(key.selectable_margin_y_bits),
         );
-        let interaction_width = spacing.interact_size.x;
         let interaction_height = spacing.interact_size.y;
         let actual_columns = columns.min(results.len());
-        let mut column_widths = vec![interaction_width; actual_columns];
+        let column_widths = vec![nominal_width; actual_columns];
         let mut cell_widths = Vec::with_capacity(results.len());
         let mut cell_heights = Vec::with_capacity(results.len());
         let mut row_heights =
@@ -740,27 +743,28 @@ impl RootListGeometryCache {
         #[cfg(test)]
         let observe_cell_loop = cell_loop_started.is_some();
         for (index, action) in results.iter().enumerate() {
-            let text = root_grid_result_text(action, &text_presentation);
+            let text = root_grid_result_text(ui, action, &text_presentation, nominal_width);
             let galley = text.into_galley_impl(
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
-                    key.wrap_mode,
+                    egui::TextWrapMode::Extend,
                     (nominal_width - margin.x).max(0.0),
                 ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
-            let cell_width = nominal_width.max(galley.size().x + margin.x);
+            let cell_width = nominal_width;
             let cell_height = ROOT_GRID_MIN_HEIGHT
                 .max(interaction_height)
                 .max(galley.size().y + margin.y);
-            let column = index % columns;
             let row = index / columns;
-            column_widths[column] = column_widths[column].max(cell_width);
             row_heights[row] = row_heights[row].max(cell_height);
             cell_widths.push(cell_width);
             cell_heights.push(cell_height);
+        }
+        for (index, height) in cell_heights.iter_mut().enumerate() {
+            *height = row_heights[index / columns];
         }
         #[cfg(test)]
         c2e_grid_cell_loop_observer::record_loop(cell_loop_started, results.len());
@@ -789,15 +793,7 @@ impl RootListGeometryCache {
             }
         }
 
-        // Grid centers its fixed 44pt allocation in each logical row. If the
-        // actual selectable is taller, egui lets it spill below that row.
-        // Keep logical prefixes for row placement and a max-end tree for
-        // viewport queries, since visual row bottoms are not monotonic.
-        let grid_visual_row_tops = row_tops
-            .iter()
-            .zip(&row_heights)
-            .map(|(top, height)| top + ((height - ROOT_GRID_MIN_HEIGHT) * 0.5).max(0.0))
-            .collect::<Vec<_>>();
+        let grid_visual_row_tops = row_tops.clone();
         let grid_visual_row_bottoms = grid_visual_row_tops
             .iter()
             .zip(&row_heights)
@@ -1036,7 +1032,12 @@ fn root_list_display_text<'a>(
         .get(&action.action)
         .and_then(|alias| alias.as_ref());
     if show_full_paths || aliased.is_none() {
-        std::borrow::Cow::Owned(format!("{} : {}", action.label, action.desc))
+        let description = if show_full_paths && folder_aliases.contains_key(&action.action) {
+            action.desc.clone()
+        } else {
+            compact_result_description(&action.desc)
+        };
+        std::borrow::Cow::Owned(format!("{} : {}", action.label, description))
     } else {
         std::borrow::Cow::Borrowed(action.label.as_str())
     }
@@ -1120,17 +1121,82 @@ fn root_list_result_text(
         .and_then(|alias| alias.as_ref())
         .is_some();
     if show_full_paths || !has_alias {
-        presentation.widget_text(&action.label, Some((" : ", &action.desc)))
+        let description = if show_full_paths && folder_aliases.contains_key(&action.action) {
+            std::borrow::Cow::Borrowed(action.desc.as_str())
+        } else {
+            std::borrow::Cow::Owned(compact_result_description(&action.desc))
+        };
+        presentation.widget_text(&action.label, Some((" : ", &description)))
     } else {
         presentation.widget_text(&action.label, None)
     }
 }
 
+fn compact_result_description(description: &str) -> String {
+    description
+        .split_whitespace()
+        .take(7)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn root_grid_ellipsize(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32) -> String {
+    let width = width.max(0.0);
+    ui.ctx().fonts_mut(|fonts| {
+        let measure = |fonts: &mut egui::epaint::text::FontsView<'_>, text: String| {
+            fonts
+                .layout_no_wrap(text, font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        };
+        if measure(fonts, text.to_owned()) <= width {
+            return text.to_owned();
+        }
+        if measure(fonts, "…".to_owned()) > width {
+            return String::new();
+        }
+        let mut boundaries = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        boundaries.push(text.len());
+        let mut low = 0;
+        let mut high = boundaries.len();
+        while low + 1 < high {
+            let mid = (low + high) / 2;
+            if measure(fonts, format!("{}…", &text[..boundaries[mid]])) <= width {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        format!("{}…", &text[..boundaries[low]])
+    })
+}
+
 fn root_grid_result_text(
+    ui: &egui::Ui,
     action: &Action,
     presentation: &RootResultTextPresentation,
+    width: f32,
 ) -> egui::WidgetText {
-    presentation.widget_text(&action.label, Some(("\n", &action.desc)))
+    let available = (width - root_selectable_frame_margin(ui).x).max(0.0);
+    let title = action
+        .label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = root_grid_ellipsize(ui, &title, &presentation.primary_font, available);
+    let description = root_grid_ellipsize(
+        ui,
+        &compact_result_description(&action.desc),
+        &presentation.secondary_font,
+        available,
+    );
+    presentation.widget_text(
+        &title,
+        (!description.is_empty()).then_some(("\n", description.as_str())),
+    )
 }
 
 fn root_grid_cell_response(
@@ -1161,19 +1227,24 @@ fn root_grid_cell_response(
             .max_rect(row_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    cell_ui.set_clip_rect(ui.clip_rect());
+    cell_ui.set_clip_rect(ui.clip_rect().intersect(row_rect));
     cell_ui.set_style(ui.style().clone());
+    cell_ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     if !ui.is_enabled() {
         cell_ui.disable();
     }
-    let text = root_grid_result_text(action, presentation);
+    let text = root_grid_result_text(&cell_ui, action, presentation, geometry.grid_nominal_width);
     cell_ui
         .with_layout(
             egui::Layout::left_to_right(egui::Align::Center),
             |cell_ui| {
                 cell_ui.add_sized(
-                    [geometry.grid_nominal_width, ROOT_GRID_MIN_HEIGHT],
-                    egui::Button::selectable(selected, text).frame_when_inactive(true),
+                    [geometry.grid_nominal_width, row_height],
+                    egui::Button::selectable(selected, text)
+                        .frame(
+                            geometry.grid_nominal_width >= root_selectable_frame_margin(cell_ui).x,
+                        )
+                        .frame_when_inactive(true),
                 )
             },
         )
@@ -10784,15 +10855,12 @@ impl LauncherApp {
                                     let row = selected / cols;
                                     let cell_height =
                                         self.root_list_geometry.grid_cell_heights[selected];
-                                    let row_height = self.root_list_geometry.row_heights[row];
                                     let selected_rect = egui::Rect::from_min_size(
                                         content_origin
                                             + egui::vec2(
                                                 self.root_list_geometry.grid_column_x_offsets
                                                     [column],
-                                                self.root_list_geometry.row_tops[row]
-                                                    + ((row_height - ROOT_GRID_MIN_HEIGHT) * 0.5)
-                                                        .max(0.0),
+                                                self.root_list_geometry.row_tops[row],
                                             ),
                                         egui::vec2(
                                             self.root_list_geometry.grid_cell_widths[selected],
@@ -10901,7 +10969,11 @@ impl LauncherApp {
                                         rows_built = rows_built.saturating_add(1);
                                         let menu_resp = self.attach_result_context_menu(
                                             &action,
-                                            resp,
+                                            resp.on_hover_text(if action.desc == "Snippet" {
+                                                action.label.clone()
+                                            } else {
+                                                format!("{}\n{}", action.label, action.desc)
+                                            }),
                                             &mut refresh,
                                             &mut set_focus,
                                             &mut deferred_universal_action,
@@ -11157,7 +11229,12 @@ impl LauncherApp {
                                             a.action.clone()
                                         }
                                     } else {
-                                        generic_result_tooltip(&a)
+                                        let detail = generic_result_tooltip(&a);
+                                        if a.desc == "Snippet" || a.desc.is_empty() {
+                                            detail
+                                        } else {
+                                            format!("{detail}\n{}", a.desc)
+                                        }
                                     };
                                     let menu_resp = self.attach_result_context_menu(
                                         &a,
@@ -16401,23 +16478,41 @@ mod tests {
     ) -> EagerRootGridLayout {
         let nominal_width = ((ui.available_width() - columns.saturating_sub(1) as f32 * 8.0)
             / columns as f32)
-            .max(160.0);
+            .max(0.0);
         let mut cells = Vec::with_capacity(actions.len());
         let mut cell_cursors = Vec::with_capacity(actions.len());
         let text_presentation = RootResultTextPresentation::new(ui);
+        let margin = root_selectable_frame_margin(ui);
+        let mut row_heights = vec![
+            ui.spacing().interact_size.y.max(ROOT_GRID_MIN_HEIGHT);
+            actions.len().div_ceil(columns)
+        ];
+        for (index, action) in actions.iter().enumerate() {
+            let text = root_grid_result_text(ui, action, &text_presentation, nominal_width);
+            let size = text.measure_size_impl(
+                ui.ctx(),
+                ui.style(),
+                egui::text::TextWrapping::from_wrap_mode_and_width(
+                    egui::TextWrapMode::Extend,
+                    (nominal_width - margin.x).max(0.0),
+                ),
+                egui::FontSelection::Style(egui::TextStyle::Button),
+                egui::Align::Center,
+            );
+            row_heights[index / columns] = row_heights[index / columns].max(size.y + margin.y);
+        }
         let grid = egui::Grid::new(("root-grid-real", identity))
             .num_columns(columns)
+            .min_col_width(0.0)
             .spacing([8.0, 6.0])
             .show(ui, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for (index, action) in actions.iter().enumerate() {
                     cell_cursors.push(ui.cursor().min);
+                    let text = root_grid_result_text(ui, action, &text_presentation, nominal_width);
                     let response = ui.add_sized(
-                        [nominal_width, ROOT_GRID_MIN_HEIGHT],
-                        egui::Button::selectable(
-                            false,
-                            root_grid_result_text(action, &text_presentation),
-                        )
-                        .frame_when_inactive(true),
+                        [nominal_width, row_heights[index / columns]],
+                        egui::Button::selectable(false, text).frame_when_inactive(true),
                     );
                     cells.push(response.rect);
                     if (index + 1) % columns == 0 {
@@ -16752,7 +16847,6 @@ mod tests {
             let mut eager_grid_bounds = egui::Rect::NOTHING;
             let mut eager_content_bounds = egui::Rect::NOTHING;
             let mut cached_cells = Vec::new();
-            let mut interaction_size = egui::Vec2::ZERO;
             let mut measured_root_cursor = egui::Pos2::ZERO;
             let mut measured_wrap_mode = egui::TextWrapMode::Extend;
             let mut measured_button_font = egui::FontId::default();
@@ -16817,7 +16911,6 @@ mod tests {
                                     ui.style(),
                                     egui::FontSelection::Style(egui::TextStyle::Small),
                                 );
-                            interaction_size = ui.spacing().interact_size;
                             cache.ensure_grid(ui, &actions, columns);
                             let text_presentation = RootResultTextPresentation::new(ui);
                             cached_cells = actions
@@ -16919,7 +17012,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| index % columns == column)
-                    .map(|(_, rect)| rect.width().max(interaction_size.x))
+                    .map(|(_, rect)| rect.width())
                     .fold(0.0_f32, f32::max);
                 assert!(
                     (cache.grid_column_widths[column] - actual_width).abs() <= 1.0,
@@ -16941,7 +17034,7 @@ mod tests {
                         .iter()
                         .enumerate()
                         .filter(|(index, _)| index % columns == column)
-                        .map(|(_, rect)| rect.width().max(interaction_size.x))
+                        .map(|(_, rect)| rect.width())
                         .fold(0.0_f32, f32::max)
                 })
                 .sum::<f32>()
@@ -16972,7 +17065,88 @@ mod tests {
     }
 
     #[test]
-    fn root_grid_tall_cell_spill_stays_visible_without_intermediate_rows() {
+    fn root_grid_compact_text_and_hit_rects_stay_inside_allocated_cells() {
+        use crate::plugin::Plugin;
+        let ctx = egui::Context::default();
+        let original = format!(
+            "  文雪\n{}\t alpha beta gamma delta epsilon zeta eta theta",
+            "x".repeat(1_000)
+        );
+        let mut actions = vec![
+            Action {
+                label: format!("Title\n{}", "z".repeat(1_000)),
+                desc: original.clone(),
+                action: "test:long".into(),
+                args: None,
+            },
+            Action {
+                label: "Second".into(),
+                desc: "one two three four five six seven eight".into(),
+                action: "test:second".into(),
+                args: None,
+            },
+            Action {
+                label: "Third".into(),
+                desc: String::new(),
+                action: "test:third".into(),
+                args: None,
+            },
+        ];
+        actions.extend(
+            crate::plugins::mouse::MousePlugin
+                .search("mouse")
+                .into_iter()
+                .take(2),
+        );
+        actions.extend(crate::plugins::hotfolder::HotFolderPlugin.search("hotfolder"));
+        assert_eq!(
+            compact_result_description(" one\n two\tthree four five six seven eight "),
+            "one two three four five six seven"
+        );
+        for width in [12.0_f32, 120.0, 480.0] {
+            for scale in [1.0_f32, 1.5] {
+                let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0));
+                let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 800.0))), ..Default::default() }, |ctx| {
+                    let mut ui = test_child_ui(ctx, egui::LayerId::new(egui::Order::Foreground, egui::Id::new("compact-grid-test")), egui::Id::new(("compact-grid", width.to_bits(), scale as u32)), outer, outer);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.style_mut().spacing.interact_size.x = 210.0;
+                        scale_ui(ui, scale, |ui| {
+                            let mut cache = RootListGeometryCache::default();
+                            cache.ensure_grid(ui, &actions, 3);
+                            let presentation = RootResultTextPresentation::new(ui);
+                            for (index, action) in actions.iter().enumerate() {
+                                let column = index % 3;
+                                let row = index / 3;
+                                let expected = egui::Rect::from_min_size(outer.min + egui::vec2(cache.grid_column_x_offsets[column], cache.row_tops[row]), egui::vec2(cache.grid_column_widths[column], cache.row_heights[row]));
+                                let response = root_grid_cell_response(ui, &cache, index, action, false, &presentation);
+                                assert!(expected.expand(0.1).contains_rect(response.rect), "width {width}, scale {scale}, cell {index}: response {:?}, allocated {expected:?}", response.rect);
+                                assert!(response.rect.right() <= outer.right() + 0.1);
+                                let egui::WidgetText::LayoutJob(job) = root_grid_result_text(ui, action, &presentation, cache.grid_nominal_width) else { panic!("layout job expected") };
+                                assert!(job.text.lines().count() <= 2);
+                                assert!(job.text.lines().nth(1).unwrap_or("").split_whitespace().count() <= 7);
+                            }
+                        });
+                    });
+                });
+                output.drop_without_applying_deltas();
+            }
+        }
+        assert_eq!(
+            actions[0].desc, original,
+            "display projection never mutates saved data"
+        );
+        assert_eq!(
+            deferred_activation_from_results(&actions, 1, ActivationSource::Click)
+                .unwrap()
+                .action
+                .action,
+            "test:second"
+        );
+    }
+
+    #[test]
+    fn root_grid_long_multiline_title_does_not_spill_into_later_rows() {
         let ctx = egui::Context::default();
         let actions = (0..300)
             .map(|index| Action {
@@ -17015,19 +17189,17 @@ mod tests {
         output.drop_without_applying_deltas();
 
         let row_height = cache.row_heights[0];
-        let viewport_top = row_height * 1.25;
-        assert!(viewport_top < cache.grid_visual_row_bottoms[0]);
+        // The cache intentionally keeps a small number of adjacent rows for
+        // overscan, so move beyond that buffer before asserting row eviction.
+        let viewport_top = (row_height + 6.0) * (ROOT_LIST_OVERSCAN_ROWS + 3) as f32;
+        assert!(viewport_top > cache.grid_visual_row_bottoms[0]);
         let viewport =
             egui::Rect::from_min_size(egui::pos2(0.0, viewport_top), egui::vec2(480.0, 80.0));
         assert!(!cache.visible_range(viewport).contains(&0));
 
         let rows = cache.visible_grid_rows(viewport);
-        assert!(rows.contains(&0), "the tall cell is still visually visible");
+        assert!(!rows.contains(&0), "the first cell ends within its row");
         assert!(rows.len() < 10, "visible rows stay bounded: {rows:?}");
-        assert!(
-            rows.get(1).is_some_and(|next| *next > 1),
-            "invisible logical rows are not added just to bridge a spill: {rows:?}"
-        );
     }
 
     fn root_list_test_app(

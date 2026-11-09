@@ -6,10 +6,42 @@ pub struct MousePlugin;
 
 impl MousePlugin {
     fn action(label: impl Into<String>, command: impl Into<String>) -> Action {
+        let command = command.into();
+        let summary = match command.as_str() {
+            "mouse:settings" | "mouse:click:settings" => "Configure mouse tools and appearance",
+            "mouse:help" | "mouse:click:help" => "Show mouse tool guidance",
+            "mouse:coords:toggle" => "Toggle coordinate display",
+            "mouse:coords:on" => "Show coordinate display",
+            "mouse:coords:off" => "Hide coordinate display",
+            "mouse:coords:copy" => "Copy current coordinates",
+            "mouse:coords:pick" => "Pick coordinates once",
+            "mouse:coords:cancel" => "Cancel coordinate picking",
+            "mouse:coords:freeze" => "Freeze coordinate display",
+            "mouse:coords:unfreeze" => "Resume coordinate display",
+            "mouse:crosshair:toggle" => "Toggle crosshair",
+            "mouse:crosshair:on" => "Show crosshair",
+            "mouse:crosshair:off" => "Hide crosshair",
+            "mouse:halo:toggle" => "Toggle inversion halo",
+            "mouse:halo:on" => "Show inversion halo",
+            "mouse:halo:off" => "Hide inversion halo",
+            "mouse:zoom:toggle" => "Toggle screen magnifier",
+            "mouse:zoom:on" => "Show screen magnifier",
+            "mouse:zoom:off" => "Hide screen magnifier",
+            "mouse:click:toggle" => "Toggle click feedback",
+            "mouse:click:on" => "Enable click feedback",
+            "mouse:click:off" => "Disable click feedback",
+            "mouse:effects:off" => "Turn off mouse effects",
+            _ if command.starts_with("mouse:coords:") => "Configure coordinate display",
+            _ if command.starts_with("mouse:crosshair:") => "Configure crosshair",
+            _ if command.starts_with("mouse:halo:") => "Configure inversion halo",
+            _ if command.starts_with("mouse:zoom:") => "Configure screen magnifier",
+            _ if command.starts_with("mouse:click:") => "Configure click feedback",
+            _ => "Run mouse tool command",
+        };
         Action {
             label: label.into(),
-            desc: "Mouse coordinate HUD, one-shot picking, click feedback, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Click feedback passively observes physical presses through the shared gesture hook, preserves its consume/replay behavior, and ignores injected or tagged replays. Appearance is saved in Mouse Settings; click enablement is session-only and starts off after restart. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
-            action: command.into(),
+            desc: summary.into(),
+            action: command,
             args: None,
         }
     }
@@ -137,6 +169,29 @@ impl Plugin for MousePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_summaries_are_bounded_and_command_specific() {
+        let actions = MousePlugin.search("mouse");
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.desc.split_whitespace().count() <= 7)
+        );
+        assert_ne!(
+            actions
+                .iter()
+                .find(|action| action.action == "mouse:coords:copy")
+                .unwrap()
+                .desc,
+            actions
+                .iter()
+                .find(|action| action.action == "mouse:zoom:on")
+                .unwrap()
+                .desc
+        );
+        assert!(MousePlugin.description().contains("gesture consume/replay"));
+    }
 
     #[test]
     fn mouse_commands_are_exact_case_insensitive_and_bounded() {

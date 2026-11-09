@@ -10,7 +10,7 @@ impl Plugin for SearchReplacePlugin {
         }
         vec![Action {
             label: "Open Search and Replace".into(),
-            desc: "Choose an explicit folder (direct children by default; enable subfolders), then filter supported extensions and root-relative include/exclude paths or globs. Search literal text or Rust regex and select exact matches individually; nothing is selected by default. Apply freezes the reviewed UTF-8 or UTF-8 BOM bytes, rechecks each source, and records durable backups. Stale files are skipped; cancellation can leave a partial batch. Restore applies to committed writes, while Recovery reconciles interrupted operations. Normal fs search is unchanged.".into(),
+            desc: "Preview and apply guarded text replacements".into(),
             action: "replace:open".into(),
             args: None,
         }]
