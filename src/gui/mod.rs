@@ -5983,19 +5983,31 @@ impl LauncherApp {
             Panel::CalendarPopover => {
                 if !self.calendar_popover_open {
                     self.calendar_popover.begin_host_session();
-                    self.calendar_popover_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_popover_host.initialize(
+                        &self.egui_ctx,
+                        &Self::calendar_host_spec(Panel::CalendarPopover),
+                        utility_host::UtilityPresentation::Docked,
+                    );
                     self.calendar_popover_open = true;
                 }
             }
             Panel::CalendarEventEditor => {
                 if !self.calendar_editor_open {
-                    self.calendar_editor_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_editor_host.initialize(
+                        &self.egui_ctx,
+                        &Self::calendar_host_spec(Panel::CalendarEventEditor),
+                        utility_host::UtilityPresentation::Docked,
+                    );
                     self.calendar_editor_open = true;
                 }
             }
             Panel::CalendarEventDetails => {
                 if !self.calendar_details_open {
-                    self.calendar_details_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_details_host.initialize(
+                        &self.egui_ctx,
+                        &Self::calendar_host_spec(Panel::CalendarEventDetails),
+                        utility_host::UtilityPresentation::Docked,
+                    );
                     self.calendar_details_open = true;
                 }
             },
@@ -6015,6 +6027,8 @@ impl LauncherApp {
             }
         }
         match panel {
+            Panel::TimerDialog => self.timer_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::FileSearchDialog => self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open),
             Panel::MouseGesturesDialog => self.mouse_gestures_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open),
@@ -6064,6 +6078,10 @@ impl LauncherApp {
             }
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
+            self.date_time_studio_dialog.prepare_open_presentation(&self.egui_ctx);
+            if self.date_time_studio_dialog.presentation() == utility_host::UtilityPresentation::Docked {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::NotesDialog {
             self.notes_dialog.open();
             self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
@@ -6096,6 +6114,15 @@ impl LauncherApp {
             self.clipboard_modify_host.request_focus();
         } else if matches!(panel, Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) {
             self.ensure_open(panel);
+            let presentation = match panel {
+                Panel::CalendarPopover => self.calendar_popover_host.presentation(),
+                Panel::CalendarEventEditor => self.calendar_editor_host.presentation(),
+                Panel::CalendarEventDetails => self.calendar_details_host.presentation(),
+                _ => unreachable!(),
+            };
+            if presentation == utility_host::UtilityPresentation::Docked {
+                self.request_launcher_visibility(true);
+            }
             match panel {
                 Panel::CalendarPopover => self.calendar_popover_host.request_focus(),
                 Panel::CalendarEventEditor => self.calendar_editor_host.request_focus(),
@@ -6104,7 +6131,11 @@ impl LauncherApp {
             }
         } else if panel == Panel::TimerDialog {
             self.timer_dialog.ensure_open();
+            self.timer_dialog.prepare_open_presentation(&self.egui_ctx);
             self.timer_dialog.request_host_focus();
+            if !self.timer_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ImageCompareDialog {
             self.image_compare_dialog.open();
             self.image_compare_dialog.request_host_focus();
@@ -6584,6 +6615,7 @@ impl LauncherApp {
         let spec = Self::calendar_host_spec(panel);
         match panel {
             Panel::CalendarPopover => {
+                self.calendar_popover_host.remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_popover_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -6593,6 +6625,7 @@ impl LauncherApp {
                 self.panel_states.calendar_popover = false;
             }
             Panel::CalendarEventEditor => {
+                self.calendar_editor_host.remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_editor_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -6602,6 +6635,7 @@ impl LauncherApp {
                 self.panel_states.calendar_event_editor = false;
             }
             Panel::CalendarEventDetails => {
+                self.calendar_details_host.remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_details_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -6628,7 +6662,11 @@ impl LauncherApp {
         self.calendar_selected_event = None;
         if !self.calendar_popover_open {
             self.calendar_popover_host
-                .initialize(utility_host::UtilityPresentation::Docked);
+                .initialize(
+                    &self.egui_ctx,
+                    &Self::calendar_host_spec(Panel::CalendarPopover),
+                    utility_host::UtilityPresentation::Docked,
+                );
         }
         self.calendar_popover.begin_host_session();
         self.calendar_popover_open = true;
@@ -6660,7 +6698,11 @@ impl LauncherApp {
         presentation: utility_host::UtilityPresentation,
     ) {
         if !self.calendar_editor_open {
-            self.calendar_editor_host.initialize(presentation);
+            self.calendar_editor_host.initialize(
+                &self.egui_ctx,
+                &Self::calendar_host_spec(Panel::CalendarEventEditor),
+                presentation,
+            );
         }
         if let Some(event) = event {
             self.calendar_event_editor.open(Some(event), split_scope);
@@ -6680,7 +6722,11 @@ impl LauncherApp {
         presentation: utility_host::UtilityPresentation,
     ) {
         if !self.calendar_details_open {
-            self.calendar_details_host.initialize(presentation);
+            self.calendar_details_host.initialize(
+                &self.egui_ctx,
+                &Self::calendar_host_spec(Panel::CalendarEventDetails),
+                presentation,
+            );
         }
         self.calendar_event_details.open(instance);
         self.calendar_details_open = true;
@@ -6710,7 +6756,11 @@ impl LauncherApp {
             );
         }
         self.calendar_event_editor.open_new_at(local)?;
-        self.calendar_editor_host.initialize(presentation);
+        self.calendar_editor_host.initialize(
+            &self.egui_ctx,
+            &Self::calendar_host_spec(Panel::CalendarEventEditor),
+            presentation,
+        );
         self.calendar_editor_open = true;
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);

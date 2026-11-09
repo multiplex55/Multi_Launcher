@@ -138,6 +138,7 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | Calculation Pad and reference | M3-B1a implemented / automated verified |
 | Notes list and note editors | M3-B1b implemented / automated verified |
 | File Search / Settings / Mouse Settings / Gesture Settings / Mouse Gestures | M3-B1c1 implemented / automated verified |
+| Calendar / event details / event editor / DateTime Studio / Timer | M3-B1c2 implemented / automated verified |
 | Other existing custom families enumerated above | pending remaining B1c groups |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
@@ -169,3 +170,41 @@ Separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` b
 - `m3-b1c-settings-mouse`: 4/4 passed, run `2ecf2789-7ec2-46ff-8a34-86aa60e71fa7`, runner 2.722s: live Settings/Mouse/Gesture forms and Jump Mode Cancel-draft preservation.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c-{search,settings-mouse}/`; cleanup/drain verified. Parent inspected owner/command/open/close diff and whitespace; lanes returned. This is five existing hosts only; remaining custom families and all B2 work remain pending. Native pending M9.
+
+M3-B1c1 checkpoint `0dcb66034f8fbff259c303dd80345854146d8893` pushed successfully; clean tree before time-host M3-B1c2. Implementer owns Calendar/details/editor, DateTime Studio and Timer preference lifecycle, retaining current accepted child routing until B2a. Remaining document and analysis/output families stay pending. Parent ledger/Git; single source/Cargo lane.
+
+## B2 planned child inventory (not implementation evidence)
+
+The planner traced these actual ordinary edges. Every row remains pending until accepted integration/tests; Dependency Explorer is added later at M8-B using the same policy.
+
+| Parent / owner | Actual ordinary child targets | Planned checkpoint |
+| --- | --- | --- |
+| Calc Pad | Inspector; reference | B2a existing hosts |
+| Notes list / wiki / note links | New or existing note editor | B2a existing host |
+| File Search | Folder Size; File Lock | B2a existing hosts |
+| Calendar / DateTime Studio | Event details/editor | B2a existing hosts |
+| Note editor / Markdown Studio / Diagram | Diagram Studio; Diagram Viewer | B2a existing hosts |
+| Settings accepted navigation/actions | Dashboard; Mouse/Gesture Settings; Clipboard Modify | B2a existing hosts |
+| File Search | File Preview; Hash Generator | B2b adapters |
+| Notes list | Template manager; Unused Assets | B2b adapters |
+| Note editor | Image viewer; custom Markdown table; Insert Link / Link new note forms | B2b adapters |
+| Diff | Comparison Rules; Folder Rules; memory New/Edit Inputs | B2b adapters |
+| Settings | Theme Settings; Plugin Editor; Hotkey Directory | B2b adapters |
+| Mouse Gestures / Gesture Settings | Binding editor; app-owned window-candidate picker | B2b adapters |
+| MkMacro | Action Catalog; Action Editor; Recording Review; Find/Replace Steps | B2c adapters |
+| MkMacro package UI | Help; Templates browser; Save Template; Export Library choices | B2c adapters |
+| MkMacro Action Editor / hotkey / review | Launcher Action Picker; window-candidate editor; reference Crop; nested Action Editor | B2c adapters with transitive origin |
+| MkMacro recording toolbar | Recording annotation text editor | B2c ordinary text editor; preserve pause/resume transaction |
+
+Evidence-backed exclusions: Package Import Preview is an immutable summary with Apply/Cancel (confirmation); macro invocation/runtime parameter prompts are broker-owned fixed native execution prompts; signature editor, image-asset browser, ZIP Preview and Regex Explanation are inline. Capture polling and screen/radial/recording control/outline overlays, timer-finished notification, native Open/Save/Folder pickers and actual overwrite/delete/dirty confirmations retain their existing ownership. The Recording annotation editor is a normal editable parent-owned Window without capture geometry/topmost overlay behavior, so it is included. Crop's loading and ready content must use one contextual tool kind rather than competing reference-crop/image-crop preferences. Image viewer has no Crop child; templates Open uses external viewer, Unused Assets has no ordinary child, and Diff navigation opens workspace views rather than new windows. NoteGraph parent/caller classification is receiving a final targeted caller check; its actual Note-editor opens use remembered preference while it remains root-only.
+
+## M3-B1c2 partial acceptance: Time hosts
+
+Stable keys calendar, calendar-event-details, calendar-event-editor, date-time-studio and timer now restore per real open and remember accepted changes/successful owner-completed closes. Calendar's existing popped-parent request stays authoritative; Docked/root opening resolves saved preference. Root visibility/focus uses actual presentation rather than an embedded fallback layer. Timer/Alarm share the existing authoring key; finished notification and timer runtime semantics remain unchanged. Full child-origin promotion is still B2a.
+
+Separate final fast-dev lib no-run compile passed; final post-test edit was indentation only. Owned 100-second `--no-fail-fast` batches:
+
+- `m3-b1c2-date`: 3/3 passed, run `6517273e-c2e5-4aca-973c-770bfcc0d5b3`, runner 3.183s: five-key/live-session policy, retained DateTime→Calendar preparation and DateTime draft/reference/popup host moves.
+- `m3-b1c2-calendar-timer`: 3/3 passed, run `445763ae-6127-4b4a-bab3-a7097664079f`, runner 3.244s: retained Calendar save/delete occurrence, Timer submission failure/success and Timer/Alarm authoring host moves.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c2-{date,calendar-timer}/`; cleanup/drain verified. Parent inspected source/open/close/command diff and whitespace; lanes returned. Other document and analysis/output custom hosts and B2 remain pending; native pending M9.

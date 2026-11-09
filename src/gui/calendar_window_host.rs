@@ -110,6 +110,7 @@ struct CalendarFrame<D, A> {
 }
 pub(super) struct CalendarWindowHost<D, A> {
     host: UtilityHostState,
+    active: bool,
     pending: Option<CalendarFrame<D, A>>,
     close_pending: bool,
     focus_pending: bool,
@@ -122,6 +123,7 @@ impl<D, A> Default for CalendarWindowHost<D, A> {
     fn default() -> Self {
         Self {
             host: UtilityHostState::docked(),
+            active: false,
             pending: None,
             close_pending: false,
             focus_pending: false,
@@ -154,11 +156,29 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         self.focus_pending = true;
         self.host.request_focus();
     }
-    pub fn initialize(&mut self, presentation: UtilityPresentation) {
+    pub fn initialize(
+        &mut self,
+        ctx: &egui::Context,
+        spec: &CalendarHostSpec,
+        presentation: UtilityPresentation,
+    ) {
         self.host.transition(presentation);
+        if presentation == UtilityPresentation::Docked {
+            let key =
+                crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+        }
+        self.active = true;
         self.pending = None;
         self.close_pending = false;
         self.focus_pending = true;
+    }
+    pub fn remember_on_close(&self, ctx: &egui::Context, spec: &CalendarHostSpec) {
+        if self.active {
+            let key =
+                crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
     }
     fn identity(spec: &CalendarHostSpec, host: HostIdentity, epoch: u64) -> NativeViewportIdentity {
         NativeViewportIdentity {
@@ -179,6 +199,7 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         self.close_pending = false;
         self.focus_pending = false;
         self.epoch = None;
+        self.active = false;
         #[cfg(test)]
         {
             self.test_controls = [None; 3];
@@ -429,6 +450,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         let show_root = request == Some(UtilityPresentation::Docked);
         if let Some(next) = request {
             if self.host.transition(next) {
+                let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+                super::utility_host::remember_presentation(ctx, key, next);
                 close_bound_popup(ctx, self.owned_popup.take());
                 if next == UtilityPresentation::Docked {
                     super::utility_dialog_size::close_native_utility_geometry_viewport(

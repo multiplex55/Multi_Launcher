@@ -4841,6 +4841,8 @@ impl LauncherApp {
         self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_settings_host.prepare_open(ctx, super::mouse_form_host::MOUSE_SETTINGS, self.mouse_settings_dialog.open);
         self.mouse_gesture_settings_host.prepare_open(ctx, super::mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open);
+        self.date_time_studio_dialog.prepare_open_presentation(ctx);
+        self.timer_dialog.prepare_open_presentation(ctx);
         self.calculation_pad_dialog.prepare_open_presentation(ctx);
         self.notes_dialog.prepare_open_presentation(ctx);
         for panel in &mut self.note_panels {
@@ -21618,6 +21620,153 @@ mod tests {
     }
 
     #[test]
+    fn time_hosts_restore_stable_keys_without_demoting_live_sessions() {
+        use crate::gui::utility_host::UtilityPresentation;
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        type CalendarHost = super::super::calendar_window_host::CalendarWindowHost<
+            (),
+            super::super::calendar_popover::CalendarPopoverHostActions,
+        >;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let panels = [
+            super::super::Panel::CalendarPopover,
+            super::super::Panel::CalendarEventDetails,
+            super::super::Panel::CalendarEventEditor,
+        ];
+        let keys = [
+            "calendar",
+            "calendar-event-details",
+            "calendar-event-editor",
+            "date-time-studio",
+            "timer",
+        ];
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Popout,
+            );
+        }
+        let mut calendars = [
+            CalendarHost::default(),
+            CalendarHost::default(),
+            CalendarHost::default(),
+        ];
+        for (host, panel) in calendars.iter_mut().zip(panels) {
+            host.initialize(
+                &ctx,
+                &LauncherApp::calendar_host_spec(panel),
+                UtilityPresentation::Docked,
+            );
+            assert_eq!(host.presentation(), UtilityPresentation::Popout);
+        }
+        let mut studio = super::super::DateTimeStudioDialog::default();
+        let mut timer = super::super::TimerDialog::default();
+        assert!(!studio.open && !timer.open);
+        studio.open();
+        studio.prepare_open_presentation(&ctx);
+        timer.open_timer();
+        timer.prepare_open_presentation(&ctx);
+        assert_eq!(studio.presentation(), UtilityPresentation::Popout);
+        assert!(timer.root_layer().is_none());
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        studio.prepare_open_presentation(&ctx);
+        timer.prepare_open_presentation(&ctx);
+        assert_eq!(studio.presentation(), UtilityPresentation::Popout);
+        assert!(timer.root_layer().is_none());
+        for (host, panel) in calendars.iter_mut().zip(panels) {
+            let spec = LauncherApp::calendar_host_spec(panel);
+            assert_eq!(host.presentation(), UtilityPresentation::Popout);
+            host.retire(&ctx, &spec, 1);
+            host.initialize(&ctx, &spec, UtilityPresentation::Docked);
+            assert_eq!(host.presentation(), UtilityPresentation::Docked);
+            host.retire(&ctx, &spec, 2);
+            host.initialize(&ctx, &spec, UtilityPresentation::Popout);
+            assert_eq!(
+                host.presentation(),
+                UtilityPresentation::Popout,
+                "existing popped parent origin is preserved"
+            );
+        }
+        studio.end_session_with_host(&ctx);
+        timer.end_session_with_host(&ctx);
+        manager.remember(
+            &ctx,
+            UtilityToolKey::parse("date-time-studio").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        manager.remember(
+            &ctx,
+            UtilityToolKey::parse("timer").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        studio.open();
+        studio.prepare_open_presentation(&ctx);
+        timer.open_timer();
+        timer.prepare_open_presentation(&ctx);
+        assert_eq!(studio.presentation(), UtilityPresentation::Docked);
+        assert!(timer.root_layer().is_some());
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        for name in keys {
+            assert_eq!(
+                saved
+                    .utility_presentations
+                    .get(UtilityToolKey::parse(name).unwrap()),
+                Some(RememberedPresentation::Docked)
+            );
+        }
+        let ctx2 = egui::Context::default();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let manager2 =
+            UtilityPresentationManager::new(path, workers2.clone(), saved.utility_presentations);
+        manager2.install_in_context(&ctx2);
+        let mut restarted_studio = super::super::DateTimeStudioDialog::default();
+        let mut restarted_timer = super::super::TimerDialog::default();
+        assert!(!restarted_studio.open && !restarted_timer.open);
+        restarted_studio.open();
+        restarted_studio.prepare_open_presentation(&ctx2);
+        restarted_timer.open_timer();
+        restarted_timer.prepare_open_presentation(&ctx2);
+        assert_eq!(restarted_studio.presentation(), UtilityPresentation::Docked);
+        assert!(restarted_timer.root_layer().is_some());
+        for panel in panels {
+            let mut host = CalendarHost::default();
+            host.initialize(
+                &ctx2,
+                &LauncherApp::calendar_host_spec(panel),
+                UtilityPresentation::Docked,
+            );
+            assert_eq!(host.presentation(), UtilityPresentation::Docked);
+        }
+        workers2.join_all();
+    }
+
+    #[test]
     fn date_time_studio_host_moves_preserve_draft_reference_selection_and_popup_ownership() {
         use super::super::utility_host::UtilityPresentation;
         use crate::commands::DialogCommandHost;
@@ -21680,6 +21829,7 @@ mod tests {
             app.date_time_studio_dialog.presentation(),
             UtilityPresentation::Popout
         );
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("date-time-studio").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -50309,6 +50459,7 @@ mod tests {
                 root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
             }
             assert!(app.timer_dialog.root_layer().is_none());
+            assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("timer").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
             for _ in 0..3 {
                 child(&mut app, Vec::new());
             }

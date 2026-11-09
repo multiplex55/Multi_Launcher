@@ -275,10 +275,9 @@ impl DialogCommandHost for LauncherApp {
     fn open_date_time_studio_dialog(&mut self) {
         self.date_time_studio_dialog.open();
         self.focus_panel(super::Panel::DateTimeStudioDialog);
-        self.egui_ctx.move_to_top(eframe::egui::LayerId::new(
-            eframe::egui::Order::Middle,
-            eframe::egui::Id::new("date-time-studio-window"),
-        ));
+        if let Some(layer) = self.date_time_studio_dialog.root_layer() {
+            self.egui_ctx.move_to_top(layer);
+        }
     }
     fn open_diagram_studio_dialog(&mut self) {
         self.diagram_studio_dialog.open();

@@ -11,6 +11,7 @@ use std::time::Duration;
 pub struct TimerDialog {
     pub open: bool,
     host_state: Option<super::utility_host::UtilityHostState>,
+    presentation_prepared: bool,
     host_session_epoch: u64,
     host_pending: Option<TimerHostFrame>,
     retired_native_identity: Option<super::utility_window_geometry::NativeViewportIdentity>,
@@ -185,9 +186,21 @@ impl TimerDialog {
         self.sound_popup = None;
         if !self.open {
             self.host_state = Some(super::utility_host::UtilityHostState::docked());
+            self.presentation_prepared = false;
         }
         self.host_focus = true;
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let state = self
+                .host_state
+                .get_or_insert_with(super::utility_host::UtilityHostState::docked);
+            let key = crate::settings::UtilityToolKey::parse("timer").expect("stable timer key");
+            super::utility_host::restore_remembered_presentation(ctx, key, state);
+            self.presentation_prepared = true;
+        }
+    }
+
     pub(crate) fn host_session_epoch(&self) -> u64 {
         self.host_session_epoch
     }
@@ -196,6 +209,9 @@ impl TimerDialog {
             .as_ref()
             .map(|state| state.identity())
             .unwrap_or_else(|| super::utility_host::UtilityHostState::docked().identity())
+    }
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host_state().host == super::utility_host::UtilityPresentation::Popout
     }
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         if !self.open {
@@ -398,6 +414,11 @@ impl TimerDialog {
     }
 
     pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("timer").expect("stable timer key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state().host);
+        }
+        self.presentation_prepared = false;
         self.retire_previous_native_identity(ctx);
         if let Some(identity) = self.native_identity(self.host_state()) {
             super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -436,6 +457,7 @@ impl TimerDialog {
         if !self.open {
             return;
         }
+        self.prepare_open_presentation(ctx);
         self.retire_previous_native_identity(ctx);
         if pinned {
             self.host_os_close_pending = false;
@@ -764,6 +786,8 @@ impl TimerDialog {
             && let Some(state) = &mut self.host_state
             && state.transition(requested)
         {
+            let key = crate::settings::UtilityToolKey::parse("timer").expect("stable timer key");
+            super::utility_host::remember_presentation(ctx, key, requested);
             self.host_jump.cancel_all();
             self.host_jump_frame = None;
             if requested == UtilityPresentation::Docked {
