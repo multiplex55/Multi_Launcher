@@ -907,6 +907,9 @@ pub struct Settings {
     /// Settings editor's ownership/rollback set.
     #[serde(default)]
     pub utility_dialog_sizes: crate::settings::utility_dialog_sizes::UtilityDialogSizes,
+    /// Independently owned ordinary-tool presentation choices.
+    #[serde(default)]
+    pub utility_presentations: crate::settings::UtilityPresentations,
     /// Internal durable marker for the one-time radial submenu conversion.
     /// It deliberately lives outside the authorable RadialDocument so imports
     /// and authoring undo cannot erase migration recovery state.
@@ -1301,6 +1304,7 @@ impl Default for Settings {
             mkmacro_properties: MkMacroPropertiesPreferences::default(),
             utility_dialog_sizes:
                 crate::settings::utility_dialog_sizes::UtilityDialogSizes::default(),
+            utility_presentations: crate::settings::UtilityPresentations::default(),
             radial_submenu_migration: None,
         }
     }

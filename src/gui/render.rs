@@ -4319,6 +4319,12 @@ impl LauncherApp {
                 ),
             );
         }
+        for (key, message) in self.utility_presentation_manager.begin_frame(ctx) {
+            self.report_error_message(
+                "utility_presentation.save",
+                format!("Could not save the {} window presentation. {message}", key.as_str()),
+            );
+        }
         #[cfg(windows)]
         {
             let completed = self.archive_session.poll();
@@ -4830,6 +4836,15 @@ impl LauncherApp {
             && !self.ocr_surface_visible();
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
+        self.snippet_window_host.prepare_open(ctx, &self.snippet_dialog);
+        self.paste_sequence_host.prepare_open(ctx, &self.paste_sequence_dialog);
+        self.clipboard_history_host.prepare_open(ctx, &self.clipboard_dialog);
+        self.clipboard_modify_host.prepare_open(ctx, &self.clipboard_modify_dialog);
+        self.json_utility_host.prepare_open(ctx, &self.json_utility_dialog);
+        self.batch_rename_host.prepare_open(ctx, &self.batch_rename_dialog);
+        self.search_replace_host.prepare_open(ctx, &self.search_replace_dialog);
+        self.programmer_inspector_host.prepare_open(ctx, &self.programmer_inspector_dialog);
+        self.explorer_tabs_host.prepare_open(ctx, &self.explorer_tabs_dialog);
         let (visibility_request, visibility_invocation_id, should_be_visible, _) =
             self.reconcile_root_visibility(ctx);
         if !self.mouse_gestures_host.is_popped_out() {
@@ -19872,6 +19887,162 @@ mod tests {
             disk_before
         );
         assert_eq!(app.command_cache, before_cache);
+    }
+
+    #[test]
+    fn generic_inspector_presentation_is_remembered_only_after_accepted_actions() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default().save(&path).unwrap();
+        #[inline(never)]
+        fn first(path: &str) -> crate::settings::Settings {
+            let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+                path.to_owned(),
+                workers.clone(),
+                crate::settings::UtilityPresentations::default(),
+            );
+            manager.install_in_context(&ctx);
+            let key = crate::settings::UtilityToolKey::parse("programmer-inspector").unwrap();
+            assert!(!app.programmer_inspector_dialog.open);
+            assert_eq!(manager.preference(key), None);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+            let root = egui::ViewportId::ROOT;
+            for _ in 0..4 {
+                run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            }
+            assert!(!app.programmer_inspector_host.is_popped_out());
+            let (button, clip, enabled) = app.programmer_inspector_host.test_button.unwrap();
+            assert!(enabled && clip.contains_rect(button));
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(button, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(button, false),
+                true,
+                false,
+            );
+            assert_eq!(manager.preference(key), None);
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            }
+            let (button, _, _) = app.programmer_inspector_host.test_button.unwrap();
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(button, pressed),
+                    false,
+                    false,
+                );
+            }
+            assert!(app.programmer_inspector_host.is_popped_out());
+            assert_eq!(
+                manager.preference(key),
+                Some(crate::settings::RememberedPresentation::Popout)
+            );
+            let native =
+                super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                    app.programmer_inspector_dialog.epoch(),
+                );
+            app.programmer_inspector_dialog.request_close();
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+            assert!(!app.programmer_inspector_dialog.open);
+            workers.join_all();
+            let saved = crate::settings::Settings::load(&path).unwrap();
+            assert_eq!(
+                saved.utility_presentations.get(key),
+                Some(crate::settings::RememberedPresentation::Popout)
+            );
+            saved
+        }
+        #[inline(never)]
+        fn second(path: &str, saved: crate::settings::Settings) {
+            let key = crate::settings::UtilityToolKey::parse("programmer-inspector").unwrap();
+            let root = egui::ViewportId::ROOT;
+            let ctx2 = egui::Context::default();
+            ctx2.all_styles_mut(|style| style.animation_time = 0.0);
+            let (_workspace2, mut app2) = root_list_test_app(&ctx2, Vec::new());
+            let workers2 = crate::settings_save::SettingsSaveWorkerRegistry::default();
+            let manager2 = super::super::utility_presentation::UtilityPresentationManager::new(
+                path.to_owned(),
+                workers2.clone(),
+                saved.utility_presentations,
+            );
+            manager2.install_in_context(&ctx2);
+            assert!(!app2.programmer_inspector_dialog.open);
+            prepare_tool_dialog_root(&ctx2, &mut app2);
+            app2.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+            for _ in 0..4 {
+                run_host_viewport_frame(&ctx2, &mut app2, root, Vec::new(), false, false);
+            }
+            assert!(app2.programmer_inspector_host.is_popped_out());
+            assert!(app2.programmer_inspector_host.root_layer().is_none());
+            let native2 =
+                super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                    app2.programmer_inspector_dialog.epoch(),
+                );
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx2, &mut app2, native2, Vec::new(), false, false);
+            }
+            let (dock, clip, enabled) = app2.programmer_inspector_host.test_button.unwrap();
+            assert!(enabled && clip.contains_rect(dock));
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx2,
+                    &mut app2,
+                    native2,
+                    tool_dialog_pointer_events(dock, pressed),
+                    false,
+                    false,
+                );
+            }
+            assert!(!app2.programmer_inspector_host.is_popped_out());
+            assert_eq!(
+                manager2.preference(key),
+                Some(crate::settings::RememberedPresentation::Docked)
+            );
+            app2.programmer_inspector_dialog.request_close();
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx2, &mut app2, root, Vec::new(), false, false);
+            }
+            assert!(!app2.programmer_inspector_dialog.open);
+            app2.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx2, &mut app2, root, Vec::new(), false, false);
+            }
+            assert!(!app2.programmer_inspector_host.is_popped_out());
+            workers2.join_all();
+            assert_eq!(
+                crate::settings::Settings::load(&path)
+                    .unwrap()
+                    .utility_presentations
+                    .get(key),
+                Some(crate::settings::RememberedPresentation::Docked)
+            );
+        }
+        let saved = first(&path);
+        second(&path, saved);
     }
 
     #[test]

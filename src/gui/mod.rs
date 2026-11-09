@@ -125,6 +125,7 @@ pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod utility_dialog_size;
+pub(crate) mod utility_presentation;
 mod utility_host;
 mod utility_window_geometry;
 pub(crate) mod volume_data;
@@ -1115,6 +1116,7 @@ pub struct LauncherApp {
     pub settings_path: String,
     pub(crate) settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry,
     pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
+    pub(crate) utility_presentation_manager: utility_presentation::UtilityPresentationManager,
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
@@ -3734,6 +3736,12 @@ impl LauncherApp {
             settings.utility_dialog_sizes.clone(),
         );
         utility_dialog_size_manager.install_in_context(ctx);
+        let utility_presentation_manager = utility_presentation::UtilityPresentationManager::new(
+            settings_path.clone(),
+            settings_save_workers.clone(),
+            settings.utility_presentations.clone(),
+        );
+        utility_presentation_manager.install_in_context(ctx);
         #[cfg(windows)]
         let archive_session =
             crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
@@ -3828,6 +3836,7 @@ impl LauncherApp {
             settings_path,
             settings_save_workers,
             utility_dialog_size_manager,
+            utility_presentation_manager,
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
             pending_calculation_pad_recovery_preference: None,
@@ -6031,16 +6040,20 @@ impl LauncherApp {
             self.file_search_host.request_focus();
         } else if panel == Panel::SnippetDialog {
             self.snippet_dialog.ensure_open();
+            self.snippet_window_host.prepare_open(&self.egui_ctx, &self.snippet_dialog);
             self.snippet_window_host.request_focus();
         } else if panel == Panel::PasteSequenceDialog {
             let context = self.paste_sequence_invocation_context_for_open();
             self.paste_sequence_dialog.open_with_context(context);
+            self.paste_sequence_host.prepare_open(&self.egui_ctx, &self.paste_sequence_dialog);
             self.paste_sequence_host.request_focus();
         } else if panel == Panel::ClipboardDialog {
             self.clipboard_dialog.ensure_open();
+            self.clipboard_history_host.prepare_open(&self.egui_ctx, &self.clipboard_dialog);
             self.clipboard_history_host.request_focus();
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
+            self.clipboard_modify_host.prepare_open(&self.egui_ctx, &self.clipboard_modify_dialog);
             self.clipboard_modify_host.request_focus();
         } else if matches!(panel, Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) {
             self.ensure_open(panel);
@@ -6079,6 +6092,7 @@ impl LauncherApp {
             self.regex_tester_dialog.open();
         } else if panel == Panel::ProgrammerInspectorDialog {
             self.programmer_inspector_dialog.open();
+            self.programmer_inspector_host.prepare_open(&self.egui_ctx, &self.programmer_inspector_dialog);
             if let Some(pad_layer) = self.calculation_pad_dialog.host_layer_if_root()
                 && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
                     == Some(pad_layer)
@@ -6090,19 +6104,23 @@ impl LauncherApp {
             self.programmer_inspector_host.request_focus();
         } else if panel == Panel::ExplorerTabsDialog {
             self.explorer_tabs_dialog.open();
+            self.explorer_tabs_host.prepare_open(&self.egui_ctx, &self.explorer_tabs_dialog);
             self.request_explorer_tabs_focus();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();
             }
+            self.json_utility_host.prepare_open(&self.egui_ctx, &self.json_utility_dialog);
             self.json_utility_host.request_focus();
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
+            self.batch_rename_host.prepare_open(&self.egui_ctx, &self.batch_rename_dialog);
             self.batch_rename_host.request_focus();
         } else if panel == Panel::SearchReplaceDialog {
             if !self.search_replace_dialog.open {
                 self.ensure_open(panel);
             }
+            self.search_replace_host.prepare_open(&self.egui_ctx, &self.search_replace_dialog);
             self.search_replace_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();

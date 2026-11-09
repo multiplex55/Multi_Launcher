@@ -7,6 +7,24 @@ pub(super) enum UtilityPresentation {
     Popout,
 }
 
+impl From<crate::settings::RememberedPresentation> for UtilityPresentation {
+    fn from(value: crate::settings::RememberedPresentation) -> Self {
+        match value {
+            crate::settings::RememberedPresentation::Docked => Self::Docked,
+            crate::settings::RememberedPresentation::Popout => Self::Popout,
+        }
+    }
+}
+
+impl From<UtilityPresentation> for crate::settings::RememberedPresentation {
+    fn from(value: UtilityPresentation) -> Self {
+        match value {
+            UtilityPresentation::Docked => Self::Docked,
+            UtilityPresentation::Popout => Self::Popout,
+        }
+    }
+}
+
 /// Identifies a particular lifetime of a tool presentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct HostIdentity {

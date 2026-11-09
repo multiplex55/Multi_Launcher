@@ -9,6 +9,7 @@ use crate::settings::utility_dialog_sizes::{
     UtilitySizeAcknowledgement, UtilitySizeMutation, UtilitySizePreference, UtilitySizeRevision,
     UtilityToolKey, persist_mutation,
 };
+use crate::settings::utility_presentations::{RememberedPresentation, persist_presentation};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -654,6 +655,17 @@ struct WorkerRegistryState {
     utility_sizes_acknowledgements: HashMap<UtilityToolKey, UtilitySizeAcknowledgement>,
     utility_sizes_shutdown_failures: Vec<UtilitySizeShutdownFailure>,
     utility_sizes_worker_active: bool,
+    utility_presentations_path: Option<String>,
+    utility_presentations_next_revision: HashMap<UtilityToolKey, u64>,
+    utility_presentations_latest: HashMap<UtilityToolKey, u64>,
+    utility_presentations_pending: HashMap<UtilityToolKey, (u64, RememberedPresentation)>,
+    utility_presentations_failed: HashMap<UtilityToolKey, (u64, RememberedPresentation)>,
+    utility_presentations_errors: HashMap<UtilityToolKey, (u64, String)>,
+    utility_presentations_acks: HashMap<UtilityToolKey, (u64, RememberedPresentation)>,
+    utility_presentations_shutdown_failures: Vec<(UtilityToolKey, u64, String)>,
+    utility_presentations_worker_active: bool,
+    #[cfg(test)]
+    utility_presentation_before_write_hook: Option<Arc<dyn Fn(UtilityToolKey, u64) + Send + Sync>>,
     #[cfg(test)]
     utility_size_before_write_hook:
         Option<Arc<dyn Fn(UtilityToolKey, UtilitySizeRevision) + Send + Sync>>,
@@ -718,6 +730,17 @@ impl Default for SettingsSaveWorkerRegistry {
             utility_sizes_acknowledgements: HashMap::new(),
             utility_sizes_shutdown_failures: Vec::new(),
             utility_sizes_worker_active: false,
+            utility_presentations_path: None,
+            utility_presentations_next_revision: HashMap::new(),
+            utility_presentations_latest: HashMap::new(),
+            utility_presentations_pending: HashMap::new(),
+            utility_presentations_failed: HashMap::new(),
+            utility_presentations_errors: HashMap::new(),
+            utility_presentations_acks: HashMap::new(),
+            utility_presentations_shutdown_failures: Vec::new(),
+            utility_presentations_worker_active: false,
+            #[cfg(test)]
+            utility_presentation_before_write_hook: None,
             #[cfg(test)]
             utility_size_before_write_hook: None,
         })))
@@ -725,6 +748,179 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    pub(crate) fn queue_utility_presentation(
+        &self,
+        path: String,
+        key: UtilityToolKey,
+        value: RememberedPresentation,
+    ) -> Result<u64, String> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return Err(
+                "utility presentation updates are closed because the launcher is shutting down"
+                    .into(),
+            );
+        }
+        if state
+            .utility_presentations_path
+            .as_ref()
+            .is_some_and(|bound| bound != &path)
+        {
+            return Err(
+                "utility presentation writer is already bound to a different settings file".into(),
+            );
+        }
+        state
+            .utility_presentations_path
+            .get_or_insert_with(|| path.clone());
+        let revision = state
+            .utility_presentations_next_revision
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "utility presentation revision counter is exhausted".to_owned())?;
+        state
+            .utility_presentations_next_revision
+            .insert(key, revision);
+        state.utility_presentations_latest.insert(key, revision);
+        state
+            .utility_presentations_pending
+            .insert(key, (revision, value));
+        state.utility_presentations_failed.remove(&key);
+        state.utility_presentations_errors.remove(&key);
+        if !state.utility_presentations_worker_active {
+            state.utility_presentations_worker_active = true;
+            let registry = self.clone();
+            let worker = thread::Builder::new()
+                .name("utility-presentation-settings-save".into())
+                .spawn(move || registry.drain_utility_presentations(path))
+                .map_err(|error| {
+                    state.utility_presentations_worker_active = false;
+                    let message = format!("failed to start utility presentation writer: {error}");
+                    state
+                        .utility_presentations_errors
+                        .insert(key, (revision, message.clone()));
+                    message
+                })?;
+            state.workers.push(worker);
+        }
+        drop(state);
+        self.reap_finished();
+        Ok(revision)
+    }
+
+    pub(crate) fn drain_utility_presentation_acks(
+        &self,
+    ) -> Vec<(UtilityToolKey, u64, RememberedPresentation)> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let acks = std::mem::take(&mut state.utility_presentations_acks);
+        let mut result = acks
+            .into_iter()
+            .filter_map(|(key, (revision, value))| {
+                (state.utility_presentations_latest.get(&key) == Some(&revision))
+                    .then_some((key, revision, value))
+            })
+            .collect::<Vec<_>>();
+        result.sort_by_key(|entry| entry.0);
+        result
+    }
+
+    pub(crate) fn utility_presentation_failure(
+        &self,
+        key: UtilityToolKey,
+    ) -> Option<(u64, String)> {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (revision, error) = state.utility_presentations_errors.get(&key)?;
+        (state.utility_presentations_latest.get(&key) == Some(revision))
+            .then(|| (*revision, error.clone()))
+    }
+
+    fn drain_utility_presentations(&self, path: String) {
+        loop {
+            let batch = {
+                let mut state = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.utility_presentations_pending.is_empty() {
+                    state.utility_presentations_worker_active = false;
+                    return;
+                }
+                std::mem::take(&mut state.utility_presentations_pending)
+            };
+            for (key, (revision, value)) in batch {
+                #[cfg(test)]
+                {
+                    let hook = self
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .utility_presentation_before_write_hook
+                        .clone();
+                    if let Some(hook) = hook {
+                        hook(key, revision);
+                    }
+                }
+                let result = persist_presentation(&path, key, value);
+                let mut state = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.utility_presentations_latest.get(&key) != Some(&revision) {
+                    continue;
+                }
+                match result {
+                    Ok(()) => {
+                        state
+                            .utility_presentations_acks
+                            .insert(key, (revision, value));
+                        state.utility_presentations_errors.remove(&key);
+                    }
+                    Err(error) => {
+                        state
+                            .utility_presentations_failed
+                            .insert(key, (revision, value));
+                        state
+                            .utility_presentations_errors
+                            .insert(key, (revision, format!("{error:#}")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_utility_presentation_before_write_hook(
+        &self,
+        hook: Arc<dyn Fn(UtilityToolKey, u64) + Send + Sync>,
+    ) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_presentation_before_write_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn utility_presentation_shutdown_failures(
+        &self,
+    ) -> Vec<(UtilityToolKey, u64, String)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_presentations_shutdown_failures
+            .clone()
+    }
+
     pub(crate) fn spawn(&self, run: impl FnOnce() + Send + 'static) -> Result<(), std::io::Error> {
         let mut state = self
             .0
@@ -1107,6 +1303,40 @@ impl SettingsSaveWorkerRegistry {
                 "utility size preference remains unsaved at shutdown"
             );
         }
+        let presentation_failures = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut unresolved = HashMap::new();
+            for (key, (revision, _)) in state
+                .utility_presentations_pending
+                .iter()
+                .chain(state.utility_presentations_failed.iter())
+            {
+                if state.utility_presentations_latest.get(key) == Some(revision) {
+                    let error = state
+                        .utility_presentations_errors
+                        .get(key)
+                        .filter(|(failed_revision, _)| failed_revision == revision)
+                        .map(|(_, error)| error.clone())
+                        .unwrap_or_else(|| {
+                            "accepted utility presentation was not persisted before shutdown".into()
+                        });
+                    unresolved.insert(*key, (*revision, error));
+                }
+            }
+            let mut failures = unresolved
+                .into_iter()
+                .map(|(key, (revision, error))| (key, revision, error))
+                .collect::<Vec<_>>();
+            failures.sort_by_key(|failure| failure.0);
+            state.utility_presentations_shutdown_failures = failures.clone();
+            failures
+        };
+        for (key, revision, error) in presentation_failures {
+            tracing::error!(tool = key.as_str(), revision, %error, "utility presentation remains unsaved at shutdown");
+        }
     }
 }
 
@@ -1159,6 +1389,8 @@ impl PendingSettingsSave {
 impl LauncherApp {
     pub fn install_settings_save_worker_registry(&mut self, workers: SettingsSaveWorkerRegistry) {
         self.utility_dialog_size_manager
+            .rebind(self.settings_path.clone(), workers.clone());
+        self.utility_presentation_manager
             .rebind(self.settings_path.clone(), workers.clone());
         self.settings_save_workers = workers.clone();
     }
@@ -3945,5 +4177,118 @@ mod tests {
             latest.utility_dialog_sizes.preferred(key),
             Some(size(1000.0))
         );
+    }
+
+    #[test]
+    fn utility_presentations_survive_stale_general_apply_ack_and_rollback() {
+        let key = UtilityToolKey::parse("batch-rename").unwrap();
+        let mut baseline = Settings::default();
+        baseline
+            .utility_presentations
+            .set(key, RememberedPresentation::Docked)
+            .unwrap();
+        let mut desired = baseline.clone();
+        desired.hotkey = Some("F8".into());
+        let intent = SettingsSaveIntent::general(desired, &baseline);
+        let mut latest = baseline.clone();
+        latest
+            .utility_presentations
+            .set(key, RememberedPresentation::Popout)
+            .unwrap();
+        intent.apply(&mut latest);
+        assert_eq!(
+            latest.utility_presentations.get(key),
+            Some(RememberedPresentation::Popout)
+        );
+        let committed = latest.clone();
+        latest
+            .utility_presentations
+            .set(key, RememberedPresentation::Docked)
+            .unwrap();
+        intent.overlay_applied(&mut latest, &committed);
+        assert_eq!(
+            latest.utility_presentations.get(key),
+            Some(RememberedPresentation::Docked)
+        );
+        assert!(
+            intent
+                .rollback_owned(&mut latest, &baseline, &committed)
+                .is_empty()
+        );
+        assert_eq!(
+            latest.utility_presentations.get(key),
+            Some(RememberedPresentation::Docked)
+        );
+    }
+
+    #[test]
+    fn utility_presentation_newer_write_wins_inflight_ack_and_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path = path.to_string_lossy().into_owned();
+        Settings::default().save(&path).unwrap();
+        let key = UtilityToolKey::parse("batch-rename").unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let (entered, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        workers.set_utility_presentation_before_write_hook(Arc::new(move |_, revision| {
+            if revision == 1 {
+                entered.send(()).unwrap();
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        }));
+        assert_eq!(
+            workers
+                .queue_utility_presentation(path.clone(), key, RememberedPresentation::Popout)
+                .unwrap(),
+            1
+        );
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            workers
+                .queue_utility_presentation(path.clone(), key, RememberedPresentation::Docked)
+                .unwrap(),
+            2
+        );
+        release.send(()).unwrap();
+        workers.join_all();
+        assert_eq!(
+            workers.drain_utility_presentation_acks(),
+            vec![(key, 2, RememberedPresentation::Docked)]
+        );
+        assert_eq!(
+            Settings::load(&path)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(RememberedPresentation::Docked)
+        );
+        assert!(workers.utility_presentation_shutdown_failures().is_empty());
+    }
+
+    #[test]
+    fn utility_presentation_failed_write_is_retained_and_reported_on_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let original = serde_json::json!({"utility_presentations":{"version":99,"entries":{"future-tool":"other"}}});
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let key = UtilityToolKey::parse("batch-rename").unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers
+            .queue_utility_presentation(path.clone(), key, RememberedPresentation::Popout)
+            .unwrap();
+        workers.join_all();
+        let failures = workers.utility_presentation_shutdown_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, key);
+        assert!(failures[0].2.contains("unsupported"));
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(after, original);
     }
 }

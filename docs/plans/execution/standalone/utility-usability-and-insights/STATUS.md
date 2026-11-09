@@ -24,7 +24,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M1-B | B1 Dashboard slot markers | complete; automated verified, native pending |
 | M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
 | M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
-| M3-A | H2 owned presentation preference / generic host | pending |
+| M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
 | M3-B | H1/H2 custom hosts / accepted child origins | pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | pending |
 | M4-B | D4 toolbar / pinned inspector | pending |
@@ -99,3 +99,21 @@ Separate final fast-dev lib Nextest no-run compile passed in 1m30s (six existing
 - `m2-b-ui-retest`, run `135aad4b-670b-45c5-9729-4fbf5396ca8a`: second focused fixture correction clicks actual rendered Filters header and option; passed 1/1, runner 1.874s. No assertion weakened and production UI unchanged by fixture corrections.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m2-b-{focused,remediation,ui-retest}/`; cleanup/drain verified. Parent inspected scoped source/docs diff and whitespace; source/Cargo lane returned. Native observation pending M9.
+
+M2-B checkpoint `0eabaaca45107c13a09bf83abdc3a276f47c475a` pushed successfully; clean tree before M3-A handoff. Planner's verified M3-A packet assigns a separate settings presentation map, independently owned writes, shared context capability and generic host integration (including Explorer Tabs). Internal retirement, cancelled/discarded closes and failed bootstrap cannot record fallback Docked. Custom hosts and accepted child-origin routing remain M3-B; no global H1/H2 claim until inventory integration completes. Implementer owns M3-A source/Cargo only; parent ledger/Git.
+
+M3-B will use two sequential coherent subcheckpoints under the existing milestone: M3-B1 migrates existing custom ordinary hosts to shared remembered preferences; M3-B2 carries accepted child origins and adds the narrowly required ordinary companion adapters. Both remain on this branch, with no new feature scope or parallel writer. H1/H2 global acceptance stays pending until both and their inventory checks pass.
+
+## M3-A acceptance
+
+New settings-level versioned bounded presentation map retains unsupported JSON opaquely and fails closed for writes. Independently owned per-key worker revisions coalesce writes and reject superseded acknowledgements; general Settings apply/ack/rollback does not own this field. Settings editor's explicit full-value construction copies the current field for compatibility. App-owned context manager preserves accepted in-session choices on write failure and reports once; registry rebind clears obsolete waits and profile changes reload saved preferences instead of leaking another profile's local choices.
+
+All nine generic hosts restore once per real open session before root visibility/modal decisions and their own hidden-root guard. Open/focus preparation also avoids opening-frame root focus grabs. Accepted explicit changes and successful closes remember the effective presentation before retirement; retirement itself remains unchanged. No startup auto-open. Custom families/child origins remain unimplemented until M3-B.
+
+Separate fast-dev lib no-run compilation passed. Initial integration compile omissions (Settings editor construction and app rebind ownership) were corrected at their owners. Owned 100-second `--no-fail-fast` executions:
+
+- `m3-a-settings`: 5/5 passed, run `212c1e80-59c2-40a1-a2d5-30f8327eb144`, runner 1.883s: schema/opaque data, failed-save shutdown report, stale general apply/ack/rollback, local failed choice/report-once and newer-write/old-ack/shutdown.
+- `m3-a-host`: existing host-generation regression passed; combined Inspector fixture aborted with Windows stack overflow before assertions because two large LauncherApp values occupied one frame.
+- `m3-a-host-retest`: after separate non-inlined app-lifetime helpers and a local fixture key binding correction, Inspector integration passed 1/1, run `180ce89c-8676-4ec4-9de9-6338dee676f4`, runner 3.452s. Actual retained/discarded pointer transitions, Popout restart restore, Docked close/reopen and absence of phantom root layer verified.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-a-{settings,host,host-retest}/`; cleanup/drain verified. Parent inspected final model/manager/writer/generic source changes and whitespace. Final changes only format newly added blocks; no redundant tests after whitespace-only finishing. Source/Cargo lanes returned. Native observation pending M9.

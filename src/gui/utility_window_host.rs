@@ -176,6 +176,7 @@ pub(super) enum SnippetHostCommand {
 
 pub(super) struct UtilityWindowHost<D: HostedUtilityDialog> {
     state: UtilityHostState,
+    presentation_session: Option<u64>,
     native_session: Option<u64>,
     pending: Option<HostFrame<D>>,
     deferred_close: Option<(u64, HostIdentity)>,
@@ -190,6 +191,7 @@ impl<D: HostedUtilityDialog> Default for UtilityWindowHost<D> {
     fn default() -> Self {
         Self {
             state: UtilityHostState::default(),
+            presentation_session: None,
             native_session: None,
             pending: None,
             deferred_close: None,
@@ -321,7 +323,8 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     }
 
     pub(super) fn needs_root_ui_when_hidden(&self, open: bool) -> bool {
-        (open && self.state.presentation() == UtilityPresentation::Popout)
+        (open && (self.state.presentation() == UtilityPresentation::Popout
+            || self.presentation_session.is_none()))
             || self.state.bootstrap_pending()
             || self.pending.is_some()
     }
@@ -349,6 +352,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.pending = None;
         self.deferred_close = None;
         self.docked_focus_pending = false;
+        self.presentation_session = None;
         self.state.retire_to_docked();
         self.cancel_jump();
     }
@@ -387,6 +391,23 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.show_with_companion(ctx, dialog, runtime, input, None);
     }
 
+    pub(super) fn prepare_open(&mut self, ctx: &egui::Context, dialog: &D) {
+        if !dialog.is_open() {
+            return;
+        }
+        let session = dialog.session();
+        if self.presentation_session != Some(session) {
+            self.presentation_session = Some(session);
+            if let (Some(manager), Ok(key)) = (
+                super::utility_presentation::UtilityPresentationManager::for_context(ctx),
+                crate::settings::UtilityToolKey::parse(D::KEY),
+            ) && let Some(preference) = manager.preference(key)
+            {
+                self.state.transition(preference.into());
+            }
+        }
+    }
+
     pub(super) fn show_with_companion(
         &mut self,
         ctx: &egui::Context,
@@ -399,11 +420,13 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             if self.native_session.is_some() {
                 self.retire(ctx);
             }
+            self.presentation_session = None;
             return;
         }
+        self.prepare_open(ctx, dialog);
+        let session = dialog.session();
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let host = self.state.identity();
-        let session = dialog.session();
         let mut os_close = self.deferred_close.take() == Some((session, host));
         if let Some(previous) = self.pending.take()
             && previous.root.frame_nr == root.frame_nr
@@ -743,6 +766,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             return None;
         }
         if frame.close || frame.os_close {
+            self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
             return Some(HostCompletion {
                 commands: vec![D::closed_command()],
@@ -789,10 +813,12 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let commands = dialog.complete_actions(actions, hwnd);
         let mut show_root = false;
         if commands.iter().any(D::command_closes) {
+            self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
         {
+            self.remember_presentation(ctx, presentation);
             self.close_viewport(ctx);
             self.state.transition(presentation);
             self.cancel_jump();
@@ -807,6 +833,15 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             show_root,
             owner_viewport: frame.owner.viewport_id,
         })
+    }
+
+    fn remember_presentation(&self, ctx: &egui::Context, presentation: UtilityPresentation) {
+        if let (Some(manager), Ok(key)) = (
+            super::utility_presentation::UtilityPresentationManager::for_context(ctx),
+            crate::settings::UtilityToolKey::parse(D::KEY),
+        ) {
+            manager.remember(ctx, key, presentation.into());
+        }
     }
 }
 
