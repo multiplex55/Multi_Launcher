@@ -2087,6 +2087,10 @@ impl LauncherApp {
             }
         }
         self.show_settings = true;
+        self.settings_window_host.prepare_open(&self.egui_ctx, true);
+        if !self.settings_window_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     /// Opens the main settings at playback controls, preserving any open draft.
@@ -2153,7 +2157,11 @@ impl LauncherApp {
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.mouse_gesture_settings_dialog.open();
+        self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, true);
         self.mouse_gesture_settings_host.request_focus();
+        if !self.mouse_gesture_settings_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     pub(crate) fn open_mouse_settings_dialog(&mut self) {
@@ -2161,7 +2169,11 @@ impl LauncherApp {
             let preferences = self.coordinate_tool.preferences().clone();
             self.mouse_settings_dialog.open(&preferences);
         }
+        self.mouse_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS, true);
         self.mouse_settings_host.request_focus();
+        if !self.mouse_settings_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     pub(crate) fn mouse_settings_has_root_presentation(&self) -> bool {
@@ -5585,17 +5597,26 @@ impl LauncherApp {
                 self.panel_states.mkmacro_dialog = false;
             }
             Panel::MouseGesturesDialog => {
+                if self.mouse_gestures_dialog.open {
+                    self.mouse_gestures_host.remember_current(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
+                }
                 self.mouse_gestures_dialog.open = false;
                 self.mouse_gestures_dialog.reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
                 self.mouse_gestures_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 self.panel_states.mouse_gestures_dialog = false;
             }
             Panel::MouseGestureSettingsDialog => {
+                if self.mouse_gesture_settings_dialog.open {
+                    self.mouse_gesture_settings_host.remember_current(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
+                }
                 self.mouse_gesture_settings_dialog.open = false;
                 self.mouse_gesture_settings_host.retire(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
             Panel::MouseSettingsDialog => {
+                if self.mouse_settings_dialog.open {
+                    self.mouse_settings_host.remember_current(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
+                }
                 self.mouse_settings_dialog.open = false;
                 self.mouse_settings_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
                 self.panel_states.mouse_settings_dialog = false;
@@ -5613,6 +5634,9 @@ impl LauncherApp {
                 self.panel_states.fav_dialog = false;
             }
             Panel::FileSearchDialog => {
+                if self.file_search_dialog.open {
+                    self.file_search_host.remember_current(&self.egui_ctx);
+                }
                 self.file_search_dialog.open = false;
                 self.file_search_host.retire(&self.egui_ctx);
                 self.panel_states.file_search_dialog = false;
@@ -5771,6 +5795,9 @@ impl LauncherApp {
                 self.panel_states.editor = false;
             }
             Panel::Settings => {
+                if self.show_settings {
+                    self.settings_window_host.remember_current(&self.egui_ctx);
+                }
                 self.settings_window_host.retire(&self.egui_ctx);
                 self.show_settings = false;
                 self.panel_states.settings = false;
@@ -5987,6 +6014,12 @@ impl LauncherApp {
                 }
             }
         }
+        match panel {
+            Panel::FileSearchDialog => self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open),
+            Panel::MouseGesturesDialog => self.mouse_gestures_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open),
+            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open),
+            _ => {}
+        }
         if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
             self.panel_stack.retain(|open_panel| *open_panel != panel);
         } else if panel == Panel::MarkdownStudioDialog && !self.markdown_studio_dialog.open {
@@ -6042,6 +6075,7 @@ impl LauncherApp {
             if !self.file_search_dialog.open {
                 self.file_search_dialog.open();
             }
+            self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open);
             self.file_search_host.request_focus();
         } else if panel == Panel::SnippetDialog {
             self.snippet_dialog.ensure_open();
@@ -6129,6 +6163,7 @@ impl LauncherApp {
             self.search_replace_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();
+            self.mouse_gestures_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES, true);
             self.mouse_gestures_host.request_focus();
         } else if panel == Panel::MouseSettingsDialog {
             self.open_mouse_settings_dialog();

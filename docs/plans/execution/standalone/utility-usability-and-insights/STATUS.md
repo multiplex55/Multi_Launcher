@@ -137,7 +137,8 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | Nine generic hosts including Explorer Tabs / Inspector | M3-A implemented, representative integration verified |
 | Calculation Pad and reference | M3-B1a implemented / automated verified |
 | Notes list and note editors | M3-B1b implemented / automated verified |
-| Other existing custom families enumerated above | pending B1 |
+| File Search / Settings / Mouse Settings / Gesture Settings / Mouse Gestures | M3-B1c1 implemented / automated verified |
+| Other existing custom families enumerated above | pending remaining B1c groups |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
 
@@ -153,3 +154,18 @@ Separate final fast-dev lib no-run compile passed (six existing test warnings). 
 - `m3-b1b-notes`: 2/2 passed, run `051208a9-4629-4f24-9f14-d0b9714d7216`, runner 2.675s: rendered Notes host rejected-pass/draft preservation and close/restart preference restoration.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1b-{editor,notes}/`; cleanup/drain verified. Existing rendered editor fixture now uses a disposable settings path because accepted presentation can write. Test-created untracked `clipboard_modifiers.json` was confirmed absent before execution and removed; no user file discarded. Parent inspected source diff/whitespace; lanes returned. Native pending M9; other custom hosts and B2 remain pending.
+
+M3-B1b checkpoint `422e60489ae6719c97f6dcf08216b696126cbb85` pushed successfully; clean tree before M3-B1c. Implementer owns remaining existing custom hosts (enumerated in the source inventory), batched by lifecycle mechanism with representative tests. Stable defaults, pre-modal restoration, accepted-final-close fences and hidden-root Docked access are explicit invariants; unhosted ordinary child adapters and origin precedence remain B2. Parent ledger/Git.
+
+Bounded B2 planner inventory is complete. Execution will use B2a accepted origins for already hosted edges; B2b ordinary companions outside MkMacro; B2c MkMacro's nested ordinary editors/help/pickers. Natural family commits are permitted under these substantial boundaries. Reuse `UtilityWindowHost`/`HostedUtilityDialog` (or a narrow extraction of its existing receipt/chrome mechanics), not automatic detachment in `show_utility` size wrappers. Move child draft ownership deliberately, retain one content renderer and parent-owned typed transactions; child/root receipts and parent session/document/draft freshness must qualify effects, never current global focus. Inventory includes actual transitive edges, with no invented ImagePanel→Crop or NotePanel→Graph edge. Actual covered/excluded rows will be recorded at acceptance.
+
+## M3-B1c1 partial acceptance: Search/settings/mouse hosts
+
+File Search, Settings and the three Mouse forms restore once per open before visibility/focus decisions and remember accepted changes/successful final closes. Settings/Mouse final decisions remain with existing owners. App/command direct-open routes prepare before deciding whether to show root. Forced final-close paths capture preference before retirement; helper retirement does not persist.
+
+Separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` batches:
+
+- `m3-b1c-search`: 3/3 passed, run `1a2f682c-4982-4fd7-8167-b806f061d202`, runner 2.706s: five stable-kind preferences/once-per-open policy, live hidden-root search session and retained/discarded/popped Clear regression.
+- `m3-b1c-settings-mouse`: 4/4 passed, run `2ecf2789-7ec2-46ff-8a34-86aa60e71fa7`, runner 2.722s: live Settings/Mouse/Gesture forms and Jump Mode Cancel-draft preservation.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c-{search,settings-mouse}/`; cleanup/drain verified. Parent inspected owner/command/open/close diff and whitespace; lanes returned. This is five existing hosts only; remaining custom families and all B2 work remain pending. Native pending M9.

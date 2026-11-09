@@ -48,6 +48,7 @@ fn identity(instance: u64, host: HostIdentity) -> NativeViewportIdentity {
 #[derive(Default)]
 pub(super) struct FileSearchWindowHost {
     state: UtilityHostState,
+    presentation_prepared: bool,
     instance: u64,
     pending: Option<HostFrame>,
     close_pending: Option<ViewportPassProvenance>,
@@ -108,6 +109,19 @@ impl FileSearchWindowHost {
         (open && self.is_popped_out()) || self.state.bootstrap_pending() || self.pending.is_some()
     }
 
+    pub(super) fn prepare_open(&mut self, ctx: &egui::Context, open: bool) {
+        if open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn remember_current(&self, ctx: &egui::Context) {
+        let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+        super::utility_host::remember_presentation(ctx, key, self.state.presentation());
+    }
+
     pub(super) fn request_focus(&mut self) {
         self.state.request_focus();
     }
@@ -127,6 +141,7 @@ impl FileSearchWindowHost {
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.state.retire_to_docked();
+        self.presentation_prepared = false;
         self.pending = None;
         self.close_pending = None;
         self.cancel_jump();
@@ -183,6 +198,7 @@ impl FileSearchWindowHost {
         root_scopes: (Option<JumpModeScope>, Option<JumpModeScope>),
         os_close: bool,
     ) {
+        self.prepare_open(ctx, dialog.open);
         if !dialog.open && self.is_popped_out() {
             self.retire(ctx);
         }
@@ -517,6 +533,7 @@ impl FileSearchWindowHost {
                     } else {
                         UtilityPresentation::Docked
                     });
+                    self.remember_current(ctx);
                     self.cancel_jump();
                     show_root = !popout;
                     if show_root {
@@ -531,6 +548,7 @@ impl FileSearchWindowHost {
         }
         let closed = !dialog.open;
         if closed {
+            self.remember_current(ctx);
             self.retire(ctx);
         }
         Some(HostCompletion {

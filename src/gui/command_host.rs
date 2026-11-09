@@ -777,17 +777,29 @@ impl TodoCommandHost for LauncherApp {
 impl MouseGestureCommandHost for LauncherApp {
     fn open_mouse_gesture_dialog(&mut self) {
         self.mouse_gestures_dialog.open();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_add_dialog(&mut self) {
         self.mouse_gestures_dialog.open_add();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_binding_dialog(&mut self) {
         self.mouse_gestures_dialog.open_binding_editor();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_focus(
@@ -796,7 +808,11 @@ impl MouseGestureCommandHost for LauncherApp {
     ) {
         self.mouse_gestures_dialog
             .open_focus(&args.label, &args.tokens, args.dir_mode);
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_settings_dialog(&mut self) {
@@ -988,7 +1004,11 @@ impl crate::commands::HotFolderCommandHost for LauncherApp {
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
+        self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open);
         self.file_search_host.request_focus();
+        if !self.file_search_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn cancel_file_search(&mut self) {

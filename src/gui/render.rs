@@ -4836,6 +4836,11 @@ impl LauncherApp {
             && !self.ocr_surface_visible();
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
+        self.file_search_host.prepare_open(ctx, self.file_search_dialog.open);
+        self.settings_window_host.prepare_open(ctx, self.show_settings);
+        self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
+        self.mouse_settings_host.prepare_open(ctx, super::mouse_form_host::MOUSE_SETTINGS, self.mouse_settings_dialog.open);
+        self.mouse_gesture_settings_host.prepare_open(ctx, super::mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open);
         self.calculation_pad_dialog.prepare_open_presentation(ctx);
         self.notes_dialog.prepare_open_presentation(ctx);
         for panel in &mut self.note_panels {
@@ -6698,6 +6703,7 @@ impl LauncherApp {
                 .is_some();
             copy = draft.complete_host_actions(self, actions, focus_launcher);
             if !draft.open {
+                self.mouse_gestures_host.remember_current(ctx, MOUSE_GESTURES);
                 self.mouse_gestures_host.retire(ctx, MOUSE_GESTURES);
                 self.panel_states.mouse_gestures_dialog = false;
                 self.panel_stack
@@ -6935,6 +6941,7 @@ impl LauncherApp {
             let request = actions.host_request;
             gesture.complete_host_actions(self, actions);
             if !gesture.open {
+                self.mouse_gesture_settings_host.remember_current(ctx, GESTURE_SETTINGS);
                 self.mouse_gesture_settings_host
                     .retire(ctx, GESTURE_SETTINGS);
                 self.panel_states.mouse_gesture_settings_dialog = false;
@@ -6968,6 +6975,7 @@ impl LauncherApp {
             self.mouse_settings_dialog
                 .complete_host_actions(&mut self.coordinate_tool, actions);
             if !self.mouse_settings_dialog.open {
+                self.mouse_settings_host.remember_current(ctx, MOUSE_SETTINGS);
                 self.mouse_settings_host.retire(ctx, MOUSE_SETTINGS);
                 self.panel_states.mouse_settings_dialog = false;
                 self.retire_settings_navigation_for_panel(super::Panel::MouseSettingsDialog);
@@ -46033,6 +46041,7 @@ mod tests {
             .drop_without_applying_deltas();
         }
         assert!(app.file_search_host.is_popped_out());
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("file-search").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         let viewport = app.file_search_host.test_viewport();
         let mut hide = actual_query_input(true);
         hide.events
@@ -67425,6 +67434,8 @@ mod tests {
             ).drop_without_applying_deltas();
         }
         assert!(popped_out(&app));
+        let key = crate::settings::UtilityToolKey::parse(if gesture { "gesture-settings" } else { "mouse-settings" }).unwrap();
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(key), Some(crate::settings::RememberedPresentation::Popout));
         let viewport = if gesture {
             app.mouse_gesture_settings_host.test_viewport_id(GESTURE_SETTINGS)
         } else {
@@ -67507,6 +67518,104 @@ mod tests {
     }
 
     #[test]
+    fn settings_search_and_mouse_hosts_restore_per_kind_once_per_open() {
+        use crate::gui::mouse_form_host::{
+            GESTURE_SETTINGS, GestureSettingsHost, MOUSE_GESTURES, MOUSE_SETTINGS,
+            MouseGesturesHost, MouseSettingsHost,
+        };
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        let ctx = egui::Context::default();
+        manager.install_in_context(&ctx);
+        let keys = [
+            "file-search",
+            "settings",
+            "mouse-settings",
+            "gesture-settings",
+            "mouse-gestures",
+        ];
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Popout,
+            );
+        }
+        let mut search = super::super::file_search_window_host::FileSearchWindowHost::default();
+        let mut settings = super::super::settings_window_host::SettingsWindowHost::default();
+        let mut mouse = MouseSettingsHost::default();
+        let mut gesture_settings = GestureSettingsHost::default();
+        let mut gestures = MouseGesturesHost::default();
+        search.prepare_open(&ctx, true);
+        settings.prepare_open(&ctx, true);
+        mouse.prepare_open(&ctx, MOUSE_SETTINGS, true);
+        gesture_settings.prepare_open(&ctx, GESTURE_SETTINGS, true);
+        gestures.prepare_open(&ctx, MOUSE_GESTURES, true);
+        assert!(search.is_popped_out() && settings.is_popped_out());
+        assert!(
+            mouse.is_popped_out() && gesture_settings.is_popped_out() && gestures.is_popped_out()
+        );
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        search.prepare_open(&ctx, true);
+        settings.prepare_open(&ctx, true);
+        mouse.prepare_open(&ctx, MOUSE_SETTINGS, true);
+        gesture_settings.prepare_open(&ctx, GESTURE_SETTINGS, true);
+        gestures.prepare_open(&ctx, MOUSE_GESTURES, true);
+        assert!(search.is_popped_out() && settings.is_popped_out());
+        assert!(
+            mouse.is_popped_out() && gesture_settings.is_popped_out() && gestures.is_popped_out()
+        );
+        search.retire(&ctx);
+        settings.retire(&ctx);
+        mouse.retire(&ctx, MOUSE_SETTINGS);
+        gesture_settings.retire(&ctx, GESTURE_SETTINGS);
+        gestures.retire(&ctx, MOUSE_GESTURES);
+        search.prepare_open(&ctx, true);
+        settings.prepare_open(&ctx, true);
+        mouse.prepare_open(&ctx, MOUSE_SETTINGS, true);
+        gesture_settings.prepare_open(&ctx, GESTURE_SETTINGS, true);
+        gestures.prepare_open(&ctx, MOUSE_GESTURES, true);
+        assert!(!search.is_popped_out() && !settings.is_popped_out());
+        assert!(
+            !mouse.is_popped_out()
+                && !gesture_settings.is_popped_out()
+                && !gestures.is_popped_out()
+        );
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        for name in keys {
+            assert_eq!(
+                saved
+                    .utility_presentations
+                    .get(UtilityToolKey::parse(name).unwrap()),
+                Some(RememberedPresentation::Docked)
+            );
+        }
+    }
+
+    #[test]
     fn main_settings_popout_preserves_draft_with_launcher_hidden_and_docks_back() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -67537,6 +67646,7 @@ mod tests {
             .drop_without_applying_deltas();
         }
         assert!(app.settings_window_host.is_popped_out());
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("settings").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         let viewport = app.settings_window_host.test_viewport_id();
         let mut input = actual_query_input(true);
         input
