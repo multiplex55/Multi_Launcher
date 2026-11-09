@@ -164,6 +164,20 @@ impl FileSearchDialogState {
                             );
                             let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_match_mode,
+                                FilenameMatchMode::FilenameContains,
+                                "Filename contains",
+                            );
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/match/filename-contains",
+                                "Filename contains",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
+                                &mut self.ui_preferences.filename_match_mode,
                                 FilenameMatchMode::Fuzzy,
                                 "Fuzzy",
                             );
@@ -655,6 +669,117 @@ mod tests {
     use super::*;
     use crate::file_search::settings::FileSearchSettings;
     use tempfile::tempdir;
+
+    #[test]
+    fn filename_contains_ui_selection_updates_request_without_searching() {
+        let temp = tempdir().unwrap();
+        let mut state = FileSearchDialogState {
+            search_text: "gcc".into(),
+            selected_scope: FileSearchScopeMode::Directory,
+            custom_roots: vec![temp.path().display().to_string()],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let draw = |state: &mut FileSearchDialogState, events: Vec<egui::Event>, time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 1100.0),
+                    )),
+                    focused: true,
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        state.filters_ui(ui);
+                    });
+                },
+            )
+        };
+        let output = draw(&mut state, Vec::new(), 1.0);
+        let header_position = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Filters" => {
+                    Some(text.pos + egui::vec2(3.0, 3.0))
+                }
+                _ => None,
+            })
+            .expect("Filters header is rendered");
+        output.drop_without_applying_deltas();
+        for (index, pressed) in [true, false].into_iter().enumerate() {
+            let output = draw(
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(header_position),
+                    egui::Event::PointerButton {
+                        pos: header_position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.1 + index as f64 * 0.1,
+            );
+            output.drop_without_applying_deltas();
+        }
+        let output = draw(&mut state, Vec::new(), 1.3);
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Filename contains" => {
+                    Some(text.pos + egui::vec2(3.0, 3.0))
+                }
+                _ => None,
+            })
+            .expect("filename contains option is rendered");
+        output.drop_without_applying_deltas();
+        for (index, pressed) in [true, false].into_iter().enumerate() {
+            let output = draw(
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.4 + index as f64 * 0.1,
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            state.ui_preferences.filename_match_mode,
+            FilenameMatchMode::FilenameContains
+        );
+        assert!(state.ui_preferences_dirty);
+        assert!(state.active_search_id.is_none());
+        assert_eq!(
+            state.current_status,
+            crate::file_search::model::SearchStatus::Pending
+        );
+        let request = state.build_search_request().unwrap();
+        assert_eq!(
+            request.filename_match_mode,
+            FilenameMatchMode::FilenameContains
+        );
+        assert_eq!(
+            crate::file_search::executor::FileSearchExecutor::plan_for_request(
+                &request,
+                &state.settings
+            )
+            .candidates,
+            vec![crate::file_search::model::SearchBackend::WalkDir]
+        );
+    }
 
     #[test]
     fn extension_parsing_splits_trims_and_drops_empty_values() {

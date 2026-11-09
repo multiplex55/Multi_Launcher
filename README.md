@@ -416,6 +416,7 @@ Examples: `fs`, `fs file README`, `fs content "TODO item"`, `fs here content lau
 **Filename** mode searches file and directory names under the selected roots.
 
 - **Ranked substring** is the default **Filename matching** mode. It is case-aware according to **Case-sensitive** and ranks stronger matches first: exact filename, filename starts with the query, filename contains the query, then path contains the query. Highlighting shows the matching filename/path ranges.
+- **Filename contains** matches a literal, contiguous substring in the filename, including its extension. Directory path text alone cannot qualify a result; **Case-sensitive** and **Type** still apply.
 - **Fuzzy** filename matching is available from **Filename matching** for typo-tolerant ordered-character matching. Use it when a filename is approximate or partially remembered; relevance still controls the default ordering.
 - Use the **Type** filter to choose **Files**, **Directories**, or **Files and directories**.
 - **Sort** options for filename results are **Relevance**, **Filename ↑**, **Filename ↓**, **Path ↑**, **Modified newest**, **Modified oldest**, **Size largest**, and **Size smallest**.
@@ -456,7 +457,7 @@ If ripgrep is missing, content search starts with the native backend automatical
 
 ### Everything CLI expectations
 
-When `plugin_settings.file_search.everything_enabled` is true, **Global** **Filename** searches in **Ranked substring** mode may use the Everything ES CLI before falling back to the walkdir backend. Everything is not used for **Fuzzy** filename searches, **Directory** custom-root searches, content searches, or global filename searches whose include-extension/type combination cannot be represented safely.
+When `plugin_settings.file_search.everything_enabled` is true, **Global** **Filename** searches in **Ranked substring** mode may use the Everything ES CLI before falling back to the walkdir backend. Everything is not used for **Filename contains** or **Fuzzy** filename searches, **Directory** custom-root searches, content searches, or global filename searches whose include-extension/type combination cannot be represented safely.
 
 Expected CLI setup:
 

@@ -23,7 +23,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M1-A | L1 compact descriptions / bounded cards | complete; automated verified, native pending |
 | M1-B | B1 Dashboard slot markers | complete; automated verified, native pending |
 | M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
-| M2-B | FS2 literal leaf-name matching | pending |
+| M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
 | M3-A | H2 owned presentation preference / generic host | pending |
 | M3-B | H1/H2 custom hosts / accepted child origins | pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | pending |
@@ -83,3 +83,19 @@ Explicit Clear results beside Search/Cancel has a stable Jump target. Its accept
 Separate fast-dev lib Nextest no-run compile passed in 2m00s (six existing test warnings). Owned execution `m2-a-focused`, 100-second deadline and `--no-fail-fast`, passed 9/9; run `38ceef29-9c15-4a5f-8e15-b2cd6f59e2c8`, runner 2.713s. Cases cover delayed event kinds, worker cancellation/activity, rapid restart, form preservation, stale Clear/row/copy/export and retained/discarded/detached Clear UI. Exact selectors/output/cleanup receipt: `target/utility-usability-and-insights/evidence/m2-a-focused/result.json`; cleanup/drain verified. Post-test source changes only whitespace. Parent inspected scoped diff/whitespace; source/Cargo lane returned. Native observation pending M9.
 
 Unrelated pre-existing caveat, left unchanged: unused public `SearchCoordinator::drain_events_including_stale` also applies stale events to coordinator status. There are no current callers; ordinary GUI drain rejects them. This is not an FS1 active-path defect and did not justify another rebuild or broader coordinator cleanup.
+
+M2-A checkpoint `a92e9915f292948286967f9f4a016923dfdeeb9d` pushed successfully; clean tree before M2-B handoff. FS2 planner packet assigns the distinct literal leaf-name matcher before WalkDir result-budget admission, retains existing modes/defaults, and deliberately uses existing qualified WalkDir routing rather than an unqualified Everything/UI filter. Implementer owns M2-B source/Cargo only; parent ledger/Git.
+
+## M2-B acceptance
+
+Additional `FilenameContains` / `filename_contains` mode uses shared exact/prefix/substring filename ranking without path fallback or fuzzy semantics. Case-fold expansions now highlight complete original UTF-8 characters. Existing Ranked/Fuzzy defaults/serialization retained. Qualified routing uses WalkDir in settings-aware and no-settings selectors; Everything remains Ranked-only. WalkDir's pre-existing omission of Type admission was corrected before result-budget accounting, with traversal/exclusions unchanged. README documents the literal mode and routing.
+
+`SearchRequest` has no serialization contract in this codebase; preference serde roundtrip plus actual UI selection to built request/backend is the verified boundary. Focused fixtures include path-only/fuzzy negatives, gcc/libgcc positives, punctuation/extensions/case/Unicode and capped file/directory/exclusion scans.
+
+Separate final fast-dev lib Nextest no-run compile passed in 1m30s (six existing warnings); first compile's fixture-only CentralPanel Ui/Context mismatch was corrected. Owned 100-second `--no-fail-fast` batches:
+
+- `m2-b-focused`, run `2e22458f-f559-4566-adff-0451b3b54bdf`, 10/11 passed; closed Filters UI fixture could not find the new option.
+- `m2-b-remediation`, run `a88cd2b7-a664-4e87-9f29-544e15de65f5`: strengthened same-global-roots backend assertion passed, forced egui header ID fixture still failed.
+- `m2-b-ui-retest`, run `135aad4b-670b-45c5-9729-4fbf5396ca8a`: second focused fixture correction clicks actual rendered Filters header and option; passed 1/1, runner 1.874s. No assertion weakened and production UI unchanged by fixture corrections.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m2-b-{focused,remediation,ui-retest}/`; cleanup/drain verified. Parent inspected scoped source/docs diff and whitespace; source/Cargo lane returned. Native observation pending M9.

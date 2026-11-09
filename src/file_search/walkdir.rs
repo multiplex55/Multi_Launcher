@@ -1,8 +1,8 @@
 use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
-    FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest,
-    SearchResult, SearchScope, SearchStatus,
+    FileKind, FileTypeFilter, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
+    SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::cell::Cell;
@@ -148,6 +148,14 @@ pub fn search_filenames_in_directory(
                 summary.directories_scanned += 1;
             } else {
                 summary.files_scanned += 1;
+            }
+            let allowed_type = match request.file_type_filter {
+                FileTypeFilter::FilesOnly => metadata.as_ref().is_some_and(|m| m.is_file()),
+                FileTypeFilter::DirectoriesOnly => metadata.as_ref().is_some_and(|m| m.is_dir()),
+                FileTypeFilter::FilesAndDirectories => true,
+            };
+            if !allowed_type {
+                continue;
             }
             let file_name = entry.file_name().to_string_lossy().to_string();
             if let Some(highlight) = filename_highlight_match(
@@ -362,6 +370,69 @@ mod tests {
         )
         .unwrap();
         (summary, rx.try_iter().collect())
+    }
+
+    #[test]
+    fn filename_contains_filters_leaf_and_type_before_the_result_budget() {
+        use crate::file_search::model::FilenameMatchMode;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path_only = temp.path().join("gcc");
+        let valid = temp.path().join("valid");
+        fs::create_dir_all(path_only.join("skipme")).unwrap();
+        fs::create_dir_all(&valid).unwrap();
+        fs::write(path_only.join("readme.txt"), "path only").unwrap();
+        fs::write(path_only.join("skipme/gcc-excluded.txt"), "excluded").unwrap();
+        fs::write(valid.join("gcc.exe"), "match").unwrap();
+        let mut req = request(path_only.clone(), "gcc", 1);
+        req.scope = SearchScope::Roots {
+            roots: vec![path_only.clone(), valid.clone()],
+        };
+        req.filename_match_mode = FilenameMatchMode::FilenameContains;
+        req.file_type_filter = FileTypeFilter::FilesOnly;
+        req.excluded_directory_names = vec!["skipme".into()];
+        let (summary, events) = run(req);
+        let results = events
+            .into_iter()
+            .filter_map(|event| match event {
+                SearchEvent::Result {
+                    result: SearchResult::Filename(result),
+                    ..
+                } => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summary.results_found, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_name, "gcc.exe");
+        assert_eq!(results[0].kind, FileKind::File);
+        assert!(results[0].path_match_ranges.is_empty());
+
+        let file_first = temp.path().join("file-first");
+        let dir_second = temp.path().join("dir-second");
+        fs::create_dir_all(dir_second.join("gcc-directory")).unwrap();
+        fs::create_dir_all(&file_first).unwrap();
+        fs::write(file_first.join("gcc-file"), "match").unwrap();
+        let mut req = request(file_first.clone(), "gcc", 1);
+        req.scope = SearchScope::Roots {
+            roots: vec![file_first, dir_second],
+        };
+        req.filename_match_mode = FilenameMatchMode::FilenameContains;
+        req.file_type_filter = FileTypeFilter::DirectoriesOnly;
+        let (summary, events) = run(req);
+        let results = events
+            .into_iter()
+            .filter_map(|event| match event {
+                SearchEvent::Result {
+                    result: SearchResult::Filename(result),
+                    ..
+                } => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summary.results_found, 1);
+        assert_eq!(results[0].file_name, "gcc-directory");
+        assert_eq!(results[0].kind, FileKind::Directory);
     }
 
     #[test]
