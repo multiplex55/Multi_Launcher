@@ -4837,6 +4837,10 @@ impl LauncherApp {
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
         self.calculation_pad_dialog.prepare_open_presentation(ctx);
+        self.notes_dialog.prepare_open_presentation(ctx);
+        for panel in &mut self.note_panels {
+            panel.prepare_open_presentation(ctx);
+        }
         self.snippet_window_host.prepare_open(ctx, &self.snippet_dialog);
         self.paste_sequence_host.prepare_open(ctx, &self.paste_sequence_dialog);
         self.clipboard_history_host.prepare_open(ctx, &self.clipboard_dialog);
@@ -18003,6 +18007,125 @@ mod tests {
         input.events = events;
         app.run_root_frame_for_test(ctx, input, discard_after_render)
             .0
+    }
+
+    #[test]
+    fn quick_notes_remembers_accepted_host_across_close_and_restart() {
+        use super::super::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = boxed_app(&ctx);
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = UtilityToolKey::parse("quick-notes").unwrap();
+        assert!(!app.notes_dialog.open);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::NotesDialog);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        assert!(!app.notes_dialog.test_host_identity().0);
+        let (_, button, clip, enabled) = app.notes_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(button));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(button, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(button, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(manager.preference(key), None);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (_, button, _, _) = app.notes_dialog.test_host_button();
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Popout)
+        );
+        app.notes_dialog.close_from_app(&ctx);
+        app.focus_panel(super::super::Panel::NotesDialog);
+        assert!(app.notes_dialog.test_host_identity().0);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (_, dock, clip, enabled) = app.notes_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events(
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Docked)
+        );
+        app.notes_dialog.close_from_app(&ctx);
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        assert_eq!(
+            saved.utility_presentations.get(key),
+            Some(RememberedPresentation::Docked)
+        );
+        let ctx2 = egui::Context::default();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let manager2 =
+            UtilityPresentationManager::new(path, workers2.clone(), saved.utility_presentations);
+        manager2.install_in_context(&ctx2);
+        let mut notes = super::super::notes_dialog::NotesDialog::default();
+        assert!(!notes.open);
+        notes.open();
+        notes.prepare_open_presentation(&ctx2);
+        assert!(!notes.test_host_identity().0);
+        workers2.join_all();
     }
 
     #[test]

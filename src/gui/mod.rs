@@ -5299,7 +5299,7 @@ impl LauncherApp {
                 self.panel_states.search_replace_dialog = false;
             }
             Panel::NotesDialog => {
-                self.notes_dialog.open = false;
+                self.notes_dialog.close_from_app(&self.egui_ctx);
                 self.panel_states.notes_dialog = false;
             }
             Panel::NoteGraphDialog => {
@@ -5626,7 +5626,7 @@ impl LauncherApp {
                 self.panel_states.search_replace_dialog = false;
             }
             Panel::NotesDialog => {
-                self.notes_dialog.open = false;
+                self.notes_dialog.close_from_app(&self.egui_ctx);
                 self.panel_states.notes_dialog = false;
             }
             Panel::NoteGraphDialog => {
@@ -5874,7 +5874,10 @@ impl LauncherApp {
                 }
                 self.search_replace_dialog.open();
             }
-            Panel::NotesDialog => self.notes_dialog.open = true,
+            Panel::NotesDialog => {
+                self.notes_dialog.open = true;
+                self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
+            }
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.ensure_open(),
             Panel::NotePanel => {}
@@ -6030,6 +6033,7 @@ impl LauncherApp {
             self.date_time_studio_dialog.open();
         } else if panel == Panel::NotesDialog {
             self.notes_dialog.open();
+            self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
         } else if panel == Panel::Settings {
             self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
@@ -6409,6 +6413,7 @@ impl LauncherApp {
             self.note_show_details,
             &self.note_settings,
         );
+        panel.prepare_open_presentation(&self.egui_ctx);
         panel.request_activation_handoff();
         panel.load_collapsed_sections_state(self);
         self.note_panels.push(panel);
@@ -6423,7 +6428,8 @@ impl LauncherApp {
             .is_some_and(|panel| panel.host_layer_if_root().is_some())
     }
 
-    pub fn push_note_panel(&mut self, panel: NotePanel) {
+    pub fn push_note_panel(&mut self, mut panel: NotePanel) {
+        panel.prepare_open_presentation(&self.egui_ctx);
         self.note_panels.push(panel);
         self.update_panel_stack();
     }
@@ -6786,6 +6792,7 @@ impl LauncherApp {
                         self.search();
                     }
                     self.notes_dialog.open();
+                    self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
                 } else {
                     self.report_error_message("launcher", "Note not found");
                 }

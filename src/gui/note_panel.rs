@@ -1100,6 +1100,7 @@ pub struct NotePanel {
     pub open: bool,
     prompt_identity: u64,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     show_root_after_host_change: bool,
     pending_host_frame: Option<PendingNotePanelHostFrame>,
     active_host_pass: Option<(HostIdentity, ViewportPassProvenance)>,
@@ -1804,6 +1805,7 @@ impl NotePanel {
             open: true,
             prompt_identity: NEXT_NOTE_PANEL_PROMPT_ID.fetch_add(1, Ordering::Relaxed),
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             show_root_after_host_change: false,
             pending_host_frame: None,
             active_host_pass: None,
@@ -2594,6 +2596,21 @@ impl NotePanel {
         self.prompt_identity
     }
 
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("note-editor")
+                .expect("Note editor has a registered tool key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    fn remember_current_presentation(&self, ctx: &egui::Context) {
+        let key = crate::settings::UtilityToolKey::parse("note-editor")
+            .expect("Note editor has a registered tool key");
+        super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+    }
+
     pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
         if !self.open {
             return None;
@@ -2918,6 +2935,7 @@ impl NotePanel {
         let mut native_identity = native_identity;
         if let Some(requested) = frame.actions.host_request
             && requested != self.host_state.presentation()
+            && self.open
             && effect.is_none()
         {
             if requested == UtilityPresentation::Docked {
@@ -2930,6 +2948,7 @@ impl NotePanel {
                 );
             }
             if self.host_state.transition(requested) {
+                self.remember_current_presentation(ctx);
                 self.accepted_host_effect_receipt = None;
                 self.accepted_host_modal_layer = None;
                 if requested == UtilityPresentation::Docked {
@@ -2941,6 +2960,9 @@ impl NotePanel {
                 }
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
+        }
+        if !self.open {
+            self.remember_current_presentation(ctx);
         }
         if !self.open && self.host_state.presentation() == UtilityPresentation::Popout {
             if let Some(identity) = native_identity {
@@ -4968,6 +4990,7 @@ impl NotePanel {
     }
 
     fn close_panel_and_release_focus(&mut self, app: &mut LauncherApp) {
+        self.remember_current_presentation(&app.egui_ctx);
         self.open = false;
         self.pending_close_after_save = false;
         self.discard_unsaved_prompt = false;
@@ -5193,6 +5216,7 @@ impl NotePanel {
             self.test_host_button_clip_rect = None;
             self.test_host_button_enabled = None;
         }
+        self.prepare_open_presentation(ctx);
         let previous_host_frame = self.pending_host_frame.take();
         self.pending_host_actions = NotePanelPendingHostActions::default();
         self.defer_host_actions = true;
@@ -16373,10 +16397,114 @@ mod tests {
     }
 
     #[test]
+    fn note_editors_restore_shared_preference_and_last_successful_close_wins() {
+        use super::super::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{RememberedPresentation, UtilityPresentations, UtilityToolKey};
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&settings_path).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Box::new(new_app_in_dir(&ctx, directory.path()));
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            settings_path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = UtilityToolKey::parse("note-editor").unwrap();
+        manager.remember(&ctx, key, RememberedPresentation::Popout);
+        let mut first = NotePanel::from_note(note_with_slug("First", "first"));
+        let mut second = NotePanel::from_note(note_with_slug("Second", "second"));
+        first.prepare_open_presentation(&ctx);
+        second.prepare_open_presentation(&ctx);
+        assert!(first.test_host_identity().0 && second.test_host_identity().0);
+        first.note.content.push_str(" dirty draft");
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = true;
+        first.request_close(&mut app);
+        assert!(first.open && first.discard_unsaved_prompt);
+        first.keep_editing();
+        assert!(first.note.content.ends_with(" dirty draft"));
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Popout)
+        );
+        for _ in 0..3 {
+            hosted_note_panel_frame(&ctx, &mut second, &mut app, Vec::new(), Vec::new());
+        }
+        let (_, dock, clip, enabled) = second.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            hosted_note_panel_frame(
+                &ctx,
+                &mut second,
+                &mut app,
+                Vec::new(),
+                note_panel_pointer_events(dock, pressed),
+            );
+        }
+        assert!(!second.test_host_identity().0);
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Docked)
+        );
+        first.prepare_open_presentation(&ctx);
+        assert!(
+            first.test_host_identity().0,
+            "an existing editor is not demoted"
+        );
+        app.note_confirm_discard_unsaved_changes = false;
+        first.request_close(&mut app);
+        assert!(!first.open);
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Popout)
+        );
+        let mut fresh = NotePanel::from_note(note_with_slug("Third", "third"));
+        fresh.prepare_open_presentation(&ctx);
+        assert!(fresh.test_host_identity().0);
+        second.request_close(&mut app);
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Docked)
+        );
+        workers.join_all();
+        assert_eq!(
+            Settings::load(&settings_path)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(RememberedPresentation::Docked)
+        );
+        let mut restarted = NotePanel::from_note(note_with_slug("Restarted", "restarted"));
+        let ctx2 = egui::Context::default();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let saved = Settings::load(&settings_path).unwrap();
+        let manager2 = UtilityPresentationManager::new(
+            settings_path,
+            workers2.clone(),
+            saved.utility_presentations,
+        );
+        manager2.install_in_context(&ctx2);
+        restarted.prepare_open_presentation(&ctx2);
+        assert!(!restarted.test_host_identity().0);
+        workers2.join_all();
+    }
+
+    #[test]
     fn note_panel_visible_host_buttons_move_the_same_dirty_note_and_discard_rejected_draft() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, directory.path());
         let mut panel = NotePanel::from_note(note_with_slug("Host lifecycle", "host-lifecycle"));
         panel.note.content.push_str("\n\nUnsaved text");
         let original_draft = panel.note.content.clone();

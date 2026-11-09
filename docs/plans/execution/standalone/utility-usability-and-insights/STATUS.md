@@ -136,7 +136,20 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | --- | --- |
 | Nine generic hosts including Explorer Tabs / Inspector | M3-A implemented, representative integration verified |
 | Calculation Pad and reference | M3-B1a implemented / automated verified |
-| Notes list and note editors | pending B1 |
+| Notes list and note editors | M3-B1b implemented / automated verified |
 | Other existing custom families enumerated above | pending B1 |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
+
+M3-B1a checkpoint `b343e7b0c6b48f4c74245349834ee55f90cc6e96` pushed successfully; clean tree before Notes M3-B1b. Implementer owns notes list/editor restoration, accepted final-close ordering and dirty-close fences only. Remaining custom families form B1c; child origins and ordinary companion adapters remain B2. Source/Cargo single lane; parent ledger/Git.
+
+## M3-B1b partial acceptance: Notes list/editors
+
+Notes list and fresh editors restore shared stable-tool preferences before focus/modal decisions; live editor focus never reapplies another instance's preference. Accepted transitions, app-level closes and successful editor Save/Discard close paths remember effective presentation; Cancel keeps the dirty draft. Two editors share one note-editor preference, with last accepted successful close winning. New editor stack insertion and the separate remove-note/reopen-list route prepare early; no per-note preference records or child-origin inference.
+
+Separate final fast-dev lib no-run compile passed (six existing test warnings). Owned 100-second `--no-fail-fast` batches:
+
+- `m3-b1b-editor`: 3/3 passed, run `27375df6-583a-49f1-9576-01cd36143365`, runner 2.799s: two-editor preference/Cancel/close ordering, rendered editor rejected-pass/draft preservation and same-slug reuse.
+- `m3-b1b-notes`: 2/2 passed, run `051208a9-4629-4f24-9f14-d0b9714d7216`, runner 2.675s: rendered Notes host rejected-pass/draft preservation and close/restart preference restoration.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1b-{editor,notes}/`; cleanup/drain verified. Existing rendered editor fixture now uses a disposable settings path because accepted presentation can write. Test-created untracked `clipboard_modifiers.json` was confirmed absent before execution and removed; no user file discarded. Parent inspected source diff/whitespace; lanes returned. Native pending M9; other custom hosts and B2 remain pending.

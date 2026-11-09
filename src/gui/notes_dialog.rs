@@ -854,6 +854,7 @@ fn update_filtered_projection(
 pub struct NotesDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     show_root_after_host_change: bool,
     native_jump_mode: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -1292,6 +1293,25 @@ impl NotesDialog {
                     .menu_owner
                     .as_ref()
                     .is_some_and(|owner| owner.response.context_menu_opened()))
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("quick-notes")
+                .expect("Quick Notes has a registered tool key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn close_from_app(&mut self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("quick-notes")
+                .expect("Quick Notes has a registered tool key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+            self.open = false;
+            self.presentation_prepared = false;
+        }
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
@@ -1827,6 +1847,9 @@ impl NotesDialog {
     }
 
     pub fn open(&mut self) {
+        if !self.open {
+            self.presentation_prepared = false;
+        }
         if self.host_state.presentation() == UtilityPresentation::Popout {
             if self.open {
                 self.host_state.request_focus();
@@ -1948,6 +1971,7 @@ impl NotesDialog {
         jump_mode_enabled: bool,
         defer_effects: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         #[cfg(test)]
         self.last_rendered_indices.clear();
         #[cfg(test)]
@@ -3371,7 +3395,14 @@ impl NotesDialog {
         }
         let closed = effects.close_requested || effects.os_close_requested;
         if closed {
+            super::utility_host::remember_presentation(
+                ctx,
+                crate::settings::UtilityToolKey::parse("quick-notes")
+                    .expect("registered Quick Notes key"),
+                effects.host.host,
+            );
             self.open = false;
+            self.presentation_prepared = false;
             self.close_menu_owner();
             if let Some(identity) = native_identity.take() {
                 super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -3393,6 +3424,12 @@ impl NotesDialog {
                 ctx.send_viewport_cmd_to(quick_notes_viewport_id(), egui::ViewportCommand::Close);
             }
             if self.host_state.transition(requested) {
+                super::utility_host::remember_presentation(
+                    ctx,
+                    crate::settings::UtilityToolKey::parse("quick-notes")
+                        .expect("registered Quick Notes key"),
+                    requested,
+                );
                 self.native_jump_mode.cancel_all();
                 self.native_jump_frame = None;
                 if requested == UtilityPresentation::Docked {
