@@ -21,7 +21,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | --- | --- | --- |
 | M0-A | Exact-parent baseline / push complete; source inventory ongoing | complete Git gate |
 | M1-A | L1 compact descriptions / bounded cards | complete; automated verified, native pending |
-| M1-B | B1 Dashboard slot markers | pending |
+| M1-B | B1 Dashboard slot markers | complete; automated verified, native pending |
 | M2-A | FS1 cancellation-safe Clear results | pending |
 | M2-B | FS2 literal leaf-name matching | pending |
 | M3-A | H2 owned presentation preference / generic host | pending |
@@ -60,3 +60,16 @@ Separate compilation: `cargo nextest run -p multi_launcher --cargo-profile fast-
 Exact selectors, output and result/cleanup receipts: `target/utility-usability-and-insights/evidence/m1-a-{focused,geometry-retest,navigation}/`. All cleanup/output drains verified. Parent inspected resulting diff and whitespace; only the four intended source files and this ledger changed. Native checks are deferred to M9, not claimed passed. Implementer explicitly returned source/Cargo lane before commit.
 
 Planner correction to inventory: Explorer Tabs is generic (`UtilityWindowHost<ExplorerTabsDialog>` alias/trait implementation live in its own module). M3 will also account for ordinary File Search preview/hash and notes templates/assets children, retaining native picker/modal/overlay exclusions.
+
+M1-A checkpoint `5363fa3b428f5a587ad0db29036336156f05d0da` pushed successfully; clean tree before M1-B handoff. Planner's M1-B packet assigns Dashboard preview/list token identity and presentation only, preserving placement/resize/occupancy semantics. Implementer now owns M1-B source and Cargo lane; parent retains ledger/Git.
+
+## M1-B acceptance
+
+Dashboard preview/list share existing unique session-token S-markers, clipped slot text, full label/widget/position/span tooltips and linked hover outlines. Exact selected index avoids highlighting multiple duplicate IDs. Tiny/large-font cells retain markers with the list as full-name legend; overlapping markers stack. Selection/conflict use text and borders as well as color. No saved layout schema or live-widget rendering changes.
+
+Separate final lib compilation with the same fast-dev Nextest no-run command passed in 1m34s. An introduced test-only unused-mut warning was fixed; six existing test warnings remain. Owned 100-second `--no-fail-fast` executions:
+
+- `m1-b-focused`, run `a7a6b1b0-aeaf-447c-89d0-de807e11e598`, 2/4 passed: clipped duplicate/tiny marker paint and token swap/removal identity. Drag fixture exposed an existing press-origin defect (expected two-cell span, got one because drag threshold position became anchor); fixed narrowly in preview's input owner. Linked-hover assertions passed before draft equality exposed initial weather widget-default normalization; fixture now snapshots settled state and retains direct-preview no-mutation assertion.
+- `m1-b-remediation`, run `a9b75c22-2e92-4723-9156-0d4d9e9af014`, 2/2 passed after first focused remediation; runner 1.976s.
+
+Exact selectors/output/cleanup receipts are under `target/utility-usability-and-insights/evidence/m1-b-{focused,remediation}/`; cleanup/drain verified. Parent inspected complete source diff and whitespace. Only Dashboard dialog and this ledger changed. Source/Cargo lane explicitly returned; native observation pending M9.
