@@ -25,6 +25,30 @@ impl From<UtilityPresentation> for crate::settings::RememberedPresentation {
     }
 }
 
+/// Apply a saved preference at an owning tool's real open boundary.
+pub(super) fn restore_remembered_presentation(
+    ctx: &egui::Context,
+    key: crate::settings::UtilityToolKey,
+    host: &mut UtilityHostState,
+) {
+    if let Some(manager) = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+        && let Some(preference) = manager.preference(key)
+    {
+        host.transition(preference.into());
+    }
+}
+
+/// Record an accepted presentation, before the owner retires its live host.
+pub(super) fn remember_presentation(
+    ctx: &egui::Context,
+    key: crate::settings::UtilityToolKey,
+    presentation: UtilityPresentation,
+) {
+    if let Some(manager) = super::utility_presentation::UtilityPresentationManager::for_context(ctx) {
+        manager.remember(ctx, key, presentation.into());
+    }
+}
+
 /// Identifies a particular lifetime of a tool presentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct HostIdentity {

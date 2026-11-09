@@ -59,11 +59,13 @@ pub(crate) struct CalculationPadDialog {
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
     examples_host: UtilityHostState,
+    examples_presentation_prepared: bool,
     examples_epoch: u64,
     examples_owner: Option<DocumentIncarnation>,
     examples_search: String,
@@ -358,11 +360,13 @@ impl CalculationPadDialog {
             recovery_attempted: false,
             last_recovery_identity: None,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             deferred_source_focus: None,
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
             examples_host: UtilityHostState::docked(),
+            examples_presentation_prepared: false,
             examples_epoch: 0,
             examples_owner: None,
             examples_search: String::new(),
@@ -453,7 +457,27 @@ impl CalculationPadDialog {
 
     fn reset_host_to_docked(&mut self) {
         self.host_state.retire_to_docked();
+        self.presentation_prepared = false;
         self.deferred_source_focus = None;
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            super::utility_host::restore_remembered_presentation(
+                ctx,
+                calculation_pad_tool_key(),
+                &mut self.host_state,
+            );
+            self.presentation_prepared = true;
+        }
+        if self.examples_open && !self.examples_presentation_prepared {
+            super::utility_host::restore_remembered_presentation(
+                ctx,
+                reference_tool_key(),
+                &mut self.examples_host,
+            );
+            self.examples_presentation_prepared = true;
+        }
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
@@ -474,6 +498,7 @@ impl CalculationPadDialog {
             self.examples_epoch = self.examples_epoch.wrapping_add(1);
             self.examples_owner = self.examples_owner();
             self.examples_host.retire_to_docked();
+            self.examples_presentation_prepared = false;
             self.examples_open = true;
         }
     }
@@ -751,6 +776,7 @@ impl CalculationPadDialog {
             return;
         }
 
+        self.prepare_open_presentation(ctx);
         let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let mut host_effects = None;
         match self.host_state.presentation() {
@@ -1238,6 +1264,9 @@ impl CalculationPadDialog {
             || self.examples_host.presentation() == PadHost::Popout)
             && (!self.open || !self.examples_open || self.examples_owner != self.examples_owner())
         {
+            if !self.open && self.examples_open {
+                super::utility_host::remember_presentation(ctx, reference_tool_key(), self.examples_host.presentation());
+            }
             self.retire_examples(ctx);
         }
         if let Some(help) = help {
@@ -1261,6 +1290,7 @@ impl CalculationPadDialog {
             ctx.send_viewport_cmd_to(reference_viewport_id(), egui::ViewportCommand::Close);
         }
         self.examples_host.retire_to_docked();
+        self.examples_presentation_prepared = false;
         self.examples_open = false;
         self.examples_owner = None;
         self.examples_epoch = self.examples_epoch.wrapping_add(1);
@@ -1312,6 +1342,7 @@ impl CalculationPadDialog {
             self.examples_scroll = scroll.max(0.0);
         }
         if help.close {
+            super::utility_host::remember_presentation(ctx, reference_tool_key(), help.identity.host);
             self.retire_examples(ctx);
             ctx.request_repaint();
             return;
@@ -1320,6 +1351,7 @@ impl CalculationPadDialog {
         if let Some(requested) = help.host_request
             && self.examples_host.transition(requested)
         {
+            super::utility_host::remember_presentation(ctx, reference_tool_key(), requested);
             if requested == PadHost::Docked {
                 crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx,
@@ -1489,6 +1521,7 @@ impl CalculationPadDialog {
                 _ => None,
             };
             self.apply_intent(intent);
+            self.prepare_open_presentation(ctx);
             if show_root
                 && self.examples_open
                 && self.examples_host.presentation() == PadHost::Docked
@@ -1697,6 +1730,9 @@ impl CalculationPadDialog {
             }
         }
 
+        if !self.open {
+            super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), host.identity.host);
+        }
         let close_popout = host.identity.host == PadHost::Popout && !self.open;
         if close_popout {
             crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
@@ -1852,6 +1888,7 @@ impl CalculationPadDialog {
             return false;
         }
         self.host_state.transition(requested_host);
+        super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), requested_host);
         self.deferred_source_focus = None;
         match requested_host {
             PadHost::Docked => {
@@ -2948,6 +2985,113 @@ mod tests {
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+    #[test]
+    fn pad_and_reference_restore_accepted_presentations_and_ignore_cancelled_close() {
+        use super::super::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{RememberedPresentation, Settings, UtilityPresentations};
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+
+        let (_directory, root, mut dialog) = fixture();
+        let settings_dir = tempfile::tempdir().unwrap();
+        let path = settings_dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
+        dialog.test_replace_source("dirty = 7");
+        let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discarded.host_request = Some(super::PadHost::Popout);
+        complete_host_effects(&mut dialog, &ctx, discarded);
+        assert_eq!(manager.preference(super::calculation_pad_tool_key()), None);
+        let mut pop = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        pop.pass_accepted = true;
+        pop.host_request = Some(super::PadHost::Popout);
+        complete_host_effects(&mut dialog, &ctx, pop);
+        assert_eq!(
+            manager.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Popout)
+        );
+        dialog.open_examples();
+        dialog.prepare_open_presentation(&ctx);
+        let mut reference = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        reference.accepted = true;
+        reference.host_request = Some(super::PadHost::Popout);
+        complete_help_effects(&mut dialog, &ctx, reference, None);
+        let mut reference_close = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        reference_close.accepted = true;
+        reference_close.close = true;
+        complete_help_effects(&mut dialog, &ctx, reference_close, None);
+        dialog.open_examples();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.examples_host.presentation(), super::PadHost::Popout);
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        assert!(dialog.open);
+        let mut cancel = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        cancel.pass_accepted = true;
+        cancel.intent = Some(super::DialogIntent::Decision(TransitionDecision::Cancel));
+        complete_host_effects(&mut dialog, &ctx, cancel);
+        assert!(dialog.open);
+        assert_eq!(dialog.test_source(), Some("dirty = 7"));
+        assert_eq!(
+            manager.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Popout)
+        );
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        let mut discard = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discard.pass_accepted = true;
+        discard.intent = Some(super::DialogIntent::Decision(TransitionDecision::Discard));
+        complete_host_effects(&mut dialog, &ctx, discard);
+        assert!(!dialog.open);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let ctx2 = egui::Context::default();
+        let manager2 =
+            UtilityPresentationManager::new(path, workers2.clone(), saved.utility_presentations);
+        manager2.install_in_context(&ctx2);
+        let mut restarted = CalculationPadDialog::new(&root);
+        assert!(!restarted.open);
+        restarted.open();
+        restarted.prepare_open_presentation(&ctx2);
+        assert_eq!(restarted.host_state.presentation(), super::PadHost::Popout);
+        restarted.open_examples();
+        restarted.prepare_open_presentation(&ctx2);
+        assert_eq!(
+            restarted.examples_host.presentation(),
+            super::PadHost::Popout
+        );
+        let mut dock = restarted.empty_host_effects(egui::ViewportId::ROOT);
+        dock.pass_accepted = true;
+        dock.host_request = Some(super::PadHost::Docked);
+        complete_host_effects(&mut restarted, &ctx2, dock);
+        assert_eq!(
+            manager2.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Docked)
+        );
+        workers2.join_all();
     }
 
     #[test]

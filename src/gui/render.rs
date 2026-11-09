@@ -4836,6 +4836,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible();
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
+        self.calculation_pad_dialog.prepare_open_presentation(ctx);
         self.snippet_window_host.prepare_open(ctx, &self.snippet_dialog);
         self.paste_sequence_host.prepare_open(ctx, &self.paste_sequence_dialog);
         self.clipboard_history_host.prepare_open(ctx, &self.clipboard_dialog);
@@ -60872,13 +60873,26 @@ mod tests {
     fn studio_usability_query_focus_detached_tools_leave_root_query_usable() {
         use crate::gui::Panel;
 
+        #[inline(never)]
+        fn boxed_focus_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let mut app = Box::new(root_list_app_at(ctx, two_results(), workspace.root()));
+            configure_launcher_show_focus_test_app(&mut app, "root query");
+            (workspace, app)
+        }
+
         let screen = egui::vec2(1600.0, 1200.0);
         let query_id = egui::Id::new("query_input");
         for jump in [false, true] {
             for panel in [Panel::NotesDialog, Panel::MarkdownStudioDialog,
                 Panel::CalculationPadDialog, Panel::MkMacroDialog, Panel::DiagramStudioDialog] {
                 let ctx = egui::Context::default();
-                let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root query");
+                let (_workspace, mut app) = boxed_focus_app(&ctx);
                 app.set_jump_mode_enabled(jump);
                 app.focus_panel(panel);
                 match panel {

@@ -6022,6 +6022,7 @@ impl LauncherApp {
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
+            self.calculation_pad_dialog.prepare_open_presentation(&self.egui_ctx);
             if let Some(layer) = self.calculation_pad_dialog.host_layer_if_root() {
                 self.egui_ctx.move_to_top(layer);
             }

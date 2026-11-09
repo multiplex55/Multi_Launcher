@@ -25,7 +25,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
 | M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
 | M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
-| M3-B | H1/H2 custom hosts / accepted child origins | pending |
+| M3-B | H1/H2 custom hosts / accepted child origins | in_progress B1 existing custom hosts; B2 pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | pending |
 | M4-B | D4 toolbar / pinned inspector | pending |
 | M4-C | D3 owned-text endpoint captions | pending |
@@ -117,3 +117,26 @@ Separate fast-dev lib no-run compilation passed. Initial integration compile omi
 - `m3-a-host-retest`: after separate non-inlined app-lifetime helpers and a local fixture key binding correction, Inspector integration passed 1/1, run `180ce89c-8676-4ec4-9de9-6338dee676f4`, runner 3.452s. Actual retained/discarded pointer transitions, Popout restart restore, Docked close/reopen and absence of phantom root layer verified.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-a-{settings,host,host-retest}/`; cleanup/drain verified. Parent inspected final model/manager/writer/generic source changes and whitespace. Final changes only format newly added blocks; no redundant tests after whitespace-only finishing. Source/Cargo lanes returned. Native observation pending M9.
+
+M3-A checkpoint `fa1a0f340b9363a67da4f79a86d949fa50eeb862` pushed successfully; clean tree before M3-B1. Implementer owns existing-custom-host H2 integration only, with shared policy helpers, pre-modal preparation, accepted close/transition writes and preserved absent defaults/dirty-close decisions. Typed child origins and new ordinary companion adapters remain B2. Parent owns ledger/Git and will record per-family actual coverage at acceptance.
+
+## M3-B1a partial acceptance: Calculation Pad/reference
+
+First coherent custom-family checkpoint adds shared preference helpers and Pad/reference restoration before focus/root ownership. Accepted transitions and successful final closes persist the effective choice; cancelled dirty close retains draft/presentation. Absent preference remains Docked. Other custom families and all new child-origin routing remain pending, so global H1/H2 are not complete.
+
+Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` executions:
+
+- `m3-b1-pad`: 5/5 passed, run `660db660-1142-4f3b-86cf-df198800b770`, runner 1.920s. New preference/restart/cancel test plus retained reference, explicit host request, dirty write-conflict and native-host state regressions.
+- Existing detached-query matrix initially aborted `0xc00000fd` during app fixture construction. Two diagnostic runs localized overflow after context/workspace creation and entering `root_list_app_at`, before app/UI frames. Test-only non-inlined boxed fixture removes multi-layer by-value stack pressure; all original panels/Jump/query assertions retained and diagnostics removed.
+- `m3-b1-focus-fixture-retest`: full original query/focus matrix passed 1/1, run `3aa7e5d4-4986-4fb6-891b-69f52f2e3ecc`, runner 9.670s. No stack-size override or production constructor change.
+
+Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1-{pad,focus,focus-diagnostic,focus-diagnostic-2,focus-fixture-retest}/`; cleanup/drain verified. Parent inspected scoped diff/whitespace; no temporary diagnostics remain. Source/Cargo returned before partial-family commit; native observation pending M9.
+
+| Host family inventory | Current policy coverage |
+| --- | --- |
+| Nine generic hosts including Explorer Tabs / Inspector | M3-A implemented, representative integration verified |
+| Calculation Pad and reference | M3-B1a implemented / automated verified |
+| Notes list and note editors | pending B1 |
+| Other existing custom families enumerated above | pending B1 |
+| Accepted child-origin routes / ordinary companion adapters | pending B2 |
+| Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
