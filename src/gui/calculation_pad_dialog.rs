@@ -88,6 +88,10 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_inspect_rects: Vec<(usize, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
+    test_result_rows: Vec<(usize, egui::Rect)>,
+    #[cfg(test)]
+    test_select_comparison: Option<egui::Rect>,
+    #[cfg(test)]
     test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
@@ -382,6 +386,10 @@ impl CalculationPadDialog {
             test_line_copy_rects: Vec::new(),
             #[cfg(test)]
             test_inspect_rects: Vec::new(),
+            #[cfg(test)]
+            test_result_rows: Vec::new(),
+            #[cfg(test)]
+            test_select_comparison: None,
             #[cfg(test)]
             test_inspector_reopen: None,
             #[cfg(test)]
@@ -1865,10 +1873,14 @@ impl CalculationPadDialog {
         if self.session.current_id() != Some(intent.document_id) {
             return None;
         }
-        let evaluation = self.session.evaluation()?;
         let text = match intent.target {
-            ResultCopyTarget::All => copy_all_results(evaluation),
-            ResultCopyTarget::Line(line_id) => evaluation
+            ResultCopyTarget::All => {
+                let (source, evaluation) = self.session.evaluation_with_source()?;
+                copy_all_results(source, evaluation)
+            }
+            ResultCopyTarget::Line(line_id) => self
+                .session
+                .evaluation()?
                 .lines
                 .iter()
                 .find(|line| line.id == line_id)
@@ -2269,6 +2281,11 @@ impl CalculationPadDialog {
         self.test_line_copy_rects.clear();
         #[cfg(test)]
         self.test_inspect_rects.clear();
+        #[cfg(test)]
+        {
+            self.test_result_rows.clear();
+            self.test_select_comparison = None;
+        }
 
         egui::ScrollArea::vertical()
             .id_salt("calculation-pad-results")
@@ -2284,7 +2301,24 @@ impl CalculationPadDialog {
                 for line in &evaluation.lines {
                     ui.group(|ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.monospace(format!("r{}", line.line_index + 1));
+                            let row = ui
+                                .monospace(format!("r{}", line.line_index + 1))
+                                .interact(egui::Sense::click());
+                            if matches!(line.outcome, LineOutcome::Value(_)) {
+                                #[cfg(test)]
+                                self.test_result_rows.push((line.line_index, row.rect));
+                                row.context_menu(|ui| {
+                                    let select = ui.button("Select for comparison");
+                                    #[cfg(test)]
+                                    {
+                                        self.test_select_comparison = Some(select.rect);
+                                    }
+                                    if select.clicked() {
+                                        *inspector_selection = Some(line.id);
+                                        ui.close();
+                                    }
+                                });
+                            }
                             if let Some(name) = line.assignment_name.as_deref() {
                                 ui.strong(name);
                             }
@@ -2309,9 +2343,6 @@ impl CalculationPadDialog {
                                         .formatted_result()
                                         .unwrap_or_else(|| "unavailable".into());
                                     ui.label(&formatted);
-                                    if ui.small_button("Select for comparison").clicked() {
-                                        *inspector_selection = Some(line.id);
-                                    }
                                     if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
                                         let inspect = ui.small_button("Inspect bits…");
                                         #[cfg(test)]
@@ -2675,6 +2706,19 @@ impl CalculationPadDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_result_row(&self, index: usize) -> Option<egui::Rect> {
+        self.test_result_rows
+            .iter()
+            .find(|(row, _)| *row == index)
+            .map(|(_, rect)| *rect)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_select_comparison(&self) -> Option<egui::Rect> {
+        self.test_select_comparison
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_editor_has_focus(&self, ctx: &egui::Context) -> bool {
         self.test_editor_id
             .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)))
@@ -2726,33 +2770,56 @@ impl CalculationPadDialog {
     }
 }
 
-fn copy_all_results(evaluation: &crate::calculation_pad::SessionEvaluation) -> String {
-    let mut output = String::new();
-    if let Some(diagnostic) = &evaluation.diagnostic {
-        output.push_str(&format!("Document error: {diagnostic}\n"));
+fn copy_all_results(
+    source: &str,
+    evaluation: &crate::calculation_pad::SessionEvaluation,
+) -> String {
+    let mut labeled = String::new();
+    let mut unlabeled = String::new();
+    let mut results = Vec::new();
+    if evaluation.lines.is_empty() {
+        // Preserve source even if a document-level diagnostic prevented evaluation.
+        labeled.push_str(source);
+        unlabeled.push_str(source);
     }
-    for line in &evaluation.lines {
-        let number = line.line_index + 1;
-        let name = line
-            .assignment_name
-            .as_deref()
-            .map(|name| format!(" {name}"))
-            .unwrap_or_default();
-        match &line.outcome {
-            LineOutcome::Blank => output.push_str(&format!("r{number}{name}: (blank)\n")),
-            LineOutcome::Comment => output.push_str(&format!("r{number}{name}: (comment)\n")),
-            LineOutcome::Value(value) => output.push_str(&format!(
-                "r{number}{name} = {}\n",
+    for (index, line) in evaluation.lines.iter().enumerate() {
+        let Some(expression) = source.get(line.source_range.clone()) else {
+            continue;
+        };
+        let outcome = match &line.outcome {
+            LineOutcome::Blank | LineOutcome::Comment => None,
+            LineOutcome::Value(value) => Some(
                 value
                     .formatted_result()
-                    .unwrap_or_else(|| "unavailable".into())
-            )),
-            LineOutcome::Error(error) => {
-                output.push_str(&format!("r{number}{name}: error: {error}\n"));
-            }
+                    .unwrap_or_else(|| "unavailable".into()),
+            ),
+            LineOutcome::Error(error) => Some(format!("error: {error}")),
+        };
+        if let Some(outcome) = outcome {
+            let number = line.line_index + 1;
+            labeled.push_str(&format!("r{number} = {expression} = {outcome}"));
+            unlabeled.push_str(&format!("{expression} = {outcome}"));
+            results.push(format!("r{number} = {outcome}"));
+        } else {
+            labeled.push_str(expression);
+            unlabeled.push_str(expression);
+        }
+        let end = evaluation
+            .lines
+            .get(index + 1)
+            .map_or(source.len(), |next| next.source_range.start);
+        if let Some(separator) = source.get(line.source_range.end..end) {
+            labeled.push_str(separator);
+            unlabeled.push_str(separator);
         }
     }
-    output
+    if let Some(diagnostic) = &evaluation.diagnostic {
+        results.push(format!("Document error: {diagnostic}"));
+    }
+    format!(
+        "Source and results\n{labeled}\n\nResults only\n{}\n\nSource and results without row labels\n{unlabeled}",
+        results.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -2794,6 +2861,11 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().to_path_buf());
         let dialog = CalculationPadDialog::new(&root);
         (directory, root, dialog)
+    }
+
+    fn copy_all_session(session: &mut CalculationPadSession) -> String {
+        let (source, evaluation) = session.evaluation_with_source().unwrap();
+        copy_all_results(source, evaluation)
     }
 
     fn input(screen_size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
@@ -3498,8 +3570,8 @@ mod tests {
         else {
             panic!("Copy all returns a clipboard effect only after an explicit click");
         };
-        assert!(summary.find("r1 total = 5").unwrap() < summary.find("r2 = 20").unwrap());
-        assert!(summary.contains("r3: error:"));
+        assert!(summary.contains("r1 = total = 2 + 3 = 5\nr2 = r1 * 4 = 20\nr3 = 1 / 0 = error:"));
+        assert!(summary.contains("Results only\nr1 = 5\nr2 = 20\nr3 = error:"));
         assert_eq!(dialog.test_source(), Some("total = 2 + 3\nr1 * 4\n1 / 0"));
     }
 
@@ -3529,8 +3601,9 @@ mod tests {
         else {
             panic!("copy all effect")
         };
-        assert!(summary.contains("r1 v = [1, 2, 3]"));
+        assert!(summary.contains("r1 = v = [1, 2, 3] = [1, 2, 3]"));
         assert!(summary.contains("r2 = [2, 4, 6]"));
+        assert!(summary.contains("v * 2 = [2, 4, 6]"));
     }
 
     #[test]
@@ -3566,6 +3639,26 @@ mod tests {
         assert!(dialog.session.redo());
         assert_eq!(value(&mut dialog.session, 1), 15.0);
         assert_eq!(dialog.session.evaluation_count(), 4);
+        assert_eq!(dialog.test_source(), Some("amount = 5\namount * 3"));
+
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.edited_source = Some("amount = 7\namount * 3".into());
+        host.result_copy = Some(super::ResultCopyIntent {
+            host: host.identity,
+            viewport_id: egui::ViewportId::ROOT,
+            document_id,
+            target: super::ResultCopyTarget::All,
+        });
+        assert_eq!(
+            complete_host_effects(&mut dialog, &egui::Context::default(), host),
+            vec![CalculationPadDialogEffect::CopyText(
+                "Source and results\nr1 = amount = 7 = 7\nr2 = amount * 3 = 21\n\nResults only\nr1 = 7\nr2 = 21\n\nSource and results without row labels\namount = 7 = 7\namount * 3 = 21".into()
+            )]
+        );
+        assert_eq!(dialog.test_source(), Some("amount = 7\namount * 3"));
+        assert_eq!(dialog.session.evaluation_count(), 5);
+        assert!(dialog.session.undo());
         assert_eq!(dialog.test_source(), Some("amount = 5\namount * 3"));
     }
 
@@ -4018,7 +4111,7 @@ mod tests {
             dialog.session.can_redo(),
             dialog.session.pending_transition(),
             dialog.session.evaluation_count(),
-            copy_all_results(dialog.session.evaluation().unwrap()),
+            copy_all_session(&mut dialog.session),
         );
         let popout_button = dialog
             .test_host_button_rect
@@ -4061,7 +4154,7 @@ mod tests {
             dialog.session.can_redo(),
             dialog.session.pending_transition(),
             dialog.session.evaluation_count(),
-            copy_all_results(dialog.session.evaluation().unwrap()),
+            copy_all_session(&mut dialog.session),
         );
         assert_eq!(state_after, state_before);
     }
@@ -4504,10 +4597,20 @@ mod tests {
         let mut evaluation = crate::calculation_pad::CalculationPadSession::with_store(
             PadDocumentStore::new(&AppDataRoot::from_path(Path::new("unused-root"))),
         );
-        evaluation.replace_source("# note\n3\nr2 + 1").unwrap();
-        let summary = copy_all_results(evaluation.evaluation().unwrap());
-        assert!(summary.contains("r1: (comment)"));
-        assert!(summary.contains("r2 = 3"));
-        assert!(summary.contains("r3 = 4"));
+        let source = "{雪} = 3\r\n# note\r\n\r\nr1 * 4\r\n1 / 0\r\n";
+        evaluation.replace_source(source).unwrap();
+        let summary = copy_all_session(&mut evaluation);
+        let error = "division or remainder by zero, or non-finite arithmetic result";
+        assert_eq!(
+            summary,
+            format!(
+                "Source and results\nr1 = {{雪}} = 3 = 3\r\n# note\r\n\r\nr4 = r1 * 4 = 12\r\nr5 = 1 / 0 = error: {error}\r\n\n\nResults only\nr1 = 3\nr4 = 12\nr5 = error: {error}\n\nSource and results without row labels\n{{雪}} = 3 = 3\r\n# note\r\n\r\nr1 * 4 = 12\r\n1 / 0 = error: {error}\r\n"
+            )
+        );
+        evaluation.replace_source("").unwrap();
+        assert_eq!(
+            copy_all_session(&mut evaluation),
+            "Source and results\n\n\nResults only\n\n\nSource and results without row labels\n"
+        );
     }
 }

@@ -134,11 +134,21 @@ impl DiagramTemplate {
         }
     }
 
-    /// Build the source session without pretending generic source is a native
-    /// editable graph or synchronously invoking the generic renderer.
+    /// Build a fresh template with its captured source color envelope.
+    pub fn create_styled_session(self, style: &super::style::MermaidStyle) -> Result<DiagramSession, DiagramTemplateError> {
+        self.create_session_with_style(Some(style))
+    }
+
     pub fn create_session(self) -> Result<DiagramSession, DiagramTemplateError> {
-        let session = DiagramSession::from_fresh_source(self.source())
-            .map_err(DiagramTemplateError::Session)?;
+        self.create_session_with_style(None)
+    }
+
+    pub fn create_session_with_style(self, style: Option<&super::style::MermaidStyle>) -> Result<DiagramSession, DiagramTemplateError> {
+        let source = match style {
+            Some(style) => super::style::edit_mermaid_style(self.source(), style).map_err(|_| DiagramTemplateError::InvalidDefinition(self))?,
+            None => self.source().to_owned(),
+        };
+        let session = DiagramSession::from_fresh_source(source).map_err(DiagramTemplateError::Session)?;
         let valid_for_capability = match self.capability() {
             DiagramTemplateCapability::NativeGraph => {
                 session.status().preview == PreviewState::Current
@@ -308,6 +318,13 @@ mod tests {
             DiagramTemplate::ALL,
             expected.map(|(template, _, _)| template)
         );
+        let text_uses_color = |svg: &str, label: &str, color: &str| {
+            svg.match_indices(label).any(|(offset, _)| {
+                let before = &svg[..offset];
+                before.rfind("<text").and_then(|start| before[start..].split('>').next())
+                    .is_some_and(|element| element.contains(&format!("fill=\"{color}\"")))
+            })
+        };
         for (template, expected_family, label) in expected {
             let output =
                 render_mermaid_preview(template.source(), raster_size).unwrap_or_else(|error| {
@@ -321,6 +338,71 @@ mod tests {
             );
             assert!(output.natural_width.is_finite() && output.natural_width > 0.0);
             assert!(output.natural_height.is_finite() && output.natural_height > 0.0);
+            let colors = "%%{init: {\"themeVariables\":{\"primaryColor\":\"#123456\",\"primaryBorderColor\":\"#345678\",\"primaryTextColor\":\"#f1f2f3\",\"lineColor\":\"#789abc\",\"background\":\"#09111a\",\"secondaryColor\":\"#234567\",\"tertiaryColor\":\"#456789\",\"timelineEventColors\":[\"#b10001\",\"#b20002\"],\"pieColors\":[\"#c10001\",\"#c20002\"],\"gitColors\":[\"#d10001\",\"#d20002\"],\"gitBranchLabelColors\":[\"#e10001\",\"#e20002\"]}}}%%\n";
+            let styled_source = format!("{colors}{}", template.source());
+            let styled = render_mermaid_preview(&styled_source, raster_size)
+                .unwrap_or_else(|error| panic!("{} styled template failed: {error}", template.name()));
+            assert_eq!(styled.family, expected_family);
+            let expected_fill = match template {
+                DiagramTemplate::EntityRelationship => "#234567",
+                DiagramTemplate::Gantt => "#345678",
+                DiagramTemplate::Timeline => "#b10001",
+                DiagramTemplate::Pie => "#c10001",
+                DiagramTemplate::GitGraph => "#d10001",
+                _ => "#123456",
+            };
+            let attribute = format!("fill=\"{expected_fill}\"");
+            if template != DiagramTemplate::Gantt {
+                assert!(styled.svg.split('<').any(|tag| {
+                    ["rect ", "path ", "circle ", "ellipse ", "polygon "].iter().any(|shape| tag.starts_with(shape))
+                        && tag.split('>').next().is_some_and(|element| element.contains(&attribute))
+                }), "{} has no shape filled {expected_fill}", template.name());
+            } else {
+                let task_fills = |svg: &str| svg.split('<').filter(|tag| tag.starts_with("rect ") && tag.contains("rx=\"3\"") && tag.contains("stroke-width=\"1\""))
+                    .filter_map(|tag| tag.split("fill=\"").nth(1)?.split('\"').next().map(str::to_owned)).collect::<Vec<_>>();
+                let original = task_fills(&output.svg);
+                let changed = task_fills(&styled.svg);
+                assert!(!original.is_empty() && original != changed, "sectioned Gantt task fills must change");
+                assert!(styled.svg.contains("stroke=\"#345678\""));
+            }
+            let dark_source = format!("%%{{init: {{\"theme\":\"dark\"}}}}%%\n{}", template.source());
+            let session = template.create_styled_session(&crate::diagram::MermaidStyle { theme: Some(crate::diagram::MermaidTheme::Dark), ..Default::default() }).unwrap();
+            assert_eq!(session.draft(), dark_source);
+            let dark = render_mermaid_preview(session.draft(), raster_size).unwrap();
+            let preset_fill = match template {
+                DiagramTemplate::EntityRelationship => "#302f3d",
+                DiagramTemplate::Pie => "#0b0000",
+                DiagramTemplate::GitGraph => "#797d7d",
+                _ => "#1f2020",
+            };
+            if template == DiagramTemplate::Gantt {
+                let task_fills = |svg: &str| svg.split('<').filter(|tag| tag.starts_with("rect ") && tag.contains("rx=\"3\"") && tag.contains("stroke-width=\"1\""))
+                    .filter_map(|tag| tag.split("fill=\"").nth(1)?.split('\"').next().map(str::to_owned)).collect::<Vec<_>>();
+                assert_ne!(task_fills(&output.svg), task_fills(&dark.svg), "dark Gantt task fill");
+            } else {
+                let attribute = format!("fill=\"{preset_fill}\"");
+                assert!(dark.svg.to_ascii_lowercase().split('<').any(|tag| {
+                    ["rect ", "path ", "circle ", "ellipse ", "polygon "].iter().any(|shape| tag.starts_with(shape)) && tag.split('>').next().is_some_and(|element| element.contains(&attribute))
+                }), "{} dark preset lacks shape fill {preset_fill}", template.name());
+            }
+            if template == DiagramTemplate::GitGraph {
+                assert!(styled.svg.contains("class=\"commit-arrows\""));
+                assert!(styled.svg.contains("stroke=\"#d10001\"") || styled.svg.contains("stroke=\"#d20002\""));
+                assert!(text_uses_color(&styled.svg, "main", "#e10001"));
+            }
+            if template == DiagramTemplate::Pie {
+                assert!(styled.svg.split('<').any(|tag| tag.starts_with("path ") && tag.contains("fill=\"#c10001\"")), "pie slice fill");
+                assert!(styled.svg.split('<').any(|tag| tag.starts_with("rect ") && tag.contains("fill=\"#c10001\"")), "pie legend marker fill");
+                assert!(styled.svg.contains("fill=\"#c20002\""));
+                assert!(text_uses_color(&styled.svg, "Housing", "#f1f2f3"));
+            }
+            if template == DiagramTemplate::Sequence {
+                assert!(styled.svg.contains("stroke=\"#345678\"") && styled.svg.contains("User"));
+            }
+            if template == DiagramTemplate::Timeline {
+                assert!(styled.svg.contains("fill=\"#b20002\""));
+                assert!(styled.raster.rgba.chunks_exact(4).any(|p| p[..3] == [0xb1, 0, 1]));
+            }
             assert_eq!((output.raster.width, output.raster.height), (640, 420));
             assert_eq!(output.raster.rgba.len(), 640 * 420 * 4);
             let visible_pixels = output

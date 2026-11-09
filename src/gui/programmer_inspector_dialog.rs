@@ -23,12 +23,13 @@ struct InspectorDraft {
     control_dirty: bool,
     feedback: Option<String>,
     generation: u64,
-    comparison_left: String,
-    comparison_right: String,
-    left_result: Option<crate::calculation_pad::ComparisonResultRef>,
-    right_result: Option<crate::calculation_pad::ComparisonResultRef>,
+    comparison_left: ComparisonSlot,
+    comparison_right: ComparisonSlot,
     comparison_result: Option<Arc<ComparisonResult>>,
     comparison_selection_generation: Option<u64>,
+    formatting_open: bool,
+    labels_open: bool,
+    comparison_open: bool,
 }
 impl Default for InspectorDraft {
     fn default() -> Self {
@@ -43,17 +44,25 @@ impl Default for InspectorDraft {
             control_dirty: false,
             feedback: None,
             generation: 0,
-            comparison_left: String::new(),
-            comparison_right: String::new(),
-            left_result: None,
-            right_result: None,
+            comparison_left: ComparisonSlot::Expression(String::new()),
+            comparison_right: ComparisonSlot::Expression(String::new()),
             comparison_result: None,
             comparison_selection_generation: None,
+            formatting_open: false,
+            labels_open: false,
+            comparison_open: true,
         }
     }
 }
 
 impl InspectorDraft {
+    fn comparison_request(&self) -> ComparisonRequest {
+        ComparisonRequest {
+            left: self.comparison_left.clone(),
+            right: self.comparison_right.clone(),
+        }
+    }
+
     fn target_mode(&self) -> IntegerMode {
         if self.target_signed {
             IntegerMode::signed(self.target_width)
@@ -89,6 +98,27 @@ impl InspectorDraft {
     }
 }
 
+fn comparison_input_text(
+    input: &ComparisonSlot,
+    context: Option<&crate::calculation_pad::ComparisonContext>,
+) -> String {
+    match input {
+        ComparisonSlot::Expression(expression) => expression.clone(),
+        ComparisonSlot::Result(selected) => context
+            .filter(|context| {
+                context.incarnation == selected.incarnation
+                    && context.document_id == selected.document_id
+            })
+            .and_then(|context| {
+                context.rows.iter().position(|row| row.id == selected.line_id)
+            })
+            .map_or_else(
+                || "Unavailable selected result".to_owned(),
+                |index| format!("r{}", index + 1),
+            ),
+    }
+}
+
 fn bit_rows(width: u32, columns: usize, grouping: u32) -> Vec<Vec<u32>> {
     let indices = (0..width).rev().collect::<Vec<_>>();
     let columns = columns.max(1);
@@ -99,6 +129,27 @@ fn bit_rows(width: u32, columns: usize, grouping: u32) -> Vec<Vec<u32>> {
         columns
     };
     indices.chunks(row_size).map(<[u32]>::to_vec).collect()
+}
+
+fn bit_columns(available: f32, cell: f32, spacing: f32, group_gap: f32, grouping: u32) -> usize {
+    let group = grouping.max(1) as usize;
+    (1_usize..=16)
+        .take_while(|&count| {
+            count as f32 * cell
+                + count.saturating_sub(1) as f32 * spacing
+                + (count.saturating_sub(1) / group) as f32 * group_gap
+                <= available
+        })
+        .last()
+        .unwrap_or(1)
+}
+
+fn section_toggle(ui: &mut egui::Ui, title: &str, open: &mut bool) -> egui::Response {
+    let response = ui.button(format!("{} {title}", if *open { "▾" } else { "▸" }));
+    if response.clicked() {
+        *open = !*open;
+    }
+    response
 }
 
 fn annotation_fragment(
@@ -248,6 +299,27 @@ impl ProgrammerInspectorDialog {
         self.draft.comparison_result.as_deref()
     }
     #[cfg(test)]
+    pub(super) fn test_comparison_input(&self, left: bool) -> String {
+        let input = if left {
+            &self.draft.comparison_left
+        } else {
+            &self.draft.comparison_right
+        };
+        comparison_input_text(
+            input,
+            self.published.as_ref().and_then(|context| context.comparison.as_deref()),
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn test_section_open(&self, name: &str) -> bool {
+        match name {
+            "section-formatting" => self.draft.formatting_open,
+            "section-labels" => self.draft.labels_open,
+            "section-comparison" => self.draft.comparison_open,
+            _ => panic!("unknown Inspector section"),
+        }
+    }
+    #[cfg(test)]
     pub(super) fn test_preference_requests(&self) -> usize {
         self.test_preference_requests
     }
@@ -324,17 +396,7 @@ impl ProgrammerInspectorDialog {
         if actions.compare
             && let Some(context) = current.comparison.as_ref()
         {
-            let slot = |selected: Option<crate::calculation_pad::ComparisonResultRef>,
-                        expression: &String| {
-                selected.map_or_else(
-                    || ComparisonSlot::Expression(expression.clone()),
-                    ComparisonSlot::Result,
-                )
-            };
-            let request = ComparisonRequest {
-                left: slot(self.draft.left_result, &self.draft.comparison_left),
-                right: slot(self.draft.right_result, &self.draft.comparison_right),
-            };
+            let request = self.draft.comparison_request();
             self.draft.comparison_result = Some(Arc::new(context.compare(request)));
             self.draft.comparison_selection_generation = Some(current.selection_generation);
         }
@@ -528,6 +590,7 @@ impl ProgrammerInspectorDialog {
                 let active_mode = draft.model.value().mode();
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!("Working mode: {}", active_mode.type_name()));
+                    ui.monospace(format!("Value: {}", draft.model.value().formatted_decimal()));
                     let pending = draft.target_mode() != active_mode;
                     if pending {
                         ui.colored_label(
@@ -579,57 +642,100 @@ impl ProgrammerInspectorDialog {
                     .id_salt("inspector-bits")
                     .max_height(220.0)
                     .show(ui, |ui| {
-                        const GROUP_GAP: f32 = 6.0;
+                        const GROUP_GAP: f32 = 8.0;
+                        const CELL_GAP: f32 = 1.0;
                         let available = ui.available_width().max(1.0);
-                        let cell_width = available.min(58.0);
-                        let columns = ((available + ui.spacing().item_spacing.x)
-                            / (cell_width + 2.0 * ui.spacing().item_spacing.x + GROUP_GAP))
-                            .floor()
-                            .max(1.0) as usize;
+                        let font = egui::TextStyle::Monospace.resolve(ui.style());
+                        let glyph_width = ui
+                            .painter()
+                            .layout_no_wrap("0".into(), font.clone(), ui.visuals().text_color())
+                            .size()
+                            .x;
+                        let cell_width = (glyph_width + 2.0 * ui.spacing().button_padding.x)
+                            .max(20.0)
+                            .min(available);
+                        let columns = bit_columns(
+                            available,
+                            cell_width,
+                            CELL_GAP,
+                            GROUP_GAP,
+                            draft.bit_grouping,
+                        );
                         let width = model.value().mode().width().bits();
                         for row in bit_rows(width, columns, draft.bit_grouping) {
                             let mut cells = Vec::with_capacity(row.len());
                             ui.horizontal(|ui| {
-                                for (position, index) in row.iter().copied().enumerate() {
-                                    if position > 0 && (index + 1) % draft.bit_grouping == 0 {
-                                        ui.add_space(GROUP_GAP);
+                                ui.spacing_mut().item_spacing.x = GROUP_GAP;
+                                let mut start = 0;
+                                while start < row.len() {
+                                    let mut end = start + 1;
+                                    while end < row.len() && (row[end] + 1) % draft.bit_grouping != 0 {
+                                        end += 1;
                                     }
-                                    let bit = model.bit(index).unwrap_or(false);
-                                    let response = ui
-                                        .push_id(("inspector-bit", index), |ui| {
-                                            ui.add_sized(
-                                                [cell_width, 23.0],
-                                                egui::Button::selectable(
-                                                    bit,
-                                                    format!("{index}: {}", u8::from(bit)),
-                                                ),
-                                            )
-                                        })
-                                        .inner;
-                                    #[cfg(test)]
-                                    test_controls.push((
-                                        format!("bit-{index}"),
-                                        response.rect,
-                                        ui.clip_rect(),
-                                        response.enabled(),
-                                    ));
-                                    cells.push((index, response.rect));
-                                    if response.clicked() {
-                                        #[cfg(test)]
-                                        {
-                                            test_clicked_bit = Some(index);
-                                        }
-                                        let _ = model.toggle_bit(index);
-                                        changed = true;
-                                    }
+                                    let group = &row[start..end];
+                                    let group_width = group.len() as f32 * cell_width
+                                        + group.len().saturating_sub(1) as f32 * CELL_GAP;
+                                    ui.vertical(|ui| {
+                                        let first = group[0];
+                                        let last = group[group.len() - 1];
+                                        let label = if first == last {
+                                            first.to_string()
+                                        } else {
+                                            format!("{first}–{last}")
+                                        };
+                                        let label_font = egui::FontId::monospace((font.size * 0.65).max(8.0));
+                                        ui.add_sized(
+                                            [group_width, label_font.size + 2.0],
+                                            egui::Label::new(egui::RichText::new(label).font(label_font))
+                                                .truncate(),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = CELL_GAP;
+                                            for &index in group {
+                                                let bit = model.bit(index).unwrap_or(false);
+                                                let response = ui
+                                                    .push_id(("inspector-bit", index), |ui| {
+                                                        ui.add_sized(
+                                                            [
+                                                                cell_width,
+                                                                font.size + 2.0 * ui.spacing().button_padding.y,
+                                                            ],
+                                                            egui::Button::selectable(
+                                                                bit,
+                                                                egui::RichText::new(u8::from(bit).to_string())
+                                                                    .font(font.clone()),
+                                                            ),
+                                                        )
+                                                    })
+                                                    .inner
+                                                    .on_hover_text(format!("Bit {index}"));
+                                                #[cfg(test)]
+                                                test_controls.push((
+                                                    format!("bit-{index}"),
+                                                    response.rect,
+                                                    ui.clip_rect(),
+                                                    response.enabled(),
+                                                ));
+                                                cells.push((index, response.rect));
+                                                if response.clicked() {
+                                                    #[cfg(test)]
+                                                    {
+                                                        test_clicked_bit = Some(index);
+                                                    }
+                                                    let _ = model.toggle_bit(index);
+                                                    changed = true;
+                                                }
+                                            }
+                                        });
+                                    });
+                                    start = end;
                                 }
                             });
                             for (lane, annotation) in model.annotations().iter().enumerate() {
                                 if !model.annotation_is_valid(annotation) {
                                     continue;
                                 }
-                                let Some(span) = annotation_fragment(&cells, &annotation.range)
-                                else {
+                                let Some(span) = annotation_fragment(&cells, &annotation.range) else {
                                     continue;
                                 };
                                 let color = [
@@ -668,10 +774,7 @@ impl ProgrammerInspectorDialog {
                                 #[cfg(test)]
                                 test_controls.push((
                                     "annotation-label".into(),
-                                    egui::Rect::from_min_size(
-                                        egui::pos2(label_x, y + 3.0),
-                                        galley.size(),
-                                    ),
+                                    egui::Rect::from_min_size(egui::pos2(label_x, y + 3.0), galley.size()),
                                     rect,
                                     true,
                                 ));
@@ -679,6 +782,7 @@ impl ProgrammerInspectorDialog {
                             }
                         }
                     });
+
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("NOT").clicked() {
                         model.bit_not();
@@ -706,323 +810,339 @@ impl ProgrammerInspectorDialog {
                     }
                     ui.label(format!("Set bits: {}", model.popcount()));
                 });
-                let mut options = model.format_options();
-                ui.horizontal_wrapped(|ui| {
-                    let prefix = ui.checkbox(&mut options.prefix, "Prefix");
-                    #[cfg(test)]
-                    test_controls.push((
-                        "prefix".into(),
-                        prefix.rect,
-                        ui.clip_rect(),
-                        prefix.enabled(),
-                    ));
-                    if prefix.changed() {
-                        changed = true;
-                        preferences_changed = true;
-                    }
-                    if ui
-                        .checkbox(&mut options.pad_to_width, "Pad to width")
-                        .changed()
-                    {
-                        changed = true;
-                        preferences_changed = true;
-                    }
-                    ui.label("Group digits:");
-                    if ui
-                        .add(egui::DragValue::new(&mut options.grouping).range(0..=128))
-                        .changed()
-                    {
-                        changed = true;
-                        preferences_changed = true;
-                    }
-                    if ui.button("Plain digits").clicked() {
-                        options = Default::default();
-                        changed = true;
-                        preferences_changed = true;
-                    }
-                });
-                let _ = model.set_format_options(options);
-                if self.preference_error.is_some() && ui.button("Retry preferences").clicked() {
-                    preferences_changed = true;
-                }
-                for (title, base) in [
-                    ("Binary", NumericBase::Binary),
-                    ("Octal", NumericBase::Octal),
-                    ("Decimal", NumericBase::Decimal),
-                    ("Hexadecimal", NumericBase::Hexadecimal),
-                ] {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(title);
-                        let text = model.format(base);
-                        let _value = ui.monospace(&text);
-                        #[cfg(test)]
-                        test_controls.push((
-                            format!("value-{title}"),
-                            _value.rect,
-                            ui.clip_rect(),
-                            _value.enabled(),
-                        ));
-                        let response = ui.small_button("Copy");
-                        #[cfg(test)]
-                        test_controls.push((
-                            format!("copy-{title}"),
-                            response.rect,
-                            ui.clip_rect(),
-                            response.enabled(),
-                        ));
-                        if response.clicked() {
-                            copy = Some(text);
-                        }
-                    });
-                }
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Bit range [start, end):");
-                    let label_start = ui.add(
-                        egui::TextEdit::singleline(&mut draft.label_start).desired_width(42.0),
-                    );
-                    #[cfg(test)]
-                    test_controls.push((
-                        "label-start".into(),
-                        label_start.rect,
-                        ui.clip_rect(),
-                        label_start.enabled(),
-                    ));
-                    if label_start.changed() {
-                        changed = true;
-                        draft.control_dirty = true;
-                    }
-                    let label_end = ui
-                        .add(egui::TextEdit::singleline(&mut draft.label_end).desired_width(42.0));
-                    #[cfg(test)]
-                    test_controls.push((
-                        "label-end".into(),
-                        label_end.rect,
-                        ui.clip_rect(),
-                        label_end.enabled(),
-                    ));
-                    if label_end.changed() {
-                        changed = true;
-                        draft.control_dirty = true;
-                    }
-                    let label_text = ui.add(
-                        egui::TextEdit::singleline(&mut draft.label_text).desired_width(120.0),
-                    );
-                    #[cfg(test)]
-                    test_controls.push((
-                        "label-text".into(),
-                        label_text.rect,
-                        ui.clip_rect(),
-                        label_text.enabled(),
-                    ));
-                    if label_text.changed() {
-                        changed = true;
-                        draft.control_dirty = true;
-                    }
-                    let add_label = ui.button("Add label");
-                    #[cfg(test)]
-                    test_controls.push((
-                        "add-label".into(),
-                        add_label.rect,
-                        ui.clip_rect(),
-                        add_label.enabled(),
-                    ));
-                    if add_label.clicked() {
-                        match (
-                            draft.label_start.parse::<u32>(),
-                            draft.label_end.parse::<u32>(),
-                        ) {
-                            (Ok(a), Ok(b)) => {
-                                match model.set_annotation(a..b, draft.label_text.clone()) {
-                                    Ok(()) => changed = true,
-                                    Err(error) => {
-                                        draft.feedback = Some(format!("{error:?}"));
-                                        changed = true;
-                                    }
-                                }
-                            }
-                            _ => {
-                                draft.feedback = Some("Enter a valid bit range.".into());
-                                changed = true;
-                            }
-                        }
-                    }
-                });
-                for annotation in model.annotations().to_vec() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "{}{}",
-                            annotation_label(&annotation),
-                            if model.annotation_is_valid(&annotation) {
-                                ""
-                            } else {
-                                " (outside current width)"
-                            }
-                        ));
-                        if ui.small_button("Remove").clicked() {
-                            model.remove_annotation(annotation.range);
-                            changed = true;
-                        }
-                    });
-                }
-                ui.separator();
-                ui.strong("Compare two values");
-                for (title, expression, selected) in [
-                    ("Left", &mut draft.comparison_left, &mut draft.left_result),
-                    (
-                        "Right",
-                        &mut draft.comparison_right,
-                        &mut draft.right_result,
-                    ),
-                ] {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(title);
-                        let field = ui.text_edit_singleline(expression);
-                        #[cfg(test)]
-                        test_controls.push((
-                            format!("comparison-{title}"),
-                            field.rect,
-                            ui.clip_rect(),
-                            field.enabled(),
-                        ));
-                        if field.changed() {
-                            if expression.len() > crate::calculation_pad::MAX_EXPRESSION_BYTES {
-                                let mut end = crate::calculation_pad::MAX_EXPRESSION_BYTES;
-                                while !expression.is_char_boundary(end) {
-                                    end -= 1;
-                                }
-                                expression.truncate(end);
-                                draft.feedback =
-                                    Some("Comparison input was limited to 2048 bytes.".into());
-                            }
-                            *selected = None;
-                            changed = true;
-                        }
-                        let select = ui.add_enabled(
-                            runtime.context.selected_line.is_some()
-                                && runtime.context.comparison.is_some(),
-                            egui::Button::new("Use selected result"),
-                        );
-                        #[cfg(test)]
-                        test_controls.push((
-                            format!("select-{title}"),
-                            select.rect,
-                            ui.clip_rect(),
-                            select.enabled(),
-                        ));
-                        if select.clicked() {
-                            *selected = runtime
-                                .context
-                                .selected_line
-                                .zip(runtime.context.comparison.as_ref())
-                                .map(|(line_id, context)| {
-                                    crate::calculation_pad::ComparisonResultRef {
-                                        incarnation: context.incarnation,
-                                        document_id: context.document_id,
-                                        line_id,
-                                    }
-                                });
-                            changed = true;
-                        }
-                        if let Some(line) = selected {
-                            ui.weak(format!("Selected line ID {}", line.line_id.get()));
-                        }
-                    });
-                }
-                let comparison_button = ui.add_enabled(
-                    runtime.context.comparison.is_some(),
-                    egui::Button::new("Compare / Refresh"),
-                );
+                let formatting = section_toggle(ui, "Formatting", &mut draft.formatting_open);
                 #[cfg(test)]
                 test_controls.push((
-                    "compare".into(),
-                    comparison_button.rect,
+                    "section-formatting".into(),
+                    formatting.rect,
                     ui.clip_rect(),
-                    comparison_button.enabled(),
+                    formatting.enabled(),
                 ));
-                if comparison_button.clicked() {
-                    compare = true;
+                if formatting.clicked() {
+                    changed = true;
                 }
-                if let Some(result) = &draft.comparison_result {
-                    let current_request = ComparisonRequest {
-                        left: draft.left_result.map_or_else(
-                            || ComparisonSlot::Expression(draft.comparison_left.clone()),
-                            ComparisonSlot::Result,
-                        ),
-                        right: draft.right_result.map_or_else(
-                            || ComparisonSlot::Expression(draft.comparison_right.clone()),
-                            ComparisonSlot::Result,
-                        ),
-                    };
-                    let current_context =
-                        runtime.context.comparison.as_ref().is_some_and(|context| {
-                            context.incarnation == result.context.incarnation
-                                && context.document_id == result.context.document_id
-                                && context.revision == result.context.revision
-                        });
-                    if !current_context
-                        || result.request != current_request
-                        || draft.comparison_selection_generation
-                            != Some(runtime.context.selection_generation)
-                    {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            "Comparison is stale; refresh to use the current Pad and inputs.",
-                        );
+                if draft.formatting_open {
+                    let mut options = model.format_options();
+                    ui.horizontal_wrapped(|ui| {
+                        let prefix = ui.checkbox(&mut options.prefix, "Prefix");
+                        #[cfg(test)]
+                        test_controls.push((
+                            "prefix".into(),
+                            prefix.rect,
+                            ui.clip_rect(),
+                            prefix.enabled(),
+                        ));
+                        if prefix.changed() {
+                            changed = true;
+                            preferences_changed = true;
+                        }
+                        if ui
+                            .checkbox(&mut options.pad_to_width, "Pad to width")
+                            .changed()
+                        {
+                            changed = true;
+                            preferences_changed = true;
+                        }
+                        ui.label("Group digits:");
+                        if ui
+                            .add(egui::DragValue::new(&mut options.grouping).range(0..=128))
+                            .changed()
+                        {
+                            changed = true;
+                            preferences_changed = true;
+                        }
+                        if ui.button("Plain digits").clicked() {
+                            options = Default::default();
+                            changed = true;
+                            preferences_changed = true;
+                        }
+                    });
+                    let _ = model.set_format_options(options);
+                    if self.preference_error.is_some() && ui.button("Retry preferences").clicked() {
+                        preferences_changed = true;
                     }
-                    for (name, side) in [("Left", &result.left), ("Right", &result.right)] {
+                    for (title, base) in [
+                        ("Binary", NumericBase::Binary),
+                        ("Octal", NumericBase::Octal),
+                        ("Decimal", NumericBase::Decimal),
+                        ("Hexadecimal", NumericBase::Hexadecimal),
+                    ] {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("{name} ({})", side.type_label()));
-                            let formatted = side.formatted();
-                            ui.monospace(&formatted);
-                            if side
-                                .value
-                                .as_ref()
-                                .is_ok_and(crate::calculation_pad::CalculationValue::is_approximate)
-                            {
-                                ui.weak("approx.");
-                            }
-                            let response = ui.small_button("Copy result");
+                            ui.label(title);
+                            let text = model.format(base);
+                            let _value = ui.monospace(&text);
                             #[cfg(test)]
                             test_controls.push((
-                                format!("comparison-copy-{name}"),
+                                format!("value-{title}"),
+                                _value.rect,
+                                ui.clip_rect(),
+                                _value.enabled(),
+                            ));
+                            let response = ui.small_button("Copy");
+                            #[cfg(test)]
+                            test_controls.push((
+                                format!("copy-{title}"),
                                 response.rect,
                                 ui.clip_rect(),
                                 response.enabled(),
                             ));
                             if response.clicked() {
-                                copy = Some(formatted);
+                                copy = Some(text);
                             }
                         });
-                        let representation = match &side.value {
-                            Ok(crate::calculation_pad::CalculationValue::Integer(value)) => {
-                                Some((value.bit_pattern(), value.formatted_decimal()))
-                            }
-                            Ok(crate::calculation_pad::CalculationValue::ExactBase {
-                                value,
-                                ..
-                            }) => Some((*value, value.to_string())),
-                            _ => None,
-                        };
-                        if let Some((bits, decimal)) = representation {
-                            ui.monospace(format!(
-                                "dec {decimal}  bin {}  oct {}  hex {}",
-                                crate::common::numeric_base::format_unsigned(
-                                    bits,
-                                    NumericBase::Binary
-                                ),
-                                crate::common::numeric_base::format_unsigned(
-                                    bits,
-                                    NumericBase::Octal
-                                ),
-                                crate::common::numeric_base::format_unsigned(
-                                    bits,
-                                    NumericBase::Hexadecimal
-                                )
-                            ));
-                        }
                     }
-                    ui.label(result.relation.description());
                 }
+                let labels = section_toggle(ui, "Bit labels", &mut draft.labels_open);
+                #[cfg(test)]
+                test_controls.push((
+                    "section-labels".into(),
+                    labels.rect,
+                    ui.clip_rect(),
+                    labels.enabled(),
+                ));
+                if labels.clicked() {
+                    changed = true;
+                }
+                if draft.labels_open {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Bit range [start, end):");
+                        let label_start =
+                            ui.add(egui::TextEdit::singleline(&mut draft.label_start).desired_width(42.0));
+                        #[cfg(test)]
+                        test_controls.push((
+                            "label-start".into(),
+                            label_start.rect,
+                            ui.clip_rect(),
+                            label_start.enabled(),
+                        ));
+                        if label_start.changed() {
+                            changed = true;
+                            draft.control_dirty = true;
+                        }
+                        let label_end =
+                            ui.add(egui::TextEdit::singleline(&mut draft.label_end).desired_width(42.0));
+                        #[cfg(test)]
+                        test_controls.push((
+                            "label-end".into(),
+                            label_end.rect,
+                            ui.clip_rect(),
+                            label_end.enabled(),
+                        ));
+                        if label_end.changed() {
+                            changed = true;
+                            draft.control_dirty = true;
+                        }
+                        let label_text =
+                            ui.add(egui::TextEdit::singleline(&mut draft.label_text).desired_width(120.0));
+                        #[cfg(test)]
+                        test_controls.push((
+                            "label-text".into(),
+                            label_text.rect,
+                            ui.clip_rect(),
+                            label_text.enabled(),
+                        ));
+                        if label_text.changed() {
+                            changed = true;
+                            draft.control_dirty = true;
+                        }
+                        let add_label = ui.button("Add label");
+                        #[cfg(test)]
+                        test_controls.push((
+                            "add-label".into(),
+                            add_label.rect,
+                            ui.clip_rect(),
+                            add_label.enabled(),
+                        ));
+                        if add_label.clicked() {
+                            match (
+                                draft.label_start.parse::<u32>(),
+                                draft.label_end.parse::<u32>(),
+                            ) {
+                                (Ok(a), Ok(b)) => match model.set_annotation(a..b, draft.label_text.clone()) {
+                                    Ok(()) => changed = true,
+                                    Err(error) => {
+                                        draft.feedback = Some(format!("{error:?}"));
+                                        changed = true;
+                                    }
+                                },
+                                _ => {
+                                    draft.feedback = Some("Enter a valid bit range.".into());
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+                    for annotation in model.annotations().to_vec() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{}{}",
+                                annotation_label(&annotation),
+                                if model.annotation_is_valid(&annotation) {
+                                    ""
+                                } else {
+                                    " (outside current width)"
+                                }
+                            ));
+                            if ui.small_button("Remove").clicked() {
+                                model.remove_annotation(annotation.range);
+                                changed = true;
+                            }
+                        });
+                    }
+                }
+                ui.separator();
+                let comparison = section_toggle(ui, "Compare two values", &mut draft.comparison_open);
+                #[cfg(test)]
+                test_controls.push((
+                    "section-comparison".into(),
+                    comparison.rect,
+                    ui.clip_rect(),
+                    comparison.enabled(),
+                ));
+                if comparison.clicked() {
+                    changed = true;
+                }
+                if draft.comparison_open {
+                    for (title, input) in [
+                        ("Left", &mut draft.comparison_left),
+                        ("Right", &mut draft.comparison_right),
+                    ] {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(title);
+                            let mut expression =
+                                comparison_input_text(input, runtime.context.comparison.as_deref());
+                            let field = ui.text_edit_singleline(&mut expression);
+                            #[cfg(test)]
+                            test_controls.push((
+                                format!("comparison-{title}"),
+                                field.rect,
+                                ui.clip_rect(),
+                                field.enabled(),
+                            ));
+                            if field.changed() {
+                                if expression.len() > crate::calculation_pad::MAX_EXPRESSION_BYTES {
+                                    let mut end = crate::calculation_pad::MAX_EXPRESSION_BYTES;
+                                    while !expression.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
+                                    expression.truncate(end);
+                                    draft.feedback = Some("Comparison input was limited to 2048 bytes.".into());
+                                }
+                                *input = ComparisonSlot::Expression(expression);
+                                changed = true;
+                            }
+                            let select = ui.add_enabled(
+                                runtime.context.selected_line.is_some() && runtime.context.comparison.is_some(),
+                                egui::Button::new("Use selected result"),
+                            );
+                            #[cfg(test)]
+                            test_controls.push((
+                                format!("select-{title}"),
+                                select.rect,
+                                ui.clip_rect(),
+                                select.enabled(),
+                            ));
+                            if select.clicked()
+                                && let Some(selected) = runtime
+                                    .context
+                                    .selected_line
+                                    .zip(runtime.context.comparison.as_ref())
+                                    .map(
+                                        |(line_id, context)| crate::calculation_pad::ComparisonResultRef {
+                                            incarnation: context.incarnation,
+                                            document_id: context.document_id,
+                                            line_id,
+                                        },
+                                    )
+                            {
+                                *input = ComparisonSlot::Result(selected);
+                                changed = true;
+                            }
+                            if matches!(input, ComparisonSlot::Result(_)) {
+                                ui.weak("Selected result");
+                            }
+                        });
+                    }
+                    let comparison_button = ui.add_enabled(
+                        runtime.context.comparison.is_some(),
+                        egui::Button::new("Compare / Refresh"),
+                    );
+                    #[cfg(test)]
+                    test_controls.push((
+                        "compare".into(),
+                        comparison_button.rect,
+                        ui.clip_rect(),
+                        comparison_button.enabled(),
+                    ));
+                    if comparison_button.clicked() {
+                        compare = true;
+                    }
+                    if let Some(result) = &draft.comparison_result {
+                        let current_request = draft.comparison_request();
+                        let current_context = runtime.context.comparison.as_ref().is_some_and(|context| {
+                            context.incarnation == result.context.incarnation
+                                && context.document_id == result.context.document_id
+                                && context.revision == result.context.revision
+                        });
+                        if !current_context
+                            || result.request != current_request
+                            || draft.comparison_selection_generation
+                                != Some(runtime.context.selection_generation)
+                        {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "Comparison is stale; refresh to use the current Pad and inputs.",
+                            );
+                        }
+                        for (name, side) in [("Left", &result.left), ("Right", &result.right)] {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!("{name} ({})", side.type_label()));
+                                let formatted = side.formatted();
+                                ui.monospace(&formatted);
+                                if side
+                                    .value
+                                    .as_ref()
+                                    .is_ok_and(crate::calculation_pad::CalculationValue::is_approximate)
+                                {
+                                    ui.weak("approx.");
+                                }
+                                let response = ui.small_button("Copy result");
+                                #[cfg(test)]
+                                test_controls.push((
+                                    format!("comparison-copy-{name}"),
+                                    response.rect,
+                                    ui.clip_rect(),
+                                    response.enabled(),
+                                ));
+                                if response.clicked() {
+                                    copy = Some(formatted);
+                                }
+                            });
+                            let representation = match &side.value {
+                                Ok(crate::calculation_pad::CalculationValue::Integer(value)) => {
+                                    Some((value.bit_pattern(), value.formatted_decimal()))
+                                }
+                                Ok(crate::calculation_pad::CalculationValue::ExactBase { value, .. }) => {
+                                    Some((*value, value.to_string()))
+                                }
+                                _ => None,
+                            };
+                            if let Some((bits, decimal)) = representation {
+                                ui.monospace(format!(
+                                    "dec {decimal}  bin {}  oct {}  hex {}",
+                                    crate::common::numeric_base::format_unsigned(bits, NumericBase::Binary),
+                                    crate::common::numeric_base::format_unsigned(bits, NumericBase::Octal),
+                                    crate::common::numeric_base::format_unsigned(
+                                        bits,
+                                        NumericBase::Hexadecimal
+                                    )
+                                ));
+                            }
+                        }
+                        ui.label(result.relation.description());
+                    }
+                }
+
                 if let Some(message) = &draft.feedback {
                     ui.label(message);
                 }
@@ -1126,6 +1246,37 @@ mod tests {
     use crate::platform::app_data::AppDataRoot;
 
     #[test]
+    fn selected_comparison_input_tracks_identity_and_reports_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("data")));
+        session.replace_source("123\n345").unwrap();
+        session.save_as("selected input").unwrap();
+        session.evaluation();
+        let initial = session.comparison_context().unwrap();
+        let input = ComparisonSlot::Result(crate::calculation_pad::ComparisonResultRef {
+            incarnation: initial.incarnation,
+            document_id: initial.document_id,
+            line_id: initial.rows[0].id,
+        });
+        assert_eq!(comparison_input_text(&input, Some(&initial)), "r1");
+        session.replace_source("0\n123\n345").unwrap();
+        session.evaluation();
+        let moved = session.comparison_context().unwrap();
+        assert_eq!(moved.rows[1].id, initial.rows[0].id);
+        assert_eq!(comparison_input_text(&input, Some(&moved)), "r2");
+        session.replace_source("0\n345").unwrap();
+        session.evaluation();
+        let removed = session.comparison_context().unwrap();
+        assert_eq!(comparison_input_text(&input, Some(&removed)), "Unavailable selected result");
+        session.request_open(initial.document_id).unwrap();
+        session.resolve_pending(crate::calculation_pad::TransitionDecision::Discard).unwrap();
+        session.evaluation();
+        let reopened = session.comparison_context().unwrap();
+        assert_eq!(comparison_input_text(&input, Some(&reopened)), "Unavailable selected result");
+    }
+
+    #[test]
     fn inspector_mode_selection_checks_and_preserves_pending_target() {
         let mut draft = InspectorDraft::default();
         let format = draft.model.format_options();
@@ -1180,6 +1331,9 @@ mod tests {
             }
         }
         assert_eq!(bit_rows(16, 9, 4)[0], vec![15, 14, 13, 12, 11, 10, 9, 8]);
+        assert_eq!(bit_rows(16, 5, 8)[0], vec![15, 14, 13, 12, 11]);
+        assert_eq!(bit_columns(500.0, 25.0, 1.0, 8.0, 4), 16);
+        assert!(bit_columns(200.0, 40.0, 1.0, 8.0, 4) < 8);
         let cell = |index, x| {
             (
                 index,
@@ -1292,6 +1446,82 @@ mod tests {
     }
 
     #[test]
+    fn inspector_grid_uses_sixteen_bits_at_normal_width_and_adapts_to_text_size() {
+        for (available, font_size, expected_first_row) in [(620.0, 14.0, 16), (320.0, 24.0, 4)] {
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                style.text_styles.insert(
+                    egui::TextStyle::Monospace,
+                    egui::FontId::monospace(font_size),
+                );
+            });
+            let mut dialog = ProgrammerInspectorDialog::default();
+            dialog.open();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(available, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let runtime = InspectorRuntime {
+                    context: Arc::new(InspectorPadContext::default()),
+                    root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
+                    host: HostIdentity {
+                        host: UtilityPresentation::Docked,
+                        generation: 0,
+                    },
+                    pinned: false,
+                };
+                dialog.render_host(
+                    &ctx,
+                    &runtime,
+                    true,
+                    true,
+                    Some(ui),
+                    UtilityPresentation::Docked,
+                );
+            });
+            output.textures_delta.clear();
+            let bits: Vec<_> = dialog
+                .test_controls
+                .iter()
+                .filter(|(name, _, _, _)| {
+                    name.strip_prefix("bit-")
+                        .is_some_and(|suffix| suffix.parse::<u32>().is_ok())
+                })
+                .collect();
+            assert_eq!(bits.len(), 64);
+            let first_y = bits[0].1.center().y;
+            let first_row = bits
+                .iter()
+                .take_while(|(_, rect, _, _)| (rect.center().y - first_y).abs() < font_size * 0.5)
+                .count();
+            if font_size == 14.0 {
+                assert_eq!(
+                    first_row,
+                    expected_first_row,
+                    "first cells: {:?}",
+                    &bits[..20]
+                );
+            } else {
+                assert!(
+                    first_row >= expected_first_row && first_row < 16,
+                    "first row has {first_row} cells: {:?}",
+                    &bits[..20]
+                );
+            }
+            for (_, rect, clip, _) in bits {
+                assert!(
+                    rect.left() >= clip.left() && rect.right() <= clip.right(),
+                    "{rect:?} outside {clip:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn programmer_inspector_retains_private_draft_across_new_context_and_move() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
@@ -1363,6 +1593,9 @@ mod tests {
 
         let mut moved = dialog.draft.clone();
         moved.label_text = "retained across Dock".into();
+        moved.formatting_open = true;
+        moved.labels_open = true;
+        moved.comparison_open = false;
         moved.generation += 1;
         let move_action = InspectorActions {
             host_request: Some(UtilityPresentation::Docked),
@@ -1384,6 +1617,8 @@ mod tests {
             (None, None, Some(preference))
         );
         assert_eq!(dialog.draft.label_text, "retained across Dock");
+        assert!(dialog.draft.formatting_open && dialog.draft.labels_open);
+        assert!(!dialog.draft.comparison_open);
         let host_only = InspectorActions {
             host_request: Some(UtilityPresentation::Popout),
             close: false,
@@ -1400,6 +1635,9 @@ mod tests {
             host_button: None,
         };
         assert_eq!(dialog.commit(host_only, &fresh), (None, None, None));
+        dialog.publish(Arc::clone(&old));
+        assert!(dialog.draft.formatting_open && dialog.draft.labels_open);
+        assert!(!dialog.draft.comparison_open);
 
         let mut clean = ProgrammerInspectorDialog::default();
         clean.open();

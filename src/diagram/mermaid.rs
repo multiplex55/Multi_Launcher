@@ -6,6 +6,7 @@ use super::model::{
     MAX_GROUP_ID_BYTES, MAX_LABEL_BYTES, MAX_NODE_ID_BYTES, NodeId, NodeShape, Position,
 };
 use std::collections::HashMap;
+use super::style::{extract_style, MermaidColor, MermaidNodeStyle};
 use std::fmt;
 
 pub const MAX_MERMAID_SOURCE_BYTES: usize = 64 * 1024;
@@ -50,6 +51,7 @@ impl std::error::Error for MermaidDiagnostic {}
 #[derive(Debug)]
 pub enum MermaidFormatError {
     InvalidGraph(GraphValidationError),
+    StyleSerialization(serde_json::Error),
     SourceTooLarge { max_bytes: usize },
     LineTooLarge { max_bytes: usize },
     TooManyLines { max_lines: usize },
@@ -59,6 +61,7 @@ impl fmt::Display for MermaidFormatError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidGraph(error) => error.fmt(formatter),
+            Self::StyleSerialization(error) => write!(formatter, "could not format Mermaid style: {error}"),
             Self::SourceTooLarge { max_bytes } => {
                 write!(
                     formatter,
@@ -85,6 +88,7 @@ impl std::error::Error for MermaidFormatError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidGraph(error) => Some(error),
+            Self::StyleSerialization(error) => Some(error),
             Self::SourceTooLarge { .. } | Self::LineTooLarge { .. } | Self::TooManyLines { .. } => {
                 None
             }
@@ -102,7 +106,15 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
         return Ok(DiagramDocument::default());
     }
 
+    let (style, directive) = extract_style(source).map_err(|(offset, message)| {
+        let line_number = source[..offset].bytes().filter(|&byte| byte == b'\n').count() + 1;
+        let line = source[offset..].lines().next().unwrap_or("");
+        let leading = line.len() - line.trim_start().len();
+        diagnostic(MermaidDiagnosticKind::Unsupported, message, line, offset, line_number, leading, line.len())
+    })?;
     let mut graph = DiagramDocument::default();
+    graph.style = style;
+    let mut pending_styles = Vec::new();
     let mut nodes_by_id = HashMap::<NodeId, usize>::new();
     let mut explicit_declarations = HashMap::<NodeId, (NodeShape, String)>::new();
     let mut active_group: Option<GroupId> = None;
@@ -116,6 +128,10 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
             .unwrap_or(line_with_newline);
         let line = line_with_cr.strip_suffix('\r').unwrap_or(line_with_cr);
         let trimmed = line.trim();
+        if directive.as_ref().is_some_and(|range| range.start == byte_offset) {
+            byte_offset = byte_offset.saturating_add(line_with_newline.len());
+            continue;
+        }
         if !trimmed.is_empty() {
             if !saw_header {
                 graph.direction = parse_header(line, byte_offset, line_number)?;
@@ -133,7 +149,12 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                         line.len(),
                     ));
                 }
-                if trimmed == "end" {
+                if trimmed.starts_with("style ") {
+                    let (id, style) = parse_node_style(trimmed).map_err(|message| diagnostic(
+                        MermaidDiagnosticKind::Unsupported, message, line, byte_offset, line_number, leading, line.len(),
+                    ))?;
+                    pending_styles.push((id, style, line.to_owned(), byte_offset, line_number, leading));
+                } else if trimmed == "end" {
                     if active_group.take().is_none() {
                         return Err(diagnostic(
                             MermaidDiagnosticKind::Invalid,
@@ -225,6 +246,14 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
             line.len(),
         ));
     }
+    for (id, style, line, offset, number, leading) in pending_styles {
+        if !nodes_by_id.contains_key(&id) {
+            return Err(diagnostic(MermaidDiagnosticKind::Invalid, format!("style target {id} does not exist"), &line, offset, number, leading, line.len()));
+        }
+        if graph.node_styles.insert(id.clone(), style).is_some() {
+            return Err(diagnostic(MermaidDiagnosticKind::Invalid, format!("duplicate style for {id}"), &line, offset, number, leading, line.len()));
+        }
+    }
     graph.validate().map_err(|error| {
         diagnostic(
             MermaidDiagnosticKind::Invalid,
@@ -256,6 +285,11 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
     let encoded_bytes = measure_formatted_size(graph)?;
 
     let mut output = String::with_capacity(encoded_bytes);
+    if !graph.style.is_empty() {
+        output.push_str("%%{init: ");
+        output.push_str(&serde_json::to_string(&graph.style).map_err(MermaidFormatError::StyleSerialization)?);
+        output.push_str("}%%\n");
+    }
     output.push_str("flowchart ");
     output.push_str(graph.direction.as_mermaid());
     output.push('\n');
@@ -306,7 +340,34 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
         output.push_str(edge.to.as_str());
         output.push('\n');
     }
+    for (id, style) in &graph.node_styles {
+        output.push_str(&format_node_style(id, style));
+        output.push('\n');
+    }
     Ok(output)
+}
+
+fn parse_node_style(line: &str) -> Result<(NodeId, MermaidNodeStyle), String> {
+    let rest = line.strip_prefix("style ").ok_or("expected style")?.trim_start();
+    let (id, properties) = rest.split_once(char::is_whitespace).ok_or("style requires a target and colors")?;
+    let id = NodeId::new(id).map_err(|_| "invalid style target")?;
+    let mut style = MermaidNodeStyle::default();
+    for property in properties.split(',') {
+        let (name, value) = property.trim().split_once(':').ok_or("expected color property")?;
+        let color = MermaidColor::parse(value.trim()).map_err(str::to_owned)?;
+        let slot = match name.trim() { "fill" => &mut style.fill, "stroke" => &mut style.stroke, "color" => &mut style.color, _ => return Err("unsupported style property".into()) };
+        if slot.replace(color).is_some() { return Err("duplicate style property".into()); }
+    }
+    if style.is_empty() { return Err("style requires at least one color".into()); }
+    Ok((id, style))
+}
+
+fn format_node_style(id: &NodeId, style: &MermaidNodeStyle) -> String {
+    let mut properties = Vec::new();
+    for (name, color) in [("fill", style.fill), ("stroke", style.stroke), ("color", style.color)] {
+        if let Some(color) = color { properties.push(format!("{name}:{}", color.hex())); }
+    }
+    format!("style {id} {}", properties.join(","))
 }
 
 fn write_node_line(output: &mut String, node: &DiagramNode) {
@@ -327,7 +388,14 @@ fn write_node_line(output: &mut String, node: &DiagramNode) {
 fn measure_formatted_size(graph: &DiagramDocument) -> Result<usize, MermaidFormatError> {
     let mut total_bytes = 0usize;
     let mut line_count = 0usize;
+    if !graph.style.is_empty() {
+        let line = format!("%%{{init: {}}}%%", serde_json::to_string(&graph.style).map_err(MermaidFormatError::StyleSerialization)?);
+        record_formatted_line(&mut total_bytes, &mut line_count, line.len())?;
+    }
     record_formatted_line(&mut total_bytes, &mut line_count, "flowchart TD".len())?;
+    for (id, style) in &graph.node_styles {
+        record_formatted_line(&mut total_bytes, &mut line_count, format_node_style(id, style).len())?;
+    }
 
     for node in &graph.nodes {
         let label_bytes = encoded_mermaid_text_len(&node.label)?;
@@ -1269,6 +1337,26 @@ mod tests {
     use crate::diagram::{
         DiagramDocument, DiagramNode, FlowDirection, NodeId, NodeShape, Position,
     };
+
+    #[test]
+    fn color_envelope_and_node_styles_roundtrip_and_reject_unsupported_input() {
+        let source = "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"primaryColor\":\"#123456\",\"mindmapSectionColors\":[\"#abc\",\"#abcdef\"]}}}%%\r\nflowchart TD\r\nA[\"東京\"] --> B\r\nstyle A fill:#abc,stroke:#123456,color:#fedcba\r\n";
+        let graph = parse_mermaid(source).unwrap();
+        let canonical = format_mermaid(&graph).unwrap();
+        assert_eq!(super::measure_formatted_size(&graph).unwrap(), canonical.len());
+        assert_eq!(parse_mermaid(&canonical).unwrap(), graph);
+        for source in [
+            "%%{init: {\"theme\":\"dark\",\"securityLevel\":\"loose\"}}%%\nflowchart TD\nA\n",
+            "%%{init: {\"theme\":\"dark\",\"theme\":\"forest\"}}%%\nflowchart TD\nA\n",
+            "flowchart TD\nA\nstyle B fill:#abc\n",
+            "flowchart TD\nA\nstyle A fill:#abc,fill:#123\n",
+            "flowchart TD\nA\nstyle A fill:#abc,stroke-width:2\n",
+            "flowchart TD\nA\nstyle A fill:#badbadz\n",
+            "flowchart TD\nA\nstyle A fill:#abc\nstyle A stroke:#123\n",
+        ] { assert!(parse_mermaid(source).is_err(), "{source}"); }
+        let diagnostic = parse_mermaid("flowchart TD\nA[\"東京\"]\nstyle Missing fill:#abc\n").unwrap_err();
+        assert_eq!(diagnostic.span.line, 3);
+    }
 
     #[test]
     fn diagram_mermaid_supported_subset_roundtrips_shapes_groups_edges_and_unicode() {

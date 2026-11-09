@@ -318,6 +318,8 @@ eframe = { path = "vendor/eframe" }
 image = { path = "vendor/image" }
 # Preserve toast hover-pause behavior with egui 0.36's full-rect close interaction.
 egui-toast = { path = "vendor/egui-toast" }
+# Allow bounded Timeline event-card color configuration.
+mermaid-rs-renderer = { path = "vendor/mermaid-rs-renderer" }
 
 [workspace]
 members = [".", "crates/multi_launcher_table_core"]

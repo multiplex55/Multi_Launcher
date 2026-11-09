@@ -658,6 +658,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn styled_session_history_survives_save_decode_and_undo() {
+        let mut session = session_with_history();
+        session.replace_source("%%{init: {\"theme\":\"forest\"}}%%\nflowchart TD\nA[\"Styled\"] --> B\nstyle A fill:#123456,stroke:#abcdef,color:#fedcba\n").unwrap();
+        let bytes = session.encode().unwrap();
+        let mut reopened = decode_session(&bytes).unwrap();
+        assert_eq!(reopened.draft(), session.draft());
+        assert_eq!(reopened.preview_graph(), session.preview_graph());
+        assert_eq!(reopened.encode().unwrap(), bytes);
+        assert!(reopened.undo().unwrap());
+        assert!(!reopened.draft().contains("style A"));
+        assert!(reopened.redo().unwrap());
+        assert!(reopened.draft().contains("style A"));
+    }
+
+    #[test]
+    fn frozen_unstyled_session_history_remains_compatible() {
+        let bytes = include_bytes!("../../tests/fixtures/diagram_session_v1_unstyled_history.json");
+        let mut decoded = decode_session(bytes).unwrap();
+        let expected = session_with_history();
+        assert_eq!(decoded.draft(), expected.draft());
+        assert_eq!(decoded.preview_graph(), expected.preview_graph());
+        assert_eq!(decoded.encode().unwrap(), bytes);
+        let latest = decoded.draft().to_owned();
+        assert!(decoded.undo().unwrap());
+        assert!(decoded.draft().contains("Alpha"));
+        assert!(decoded.redo().unwrap());
+        assert_eq!(decoded.draft(), latest);
+    }
+
     fn session_with_history() -> DiagramSession {
         let mut session = DiagramSession::new();
         session

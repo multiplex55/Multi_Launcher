@@ -18630,6 +18630,28 @@ mod tests {
         panic!("Inspector control {name} did not become visible: {last:?}");
     }
 
+    fn inspector_open_section(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        if !app.programmer_inspector_dialog.test_section_open(name) {
+            let button = inspector_visible_control(ctx, app, viewport, name);
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    ctx,
+                    app,
+                    viewport,
+                    tool_dialog_pointer_events(button, pressed),
+                    false,
+                    false,
+                );
+            }
+            assert!(app.programmer_inspector_dialog.test_section_open(name));
+        }
+    }
+
     #[test]
     fn explorer_tabs_saved_folder_picker_accepts_actual_clicks() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -19895,11 +19917,17 @@ mod tests {
             (1_u128 << 63) | (1_u128 << 62) | 9_007_199_254_740_993
         );
         assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
-        let (copy, clip, enabled) = app
-            .programmer_inspector_dialog
-            .test_control("copy-Decimal")
-            .expect("native decimal Copy");
-        assert!(enabled && clip.contains_rect(copy));
+        let before_low = app.programmer_inspector_dialog.test_value();
+        let low = inspector_visible_control(&ctx, &mut app, native, "bit-0");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(&ctx, &mut app, native, tool_dialog_pointer_events(low, pressed), false, false);
+            }
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_clicked_bit(), Some(0));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), before_low);
+        inspector_open_section(&ctx, &mut app, native, "section-formatting");
+        let copy = inspector_visible_control(&ctx, &mut app, native, "copy-Decimal");
         let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
         for (discard_root, discard_child) in [(true, false), (false, true)] {
             run_host_viewport_frame(
@@ -19951,6 +19979,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        assert!(app.programmer_inspector_dialog.test_section_open("section-formatting"));
         let (insert, clip, enabled) = app
             .programmer_inspector_dialog
             .test_control("insert")
@@ -20177,6 +20206,7 @@ mod tests {
             .test_control("insert")
             .unwrap();
         assert!(!enabled, "stale adopted source cannot be inserted");
+        inspector_open_section(&ctx, &mut app, root, "section-formatting");
         let copy = inspector_visible_control(&ctx, &mut app, root, "copy-Decimal");
         let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
         for pressed in [true, false] {
@@ -20269,6 +20299,7 @@ mod tests {
             output.drop_without_applying_deltas();
             assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
         }
+        inspector_open_section(&ctx, &mut app, root, "section-labels");
         for (name, text) in [
             ("label-start", "0"),
             ("label-end", "1"),
@@ -20418,6 +20449,296 @@ mod tests {
             "a genuine editor click captures the new incarnation"
         );
     }
+    #[test]
+    fn programmer_inspector_minimum_size_reaches_comparison() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("123\n345");
+        let size = egui::vec2(360.0, 280.0);
+        for _ in 0..4 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, size)
+                .drop_without_applying_deltas();
+        }
+        app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+        let mut reached = false;
+        let mut last = None;
+        for _ in 0..30 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, size)
+                .drop_without_applying_deltas();
+            let (rect, clip, enabled) = app
+                .programmer_inspector_dialog
+                .test_control("compare")
+                .unwrap();
+            last = Some((rect, clip, enabled));
+            if enabled && clip.contains_rect(rect) {
+                reached = true;
+                break;
+            }
+            let position = egui::pos2(clip.center().x, clip.bottom() - 5.0);
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -140.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                size,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(
+            reached,
+            "comparison remains reachable by scrolling at minimum size: {last:?}"
+        );
+    }
+
+    #[test]
+    fn programmer_inspector_typed_comparison_and_selected_result_are_truthful() {
+        use crate::calculation_pad::ComparisonRelation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let root = egui::ViewportId::ROOT;
+        let source = "123\n345";
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .selected_line
+                .is_none()
+        );
+        let (open, clip, enabled) = app.calculation_pad_dialog.test_inspector_reopen().unwrap();
+        assert!(enabled && clip.contains_rect(open));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(open, pressed),
+                false,
+                false,
+            );
+        }
+        fn input(ctx: &egui::Context, app: &mut LauncherApp, name: &str, text: &str) {
+            let root = egui::ViewportId::ROOT;
+            let field = inspector_visible_control(ctx, app, root, name);
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    ctx,
+                    app,
+                    root,
+                    tool_dialog_pointer_events(field, pressed),
+                    false,
+                    false,
+                );
+            }
+            run_host_viewport_frame(
+                ctx,
+                app,
+                root,
+                vec![
+                    key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                    egui::Event::Text(text.into()),
+                ],
+                false,
+                false,
+            );
+        }
+        fn compare(ctx: &egui::Context, app: &mut LauncherApp) {
+            let root = egui::ViewportId::ROOT;
+            let button = inspector_visible_control(ctx, app, root, "compare");
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    ctx,
+                    app,
+                    root,
+                    tool_dialog_pointer_events(button, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        input(&ctx, &mut app, "comparison-Left", "r1");
+        input(&ctx, &mut app, "comparison-Right", "r2");
+        compare(&ctx, &mut app);
+        let result = app.programmer_inspector_dialog.test_comparison().unwrap();
+        assert_eq!(
+            (result.left.formatted(), result.right.formatted()),
+            ("123".into(), "345".into())
+        );
+        assert!(
+            matches!(result.relation, ComparisonRelation::Scalar { difference, .. } if difference == -222.0)
+        );
+        input(&ctx, &mut app, "comparison-Left", "10 ft");
+        input(&ctx, &mut app, "comparison-Right", "120 in");
+        compare(&ctx, &mut app);
+        assert!(matches!(
+            app.programmer_inspector_dialog
+                .test_comparison()
+                .unwrap()
+                .relation,
+            ComparisonRelation::Quantity {
+                ordering: std::cmp::Ordering::Equal,
+                ..
+            }
+        ));
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+
+        app.calculation_pad_dialog
+            .test_replace_source("first = 123\nsecond = 345");
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(app.calculation_pad_dialog.inspector_context().selected_line.is_none());
+        input(&ctx, &mut app, "comparison-Left", "first");
+        input(&ctx, &mut app, "comparison-Right", "second");
+        compare(&ctx, &mut app);
+        let named = app.programmer_inspector_dialog.test_comparison().unwrap();
+        assert_eq!((named.left.formatted(), named.right.formatted()), ("123".into(), "345".into()));
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+
+        // Close the Inspector and select the first Pad result through its context menu.
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let row = app.calculation_pad_dialog.test_result_row(0).unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                vec![
+                    egui::Event::PointerMoved(row.center()),
+                    egui::Event::PointerButton {
+                        pos: row.center(),
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        let select = app
+            .calculation_pad_dialog
+            .test_select_comparison()
+            .expect("result context menu");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(select, pressed),
+                false,
+                false,
+            );
+        }
+        let (open, _, _) = app.calculation_pad_dialog.test_inspector_reopen().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(open, pressed),
+                false,
+                false,
+            );
+        }
+        input(&ctx, &mut app, "comparison-Left", "r2");
+        let selected = inspector_visible_control(&ctx, &mut app, root, "select-Left");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(selected, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(selected, false),
+            true,
+            false,
+        );
+        assert_eq!(
+            app.programmer_inspector_dialog.test_comparison_input(true),
+            "r2"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(selected, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_comparison_input(true),
+            "r1"
+        );
+        input(&ctx, &mut app, "comparison-Right", "r2");
+        compare(&ctx, &mut app);
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_comparison()
+                .unwrap()
+                .left
+                .formatted(),
+            "123"
+        );
+        input(&ctx, &mut app, "comparison-Left", "r2");
+        compare(&ctx, &mut app);
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_comparison()
+                .unwrap()
+                .left
+                .formatted(),
+            "345"
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+    }
+
     #[test]
     fn programmer_inspector_comparison_and_preferences_use_retained_host_receipts() {
         use crate::calculation_pad::ComparisonRelation;
@@ -20655,6 +20976,7 @@ mod tests {
                 .formatted(),
             "13"
         );
+        inspector_open_section(&ctx, &mut app, native, "section-formatting");
         let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
         for (discard_root, discard_child) in [(true, false), (false, true)] {
             run_host_viewport_frame(

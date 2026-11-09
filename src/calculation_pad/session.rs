@@ -725,6 +725,13 @@ impl CalculationPadSession {
         current.cached_evaluation.as_ref()
     }
 
+    /// Returns the source and its evaluation from the same current revision.
+    pub(crate) fn evaluation_with_source(&mut self) -> Option<(&str, &SessionEvaluation)> {
+        self.evaluation()?;
+        let current = self.current.as_ref()?;
+        Some((&current.source, current.cached_evaluation.as_ref()?))
+    }
+
     pub fn cached_evaluation_revision(&self) -> Option<u64> {
         self.current
             .as_ref()

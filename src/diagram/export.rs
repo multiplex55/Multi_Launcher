@@ -2977,9 +2977,8 @@ fn draw_scene(
     text: &RasterTextPlan,
     fonts: &FontSet,
 ) {
-    image
-        .pixels_mut()
-        .for_each(|pixel| *pixel = Rgba([249, 250, 251, 255]));
+    let rgba = |color: super::style::MermaidColor| Rgba([color.0[0], color.0[1], color.0[2], 255]);
+    image.pixels_mut().for_each(|pixel| *pixel = rgba(scene.colors.background));
     for group in &scene.groups {
         let bounds = transform.rect(group.bounds);
         let radius = 9.0;
@@ -2988,12 +2987,12 @@ fn draw_scene(
             bounds,
             ShapeFill::Rounded,
             radius,
-            Rgba([239, 246, 255, 255]),
+            rgba(scene.colors.group_fill),
         );
         draw_polyline(
             image,
             &rounded_rect_points(bounds, radius),
-            Rgba([100, 116, 139, 255]),
+            rgba(scene.colors.group_stroke),
         );
     }
     for edge in &scene.edges {
@@ -3001,19 +3000,19 @@ fn draw_scene(
         for step in 1..=CUBIC_SEGMENTS {
             let current =
                 transform.point(cubic_point(edge.path, step as f64 / CUBIC_SEGMENTS as f64));
-            draw_line(image, previous, current, Rgba([71, 85, 105, 255]));
+            draw_line(image, previous, current, rgba(scene.colors.line));
             previous = current;
         }
         let triangle = arrow_points(edge.arrowhead, transform);
-        fill_triangle(image, triangle, Rgba([71, 85, 105, 255]));
-        draw_polyline(image, &closed_points(&triangle), Rgba([71, 85, 105, 255]));
+        fill_triangle(image, triangle, rgba(scene.colors.line));
+        draw_polyline(image, &closed_points(&triangle), rgba(scene.colors.line));
         if let Some(bounds) = edge.label_bounds {
             fill_shape(
                 image,
                 transform.rect(bounds),
                 ShapeFill::Rounded,
                 3.0,
-                Rgba([255, 255, 255, 255]),
+                if scene.colors.explicit { rgba(scene.colors.background) } else { Rgba([255, 255, 255, 255]) },
             );
         }
     }
@@ -3029,22 +3028,18 @@ fn draw_scene(
             bounds,
             shape,
             scene.metrics.rounded_corner_radius * transform.scale,
-            Rgba([255, 255, 255, 255]),
+            rgba(node.colors.fill),
         );
         draw_polyline(
             image,
             &node_outline_points(node, transform, scene.metrics.rounded_corner_radius),
-            Rgba([51, 65, 85, 255]),
+            rgba(node.colors.stroke),
         );
     }
-    for group in &text.groups {
-        draw_text_block(image, group, fonts, Rgba([15, 23, 42, 255]));
-    }
-    for label in text.edges.iter().flatten() {
-        draw_text_block(image, label, fonts, Rgba([15, 23, 42, 255]));
-    }
-    for node in &text.nodes {
-        draw_text_block(image, node, fonts, Rgba([15, 23, 42, 255]));
+    for group in &text.groups { draw_text_block(image, group, fonts, rgba(scene.colors.text)); }
+    for label in text.edges.iter().flatten() { draw_text_block(image, label, fonts, rgba(scene.colors.text)); }
+    for (node, rendered) in scene.nodes.iter().zip(&text.nodes) {
+        draw_text_block(image, rendered, fonts, rgba(node.colors.text));
     }
 }
 
@@ -3250,8 +3245,8 @@ fn encode_svg(
     svg_fmt(
         &mut output,
         format_args!(
-            "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#f9fafb\"/>\n",
-            transform.width, transform.height
+            "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"{}\"/>\n",
+            transform.width, transform.height, scene.colors.background.hex()
         ),
     )?;
     for group in &scene.groups {
@@ -3260,12 +3255,14 @@ fn encode_svg(
         svg_fmt(
             &mut output,
             format_args!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"#eff6ff\" stroke=\"#64748b\" stroke-width=\"{}\"/>\n",
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>\n",
                 svg_num(rect.min_x),
                 svg_num(rect.min_y),
                 svg_num(rect.width()),
                 svg_num(rect.height()),
                 svg_num(radius),
+                scene.colors.group_fill.hex(),
+                scene.colors.group_stroke.hex(),
                 svg_num(STROKE_WIDTH)
             ),
         )?;
@@ -3279,7 +3276,7 @@ fn encode_svg(
         svg_fmt(
             &mut output,
             format_args!(
-                "<path d=\"M {} {} C {} {}, {} {}, {} {}\" fill=\"none\" stroke=\"#475569\" stroke-width=\"{}\" stroke-linecap=\"round\"/>\n",
+                "<path d=\"M {} {} C {} {}, {} {}, {} {}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\"/>\n",
                 svg_num(start.x),
                 svg_num(start.y),
                 svg_num(control1.x),
@@ -3288,6 +3285,7 @@ fn encode_svg(
                 svg_num(control2.y),
                 svg_num(end.x),
                 svg_num(end.y),
+                scene.colors.line.hex(),
                 svg_num(STROKE_WIDTH)
             ),
         )?;
@@ -3295,13 +3293,14 @@ fn encode_svg(
         svg_fmt(
             &mut output,
             format_args!(
-                "<polygon points=\"{} {},{} {},{} {}\" fill=\"#475569\"/>\n",
+                "<polygon points=\"{} {},{} {},{} {}\" fill=\"{}\"/>\n",
                 svg_num(triangle[0].x),
                 svg_num(triangle[0].y),
                 svg_num(triangle[1].x),
                 svg_num(triangle[1].y),
                 svg_num(triangle[2].x),
-                svg_num(triangle[2].y)
+                svg_num(triangle[2].y),
+                scene.colors.line.hex()
             ),
         )?;
         if let Some(bounds) = edge.label_bounds {
@@ -3309,11 +3308,12 @@ fn encode_svg(
             svg_fmt(
                 &mut output,
                 format_args!(
-                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"#ffffff\"/>\n",
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"{}\"/>\n",
                     svg_num(rect.min_x),
                     svg_num(rect.min_y),
                     svg_num(rect.width()),
-                    svg_num(rect.height())
+                    svg_num(rect.height()),
+                    if scene.colors.explicit { scene.colors.background.hex() } else { "#ffffff".to_owned() }
                 ),
             )?;
         }
@@ -3335,6 +3335,7 @@ fn encode_svg(
             group.label_alignment,
             transform,
             &mut clip_id,
+            scene.colors.text,
         )?;
     }
     for edge in &scene.edges {
@@ -3348,6 +3349,7 @@ fn encode_svg(
                 alignment,
                 transform,
                 &mut clip_id,
+                scene.colors.text,
             )?;
         }
     }
@@ -3359,6 +3361,7 @@ fn encode_svg(
             node.label_alignment,
             transform,
             &mut clip_id,
+            node.colors.text,
         )?;
     }
     output.push_str("</svg>\n")?;
@@ -3372,11 +3375,13 @@ fn write_svg_node(
     radius: f64,
 ) -> Result<(), DiagramExportError> {
     let rect = transform.rect(node.bounds);
+    let fill = node.colors.fill.hex();
+    let stroke = node.colors.stroke.hex();
     match node.shape {
         NodeShape::Rectangle => svg_fmt(
             output,
             format_args!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\" stroke=\"#334155\" stroke-width=\"{}\"/>\n",
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\"/>\n",
                 svg_num(rect.min_x),
                 svg_num(rect.min_y),
                 svg_num(rect.width()),
@@ -3387,7 +3392,7 @@ fn write_svg_node(
         NodeShape::Rounded => svg_fmt(
             output,
             format_args!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"#ffffff\" stroke=\"#334155\" stroke-width=\"{}\"/>\n",
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\"/>\n",
                 svg_num(rect.min_x),
                 svg_num(rect.min_y),
                 svg_num(rect.width()),
@@ -3403,7 +3408,7 @@ fn write_svg_node(
         NodeShape::Diamond => svg_fmt(
             output,
             format_args!(
-                "<polygon points=\"{} {},{} {},{} {},{} {}\" fill=\"#ffffff\" stroke=\"#334155\" stroke-width=\"{}\"/>\n",
+                "<polygon points=\"{} {},{} {},{} {},{} {}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\"/>\n",
                 svg_num((rect.min_x + rect.max_x) / 2.0),
                 svg_num(rect.min_y),
                 svg_num(rect.max_x),
@@ -3425,14 +3430,16 @@ fn write_svg_text_block(
     alignment: TextHorizontalAlignment,
     transform: ExportTransform,
     clip_id: &mut usize,
+    color: super::style::MermaidColor,
 ) -> Result<(), DiagramExportError> {
     let rect = transform.rect(bounds);
     let id = *clip_id;
     *clip_id = clip_id.saturating_add(1);
+    let color = color.hex();
     svg_fmt(
         output,
         format_args!(
-            "<defs><clipPath id=\"label-{id}\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>\n<g clip-path=\"url(#label-{id})\" fill=\"#0f172a\" font-family=\"sans-serif\">\n",
+            "<defs><clipPath id=\"label-{id}\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>\n<g clip-path=\"url(#label-{id})\" fill=\"{color}\" font-family=\"sans-serif\">\n",
             svg_num(rect.min_x),
             svg_num(rect.min_y),
             svg_num(rect.width()),
@@ -3704,6 +3711,37 @@ mod tests {
                 .pixels()
                 .all(|pixel| pixel.0 == [249, 250, 251, 255])
         );
+    }
+
+    #[test]
+    fn dark_labeled_edge_uses_theme_text_and_background() {
+        let session = fresh_session("%%{init: {\"theme\":\"dark\"}}%%\nflowchart TD\nsubgraph G[\"Group\"]\nA\nend\nA -->|label| B\n");
+        let snapshot = DiagramImageSnapshot::capture(&session, SceneMetrics::default()).unwrap();
+        let colors = snapshot.scene.colors;
+        assert_ne!(colors.text, colors.background);
+        assert_ne!(colors.text, colors.group_fill);
+        let svg = snapshot.encode_svg(1.0).unwrap();
+        let svg = std::str::from_utf8(svg.bytes()).unwrap();
+        assert!(svg.contains(&format!("rx=\"3\" fill=\"{}\"", colors.background.hex())));
+        assert!(svg.contains(&format!("fill=\"{}\" stroke=\"{}\"", colors.group_fill.hex(), colors.group_stroke.hex())));
+        assert!(svg.contains(&format!("fill=\"{}\" font-family=\"sans-serif\"", colors.text.hex())));
+        let png = snapshot.encode_png(1.0).unwrap();
+        let decoded = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        let [r, g, b] = colors.background.0;
+        assert!(decoded.pixels().any(|pixel| pixel.0 == [r, g, b, 255]));
+    }
+
+    #[test]
+    fn styled_native_scene_svg_and_png_share_effective_colors() {
+        let session = fresh_session("%%{init: {\"themeVariables\":{\"lineColor\":\"#193b5d\"}}}%%\nflowchart TD\nA[\"Hello\"] --> B\nstyle A fill:#123456,stroke:#abcdef,color:#fedcba\n");
+        let snapshot = DiagramImageSnapshot::capture(&session, SceneMetrics::default()).unwrap();
+        assert_eq!(snapshot.scene.nodes[0].colors.fill.0, [0x12, 0x34, 0x56]);
+        let svg = snapshot.encode_svg(1.0).unwrap();
+        let svg_text = std::str::from_utf8(svg.bytes()).unwrap();
+        for color in ["#123456", "#abcdef", "#fedcba", "#193b5d"] { assert!(svg_text.contains(color), "{color}"); }
+        let png = snapshot.encode_png(1.0).unwrap();
+        let decoded = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        assert!(decoded.pixels().any(|pixel| pixel.0 == [0x12, 0x34, 0x56, 255]));
     }
 
     #[test]

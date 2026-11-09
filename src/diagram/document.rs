@@ -24,7 +24,7 @@ pub enum PendingDiagramTransition {
     Open(PathBuf),
     ImportMermaid(MermaidFile),
     CopySource(DiagramSourceCopy),
-    ApplyTemplate(DiagramTemplate),
+    ApplyTemplate { template: DiagramTemplate, style: Option<super::style::MermaidStyle> },
     ApplyVisualTemplate(VisualAuthoringTemplate),
     Close,
 }
@@ -631,19 +631,15 @@ impl DiagramDocumentController {
     }
 
     /// Requests a built-in validated template as a new untitled session.
-    pub fn request_template(
-        &mut self,
-        template: DiagramTemplate,
-    ) -> Result<TransitionOutcome, DiagramDocumentError> {
-        let requested = PendingDiagramTransition::ApplyTemplate(template);
-        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
-            return Ok(outcome);
-        }
-        let candidate = template.create_session()?;
-        if self.is_dirty() {
-            self.pending = Some(requested);
-            return Ok(TransitionOutcome::DecisionRequired);
-        }
+    pub fn request_template(&mut self, template: DiagramTemplate) -> Result<TransitionOutcome, DiagramDocumentError> {
+        self.request_template_with_style(template, None)
+    }
+
+    pub fn request_template_with_style(&mut self, template: DiagramTemplate, style: Option<super::style::MermaidStyle>) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::ApplyTemplate { template, style: style.clone() };
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? { return Ok(outcome); }
+        let candidate = template.create_session_with_style(style.as_ref())?;
+        if self.is_dirty() { self.pending = Some(requested); return Ok(TransitionOutcome::DecisionRequired); }
         self.active = Some(ActiveDocument::untitled(candidate, None));
         Ok(TransitionOutcome::Applied)
     }
@@ -774,8 +770,9 @@ impl DiagramDocumentController {
                 let session = DiagramSession::from_fresh_source(&source.source)?;
                 self.active = Some(ActiveDocument::untitled(session, source.origin.clone()));
             }
-            PendingDiagramTransition::ApplyTemplate(template) => {
-                self.active = Some(ActiveDocument::untitled(template.create_session()?, None));
+            PendingDiagramTransition::ApplyTemplate { template, style } => {
+                let session = template.create_session_with_style(style.as_ref())?;
+                self.active = Some(ActiveDocument::untitled(session, None));
             }
             PendingDiagramTransition::ApplyVisualTemplate(template) => {
                 self.active = Some(ActiveDocument::untitled_visual(template.create_document()?));
@@ -1678,9 +1675,7 @@ mod tests {
         );
         assert_eq!(
             controller.pending_transition(),
-            Some(&PendingDiagramTransition::ApplyTemplate(
-                DiagramTemplate::Decision
-            ))
+            Some(&PendingDiagramTransition::ApplyTemplate { template: DiagramTemplate::Decision, style: None })
         );
         assert_eq!(
             controller
