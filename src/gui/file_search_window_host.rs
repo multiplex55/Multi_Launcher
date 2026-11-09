@@ -498,9 +498,6 @@ impl FileSearchWindowHost {
         if close {
             dialog.open = false;
         } else {
-            if let Some(preview) = frame.preview.take() {
-                dialog.preview_dialog.complete_host_actions(preview, None);
-            }
             if let Some(actions) = frame.actions.take() {
                 let request = actions.host_request;
                 #[cfg(windows)]
@@ -527,6 +524,9 @@ impl FileSearchWindowHost {
                     }
                     ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
+            }
+            if let Some(preview) = frame.preview.take() {
+                dialog.preview_dialog.complete_host_actions(preview, None);
             }
         }
         let closed = !dialog.open;

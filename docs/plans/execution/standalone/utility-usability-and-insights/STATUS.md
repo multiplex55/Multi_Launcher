@@ -22,7 +22,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M0-A | Exact-parent baseline / push complete; source inventory ongoing | complete Git gate |
 | M1-A | L1 compact descriptions / bounded cards | complete; automated verified, native pending |
 | M1-B | B1 Dashboard slot markers | complete; automated verified, native pending |
-| M2-A | FS1 cancellation-safe Clear results | pending |
+| M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
 | M2-B | FS2 literal leaf-name matching | pending |
 | M3-A | H2 owned presentation preference / generic host | pending |
 | M3-B | H1/H2 custom hosts / accepted child origins | pending |
@@ -73,3 +73,13 @@ Separate final lib compilation with the same fast-dev Nextest no-run command pas
 - `m1-b-remediation`, run `a9b75c22-2e92-4723-9156-0d4d9e9af014`, 2/2 passed after first focused remediation; runner 1.976s.
 
 Exact selectors/output/cleanup receipts are under `target/utility-usability-and-insights/evidence/m1-b-{focused,remediation}/`; cleanup/drain verified. Parent inspected complete source diff and whitespace. Only Dashboard dialog and this ledger changed. Source/Cargo lane explicitly returned; native observation pending M9.
+
+M1-B checkpoint `2c8135e71fbac81a7c239c526245f2cf655d5b32` pushed successfully; clean tree before M2-A handoff. Planner identified the active GUI search identity as FS1's first responsible boundary; Clear must retire it through accepted host actions, unlike Cancel which preserves partial results. Implementer received M2-A only; parent retains ledger/Git.
+
+## M2-A acceptance
+
+Explicit Clear results beside Search/Cancel has a stable Jump target. Its accepted captured search identity/result revision takes priority over same-pass result row/copy/export effects. Matching coordinator cancellation/retirement is immediate and nonblocking; no synchronous unbounded event-queue drain. Late events are stale; worker-owned Activity reaches terminal independently. Rows/refinement/selection/preview/diagnostics/request/backend/sort-pending state clear to Ready without changing form/preferences. Preview effects complete after parent actions and reject the cleared context. Ordinary Cancel still preserves partial results.
+
+Separate fast-dev lib Nextest no-run compile passed in 2m00s (six existing test warnings). Owned execution `m2-a-focused`, 100-second deadline and `--no-fail-fast`, passed 9/9; run `38ceef29-9c15-4a5f-8e15-b2cd6f59e2c8`, runner 2.713s. Cases cover delayed event kinds, worker cancellation/activity, rapid restart, form preservation, stale Clear/row/copy/export and retained/discarded/detached Clear UI. Exact selectors/output/cleanup receipt: `target/utility-usability-and-insights/evidence/m2-a-focused/result.json`; cleanup/drain verified. Post-test source changes only whitespace. Parent inspected scoped diff/whitespace; source/Cargo lane returned. Native observation pending M9.
+
+Unrelated pre-existing caveat, left unchanged: unused public `SearchCoordinator::drain_events_including_stale` also applies stale events to coordinator status. There are no current callers; ordinary GUI drain rejects them. This is not an FS1 active-path defect and did not justify another rebuild or broader coordinator cleanup.

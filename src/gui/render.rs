@@ -45864,6 +45864,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn file_search_clear_results_requires_retained_host_pass_and_works_popped_out() {
+        use crate::file_search::model::SearchId;
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        let path = workspace.root().join("retained-result.txt");
+        seed_actual_file_search_filename_results(&mut app, SearchId(947), &[path.clone()]);
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let clear = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::ClearResults)
+            .expect("Clear results is visible");
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            clear.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+        assert_eq!(app.file_search_dialog.active_search_id, Some(SearchId(947)));
+        assert_eq!(
+            app.file_search_dialog.results.len(),
+            1,
+            "discarded activation cannot clear"
+        );
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            clear.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.file_search_dialog.results.is_empty());
+        assert!(app.file_search_dialog.active_search_id.is_none());
+
+        seed_actual_file_search_filename_results(&mut app, SearchId(948), &[path]);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let (popout, clip, enabled) = app.file_search_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            popout.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.file_search_host.is_popped_out());
+        let viewport = app.file_search_host.test_viewport();
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            child_frame(&mut app, Vec::new());
+        }
+        let clear = app.file_search_host.test_target("Clear results");
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(clear, pressed));
+        }
+        assert!(app.file_search_dialog.results.is_empty());
+        assert!(app.file_search_dialog.active_search_id.is_none());
+    }
+
     fn dismiss_file_search_popup_if_open(ctx: &egui::Context, app: &mut LauncherApp) {
         if !egui::Popup::is_any_open(ctx) {
             return;
