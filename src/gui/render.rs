@@ -25039,6 +25039,306 @@ mod tests {
     }
 
     #[test]
+    fn folder_size_treemap_rejects_discarded_and_stale_press_without_rescan() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let fixture = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(fixture.path().join("data.txt"), b"held scan data").unwrap();
+        let (session, control) = crate::folder_size::FolderSizeSession::with_held_test_scan(|| {});
+        app.folder_size_dialog.set_session_for_test(session);
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(fixture.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.progress().is_empty()
+            || !app
+                .folder_size_dialog
+                .session_view_for_test()
+                .progress()
+                .is_some_and(|p| p.total_logical_bytes() > 0)
+        {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Treemap");
+        let tile = folder_size_host_control(&ctx, &mut app, root, "tile/data.txt");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(tile, true),
+            true,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(tile, false),
+            false,
+            false,
+        );
+        assert!(app.folder_size_dialog.test_navigation_state().1.is_none());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(tile, true),
+            false,
+            false,
+        );
+        control.request_late();
+        while !control.late_emitted() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(tile, false),
+            false,
+            false,
+        );
+        assert!(app.folder_size_dialog.test_navigation_state().1.is_none());
+        click_folder_size_host_control(&ctx, &mut app, root, "filter/Files");
+        let tile = folder_size_host_control(&ctx, &mut app, root, "tile/data.txt");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(tile, true),
+            false,
+            false,
+        );
+        app.folder_size_dialog
+            .age_treemap_press_publication_for_test();
+        let mut batched = tool_dialog_pointer_events(tile, false);
+        batched.extend(tool_dialog_pointer_events(tile, true));
+        batched.extend(tool_dialog_pointer_events(tile, false));
+        run_host_viewport_frame(&ctx, &mut app, root, batched, false, false);
+        assert!(
+            app.folder_size_dialog.test_navigation_state().1.is_some(),
+            "same-frame primary click selects the tile"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                vec![
+                    egui::Event::PointerMoved(tile.center()),
+                    egui::Event::PointerButton {
+                        pos: tile.center(),
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                false,
+            );
+        }
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        click_folder_size_host_control(&ctx, &mut app, root, "reveal/data.txt");
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let [RootDialogEffect::RevealFolderSize(request)] = effects.as_slice() else {
+            panic!("expected guarded tile reveal, got {effects:?}")
+        };
+        assert_eq!(
+            app.folder_size_dialog
+                .take_reveal_path_for_dispatch(request)
+                .unwrap(),
+            Some(fixture.path().join("data.txt"))
+        );
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Both");
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Treemap");
+        assert_eq!(control.started(), vec![1]);
+        control.release();
+    }
+
+    fn folder_size_separate_click_sequences(ctx: &egui::Context, app: &mut LauncherApp) {
+        let mut input = actual_query_input(true);
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 900.0),
+        ));
+        input.time = Some(ctx.input(|input| input.time) + 1.0);
+        app.run_root_frame_for_test(ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn folder_size_treemap_links_selection_drill_and_view_modes() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let fixture = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::create_dir_all(fixture.path().join("outer").join("inner")).unwrap();
+        std::fs::write(
+            fixture.path().join("outer/inner/nested.txt"),
+            b"nested contents",
+        )
+        .unwrap();
+        std::fs::write(fixture.path().join("direct.txt"), b"direct contents").unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(fixture.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        folder_size_separate_click_sequences(&ctx, &mut app);
+        let outer_row = folder_size_host_control(&ctx, &mut app, root, "row/outer");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(outer_row, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert!(app.folder_size_dialog.test_navigation_state().2.is_some());
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Treemap");
+        let _ = folder_size_host_control(&ctx, &mut app, root, "treemap-empty");
+        click_folder_size_host_control(&ctx, &mut app, root, "up");
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Table");
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        click_folder_size_host_control(&ctx, &mut app, root, "refresh");
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let generation = app.folder_size_dialog.session_view_for_test().generation();
+        click_folder_size_host_control(&ctx, &mut app, root, "row/direct.txt");
+        let selected = app.folder_size_dialog.test_navigation_state().1;
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Treemap");
+        click_folder_size_host_control(&ctx, &mut app, root, "tile/direct.txt");
+        assert_eq!(app.folder_size_dialog.test_navigation_state().1, selected);
+        folder_size_separate_click_sequences(&ctx, &mut app);
+        let direct = folder_size_host_control(&ctx, &mut app, root, "tile/direct.txt");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(direct, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert!(app.folder_size_dialog.test_navigation_state().2.is_none());
+        folder_size_separate_click_sequences(&ctx, &mut app);
+        let outer = folder_size_host_control(&ctx, &mut app, root, "tile/outer");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(outer, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        let outer_navigation = app.folder_size_dialog.test_navigation_state();
+        assert!(outer_navigation.2.is_some());
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        assert_eq!(
+            app.folder_size_dialog.test_navigation_state(),
+            outer_navigation
+        );
+        folder_size_separate_click_sequences(&ctx, &mut app);
+        let inner = folder_size_host_control(&ctx, &mut app, root, "tile/inner");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(inner, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert_ne!(
+            app.folder_size_dialog.test_navigation_state().2,
+            outer_navigation.2
+        );
+        click_folder_size_host_control(&ctx, &mut app, root, "up");
+        assert_eq!(
+            app.folder_size_dialog.test_navigation_state().2,
+            outer_navigation.2
+        );
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.25;
+            }
+        });
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Both");
+        let _ = folder_size_host_control(&ctx, &mut app, root, "treemap-area");
+        for _ in 0..3 {
+            let mut input = actual_query_input(true);
+            input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(650.0, 700.0),
+            ));
+            app.run_root_frame_for_test(&ctx, input, false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let (chart, clip) = app
+            .folder_size_dialog
+            .test_action_rect("treemap-area")
+            .expect("narrow treemap");
+        assert!(
+            chart.is_positive() && clip.contains_rect(chart),
+            "narrow chart {chart:?}, clip {clip:?}"
+        );
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        let native = super::super::FolderSizeDialogState::viewport();
+        let _ = folder_size_host_control(&ctx, &mut app, native, "treemap-area");
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        let _ = folder_size_host_control(&ctx, &mut app, root, "treemap-area");
+        click_folder_size_host_control(&ctx, &mut app, root, "view/Table");
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(
+            app.folder_size_dialog
+                .test_action_rect("row/inner")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn folder_size_host_preserves_scan_and_drill_through_hidden_root() {
         use super::super::utility_host::UtilityPresentation;
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();

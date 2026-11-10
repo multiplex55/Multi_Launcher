@@ -355,8 +355,31 @@ fn project_row(
 
 use super::utility_host::{HostedCopyCapture, HostedCopyReceipt};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderView {
+    Table,
+    Treemap,
+    Both,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct TreemapPress {
+    projection: ProjectionKey,
+    directory: Option<(u64, usize)>,
+    filter: KindFilter,
+    rect: egui::Rect,
+    area: egui::Rect,
+    row: usize,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+}
+
 #[derive(Clone)]
 enum FolderSizeAction {
+    SetView(FolderView),
+    CancelTreemapPress,
+    TreemapPress(TreemapPress),
+    TreemapRelease(TreemapPress, bool),
     Host(super::utility_host::UtilityPresentation),
     ChooseFolder,
     Prefill(PathBuf),
@@ -494,8 +517,9 @@ pub(crate) struct FolderSizeDialogState {
     sort_direction: SortDirection,
     filter: KindFilter,
     visible_rows: Option<VisibleRows>,
-    #[allow(dead_code)]
     treemap_cache: TreemapCache,
+    folder_view: FolderView,
+    treemap_press: Option<TreemapPress>,
     pending: Option<PendingFolderSizePass>,
     notice: Option<String>,
     #[cfg(test)]
@@ -557,6 +581,8 @@ impl FolderSizeDialogState {
             filter: KindFilter::All,
             visible_rows: None,
             treemap_cache: TreemapCache::default(),
+            folder_view: FolderView::Table,
+            treemap_press: None,
             pending: None,
             notice: None,
             #[cfg(test)]
@@ -694,6 +720,10 @@ impl FolderSizeDialogState {
         let sort_column = self.sort_column;
         let sort_direction = self.sort_direction;
         let filter = self.filter;
+        let folder_view = self.folder_view;
+        let host_identity = self.host.identity();
+        let host_epoch = self.host_epoch;
+        let previous_treemap_press = self.treemap_press;
         let owned_popup = self.row_menu.map(|(_, _, popup, _, _, _)| popup);
         let current_directory = self.current_directory;
         let current_directory_path = self.current_directory_path.clone();
@@ -869,24 +899,103 @@ impl FolderSizeDialogState {
                             #[cfg(test)] &mut self.test_action_rects);
                     }
                     if let Some(projection) = projection.as_deref() {
-                        show_folder_rows(
-                            ui,
-                            projection,
-                            selected_root.as_ref(),
-                            current_directory,
-                            current_directory_path.as_deref(),
-                            selected_entry,
-                            &visible_indices,
-                            sort_column,
-                            sort_direction,
-                            filter,
-                            owned_popup,
-                            commit_allowed,
-                            pass_allowed,
-                            &mut staged_actions,
-                            #[cfg(test)]
-                            &mut self.test_action_rects,
-                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, value) in [
+                                ("Table", FolderView::Table),
+                                ("Treemap", FolderView::Treemap),
+                                ("Both", FolderView::Both),
+                            ] {
+                                let response = ui.selectable_label(folder_view == value, label);
+                                #[cfg(test)]
+                                self.test_action_rects.push((
+                                    format!("view/{label}"),
+                                    response.rect,
+                                    ui.clip_rect(),
+                                ));
+                                if response.clicked() && commit_allowed {
+                                    staged_actions.push(FolderSizeAction::SetView(value));
+                                }
+                            }
+                        });
+                        macro_rules! rows {
+                            ($ui:expr, $show:expr) => {
+                                show_folder_rows(
+                                    $ui,
+                                    projection,
+                                    selected_root.as_ref(),
+                                    current_directory,
+                                    current_directory_path.as_deref(),
+                                    selected_entry,
+                                    &visible_indices,
+                                    sort_column,
+                                    sort_direction,
+                                    filter,
+                                    owned_popup,
+                                    commit_allowed,
+                                    pass_allowed,
+                                    $show,
+                                    &mut staged_actions,
+                                    #[cfg(test)]
+                                    &mut self.test_action_rects,
+                                )
+                            };
+                        }
+                        macro_rules! chart {
+                            ($ui:expr) => {{
+                                let size = treemap_view_size($ui);
+                                if let Some(layout) =
+                                    self.treemap_layout(size.x as f64, size.y as f64)
+                                {
+                                    show_treemap(
+                                        $ui,
+                                        projection,
+                                        &layout,
+                                        size,
+                                        selected_entry,
+                                        current_directory,
+                                        filter,
+                                        host_identity,
+                                        host_epoch,
+                                        previous_treemap_press,
+                                        owned_popup,
+                                        commit_allowed,
+                                        pass_allowed,
+                                        &mut staged_actions,
+                                        #[cfg(test)]
+                                        &mut self.test_action_rects,
+                                    );
+                                }
+                            }};
+                        }
+                        if folder_view == FolderView::Both && treemap_view_size(ui).x >= 850.0 {
+                            ui.columns(2, |columns| {
+                                for column in columns.iter_mut() {
+                                    column.set_clip_rect(
+                                        column.clip_rect().intersect(column.max_rect()),
+                                    );
+                                }
+                                rows!(&mut columns[0], true);
+                                chart!(&mut columns[1]);
+                            });
+                        } else {
+                            if folder_view == FolderView::Both {
+                                let height = (ui.available_height() * 0.45).max(100.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                                        rows!(ui, true);
+                                    },
+                                );
+                                chart!(ui);
+                            } else {
+                                rows!(ui, folder_view == FolderView::Table);
+                                if folder_view == FolderView::Treemap {
+                                    chart!(ui);
+                                }
+                            }
+                        }
                     } else if selected_root.is_some() {
                         ui.label("No scan results yet. Choose Scan when you are ready.");
                     }
@@ -1297,7 +1406,7 @@ impl FolderSizeDialogState {
                 action,
                 FolderSizeAction::Select { .. }
                     | FolderSizeAction::RevealRow { .. } | FolderSizeAction::OpenRowMenu { .. }
-                    | FolderSizeAction::SetSort(_) | FolderSizeAction::SetFilter(_)
+                    | FolderSizeAction::SetSort(_) | FolderSizeAction::SetFilter(_) | FolderSizeAction::TreemapPress(_) | FolderSizeAction::TreemapRelease(_, _)
                     | FolderSizeAction::Drill { .. }
                     | FolderSizeAction::Back { .. }
                     | FolderSizeAction::CopyRow { .. }
@@ -1314,7 +1423,51 @@ impl FolderSizeDialogState {
                 continue;
             }
             match action {
+                FolderSizeAction::SetView(view) => {
+                    self.folder_view = view;
+                    self.treemap_press = None;
+                }
+                FolderSizeAction::CancelTreemapPress => {
+                    self.treemap_press = None;
+                }
+                FolderSizeAction::TreemapPress(press) => {
+                    if self.folder_view != FolderView::Table
+                        && press.host == self.host.identity()
+                        && press.epoch == self.host_epoch
+                        && press.directory == self.current_directory
+                        && press.filter == self.filter
+                        && self
+                            .projection
+                            .as_ref()
+                            .is_some_and(|p| p.key == press.projection)
+                    {
+                        self.treemap_press = Some(press);
+                    }
+                }
+                FolderSizeAction::TreemapRelease(press, double) => {
+                    let accepted = self.treemap_press.take() == Some(press)
+                        && self.folder_view != FolderView::Table
+                        && press.host == self.host.identity()
+                        && press.epoch == self.host_epoch
+                        && press.directory == self.current_directory
+                        && press.filter == self.filter
+                        && self
+                            .projection
+                            .as_ref()
+                            .is_some_and(|p| p.key == press.projection)
+                        && self
+                            .visible_rows
+                            .as_ref()
+                            .is_some_and(|rows| rows.indices.contains(&press.row));
+                    if accepted {
+                        self.select_row(press.projection.generation, press.row);
+                        if double {
+                            self.drill_row(press.projection.generation, press.row);
+                        }
+                    }
+                }
                 FolderSizeAction::Host(next) => {
+                    self.treemap_press = None;
                     if self.host.transition(next) {
                         let key =
                             crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
@@ -1469,29 +1622,8 @@ impl FolderSizeDialogState {
                         }));
                     }
                 }
-                FolderSizeAction::Select { generation, index } => {
-                    if self
-                        .projection
-                        .as_ref()
-                        .is_some_and(|projection| projection.contains_row(generation, index))
-                    {
-                        self.selected_entry = Some((generation, index));
-                    }
-                }
-                FolderSizeAction::Drill { generation, index } => {
-                    if let Some(projection) = self.projection.as_ref()
-                        && projection.contains_row(generation, index)
-                        && projection
-                            .row(index)
-                            .is_some_and(|row| row.kind == FolderSizeEntryKind::Directory)
-                        && let Some(path) = projection.source.path_at(index)
-                    {
-                        self.selected_entry = Some((generation, index));
-                        self.current_directory = Some((generation, index));
-                        self.current_directory_path = Some(path.clone());
-                        self.notice = Some(format!("Showing {}", path.display()));
-                    }
-                }
+                FolderSizeAction::Select { generation, index } => self.select_row(generation, index),
+                FolderSizeAction::Drill { generation, index } => self.drill_row(generation, index),
                 FolderSizeAction::Back { generation, index } => {
                     if self.current_directory == Some((generation, index))
                         && let Some(projection) = self.projection.as_ref()
@@ -1594,8 +1726,32 @@ impl FolderSizeDialogState {
         });
     }
 
+    fn select_row(&mut self, generation: u64, index: usize) {
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.contains_row(generation, index))
+        {
+            self.selected_entry = Some((generation, index));
+        }
+    }
+
+    fn drill_row(&mut self, generation: u64, index: usize) {
+        if let Some(projection) = self.projection.as_ref()
+            && projection.contains_row(generation, index)
+            && projection
+                .row(index)
+                .is_some_and(|row| row.kind == FolderSizeEntryKind::Directory)
+            && let Some(path) = projection.source.path_at(index)
+        {
+            self.selected_entry = Some((generation, index));
+            self.current_directory = Some((generation, index));
+            self.current_directory_path = Some(path.clone());
+            self.notice = Some(format!("Showing {}", path.display()));
+        }
+    }
+
     // Called only when the treemap is requested; table rendering does no layout work.
-    #[allow(dead_code)]
     fn treemap_layout(
         &mut self,
         width: f64,
@@ -1626,7 +1782,7 @@ impl FolderSizeDialogState {
         let mut indices = projection.children.get(directory).into_iter().flatten().copied()
             .filter(|index| filter_matches(self.filter, projection.rows[*index].kind)).collect::<Vec<_>>();
         indices.sort_by(|a, b| compare_rows(&projection.rows, *a, *b, self.sort_column, self.sort_direction, projection.total_logical_bytes));
-        if self.selected_entry.is_some_and(|(generation, index)| generation != key.projection.generation || !indices.contains(&index)) {
+        if self.selected_entry.is_some_and(|(generation, index)| generation != key.projection.generation || (!indices.contains(&index) && self.current_directory != Some((generation, index)))) {
             self.selected_entry = None;
         }
         self.visible_rows = Some(VisibleRows { key, indices: Arc::new(indices) });
@@ -1848,6 +2004,15 @@ impl FolderSizeDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn age_treemap_press_publication_for_test(&mut self) {
+        self.treemap_press
+            .as_mut()
+            .expect("retained tile press")
+            .projection
+            .version = ProjectionVersion::Progress(0);
+    }
+
+    #[cfg(test)]
     pub(crate) fn age_row_menu_publication_for_test(&mut self) {
         let (key, ..) = self.row_menu.as_mut().expect("retained row menu");
         key.version = ProjectionVersion::Progress(0);
@@ -1968,6 +2133,220 @@ fn show_scan_status(
     }
 }
 
+fn treemap_view_size(ui: &egui::Ui) -> egui::Vec2 {
+    let available = ui.available_size();
+    let visible = ui.clip_rect().max - ui.cursor().min;
+    egui::vec2(
+        available.x.min(visible.x).max(1.0),
+        (available.y.min(visible.y) - 30.0).clamp(1.0, 350.0),
+    )
+}
+
+fn show_treemap(
+    ui: &mut egui::Ui,
+    projection: &FolderSizeProjection,
+    layout: &crate::folder_size::treemap::Layout,
+    size: egui::Vec2,
+    selected: Option<(u64, usize)>,
+    directory: Option<(u64, usize)>,
+    filter: KindFilter,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    previous_press: Option<TreemapPress>,
+    owned_popup: Option<egui::Id>,
+    input_allowed: bool,
+    menu_allowed: bool,
+    actions: &mut Vec<FolderSizeAction>,
+    #[cfg(test)] rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) {
+    let (area, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    #[cfg(test)]
+    rects.push(("treemap-area".into(), area, ui.clip_rect()));
+    let painter = ui.painter().with_clip_rect(area.intersect(ui.clip_rect()));
+    let mut tiny = 0usize;
+    let mut unlabelled = 0usize;
+    let mut press_still_current = previous_press.is_none();
+    let mut fresh_press = false;
+    for tile in &layout.tiles {
+        let r = tile.rect;
+        let rect = egui::Rect::from_min_size(
+            area.min + egui::vec2(r.x as f32, r.y as f32),
+            egui::vec2(r.width as f32, r.height as f32),
+        )
+        .intersect(area);
+        if rect.width() < 2.0 || rect.height() < 2.0 {
+            tiny += 1;
+            continue;
+        }
+        if rect.width() < 80.0 || rect.height() < 32.0 {
+            unlabelled += 1;
+        }
+        let Some(row) = projection.row(tile.row) else {
+            continue;
+        };
+        let is_selected = selected == Some((projection.key.generation, tile.row));
+        let response = ui.interact(
+            rect,
+            ui.id()
+                .with(("treemap", projection.key.generation, tile.row)),
+            egui::Sense::click(),
+        );
+        painter.rect_filled(
+            rect,
+            0.0,
+            if is_selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            },
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            if is_selected {
+                ui.visuals().selection.stroke
+            } else {
+                ui.visuals().widgets.inactive.bg_stroke
+            },
+            egui::StrokeKind::Inside,
+        );
+        let share = tile.bytes as f64 * 100.0 / layout.total as f64;
+        let text = format!(
+            "{}{}\n{} · {:.1}%",
+            if is_selected { "✓ " } else { "" },
+            row.name,
+            format_bytes(tile.bytes),
+            share
+        );
+        painter.with_clip_rect(rect.intersect(area)).text(
+            rect.min + egui::vec2(4.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            text,
+            egui::TextStyle::Small.resolve(ui.style()),
+            ui.visuals().text_color(),
+        );
+        #[cfg(test)]
+        rects.push((
+            format!("tile/{}", row.name),
+            rect,
+            area.intersect(ui.clip_rect()),
+        ));
+        let response = response.on_hover_ui(|ui| {
+            let path = projection
+                .source
+                .path_at(tile.row)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| row.name.clone());
+            ui.label(format!(
+                "{}\n{} · {} · {}{}",
+                path,
+                if row.kind == FolderSizeEntryKind::Directory {
+                    "Folder"
+                } else {
+                    "File"
+                },
+                row_status(row),
+                format_bytes(tile.bytes),
+                if tile.provisional {
+                    " (provisional subtotal)"
+                } else {
+                    ""
+                }
+            ));
+        });
+        let press = TreemapPress {
+            projection: projection.key,
+            directory,
+            filter,
+            rect,
+            area,
+            row: tile.row,
+            host,
+            epoch,
+        };
+        if previous_press == Some(press) {
+            press_still_current = true;
+        }
+        let primary_pressed = ui.input(|input| input.events.iter().any(|event| matches!(event,
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }
+                if rect.contains(*pos) && ui.clip_rect().contains(*pos))));
+        if input_allowed
+            && primary_pressed
+            && (response.is_pointer_button_down_on() || response.clicked())
+        {
+            actions.push(FolderSizeAction::TreemapPress(press));
+            fresh_press = true;
+        }
+        folder_row_context(
+            &response,
+            row,
+            projection.key.generation,
+            tile.row,
+            owned_popup,
+            input_allowed,
+            menu_allowed,
+            actions,
+            #[cfg(test)]
+            rects,
+        );
+        if input_allowed && response.clicked() {
+            actions.push(FolderSizeAction::TreemapRelease(
+                press,
+                response.double_clicked(),
+            ));
+        }
+    }
+    if input_allowed && !press_still_current && !fresh_press {
+        actions.push(FolderSizeAction::CancelTreemapPress);
+    }
+    if layout.tiles.is_empty() && layout.zero_count == 0 {
+        let _empty = ui.weak("No retained measured children here. For an unscanned folder, enable Include subfolders and Refresh, or choose this folder as the scan root.");
+        #[cfg(test)]
+        rects.push(("treemap-empty".into(), _empty.rect, ui.clip_rect()));
+    }
+    ui.weak(format!("Displayed measured total: {} bytes · {} tiny · {} with clipped labels · {} zero · {} unknown · {} skipped · {} provisional", layout.total, tiny, unlabelled, layout.zero_count, layout.unknown_count, layout.omitted_count, layout.provisional_count));
+}
+fn folder_row_context(
+    response: &egui::Response,
+    row: &FolderSizeRow,
+    generation: u64,
+    index: usize,
+    owned_popup: Option<egui::Id>,
+    commit_allowed: bool,
+    menu_allowed: bool,
+    actions: &mut Vec<FolderSizeAction>,
+    #[cfg(test)] rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) {
+    if response.secondary_clicked() && commit_allowed {
+        actions.push(FolderSizeAction::OpenRowMenu {
+            generation,
+            index,
+            popup: egui::Popup::default_response_id(response),
+        });
+    }
+    let popup = egui::Popup::default_response_id(response);
+    if response.context_menu_opened() && owned_popup != Some(popup) && !response.secondary_clicked()
+    {
+        egui::Popup::close_id(&response.ctx, popup);
+    }
+    response.context_menu(|ui| {
+        let copy = ui.button("Copy path");
+        #[cfg(test)]
+        rects.push((format!("copy-row/{}", row.name), copy.rect, ui.clip_rect()));
+        if copy.clicked() && menu_allowed {
+            actions.push(FolderSizeAction::CopyRow { generation, index });
+            ui.close();
+        }
+        let reveal = ui.button("Reveal in File Explorer");
+        #[cfg(test)]
+        rects.push((format!("reveal/{}", row.name), reveal.rect, ui.clip_rect()));
+        if reveal.clicked() && menu_allowed {
+            actions.push(FolderSizeAction::RevealRow { generation, index });
+            ui.close();
+        }
+    });
+}
+
 fn show_folder_rows(
     ui: &mut egui::Ui,
     projection: &FolderSizeProjection,
@@ -1982,6 +2361,7 @@ fn show_folder_rows(
     owned_popup: Option<egui::Id>,
     commit_allowed: bool,
     menu_allowed: bool,
+    show_table: bool,
     staged_actions: &mut Vec<FolderSizeAction>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
@@ -1995,10 +2375,10 @@ fn show_folder_rows(
     ui.horizontal(|ui| {
         if let Some((generation, index)) = current_directory
             && generation == projection.key.generation
-            && ui.button("Up").clicked()
-            && commit_allowed
         {
-            staged_actions.push(FolderSizeAction::Back { generation, index });
+            let up = ui.button("Up");
+            #[cfg(test)] test_action_rects.push(("up".into(), up.rect, ui.clip_rect()));
+            if up.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::Back { generation, index }); }
         }
         if let Some(path) = current_path {
             let full_path = path.display().to_string();
@@ -2018,6 +2398,7 @@ fn show_folder_rows(
             if response.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::SetFilter(value)); }
         }
     });
+    if !show_table { return; }
     ui.separator();
     ui.horizontal(|ui| {
         let name_width = row_name_width(ui.available_width());
@@ -2066,23 +2447,9 @@ fn show_folder_rows(
                         if response.clicked() && commit_allowed {
                             staged_actions.push(FolderSizeAction::Select { generation, index });
                         }
-                        if response.secondary_clicked() && commit_allowed {
-                            staged_actions.push(FolderSizeAction::OpenRowMenu {
-                                generation, index, popup: egui::Popup::default_response_id(&response),
-                            });
-                        }
-                        let popup = egui::Popup::default_response_id(&response);
-                        if response.context_menu_opened() && owned_popup != Some(popup) && !response.secondary_clicked() {
-                            egui::Popup::close_id(ui.ctx(), popup);
-                        }
-                        response.context_menu(|ui| {
-                            let reveal = ui.button("Reveal in File Explorer");
-                            #[cfg(test)] test_action_rects.push((format!("reveal/{}", row.name), reveal.rect, ui.clip_rect()));
-                            if reveal.clicked() && menu_allowed {
-                                staged_actions.push(FolderSizeAction::RevealRow { generation, index });
-                                ui.close();
-                            }
-                        });
+                        folder_row_context(&response, row, generation, index, owned_popup,
+                            commit_allowed, menu_allowed, staged_actions,
+                            #[cfg(test)] test_action_rects);
                         if response.double_clicked()
                             && commit_allowed
                             && row.kind == FolderSizeEntryKind::Directory
