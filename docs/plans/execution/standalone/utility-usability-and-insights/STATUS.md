@@ -30,7 +30,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M4-B | D4 toolbar / pinned inspector | complete; automated verified, native pending |
 | M4-C | D3 owned-text endpoint captions | complete; automated verified, native pending |
 | M4-D | D5 actual connector creation / reconnection | complete; automated verified, native pending |
-| M5-A | I1 bounded label-file exchange | pending |
+| M5-A | I1 bounded label-file exchange | complete; automated verified, native pending |
 | M6-A | R1/R2 explicit duration / encoder timeline | pending |
 | M6-B | R1/R2 exact typing / 25-second steps | pending |
 | M7-A | F1 retained-tree treemap model | pending |
@@ -380,3 +380,17 @@ Final separate fast-dev lib no-run compile passed. The initial compile's route-p
 - `m4-d-root-discard`: 1/1 exact root-discard regression.
 
 Receipts/selectors/output: `target/utility-usability-and-insights/evidence/m4-d-*`; final receipts exit 0/no timeout/cleanup and drain verified. Parent inspected scoped diff/whitespace/status; no diagnostics or duplicate implementation. Source/Cargo returned; only new-block formatting followed final successful tests. Physical native creation/reconnect remains pending M9; automated state/input tests are not native observations. M5–M8 and B2b/c adapters remain required.
+
+M4-D checkpoint `3c4e687d19a2ca3e512332861d2334f3b49d8c88` pushed successfully; clean tree before M5-A. Implementer owns bounded labels-only JSON codec/atomic replacement and accepted Inspector file/confirmation flow, with native owner/session/draft guards and nonlabel/Pad invariants. Parent ledger/Git; one source/Cargo lane. M6–M8, global ordinary B2b/c adapters and M9 remain pending.
+
+## M5-A acceptance: Bounded Inspector label exchange
+
+Version 1 UTF-8 JSON exchanges only ordered `{label,start,end_exclusive}` definitions with an optional source-width hint. The regular-file read is bounded to 128 KiB plus growth detection; universal 0≤start<end≤128 validation limits 128 labels/128 UTF-8 bytes each, rejects duplicate exact ranges and malformed/unsupported input, and preserves overlapping distinct ranges/order/empty labels. Atomic domain replacement retains out-of-current-width definitions as invalid without changing numeric mode. Export uses captured labels and existing durable `save_atomic`.
+
+Import/Export buttons live inside Bit labels. Typed file requests carry the rendered host and Inspector epoch; accepted same-frame draft edits complete first, then picker/confirmation guards bind resulting generation to the original owner. A host promoted/retired before dispatch, pending close, changed epoch/draft or rejected pass cannot open/apply stale file work. Existing nonempty changed labels (including replacement by empty) require explicit count confirmation; cancel/failure leaves model state. Numeric bits/mode, pending input, Pad source/binding/history/dirty and populated comparison state are preserved.
+
+The initial compiled binary stalled in test discovery before any test ran. Owned `m5-a-codec` timed out at 100 seconds with cleanup/drain verified. Local dependency/PE inspection established the first Windows rfd MessageDialog reference imported `TaskDialogIndirect` under existing common-controls-v6, while resources have no activation manifest. The confirmation boundary now uses HWND-owned `MessageBoxW` with No default and explicit API error handling; global features/manifests unchanged. Pre/post imports and timeout evidence are retained in `m5-a-codec`; rebuilt discovery completed normally, TaskDialogIndirect absent/MessageBoxW present. This is a resolved feature startup defect, not a claimed failed codec test or physical native observation.
+
+Final separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` successful batches under `target/utility-usability-and-insights/evidence/`: `m5-a-codec-fixed` 4/4 (bounds/roundtrip/atomic domain plus existing exact Inspector behavior); `m5-a-inspector` 7/7 (accepted controls/file flow, stale host/session/draft, same-frame ordering, confirmation, narrow/native body/private draft regressions); pending-close guards 3/3; actual export replacement I/O failure/sentinel 1/1; final `m5-a-pad-invariants` 1/1 uses real Pad source/binding and nonempty comparison result. Exact selectors remain in each receipt. All final receipts exit 0/no timeout/cleanup and drain verified.
+
+Parent inspected scoped diff/whitespace/status; only label domain/codec, Inspector/generic-host/app dispatch and ledger changed. New codec is intentional; no loader workarounds, diagnostics or task processes remain. Source/Cargo returned. Physical native file-picker/import/export observation pending M9; M6–M8 and remaining global ordinary adapters continue.

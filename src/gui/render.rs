@@ -12975,9 +12975,9 @@ impl LauncherApp {
                         self.panel_stack
                             .retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
                     }
-                    ProgrammerInspectorHostCommand::Apply(actions) => {
+                    ProgrammerInspectorHostCommand::Apply(actions, hwnd) => {
                         let source_context = std::sync::Arc::clone(&actions.context);
-                        let (copy, insert, preferences) = self.programmer_inspector_dialog.commit(actions, &current_inspector_context);
+                        let (copy, insert, preferences) = self.programmer_inspector_dialog.commit_with_file(actions, &current_inspector_context, hwnd, &self.programmer_inspector_host);
                         if let Some(text) = copy { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }); }
                         if let Some(request) = insert { self.calculation_pad_dialog.apply_inspector_insert(ctx, &source_context, request); }
                         if let Some(preferences) = preferences { self.request_programmer_inspector_preference_save(ctx, preferences); }

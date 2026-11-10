@@ -182,6 +182,7 @@ pub(crate) struct ProgrammerInspectorDialog {
     draft: InspectorDraft,
     published: Option<Arc<InspectorPadContext>>,
     preference_error: Option<String>,
+    file_feedback: Option<String>,
     #[cfg(test)]
     test_controls: Vec<(String, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
@@ -195,12 +196,26 @@ pub(super) struct InspectorRuntime {
     pub(super) host: HostIdentity,
     pub(super) pinned: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectorLabelFileAction {
+    Import,
+    Export,
+}
+
+#[derive(Clone, Copy)]
+struct InspectorLabelFileRequest {
+    action: InspectorLabelFileAction,
+    host: HostIdentity,
+    epoch: u64,
+}
+
 pub(super) struct InspectorActions {
     pub(super) host_request: Option<UtilityPresentation>,
     pub(super) close: bool,
     pub(super) context: Arc<InspectorPadContext>,
     draft: Option<InspectorDraft>,
     expected_generation: u64,
+    file_action: Option<InspectorLabelFileRequest>,
     pub(super) copy: Option<String>,
     pub(super) insert: bool,
     compare: bool,
@@ -363,6 +378,7 @@ impl ProgrammerInspectorDialog {
             context,
             draft: Some(draft),
             expected_generation: self.draft.generation,
+            file_action: None,
             copy: None,
             insert: false,
             compare: false,
@@ -372,6 +388,29 @@ impl ProgrammerInspectorDialog {
             receipt: None,
             host_button: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_pending_label_file_action(
+        &self,
+        ctx: &egui::Context,
+        context: Arc<InspectorPadContext>,
+        host: HostIdentity,
+    ) -> InspectorActions {
+        let mut actions = self.test_pending_popout_with_bit_edit(ctx, context);
+        actions.host_request = None;
+        actions.draft = None;
+        actions.file_action = Some(InspectorLabelFileRequest {
+            action: InspectorLabelFileAction::Import,
+            host,
+            epoch: self.epoch,
+        });
+        actions
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_file_feedback(&self) -> Option<&str> {
+        self.file_feedback.as_deref()
     }
 
     pub(super) fn commit(
@@ -439,6 +478,154 @@ impl ProgrammerInspectorDialog {
         };
         (copy, insert, preferences)
     }
+    pub(super) fn commit_with_file(
+        &mut self,
+        actions: InspectorActions,
+        current: &Arc<InspectorPadContext>,
+        hwnd: Option<usize>,
+        host: &super::utility_window_host::ProgrammerInspectorWindowHost,
+    ) -> (
+        Option<String>,
+        Option<crate::calculation_pad::InspectorInsertRequest>,
+        Option<crate::settings::ProgrammerInspectorPreferences>,
+    ) {
+        self.commit_with_file_using(
+            actions,
+            current,
+            |identity| host.identity() == identity,
+            |_, action| native_label_picker(action, hwnd),
+            |_, count| native_label_confirmation(count, hwnd),
+        )
+    }
+
+    fn commit_with_file_using(
+        &mut self,
+        mut actions: InspectorActions,
+        current: &Arc<InspectorPadContext>,
+        host_current: impl Fn(HostIdentity) -> bool,
+        pick: impl FnMut(
+            &mut Self,
+            InspectorLabelFileAction,
+        ) -> anyhow::Result<Option<std::path::PathBuf>>,
+        confirm: impl FnMut(&mut Self, usize) -> anyhow::Result<bool>,
+    ) -> (
+        Option<String>,
+        Option<crate::calculation_pad::InspectorInsertRequest>,
+        Option<crate::settings::ProgrammerInspectorPreferences>,
+    ) {
+        let request = actions.file_action.take();
+        let accepted = request.is_some_and(|request| {
+            self.open
+                && !self.close_requested
+                && self.epoch == request.epoch
+                && host_current(request.host)
+                && self.draft.generation == actions.expected_generation
+                && !actions.close
+                && actions.host_request.is_none()
+                && actions.context.as_ref() == current.as_ref()
+        });
+        let result = self.commit(actions, current);
+        if accepted && let Some(request) = request {
+            self.run_label_file_action(
+                request.action,
+                || host_current(request.host),
+                pick,
+                confirm,
+            );
+        }
+        result
+    }
+
+    fn run_label_file_action(
+        &mut self,
+        action: InspectorLabelFileAction,
+        host_current: impl Fn() -> bool,
+        mut pick: impl FnMut(
+            &mut Self,
+            InspectorLabelFileAction,
+        ) -> anyhow::Result<Option<std::path::PathBuf>>,
+        mut confirm: impl FnMut(&mut Self, usize) -> anyhow::Result<bool>,
+    ) {
+        let epoch = self.epoch;
+        let generation = self.draft.generation;
+        let labels = self.draft.model.annotations().to_vec();
+        let width = self.draft.model.value().mode().width().bits();
+        let is_current = |dialog: &Self| {
+            dialog.open
+                && !dialog.close_requested
+                && dialog.epoch == epoch
+                && dialog.draft.generation == generation
+                && host_current()
+        };
+        if !is_current(self) {
+            return;
+        }
+        let path = match pick(self, action) {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                if is_current(self) {
+                    self.file_feedback = Some(error.to_string());
+                }
+                return;
+            }
+        };
+        if !is_current(self) {
+            return;
+        }
+        match action {
+            InspectorLabelFileAction::Export => {
+                let result = crate::calculation_pad::write_bit_labels(&path, &labels, width);
+                if is_current(self) {
+                    self.file_feedback = Some(match result {
+                        Ok(()) => format!("Exported {} labels.", labels.len()),
+                        Err(error) => format!("Could not export labels: {error:#}"),
+                    });
+                }
+            }
+            InspectorLabelFileAction::Import => {
+                let incoming = match crate::calculation_pad::read_bit_labels(&path) {
+                    Ok(labels) => labels,
+                    Err(error) => {
+                        if is_current(self) {
+                            self.file_feedback =
+                                Some(format!("Could not import labels: {error:#}"));
+                        }
+                        return;
+                    }
+                };
+                if !is_current(self) {
+                    return;
+                }
+                if !labels.is_empty() && labels != incoming {
+                    match confirm(self, incoming.len()) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(error) => {
+                            if is_current(self) {
+                                self.file_feedback = Some(error.to_string());
+                            }
+                            return;
+                        }
+                    }
+                }
+                if !is_current(self) {
+                    return;
+                }
+                let count = incoming.len();
+                match self.draft.model.replace_annotations(incoming) {
+                    Ok(()) => {
+                        self.draft.generation = self.draft.generation.wrapping_add(1);
+                        self.file_feedback = Some(format!("Imported {count} labels."));
+                    }
+                    Err(error) => {
+                        self.file_feedback = Some(format!("Could not import labels: {error:?}"))
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn render_host(
         &mut self,
         ctx: &egui::Context,
@@ -454,6 +641,7 @@ impl ProgrammerInspectorDialog {
         let mut insert = false;
         let mut compare = false;
         let mut preferences_changed = false;
+        let mut file_action = None;
         let mut request = None;
         let mut window_open = self.open;
         let mut visible = false;
@@ -930,6 +1118,17 @@ impl ProgrammerInspectorDialog {
                 }
                 if draft.labels_open {
                     ui.horizontal_wrapped(|ui| {
+                        let import = ui.button("Import labels…");
+                        let export = ui.button("Export labels…");
+                        #[cfg(test)]
+                        {
+                            test_controls.push(("import-labels".into(), import.rect, ui.clip_rect(), import.enabled()));
+                            test_controls.push(("export-labels".into(), export.rect, ui.clip_rect(), export.enabled()));
+                        }
+                        if import.clicked() { file_action = Some(InspectorLabelFileRequest { action: InspectorLabelFileAction::Import, host: runtime.host, epoch: self.epoch }); }
+                        if export.clicked() { file_action = Some(InspectorLabelFileRequest { action: InspectorLabelFileAction::Export, host: runtime.host, epoch: self.epoch }); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Bit range [start, end):");
                         let label_start =
                             ui.add(egui::TextEdit::singleline(&mut draft.label_start).desired_width(42.0));
@@ -1171,6 +1370,9 @@ impl ProgrammerInspectorDialog {
                 if let Some(message) = &draft.feedback {
                     ui.label(message);
                 }
+                if let Some(message) = &self.file_feedback {
+                    ui.label(message);
+                }
                 if let Some(message) = &self.preference_error {
                     ui.colored_label(ui.visuals().error_fg_color, message);
                 }
@@ -1251,6 +1453,7 @@ impl ProgrammerInspectorDialog {
             context: Arc::clone(&runtime.context),
             draft: changed.then_some(draft),
             expected_generation: self.draft.generation,
+            file_action,
             copy,
             insert,
             compare,
@@ -1264,11 +1467,388 @@ impl ProgrammerInspectorDialog {
     }
 }
 
+fn native_label_picker(
+    action: InspectorLabelFileAction,
+    hwnd: Option<usize>,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let picker = rfd::FileDialog::new()
+        .add_filter("Bit labels", &["json"])
+        .set_file_name("bit-labels.json");
+    #[cfg(windows)]
+    let picker = {
+        let hwnd = hwnd
+            .and_then(|value| std::num::NonZeroIsize::new(value as isize))
+            .ok_or_else(|| {
+                anyhow::anyhow!("The Inspector window is unavailable for the file dialog.")
+            })?;
+        picker.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+    };
+    #[cfg(not(windows))]
+    let _ = hwnd;
+    Ok(match action {
+        InspectorLabelFileAction::Import => picker.pick_file(),
+        InspectorLabelFileAction::Export => picker.save_file(),
+    })
+}
+
+fn native_label_confirmation(count: usize, hwnd: Option<usize>) -> anyhow::Result<bool> {
+    #[cfg(windows)]
+    {
+        use windows::{
+            Win32::{
+                Foundation::HWND,
+                UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW},
+            },
+            core::PCWSTR,
+        };
+        let owner = hwnd
+            .and_then(|value| std::num::NonZeroIsize::new(value as isize))
+            .ok_or_else(|| {
+                anyhow::anyhow!("The Inspector window is unavailable for confirmation.")
+            })?;
+        let message: Vec<u16> = format!("Replace the current labels with {count} imported labels?")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let title: Vec<u16> = "Replace bit labels?"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: owner is the validated live Inspector HWND; both strings remain NUL-terminated
+        // and alive for the synchronous modal call.
+        let result = unsafe {
+            MessageBoxW(
+                HWND(owner.get() as *mut _),
+                PCWSTR(message.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            )
+        };
+        if result.0 == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(result == IDYES)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        Ok(rfd::MessageDialog::new()
+            .set_title("Replace bit labels?")
+            .set_description(format!(
+                "Replace the current labels with {count} imported labels?"
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::calculation_pad::{CalculationPadSession, TypedInteger};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn inspector_label_file_import_export_is_labels_only_and_confirmed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("labels.json");
+        let incoming = vec![crate::calculation_pad::InspectorAnnotation {
+            range: 100..128,
+            label: "界".into(),
+        }];
+        crate::calculation_pad::write_bit_labels(&path, &incoming, 128).unwrap();
+        let mut session =
+            CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("pad")));
+        session.replace_source("u8(2)\nu8(3)").unwrap();
+        session.save_as("labels-fixture").unwrap();
+        session.evaluation();
+        let line = session.line_id(0).unwrap();
+        let source = session.inspector_source(line).unwrap();
+        let comparison = session.comparison_context().unwrap();
+        let pad_before = (
+            session.source().map(str::to_owned),
+            session.revision(),
+            session.is_dirty(),
+            session.can_undo(),
+            session.can_redo(),
+        );
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        dialog.draft.model.observe(Some(source));
+        dialog.draft.comparison_result = Some(Arc::new(comparison.compare(ComparisonRequest {
+            left: ComparisonSlot::Expression("u8(2)".into()),
+            right: ComparisonSlot::Expression("u8(3)".into()),
+        })));
+        dialog
+            .draft
+            .model
+            .reinterpret_bits(IntegerMode::unsigned(IntegerWidth::Bits8));
+        dialog.draft.model.toggle_bit(1).unwrap();
+        dialog
+            .draft
+            .model
+            .set_annotation(0..2, "existing".into())
+            .unwrap();
+        dialog.draft.label_text = "pending input".into();
+        dialog.draft.control_dirty = true;
+        dialog.draft.comparison_left = ComparisonSlot::Expression("unchanged".into());
+        let value = dialog.draft.model.value();
+        let adopted = dialog.draft.model.adopted().cloned();
+        let candidate = dialog.draft.model.candidate().cloned();
+        let result = dialog.draft.comparison_result.clone();
+        let mut confirmations = 0;
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |_, _| Ok(Some(path.clone())),
+            |_, count| {
+                confirmations += 1;
+                assert_eq!(count, 1);
+                Ok(false)
+            },
+        );
+        assert_eq!(dialog.draft.model.annotations()[0].label, "existing");
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |_, _| Ok(Some(path.clone())),
+            |_, count| {
+                confirmations += 1;
+                assert_eq!(count, 1);
+                Ok(true)
+            },
+        );
+        assert_eq!(confirmations, 2);
+        assert_eq!(dialog.draft.model.annotations(), incoming);
+        assert!(!dialog.draft.model.annotation_is_valid(&incoming[0]));
+        assert_eq!(dialog.draft.model.value(), value);
+        assert!(adopted.is_some() && candidate.is_some() && result.is_some());
+        assert_eq!(
+            (
+                session.source().map(str::to_owned),
+                session.revision(),
+                session.is_dirty(),
+                session.can_undo(),
+                session.can_redo()
+            ),
+            pad_before
+        );
+        assert_eq!(dialog.draft.model.adopted(), adopted.as_ref());
+        assert_eq!(dialog.draft.model.candidate(), candidate.as_ref());
+        assert_eq!(dialog.draft.label_text, "pending input");
+        assert!(dialog.draft.control_dirty);
+        assert_eq!(dialog.draft.comparison_result, result);
+        assert!(
+            matches!(&dialog.draft.comparison_left, ComparisonSlot::Expression(text) if text == "unchanged")
+        );
+        let export = temp.path().join("export.json");
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Export,
+            || true,
+            |_, _| Ok(Some(export.clone())),
+            |_, _| panic!("export does not confirm labels"),
+        );
+        assert_eq!(
+            crate::calculation_pad::read_bit_labels(&export).unwrap(),
+            incoming
+        );
+        assert!(
+            dialog
+                .file_feedback
+                .as_deref()
+                .unwrap()
+                .contains("1 labels")
+        );
+        crate::calculation_pad::write_bit_labels(&path, &[], 8).unwrap();
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |_, _| Ok(Some(path.clone())),
+            |_, count| {
+                assert_eq!(count, 0);
+                Ok(true)
+            },
+        );
+        assert!(dialog.draft.model.annotations().is_empty());
+        assert_eq!(dialog.draft.model.value(), value);
+    }
+
+    #[test]
+    fn inspector_label_file_stale_picker_and_confirmation_cannot_replace_new_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("labels.json");
+        let incoming = vec![crate::calculation_pad::InspectorAnnotation {
+            range: 2..3,
+            label: "incoming".into(),
+        }];
+        crate::calculation_pad::write_bit_labels(&path, &incoming, 8).unwrap();
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        dialog
+            .draft
+            .model
+            .set_annotation(0..1, "old".into())
+            .unwrap();
+        let original = dialog.draft.model.annotations().to_vec();
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |dialog, _| {
+                dialog.finish_close();
+                dialog.open();
+                Ok(Some(path.clone()))
+            },
+            |_, _| panic!("stale epoch must not confirm"),
+        );
+        assert_eq!(dialog.draft.model.annotations(), original);
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |dialog, _| {
+                dialog
+                    .draft
+                    .model
+                    .set_annotation(1..2, "new".into())
+                    .unwrap();
+                dialog.draft.generation += 1;
+                Ok(Some(path.clone()))
+            },
+            |_, _| panic!("stale generation must not confirm"),
+        );
+        assert_eq!(dialog.draft.model.annotations().len(), 2);
+        let before = dialog.draft.model.annotations().to_vec();
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |_, _| Ok(Some(path.clone())),
+            |dialog, _| {
+                dialog.draft.generation += 1;
+                Ok(true)
+            },
+        );
+        assert_eq!(dialog.draft.model.annotations(), before);
+        let current = std::cell::Cell::new(true);
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || current.get(),
+            |_, _| {
+                current.set(false);
+                Ok(Some(path.clone()))
+            },
+            |_, _| panic!("stale host must not confirm"),
+        );
+        assert_eq!(dialog.draft.model.annotations(), before);
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |dialog, _| {
+                dialog.request_close();
+                Ok(Some(path.clone()))
+            },
+            |_, _| panic!("pending close must not confirm"),
+        );
+        assert_eq!(dialog.draft.model.annotations(), before);
+        dialog.open();
+        dialog.run_label_file_action(
+            InspectorLabelFileAction::Import,
+            || true,
+            |_, _| Ok(None),
+            |_, _| panic!("cancel must not confirm"),
+        );
+        assert_eq!(dialog.draft.model.annotations(), before);
+    }
+
+    #[test]
+    fn inspector_label_file_action_commits_same_frame_draft_before_picker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("labels.json");
+        crate::calculation_pad::write_bit_labels(
+            &path,
+            &[crate::calculation_pad::InspectorAnnotation {
+                range: 4..5,
+                label: "imported".into(),
+            }],
+            8,
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let context = Arc::new(InspectorPadContext::default());
+        let host = HostIdentity {
+            host: UtilityPresentation::Docked,
+            generation: 1,
+        };
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        let mut actions = dialog.test_pending_label_file_action(&ctx, Arc::clone(&context), host);
+        let mut draft = dialog.draft.clone();
+        draft
+            .model
+            .set_annotation(0..1, "same frame".into())
+            .unwrap();
+        draft.label_text = "retained".into();
+        draft.generation += 1;
+        actions.draft = Some(draft);
+        dialog.commit_with_file_using(
+            actions,
+            &context,
+            |identity| identity == host,
+            |dialog, _| {
+                assert_eq!(dialog.draft.model.annotations()[0].label, "same frame");
+                Ok(Some(path.clone()))
+            },
+            |dialog, count| {
+                assert_eq!(count, 1);
+                assert_eq!(dialog.draft.label_text, "retained");
+                Ok(true)
+            },
+        );
+        assert_eq!(dialog.draft.model.annotations()[0].label, "imported");
+        assert_eq!(dialog.draft.label_text, "retained");
+    }
+
+    #[test]
+    fn inspector_label_file_controls_render_in_narrow_and_native_bodies() {
+        for (width, presentation) in [
+            (320.0, UtilityPresentation::Docked),
+            (720.0, UtilityPresentation::Popout),
+        ] {
+            let ctx = egui::Context::default();
+            let mut dialog = ProgrammerInspectorDialog::default();
+            dialog.open();
+            dialog.draft.labels_open = true;
+            dialog
+                .draft
+                .select_mode(IntegerMode::unsigned(IntegerWidth::Bits8));
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let runtime = InspectorRuntime {
+                    context: Arc::new(InspectorPadContext::default()),
+                    root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
+                    host: HostIdentity {
+                        host: presentation,
+                        generation: 1,
+                    },
+                    pinned: false,
+                };
+                let actions =
+                    dialog.render_host(&ctx, &runtime, true, true, Some(ui), presentation);
+                assert!(actions.file_action.is_none());
+            });
+            for name in ["import-labels", "export-labels"] {
+                let (rect, clip, enabled) = dialog.test_control(name).unwrap();
+                assert!(clip.contains_rect(rect), "{name}: {rect:?} / {clip:?}");
+                assert!(enabled);
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
 
     #[test]
     fn selected_comparison_input_tracks_identity_and_reports_unavailable() {
@@ -1587,6 +2167,7 @@ mod tests {
             close: false,
             context: Arc::clone(&old),
             expected_generation: dialog.draft.generation,
+            file_action: None,
             draft: Some(draft),
             copy: Some("stale".into()),
             insert: true,
@@ -1627,6 +2208,7 @@ mod tests {
             close: false,
             context: Arc::clone(&fresh),
             expected_generation: dialog.draft.generation,
+            file_action: None,
             draft: Some(moved),
             copy: Some("suppressed".into()),
             insert: true,
@@ -1649,6 +2231,7 @@ mod tests {
             close: false,
             context: Arc::clone(&fresh),
             expected_generation: dialog.draft.generation,
+            file_action: None,
             draft: None,
             copy: None,
             insert: false,

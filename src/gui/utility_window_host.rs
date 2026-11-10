@@ -1933,7 +1933,7 @@ pub(super) type ProgrammerInspectorWindowHost =
     UtilityWindowHost<super::programmer_inspector_dialog::ProgrammerInspectorDialog>;
 pub(super) enum ProgrammerInspectorHostCommand {
     Closed,
-    Apply(super::programmer_inspector_dialog::InspectorActions),
+    Apply(super::programmer_inspector_dialog::InspectorActions, Option<usize>),
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
     const KEY: &'static str = "programmer-inspector";
@@ -2018,11 +2018,11 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     fn command_closes(command: &Self::Command) -> bool {
         matches!(command, ProgrammerInspectorHostCommand::Closed)
     }
-    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+    fn complete_actions(&mut self, actions: Self::Actions, hwnd: Option<usize>) -> Vec<Self::Command> {
         if actions.close {
             vec![ProgrammerInspectorHostCommand::Closed]
         } else {
-            vec![ProgrammerInspectorHostCommand::Apply(actions)]
+            vec![ProgrammerInspectorHostCommand::Apply(actions, hwnd)]
         }
     }
     #[cfg(test)]
@@ -2035,6 +2035,53 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
 mod deferred_open_tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn inspector_label_file_action_rejects_discard_and_retired_source_host() {
+        let ctx = egui::Context::default();
+        let mut dialog =
+            super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        dialog.open();
+        let context =
+            Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
+        dialog.publish(Arc::clone(&context));
+        let mut host = ProgrammerInspectorWindowHost::default();
+        host.prepare_open(&ctx, &dialog);
+        let make_frame = |host: &ProgrammerInspectorWindowHost, dialog: &super::super::programmer_inspector_dialog::ProgrammerInspectorDialog| {
+            let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+            HostFrame {
+                root: pass, owner: pass, host: host.state.identity(), session: dialog.epoch(),
+                first: true, os_close: false, close: false,
+                actions: Some(dialog.test_pending_label_file_action(&ctx, Arc::clone(&context), host.identity())),
+                checkpoint: None, native_info: None, embedded_layer: None, embedded_focus: None, focus: false,
+            }
+        };
+        host.pending = Some(make_frame(&host, &dialog));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if ui.ctx().current_pass_index() == 0 {
+                ui.ctx().request_discard("discard label-file action");
+            }
+        });
+        assert!(host.complete(&ctx, &mut dialog).is_none());
+        assert_eq!(dialog.test_file_feedback(), None);
+        output.drop_without_applying_deltas();
+
+        host.pending = Some(make_frame(&host, &dialog));
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let completion = host.complete(&ctx, &mut dialog).unwrap();
+        host.state.transition(UtilityPresentation::Popout);
+        for command in completion.commands {
+            if let ProgrammerInspectorHostCommand::Apply(actions, hwnd) = command {
+                dialog.commit_with_file(actions, &context, hwnd, &host);
+            }
+        }
+        assert_eq!(
+            dialog.test_file_feedback(),
+            None,
+            "retired source must not start a picker"
+        );
+        output.drop_without_applying_deltas();
+    }
 
     #[test]
     fn pending_popout_and_edit_win_over_deferred_root_open() {
@@ -2078,7 +2125,7 @@ mod deferred_open_tests {
         assert!(host.is_popped_out());
         assert_eq!(dialog.epoch(), epoch);
         for command in completion.commands {
-            if let ProgrammerInspectorHostCommand::Apply(actions) = command {
+            if let ProgrammerInspectorHostCommand::Apply(actions, _) = command {
                 dialog.commit(actions, &context);
             }
         }
