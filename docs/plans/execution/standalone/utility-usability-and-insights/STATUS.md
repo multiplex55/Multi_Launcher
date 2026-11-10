@@ -19,25 +19,25 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 
 | Checkpoint | Outcomes / deliverable | State |
 | --- | --- | --- |
-| M0-A | Exact-parent baseline / push complete; source inventory ongoing | complete Git gate |
-| M1-A | L1 compact descriptions / bounded cards | complete; automated verified, native pending |
-| M1-B | B1 Dashboard slot markers | complete; automated verified, native pending |
-| M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
-| M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
-| M3-A | H2 owned presentation preference / generic host | complete; automated verified with M3-B, native pending |
-| M3-B | H1/H2 custom hosts / accepted child origins | complete approved inventory; automated verified, cumulative review/native pending |
-| M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native pending |
-| M4-B | D4 toolbar / pinned inspector | complete; automated verified, native pending |
-| M4-C | D3 owned-text endpoint captions | complete; automated verified, native pending |
-| M4-D | D5 actual connector creation / reconnection | complete; automated verified, native pending |
-| M5-A | I1 bounded label-file exchange | complete; automated verified, native pending |
-| M6-A | R1/R2 explicit duration / encoder timeline | complete with M6-B; automated verified, native pending |
-| M6-B | R1/R2 exact typing / 25-second steps | complete; automated verified, native pending |
-| M7-A | F1 retained-tree treemap model | complete with M7-B; automated verified, native pending |
-| M7-B | F1/F2 linked navigation / visibility | complete; automated verified, native pending |
-| M8-A | C1 cached stable dependency snapshot | complete with M8-B; automated verified, native pending |
-| M8-B | C1 companion explorer / navigation | complete; automated verified, native pending |
-| M9-A | Cumulative review, scoped lint/native, handoff | in_progress; independent review active |
+| M0-A | Exact-parent baseline / push / inventory | complete |
+| M1-A | L1 compact descriptions / bounded cards | complete; automated verified, native LIMITED (capture unavailable) |
+| M1-B | B1 Dashboard slot markers | complete; automated verified, native LIMITED (capture unavailable) |
+| M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native LIMITED (capture unavailable) |
+| M2-B | FS2 literal leaf-name matching | complete; automated verified, native LIMITED (capture unavailable) |
+| M3-A | H2 owned presentation preference / generic host | complete; automated verified with M3-B, native LIMITED (capture unavailable) |
+| M3-B | H1/H2 custom hosts / accepted child origins | complete approved inventory; automated verified, review closed, native LIMITED |
+| M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native LIMITED (capture unavailable) |
+| M4-B | D4 toolbar / pinned inspector | complete; automated verified, native LIMITED (capture unavailable) |
+| M4-C | D3 owned-text endpoint captions | complete; automated verified, native LIMITED (capture unavailable) |
+| M4-D | D5 actual connector creation / reconnection | complete; automated verified, native LIMITED (capture unavailable) |
+| M5-A | I1 bounded label-file exchange | complete; automated verified, native LIMITED (capture unavailable) |
+| M6-A | R1/R2 explicit duration / encoder timeline | complete with M6-B; automated verified, native LIMITED (capture unavailable) |
+| M6-B | R1/R2 exact typing / 25-second steps | complete; automated verified, native LIMITED (capture unavailable) |
+| M7-A | F1 retained-tree treemap model | complete with M7-B; automated verified, native LIMITED (capture unavailable) |
+| M7-B | F1/F2 linked navigation / visibility | complete; automated verified, native LIMITED (capture unavailable) |
+| M8-A | C1 cached stable dependency snapshot | complete with M8-B; automated verified, native LIMITED (capture unavailable) |
+| M8-B | C1 companion explorer / navigation | complete; automated verified, native LIMITED (capture unavailable) |
+| M9-A | Cumulative review, scoped lint/native, handoff | complete with LIMITED physical native acceptance |
 
 No implementation builds, tests or native interactions have run at baseline preparation. The complete 17-outcome acceptance matrix and actual receipts will be maintained here as work proceeds.
 
@@ -654,3 +654,66 @@ The implementer compared all first-party diagnostics with baseline e5d.. source.
 Retained baseline categories/examples: identical Note picker/open and Table observation warnings; unchanged Clipboard Modify/Snippet Copy clones; existing SearchEvent, SettingsCatalogEntry, ClipboardDialogEffects, Drawio, PackageImportPlan and Diff TextInputDraft payload shapes; existing conditional/argument/lifetime patterns. InspectorActions added an optional file request/HWND, while baseline already embedded the large InspectorDraft/comparison slots; exact previous emitted byte size was not measured by a baseline build. The original log remains the executed evidence; the final scoped Clippy command was NOT rerun after corrections. Do not call it a warning-free current-source run.
 
 Separate cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-run passed after these source changes, with six pre-existing test warnings. Its first attempt caught a cfg(test)-only default field omitted by a needless-update simplification; explicit initialization restored it and the same target then compiled. No tests were executed for these equivalent binding/borrow/let-chain changes, and no broad regression run occurred. Rustfmt parsed touched files; parent inspected the actual diff and semantic ordering of accepted receipt conditions, pending take and dependency navigation. Only intended lint sites, the four accepted docs/help files and this ledger changed; diff-check passes with STATUS line-ending notice. Root repaired hash and all five absences remain preserved. Implementer explicitly returned source/Cargo lane. One current runnable build and physical smoke/final report remain.
+
+M9-R1 checkpoint 78aacb6a00891317c3dddca50eb907833b90474d pushed successfully; tracked tree clean before build. Parent now owns sole Cargo/native lane and started the one required current runnable build: cargo build --profile fast-dev --bin multi_launcher via owned runner m9-build (1800-second compilation deadline). Source/help are frozen at this commit; only ledger/report changes planned afterward unless a concrete build/native defect requires bounded remediation. Disposable profile and fixtures remain unlaunched; original root settings byte identity remains unverified.
+
+## M9 final build and bounded native result
+
+One current runnable build executed: cargo build --profile fast-dev --bin multi_launcher, owned evidence m9-build. It passed in 4m20s (260.296s), exit0/no timeout/CleanupVerified=true/OutputDrainVerified=true/RootAlive=false. Six retained baseline normal-build warnings remain (Note picker/open and Table test-observation bindings), plus existing vendor diagnostics. Artifact source commit: 78aacb6a00891317c3dddca50eb907833b90474d. Executable target/fast-dev/multi_launcher.exe, 148,354,560 bytes, last-write 2026-11-10T18:20:25.5148875Z, SHA256 D71FBCE1DA110E7757D4E0DB39BAD327430A392A6D3DFE309830D21E4CF9E74B. artifact.json records identity. No repeated release/application build. Only this ledger changes after that source commit; source/Cargo diff is empty.
+
+Physical native acceptance is LIMITED for ALL seven H3 flows. The initial sandbox launch preflight was denied before process creation, and no native evidence directory existed; authorized escalation then launched only the built executable from the disposable profile, with isolated Notes environment and no pre-existing same-image PID. Supported computer-use skill @oai/sky initialized, and list_apps discovered one Multi Lnchr window (returned app MultiLauncher.MultiLnchr, process image matching the built executable, window723228). The subsequent get_window/activate_window/get_window_state observation call failed with the exact message: Computer Use app approval timed out. The failing subcall is not established; no screenshot, click or typed input was verified. One refreshed list_windows selection found no target by current image or launcher title after the owned process deadline. No stale coordinates/handles, alternate automation, permissions bypass or per-tool retry campaign was used.
+
+Owned native session1 ran 2026-11-10T18:22:42.4709916Z to 19:22:42.5495340Z and reached its explicit 3,600-second stage deadline. This is NOT a passing native run: TimedOut=true, no successful application exit code. CleanupVerified=true, OutputDrainVerified=true, RootAlive=false; all owned processes were retired by the runner. Logs, launch metadata, process identities, result.json and observation.json remain under target/utility-usability-and-insights/evidence/m9-native-session1/. The supported observation gate did not return usable UI before the bounded run ended. No physical restart, picker, connector, recording/playback or Explorer behavior is claimed observed.
+
+The disposable settings retained the expected nine plugin IDs and startup additionally enabled clipboard_modify; Paste next/cancel remain null, indexing/external plugin paths empty and Notes external-open Neither. Startup logged retained starter radial and retained-last-good diagnostics for absent favorites/gesture fixture stores; these are recorded fixture/runtime-startup observations, not evidence of UI acceptance or a new feature defect. No temporary-default settings fallback message appears in captured startup logs, but the visible custom inventory was not verified. Task-owned profile artifacts, including its generated clipboard/config files, remain ignored as evidence; root clipboard/actions/macro/template/assets paths remain absent. Root repaired settings SHA256 is still 08AB5A5DBF7899655F338B536C407213EA9CE76E7C914E9FDF8AB88CE8759D31.
+
+## Final requirement matrix
+
+“Automated verified” below means the focused domain/rendered/host/persistence checks recorded in the acceptance sections and exact owned result.json selectors. It does not mean a full-suite or physical native pass.
+
+| ID | Implemented / automated evidence | Physical native |
+| --- | --- | --- |
+| FS1 | Complete: cancellation/request retirement, late rows/deferred actions rejected, rerun isolated | LIMITED; unverified |
+| FS2 | Complete: literal leaf-name admission, path/fuzzy negatives, Unicode/highlights/backend | LIMITED; unverified |
+| H1 | Complete: approved ordinary-host inventory, actual retained parent/child receipts, live focus/promote/session preservation | LIMITED; unverified |
+| H2 | Complete: independently owned remembered presentation, close/cancel/stale-save/reopen/startup tests | LIMITED; unverified |
+| L1 | Complete: seven-word/Unicode summary and bounded cache/paint/hit geometry at narrow/enlarged sizes | LIMITED; unverified |
+| D1 | Complete: Colors directly below Suggestions in source column | LIMITED; unverified |
+| D2 | Complete: menu strip separate from immediate actions, preserved source/camera state | LIMITED; unverified |
+| D3 | Complete: owned object text plus IDs for connector endpoints | LIMITED; unverified |
+| D4 | Complete: arrangement above canvas and pinned independently scrolling properties | LIMITED; unverified |
+| D5 | Complete: actual create/reassign gestures, stale/cancel rejection, manual-route preservation and single undo | LIMITED; unverified |
+| I1 | Complete: bounded labels-only v1 codec/file effects, confirmation/stale guards and numeric/Pad invariants | LIMITED; unverified |
+| B1 | Complete: exact S marker/list-grid mapping, duplicate/tiny/conflict/selection behavior | LIMITED; unverified |
+| R1 | Complete: explicit Unlimited, long no-frame/idle/terminal clocks, authorized Stop/target/error semantics | LIMITED; unverified |
+| R2 | Complete: exact 1–1,000 typing/25 steps, GIF long-hold chunks and MP4 true type bounds | LIMITED; unverified |
+| F1 | Complete: retained immediate-child treemap, finite deterministic geometry and honest accounting | LIMITED; unverified |
+| F2 | Complete: linked table/treemap/Both, drill/Up, no extra scans and stale input rejection | LIMITED; unverified |
+| C1 | Complete: cached dependency projection, stable LineId/incarnation navigation, no browsing edits | LIMITED; unverified |
+
+## Final verification and limits
+
+- One configured cumulative independent review: no actionable introduced findings through 526d0c80c2dd2b1b52ed2b6c0993e2575124cd9f. Subsequent source changes were accepted static help and parent-inspected equivalent lint remediation, with separate lib test-target compilation and final normal build.
+- Exact scoped commands: cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-run; selected cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E expressions recorded in each owned receipt; one cargo clippy -p multi_launcher --profile fast-dev --lib --bin multi_launcher --no-deps; one cargo build --profile fast-dev --bin multi_launcher. Test execution deadlines were 100 seconds/batch; compilation separate. No full suite/historical acceptance campaign.
+- Clippy completed with warnings, NOT a warning-free final-source rerun. Twenty-eight introduced mechanical cases were corrected and two new inline per-frame command cases narrowly documented. Remaining baseline categories and Inspector prior-size attribution uncertainty are recorded above. Source fixes compiled; Clippy was not repeated.
+- Environmental native limitation: supported app approval/observation timeout and unavailable refreshed target; seven H3 flows remain unverified. No screenshots were returned. Automated native-viewport fixtures are not physical Windows observations.
+- Separate pre-existing/incident limits: earlier recorded Recorder preview label clipping and ZIP inspection timeout were reproduced in an available pre-task binary, not attributed to exact parent; no unrelated remediation. The actual root-settings preservation incident and bounded field undo remain documented above. Original pre-incident byte identity is UNVERIFIED; do not claim the user file was unchanged or exactly recovered. Backup-path clarification received no answer during this execution. Confirmed task-added member was removed, task-created root clipboard removed after evidence/hash checks, and no subsequent guarded root changes occurred. Tracked user work/other branches were preserved, with this explicit settings-file exception/uncertainty.
+- Final cumulative diff/obsolete paths, intended source ownership and Git state inspected; only the task ledger remains to commit. Owned Cargo and native processes are drained/retired. No known introduced feature blocker remains identified. Delivery is complete in approved implementation/bounded-verification scope with LIMITED physical native acceptance and the settings recovery uncertainty explicitly disclosed.
+
+## Git and next Goal handoff
+
+Parent branch: feat/studio-and-utility-polish. Exact parent tip: 9a7fb137126d316e351e5ee8e6a04ec20fb7630d. Task branch: feat/utility-usability-and-insights. Own baseline: e5dcd694c93cc34f425317b9a476218bf1fb2ea3, whose parent is exactly the recorded predecessor. Upstream: origin/feat/utility-usability-and-insights. All prior checkpoint pushes succeeded; final M9-A commit receives one normal push attempt and actual result/HEAD are reported after it.
+
+Significant late checkpoints: package/Search fa583b7f11a258ea78f421ad73197d1c649760a4; authoring/pickers 6941ad7123f413bcf8297f94043114f273261a1b; complete ordinary host inventory 526d0c80c2dd2b1b52ed2b6c0993e2575124cd9f; frozen built source/help/lint 78aacb6a00891317c3dddca50eb907833b90474d. Earlier feature SHAs and exact receipts are in the milestone acceptance entries. The final tip is the actual M9-A commit containing this handoff, read AFTER the last commit and reported in the final response; no recursive self-SHA commit will be created.
+
+The next authorized Goal/category must create a NEW branch DIRECTLY from that exact final tip, including any local-only commit if pushing had failed. Do not restart from master/main or an older common ancestor. No worktrees, helper clones, agent/checkpoint branches or intermediate merge/rebase/cherry-pick were used or are needed merely to advance this chain. No master merge or next feature is authorized here.
+
+## Final user review checklist (not executed by the agent)
+
+1. Launcher/Dashboard: mou/folder cards at narrow/enlarged sizes; correlate Preview S markers, hover/selection/conflicts.
+2. File Search: Filename contains positive/path-only negative; Clear completed/during search, then rerun without old rows.
+3. Windows: popped Pad opens Inspector/reference/Dependencies; Notes list/editor; close/reopen and isolated restart preserve choice without auto-open; main query stays editable.
+4. Diagram: separate menus/actions, Colors placement, pinned sidebar, arrange, text-bearing From/To, create/reconnect/undo, pan/reset/primitive inline edit.
+5. Inspector: export disposable labels, import Cancel then confirm replacement; numeric mode/value, Pad and comparison unchanged.
+6. Recording: type17, step25 to42, type0; short owned GIF/MP4 Stop and finalized playback where supported. Long duration already uses automated fake clocks.
+7. Folder Size/Dependencies: scan one owned tree once; linked views/drill/Up/toggles/Pop Out; browse/jump and insert a Pad line with current references and no navigation edits.
