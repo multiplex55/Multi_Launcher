@@ -258,6 +258,7 @@ pub(super) struct HostCompletion<C> {
     pub commands: Vec<C>,
     pub show_root: bool,
     pub owner_viewport: egui::ViewportId,
+    pub origin: Option<super::utility_host::AcceptedParentOpen<u64>>,
 }
 
 pub(super) struct CompanionPass {
@@ -346,6 +347,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     }
     pub(super) fn identity(&self) -> HostIdentity {
         self.state.identity()
+    }
+
+    pub(super) fn accepts_origin(&self, dialog: &D, origin: &super::utility_host::AcceptedParentOpen<u64>) -> bool {
+        dialog.is_open() && origin.is_current(self.state.identity(), &dialog.session())
     }
 
     pub(super) fn owner_viewport(&self) -> egui::ViewportId {
@@ -907,6 +912,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                     commands: Vec::new(),
                     show_root: presentation == UtilityPresentation::Docked,
                     owner_viewport: frame.owner.viewport_id,
+                    origin: None,
                 });
             }
             return None;
@@ -918,6 +924,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 commands: vec![D::closed_command()],
                 show_root: false,
                 owner_viewport: frame.owner.viewport_id,
+                origin: None,
             });
         }
         self.state
@@ -957,6 +964,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                     commands: Vec::new(),
                     show_root: presentation == UtilityPresentation::Docked,
                     owner_viewport: frame.owner.viewport_id,
+                    origin: None,
                 });
         };
         let presentation = D::host_request(&actions);
@@ -965,6 +973,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         #[cfg(not(windows))]
         let hwnd = None;
         let commands = dialog.complete_actions(actions, hwnd);
+        let origin = if presentation.is_none() && !commands.iter().any(D::command_closes) {
+            super::utility_host::AcceptedParentOpen::from_retained(ctx, frame.host, frame.session, frame.root, frame.owner)
+        } else {
+            None
+        };
         let mut show_root = false;
         if commands.iter().any(D::command_closes) {
             self.remember_presentation(ctx, frame.host.host);
@@ -988,6 +1001,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             show_root: (show_root || deferred == Some(UtilityPresentation::Docked))
                 && self.state.presentation() == UtilityPresentation::Docked,
             owner_viewport: frame.owner.viewport_id,
+            origin,
         })
     }
 
@@ -2395,6 +2409,128 @@ impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
     #[cfg(test)]
     fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
         None
+    }
+}
+
+pub(super) enum PluginHostCommand {
+    Close,
+    Save(
+        u64,
+        u64,
+        crate::plugin_editor::PluginSelection,
+        crate::plugin_editor::PluginSelection,
+    ),
+    Navigation(crate::settings_editor::render::SettingsNavigationFrameObserver),
+}
+impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
+    const KEY: &'static str = "plugin-settings";
+    const TITLE: &'static str = "Plugin Settings";
+    const SIZE: egui::Vec2 = egui::vec2(540.0, 440.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = crate::plugin_editor::PluginHostRuntime;
+    type Actions = crate::plugin_editor::PluginHostActions;
+    type Checkpoint = Self;
+    type Command = PluginHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("Plugin Settings"))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.host_open
+    }
+    fn session(&self) -> u64 {
+        self.host_session()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|l| l == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|l| {
+                l == binding.base_layer || Some(l) == popup || l == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.presentation_request
+    }
+    fn closed_command() -> PluginHostCommand {
+        PluginHostCommand::Close
+    }
+    fn command_closes(command: &PluginHostCommand) -> bool {
+        matches!(command, PluginHostCommand::Close)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        _: Option<usize>,
+    ) -> Vec<PluginHostCommand> {
+        self.apply_host_filter(&actions.filter_before, actions.filter_after);
+        let mut commands = Vec::new();
+        if actions.close {
+            commands.push(PluginHostCommand::Close);
+        } else if actions.changed {
+            commands.push(PluginHostCommand::Save(
+                actions.catalog_revision,
+                actions.selection_revision,
+                actions.before,
+                actions.candidate,
+            ));
+        }
+        if let Some(observer) = actions.navigation {
+            commands.push(PluginHostCommand::Navigation(observer));
+        }
+        commands
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.test_button
     }
 }
 

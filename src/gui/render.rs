@@ -2161,7 +2161,7 @@ impl LauncherApp {
                     .filter(|panel| panel.open)
                     .filter_map(|panel| panel.host.root_layer()),
             )
-            .chain(self.show_plugins.then_some(egui::LayerId::new(
+            .chain(self.plugin_editor.host_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("Plugin Settings"),
             )))
@@ -2201,8 +2201,8 @@ impl LauncherApp {
             Panel::MouseGesturesDialog => self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
-            Panel::ThemeSettingsDialog => middle(egui::Id::new("Theme settings")),
-            Panel::HotkeyDirectoryDialog => NavigationDialogKind::HotkeyDirectory.layer_id(),
+            Panel::ThemeSettingsDialog => self.theme_settings_host.root_layer(),
+            Panel::HotkeyDirectoryDialog => self.hotkey_directory_host.root_layer(),
             Panel::FavDialog => middle(egui::Id::new(Some("Favorites"))),
             Panel::FileSearchDialog => self.file_search_host.root_layer(),
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer(),
@@ -2239,7 +2239,7 @@ impl LauncherApp {
             },
             Panel::Editor => middle(egui::Id::new("App Editor")),
             Panel::Settings => self.settings_window_host.root_layer(),
-            Panel::Plugins => middle(egui::Id::new("Plugin Settings")),
+            Panel::Plugins => self.plugin_settings_host.root_layer(),
             Panel::MultiManagerDialog => middle(egui::Id::new("MultiManager")),
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
             Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
@@ -4986,7 +4986,10 @@ impl LauncherApp {
             self.notes_dialog.needs_root_ui_when_hidden(),
             self.mkmacro_dialog.needs_root_ui_when_hidden(),
             self.dashboard_editor.needs_root_ui_when_hidden(),
-            self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
+            self.settings_window_host.needs_root_ui_when_hidden(self.show_settings)
+                || self.theme_settings_host.needs_root_ui_when_hidden(self.theme_settings_dialog.host_open)
+                || self.plugin_settings_host.needs_root_ui_when_hidden(self.plugin_editor.host_open)
+                || self.hotkey_directory_host.needs_root_ui_when_hidden(self.hotkey_directory_dialog.open),
             self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open)
                 || self.gesture_binding_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.binding_is_open()),
             self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
@@ -7172,6 +7175,37 @@ impl LauncherApp {
         binding_show || picker_show
     }
 
+    fn show_settings_children_hidden(&mut self, ctx: &egui::Context, first: bool) {
+        use super::jump_mode::ui::NavigationOwner;
+        use super::utility_window_host::HostInput;
+        let input_allowed = self.native_ui_application_input_allowed(ctx);
+        let input = |can_close| HostInput { first, root_visible: false, root_input: false, native_input: input_allowed,
+            root_owner: NavigationOwner::Blocked, parent_owner: false, root_jump_active: false,
+            close_shortcut: can_close, allow_os_close: can_close, confirmation_owner: NavigationOwner::Blocked,
+            parent_instance: 0, root_scopes: (None, None) };
+        let theme_section = crate::settings_editor::catalog::SettingsSection::Theme;
+        let theme_owner = self.dedicated_settings_native_ui_owner_current(ctx, false, &theme_section);
+        let theme_navigation = self.dedicated_settings_navigation_observer(ctx, false, &theme_section, theme_owner, first);
+        let plugin_section = crate::settings_editor::catalog::SettingsSection::PluginEditor;
+        let plugin_owner = self.dedicated_settings_native_ui_owner_current(ctx, false, &plugin_section);
+        let plugin_navigation = self.dedicated_settings_navigation_observer(ctx, false, &plugin_section, plugin_owner, first);
+        self.hotkey_directory_host.show(ctx, &mut self.hotkey_directory_dialog, &super::hotkey_directory_dialog::DirectoryHostRuntime {
+            snapshot: self.hotkey_directory.clone(), can_close: !self.pinned_panels.contains(&super::Panel::HotkeyDirectoryDialog),
+        }, input(!self.pinned_panels.contains(&super::Panel::HotkeyDirectoryDialog)));
+        self.theme_settings_host.show(ctx, &mut self.theme_settings_dialog, &super::theme_settings_dialog::ThemeHostRuntime { navigation: theme_navigation }, input(!self.pinned_panels.contains(&super::Panel::ThemeSettingsDialog)));
+        if self.plugin_editor.host_open {
+            let revision = self.plugins.settings_catalog_revision();
+            let known = self.plugin_settings_catalog.as_ref().map(|catalog| catalog.revision);
+            if let Some(catalog) = self.plugins.settings_catalog_snapshot_if_changed(known) {
+                self.plugin_settings_catalog = Some(std::sync::Arc::new(catalog));
+            }
+            let runtime = crate::plugin_editor::PluginHostRuntime { pending: self.settings_save_pending(),
+                can_close: !self.pinned_panels.contains(&super::Panel::Plugins),
+                catalog_revision: revision, catalog: self.plugin_settings_catalog.clone(), navigation: plugin_navigation };
+            self.plugin_settings_host.show(ctx, &mut self.plugin_editor, &runtime, input(!self.pinned_panels.contains(&super::Panel::Plugins)));
+        }
+    }
+
     fn complete_mouse_gestures_host(&mut self, ctx: &egui::Context) -> Option<String> {
         use super::mouse_form_host::MOUSE_GESTURES;
         let mut draft = std::mem::take(&mut self.mouse_gestures_dialog);
@@ -8044,12 +8078,12 @@ impl LauncherApp {
     fn dispatch_hotkey_directory_edit(
         &mut self,
         ctx: &egui::Context,
-        root_visible: bool,
+        source: &super::utility_host::AcceptedParentOpen<u64>,
         request: &super::hotkey_directory_dialog::HotkeyDirectoryEditRequest,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         use crate::hotkey::directory::{EditDestination, MainSetting, PasteSetting};
 
-        if !self.hotkey_directory_native_ui_owner_current(ctx, root_visible) {
+        if !self.hotkey_directory_host.accepts_origin(&self.hotkey_directory_dialog, source) {
             return Err("The Hotkey Directory no longer owns the foreground window.");
         }
         let destination = super::hotkey_directory_dialog::validate_edit_request(
@@ -8190,13 +8224,19 @@ impl LauncherApp {
                         gesture_index as usize,
                         binding_index as usize,
                     )?;
-                self.mouse_gestures_host.request_focus();
+                self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, true);
+                self.mouse_gestures_dialog.set_binding_parent_instance(self.mouse_gestures_host.session());
+                let presentation = self.gesture_binding_host.open_from_origin(
+                    ctx, self.mouse_gestures_dialog.binding_dialog_mut(), false,
+                    &super::utility_host::ChildOpenOrigin::Parent(source.clone()),
+                );
+                return Ok(presentation == Some(super::utility_host::UtilityPresentation::Docked));
             }
             EditDestination::ScreenDraw(_) => {
                 return Err("Not configurable — no current editor.");
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -8564,10 +8604,16 @@ impl LauncherApp {
         section: &crate::settings_editor::catalog::SettingsSection,
     ) -> bool {
         use crate::settings_editor::catalog::SettingsSection;
-        let (is_open, title) = match section {
-            SettingsSection::Theme => (self.theme_settings_dialog_open, "Theme settings"),
-            SettingsSection::PluginEditor => (self.show_plugins, "Plugin Settings"),
-            SettingsSection::Brightness => (self.brightness_dialog.open, "Brightness"),
+        if matches!(section, SettingsSection::Theme) && self.theme_settings_host.is_popped_out() {
+            return self.theme_settings_dialog.host_open && self.native_ui_application_input_allowed(ctx);
+        }
+        if matches!(section, SettingsSection::PluginEditor) && self.plugin_settings_host.is_popped_out() {
+            return self.plugin_editor.host_open && self.native_ui_application_input_allowed(ctx);
+        }
+        let (is_open, layer) = match section {
+            SettingsSection::Theme => (self.theme_settings_dialog.host_open, self.theme_settings_host.root_layer()),
+            SettingsSection::PluginEditor => (self.plugin_editor.host_open, self.plugin_settings_host.root_layer()),
+            SettingsSection::Brightness => (self.brightness_dialog.open, Some(crate::gui::jump_mode::ui::root_window_layer_id("Brightness"))),
             SettingsSection::Mouse => {
                 return self.mouse_settings_native_ui_owner_current(ctx, root_visible);
             }
@@ -8581,7 +8627,7 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
             && !egui::Popup::is_any_open(ctx)
             && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
-                == Some(crate::gui::jump_mode::ui::root_window_layer_id(title))
+                == layer
     }
 
     fn dedicated_settings_navigation_protected_takeover(
@@ -8593,6 +8639,10 @@ impl LauncherApp {
         use crate::gui::jump_mode::ui::visible_top_middle_layer;
         use crate::settings_editor::catalog::SettingsSection;
 
+        if (matches!(section, SettingsSection::Theme) && self.theme_settings_host.is_popped_out())
+            || (matches!(section, SettingsSection::PluginEditor) && self.plugin_settings_host.is_popped_out()) {
+            return false;
+        }
         if !self.native_ui_host_input_allowed(ctx, root_visible)
             || egui::Popup::is_any_open(ctx)
         {
@@ -8600,18 +8650,14 @@ impl LauncherApp {
         }
 
         let destination_layer = match section {
-            SettingsSection::Theme => Some(crate::gui::jump_mode::ui::root_window_layer_id(
-                "Theme settings",
-            )),
+            SettingsSection::Theme => self.theme_settings_host.root_layer(),
             SettingsSection::Mouse => self
                 .mouse_settings_host
                 .root_layer(super::mouse_form_host::MOUSE_SETTINGS),
             SettingsSection::MouseGestures => self
                 .mouse_gesture_settings_host
                 .root_layer(super::mouse_form_host::GESTURE_SETTINGS),
-            SettingsSection::PluginEditor => Some(crate::gui::jump_mode::ui::root_window_layer_id(
-                "Plugin Settings",
-            )),
+            SettingsSection::PluginEditor => self.plugin_settings_host.root_layer(),
             SettingsSection::Brightness => Some(crate::gui::jump_mode::ui::root_window_layer_id(
                 "Brightness",
             )),
@@ -10034,6 +10080,7 @@ impl LauncherApp {
             self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gesture_children(&ctx, first_ui_pass, false);
+            self.show_settings_children_hidden(&ctx, first_ui_pass);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
@@ -10180,7 +10227,7 @@ impl LauncherApp {
                             self.show_editor = !self.show_editor;
                         }
                         if ui.button("Edit Plugins").clicked() && first_ui_pass {
-                            self.show_plugins = !self.show_plugins;
+                            self.pending_plugin_toggle = Some(super::utility_host::ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT));
                         }
                         if ui.button("Edit Radial Menus").clicked() && first_ui_pass {
                             self.focus_panel(crate::gui::Panel::RadialEditor);
@@ -11894,6 +11941,7 @@ impl LauncherApp {
             }
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gesture_children(&ctx, first_ui_pass, false);
+            self.show_settings_children_hidden(&ctx, first_ui_pass);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
@@ -11949,11 +11997,6 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
-        if self.hotkey_directory_dialog.take_open_request() {
-            self.focus_panel(super::Panel::HotkeyDirectoryDialog);
-            self.hotkey_directory_dialog.clear_message();
-            ctx.request_repaint();
-        }
         let hotkey_directory_kind =
             crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory;
         let hotkey_directory_instance = self.jump_mode_ui.dialog_instance(hotkey_directory_kind);
@@ -11980,13 +12023,31 @@ impl LauncherApp {
             }
             _ => None,
         };
-        self.hotkey_directory_dialog.show(
-            &ctx,
-            self.hotkey_directory.as_deref(),
-            hotkey_directory_scope.as_ref(),
-            hotkey_directory_native_owner,
+        let directory_jump_enabled = self.jump_mode_enabled();
+        let directory_root_input = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
+        let directory_native_input = self.native_ui_application_input_allowed(&ctx);
+        self.hotkey_directory_host.configure_jump(&self.jump_mode_ui, directory_jump_enabled);
+        self.hotkey_directory_host.show(
+            &ctx, &mut self.hotkey_directory_dialog, &super::hotkey_directory_dialog::DirectoryHostRuntime {
+                snapshot: self.hotkey_directory.clone(),
+                can_close: !self.pinned_panels.contains(&super::Panel::HotkeyDirectoryDialog),
+            },
+            super::utility_window_host::HostInput {
+                first: first_ui_pass,
+                root_visible: frame_logic.should_be_visible,
+                root_input: directory_root_input,
+                native_input: directory_native_input,
+                root_owner: hotkey_directory_owner,
+                parent_owner: hotkey_directory_native_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !self.pinned_panels.contains(&super::Panel::HotkeyDirectoryDialog),
+                allow_os_close: !self.pinned_panels.contains(&super::Panel::HotkeyDirectoryDialog),
+                confirmation_owner: super::jump_mode::ui::NavigationOwner::Blocked,
+                parent_instance: hotkey_directory_instance.unwrap_or(0),
+                root_scopes: (hotkey_directory_scope.as_ref(), None),
+            },
         );
-        let show_plugin = self.show_plugins;
+        let show_plugin = self.plugin_editor.host_open;
         if show_plugin {
             let section = crate::settings_editor::catalog::SettingsSection::PluginEditor;
             let owner_current = self.dedicated_settings_native_ui_owner_current(
@@ -12001,25 +12062,27 @@ impl LauncherApp {
                 owner_current,
                 first_ui_pass,
             );
-            let _navigation_scope = navigation_observer
-                .as_ref()
-                .map(|observer| observer.install(&ctx));
-            let mut ed = std::mem::take(&mut self.plugin_editor);
-            ed.ui(&ctx, self);
-            self.plugin_editor = ed;
-            drop(_navigation_scope);
-            if let Some(observer) = navigation_observer.as_ref() {
-                let owner_current = self.dedicated_settings_native_ui_owner_current(
-                    &ctx,
-                    frame_logic.should_be_visible,
-                    &section,
-                );
-                self.finish_dedicated_settings_navigation_frame(
-                    observer,
-                    owner_current,
-                    first_ui_pass,
-                );
+            let revision = self.plugins.settings_catalog_revision();
+            let known = self.plugin_settings_catalog.as_ref().map(|catalog| catalog.revision);
+            if let Some(catalog) = self.plugins.settings_catalog_snapshot_if_changed(known) {
+                self.plugin_settings_catalog = Some(std::sync::Arc::new(catalog));
             }
+            self.plugin_editor.start_host();
+            let runtime = crate::plugin_editor::PluginHostRuntime {
+                pending: self.settings_save_pending(), can_close: !self.pinned_panels.contains(&super::Panel::Plugins), catalog_revision: revision,
+                catalog: self.plugin_settings_catalog.clone(), navigation: navigation_observer.clone(),
+            };
+            let root_input = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
+            let native_input = self.native_ui_application_input_allowed(&ctx);
+            let can_close = !self.pinned_panels.contains(&super::Panel::Plugins);
+            self.plugin_settings_host.show(&ctx, &mut self.plugin_editor, &runtime,
+                super::utility_window_host::HostInput {
+                    first: first_ui_pass, root_visible: frame_logic.should_be_visible, root_input, native_input,
+                    root_owner: super::jump_mode::ui::NavigationOwner::Blocked, parent_owner: owner_current,
+                    root_jump_active: self.jump_mode_ui.active_session().is_some(), close_shortcut: can_close, allow_os_close: can_close,
+                    confirmation_owner: super::jump_mode::ui::NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+                });
+
         }
         let radial_navigation_instance = self
             .jump_mode_ui
@@ -12118,7 +12181,7 @@ impl LauncherApp {
             jump_session_escape_preempted,
         );
         self.show_mouse_gesture_children(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        if self.theme_settings_dialog_open {
+        if self.theme_settings_dialog.host_open {
             let theme_settings_section = crate::settings_editor::catalog::SettingsSection::Theme;
             let theme_settings_native_owner = self.dedicated_settings_native_ui_owner_current(
                 &ctx,
@@ -12132,26 +12195,17 @@ impl LauncherApp {
                 theme_settings_native_owner,
                 first_ui_pass,
             );
-            let _theme_settings_navigation_scope = theme_settings_navigation
-                .as_ref()
-                .map(|observer| observer.install(&ctx));
-            let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
-            let mut theme_open = self.theme_settings_dialog_open;
-            crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
-            self.finish_theme_settings_dialog_ui(theme_open, theme_state);
-            drop(_theme_settings_navigation_scope);
-            if let Some(observer) = theme_settings_navigation.as_ref() {
-                let owner_current = self.dedicated_settings_native_ui_owner_current(
-                    &ctx,
-                    frame_logic.should_be_visible,
-                    &theme_settings_section,
-                );
-                self.finish_dedicated_settings_navigation_frame(
-                    observer,
-                    owner_current,
-                    first_ui_pass,
-                );
-            }
+            let root_input = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
+            let native_input = self.native_ui_application_input_allowed(&ctx);
+            let can_close = !self.pinned_panels.contains(&super::Panel::ThemeSettingsDialog);
+            self.theme_settings_host.show(&ctx, &mut self.theme_settings_dialog, &super::theme_settings_dialog::ThemeHostRuntime { navigation: theme_settings_navigation.clone() },
+                super::utility_window_host::HostInput {
+                    first: first_ui_pass, root_visible: frame_logic.should_be_visible, root_input, native_input,
+                    root_owner: super::jump_mode::ui::NavigationOwner::Blocked, parent_owner: theme_settings_native_owner,
+                    root_jump_active: self.jump_mode_ui.active_session().is_some(), close_shortcut: can_close, allow_os_close: can_close,
+                    confirmation_owner: super::jump_mode::ui::NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+                });
+
         }
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);
@@ -12560,17 +12614,6 @@ impl LauncherApp {
             current_query_geometry,
             current_query_mouse_focus_accepted,
         );
-
-        if let Some(request) = self.hotkey_directory_dialog.take_edit_request() {
-            match self.dispatch_hotkey_directory_edit(&ctx, frame_logic.should_be_visible, &request)
-            {
-                Ok(()) => {
-                    self.hotkey_directory_dialog.open = false;
-                    ctx.request_repaint();
-                }
-                Err(message) => self.hotkey_directory_dialog.set_message(message),
-            }
-        }
 
         self.stage_ui_frame_receipt(
             &frame_logic,
@@ -13850,6 +13893,169 @@ impl LauncherApp {
         let mut host = std::mem::take(&mut self.settings_window_host);
         host.complete(ctx, self);
         self.settings_window_host = host;
+        if let Some(pass) = self.pending_plugin_toggle.take() && pass.was_retained(ctx) {
+            if self.plugin_editor.host_open && !self.pinned_panels.contains(&super::Panel::Plugins) {
+                self.plugin_settings_host.close_from_app(ctx);
+                self.plugin_editor.host_open = false;
+                self.panel_states.plugins = false;
+                self.panel_stack.retain(|panel| *panel != super::Panel::Plugins);
+            } else if !self.plugin_editor.host_open {
+                self.focus_panel(super::Panel::Plugins);
+            }
+        }
+        let mut plugin_show_root = false;
+        let mut theme_show_root = false;
+        let mut directory_show_root = false;
+        if let Some(completion) = self.plugin_settings_host.complete(ctx, &mut self.plugin_editor) {
+            use super::utility_window_host::PluginHostCommand;
+            plugin_show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    PluginHostCommand::Close => {
+                        self.plugin_editor.host_open = false;
+                        self.settings_editor.retire_plugin_settings_navigation();
+                        self.panel_stack.retain(|panel| *panel != super::Panel::Plugins);
+                    }
+                    PluginHostCommand::Navigation(observer) => {
+                        if self.plugin_editor.host_open {
+                            self.finish_dedicated_settings_navigation_frame(&observer, true, true);
+                        }
+                    }
+                    PluginHostCommand::Save(revision, selection_revision, before, candidate) => {
+                        if !self.plugin_editor.selection_is_current(selection_revision, &candidate) {
+                            continue;
+                        }
+                        if revision == self.plugins.settings_catalog_revision() && !self.settings_save_pending() {
+                            let mut editor = std::mem::take(&mut self.plugin_editor);
+                            editor.save_settings(ctx, self);
+                            self.plugin_editor = editor;
+                        } else {
+                            self.plugin_editor.restore_selection(before);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(source) = self.pending_plugin_settings_origin.take()
+            && self.settings_window_host.accepts_origin(self.show_settings, &source)
+        {
+            let was_open = self.plugin_editor.host_open;
+            self.plugin_editor.start_host();
+            self.panel_states.plugins = true;
+            self.panel_stack.retain(|panel| *panel != super::Panel::Plugins);
+            self.panel_stack.push(super::Panel::Plugins);
+            let origin = super::utility_host::ChildOpenOrigin::Parent(source.0);
+            if self.plugin_settings_host.open_from_origin(ctx, &self.plugin_editor, was_open, &origin)
+                == Some(super::utility_host::UtilityPresentation::Docked) {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.theme_settings_host.complete(ctx, &mut self.theme_settings_dialog) {
+            use super::theme_settings_dialog::ThemeHostCommand;
+            theme_show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    ThemeHostCommand::Navigation(observer) => {
+                        if self.theme_settings_dialog.host_open {
+                            self.finish_dedicated_settings_navigation_frame(&observer, true, true);
+                        }
+                    }
+                    ThemeHostCommand::Close => self.close_theme_settings_dialog(),
+                    ThemeHostCommand::Retired => {
+                        self.theme_settings_dialog.host_open = false;
+                        self.theme_settings_dialog.end_session(ctx);
+                        self.panel_states.theme_settings_dialog = false;
+                        self.panel_stack.retain(|panel| *panel != super::Panel::ThemeSettingsDialog);
+                    }
+                    ThemeHostCommand::Reload => self.theme_settings_dialog.reload_from_path(ctx, &self.settings_path),
+                    ThemeHostCommand::Preview => {
+                        super::theme::publish_preview(ctx, &self.theme_settings_dialog.draft);
+                    }
+                    ThemeHostCommand::Apply | ThemeHostCommand::Save => {
+                        let close = matches!(command, ThemeHostCommand::Save);
+                        match self.theme_settings_dialog.save_to_path(ctx, &self.settings_path) {
+                            Ok(()) => {
+                                if self.enable_toasts {
+                                    self.add_toast(Toast {
+                                        text: if close { "Theme settings saved" } else { "Theme settings applied" }.into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+                                        style: Default::default(),
+                                    });
+                                }
+                                if close { self.close_theme_settings_dialog(); }
+                            }
+                            Err(error) => { self.theme_settings_dialog.last_error = Some(error.clone()); self.report_error_message("theme settings", error); }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(source) = self.pending_theme_settings_origin.take()
+            && self.settings_window_host.accepts_origin(self.show_settings, &source)
+        {
+            let was_open = self.theme_settings_dialog.host_open;
+            self.open_theme_settings_dialog();
+            self.panel_states.theme_settings_dialog = true;
+            self.panel_stack.retain(|panel| *panel != super::Panel::ThemeSettingsDialog);
+            self.panel_stack.push(super::Panel::ThemeSettingsDialog);
+            let origin = super::utility_host::ChildOpenOrigin::Parent(source.0);
+            if self.theme_settings_host.open_from_origin(ctx, &self.theme_settings_dialog, was_open, &origin)
+                == Some(super::utility_host::UtilityPresentation::Docked) {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if let Some(completion) = self.hotkey_directory_host.complete(ctx, &mut self.hotkey_directory_dialog) {
+            use super::hotkey_directory_dialog::DirectoryHostCommand;
+            directory_show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    DirectoryHostCommand::Close => {
+                        self.hotkey_directory_dialog.open = false;
+                        self.hotkey_directory_dialog.clear_message();
+                        self.panel_states.hotkey_directory_dialog = false;
+                        self.panel_stack.retain(|panel| *panel != super::Panel::HotkeyDirectoryDialog);
+                    }
+                    DirectoryHostCommand::Edit(request) => {
+                        if let Some(source) = completion.origin.as_ref() {
+                            match self.dispatch_hotkey_directory_edit(ctx, source, &request) {
+                                Ok(show_root) => {
+                                    self.hotkey_directory_host.close_from_app(ctx);
+                                    self.hotkey_directory_dialog.open = false;
+                                    if show_root { effects.push(RootDialogEffect::ShowRoot); }
+                                }
+                                Err(message) => self.hotkey_directory_dialog.set_message(message),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(origin) = self.pending_hotkey_directory_origin.take() {
+            let authorized = match &origin {
+                super::utility_host::ChildOpenOrigin::Root => true,
+                super::utility_host::ChildOpenOrigin::Parent(receipt) => self.settings_window_host.accepts_origin(
+                    self.show_settings, &super::settings_window_host::SettingsOpenOrigin(receipt.clone())),
+            };
+            if authorized {
+                let was_open = self.hotkey_directory_dialog.open;
+                self.hotkey_directory_dialog.start_session();
+                if !was_open { self.hotkey_directory_dialog.clear_message(); }
+                let presentation = self.hotkey_directory_host.open_from_origin(ctx, &self.hotkey_directory_dialog, was_open, &origin);
+                self.panel_states.hotkey_directory_dialog = true;
+                self.panel_stack.retain(|panel| *panel != super::Panel::HotkeyDirectoryDialog);
+                self.panel_stack.push(super::Panel::HotkeyDirectoryDialog);
+                if presentation == Some(super::utility_host::UtilityPresentation::Docked) {
+                    effects.push(RootDialogEffect::ShowRoot);
+                }
+            }
+        }
+        if (plugin_show_root && self.plugin_editor.host_open && !self.plugin_settings_host.is_popped_out())
+            || (theme_show_root && self.theme_settings_dialog.host_open && !self.theme_settings_host.is_popped_out())
+            || (directory_show_root && self.hotkey_directory_dialog.open && !self.hotkey_directory_host.is_popped_out())
+        {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let stale_navigation = self
             .settings_editor
             .pending_source_origin()
@@ -16169,7 +16375,7 @@ mod tests {
         app.file_search_dialog.preview_dialog.open = true;
         app.hash_generator_dialog.open = true;
         app.table_utility_dialog.open = true;
-        app.theme_settings_dialog_open = true;
+        app.theme_settings_dialog.host_open = true;
 
         let expected_windows = [
             (
@@ -61117,7 +61323,7 @@ mod tests {
             vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
         );
         assert!(
-            app.show_plugins,
+            app.plugin_editor.host_open,
             "fresh Search Enter reveals the current disabled builtin prerequisite; selected={:?} pending={:?} diagnostic={:?} history={:?}",
             app.settings_editor.settings_search_selected_id,
             app.settings_editor
@@ -61677,10 +61883,15 @@ mod tests {
         app.plugin_editor
             .sync_committed_settings(&test_settings, plugin_infos);
         let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+        let without_presentation = |bytes: &[u8]| {
+            let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            value.as_object_mut().unwrap().remove("utility_presentations");
+            value
+        };
         app.plugin_editor.set_test_filter("cross_owner_probe");
 
         open_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
-        assert!(app.show_plugins);
+        assert!(app.plugin_editor.host_open);
         assert_eq!(app.plugin_editor.test_filter(), "cross_owner_probe");
         let actual_response = wait_for_settings_cross_owner_focus(&ctx, &mut app, &capability_id)
             .unwrap_or_else(|| {
@@ -61693,8 +61904,8 @@ mod tests {
         assert!(app.settings_editor.pending_settings_navigation.is_none());
         assert!(!app.settings_save_pending());
         assert_eq!(
-            std::fs::read(&app.settings_path).unwrap(),
-            committed_settings
+            without_presentation(&std::fs::read(&app.settings_path).unwrap()),
+            without_presentation(&committed_settings)
         );
 
         let return_to_settings_owner = |app: &mut LauncherApp| {
@@ -61703,7 +61914,7 @@ mod tests {
                 "the real PluginEditor panel closes through the normal front-dialog path"
             );
             run_settings_cross_owner_frame(&ctx, app, Vec::new());
-            assert!(!app.show_plugins);
+            assert!(!app.plugin_editor.host_open);
             assert_eq!(
                 crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
                 Some(crate::gui::jump_mode::ui::settings_layer_id()),
@@ -61718,18 +61929,30 @@ mod tests {
         app.plugin_editor.set_test_filter("no matching plugin");
         queue_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
         assert!(app.settings_editor.pending_settings_navigation.is_some());
+        // The accepted open is applied after the previous child frame; observe
+        // its newly opened frame before using its current response.
+        run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
         let (filter_id, filter_rect) = app
             .plugin_editor
             .test_filter_response()
             .expect("the newly opened PluginEditor rendered its actual Filter response");
         assert_eq!(
             crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
-            Some(crate::gui::jump_mode::ui::root_window_layer_id(
-                "Plugin Settings"
-            )),
+            app.plugin_settings_host.root_layer(),
             "the filter interaction is sent only after the real destination window is current"
         );
         let pointer = filter_rect.center();
+        run_settings_cross_owner_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(pointer)]);
+        assert!(app.dedicated_settings_native_ui_owner_current(&ctx, true, &crate::settings_editor::catalog::SettingsSection::PluginEditor));
+        run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        assert!(ctx.read_response(filter_id).is_some_and(|response| response.enabled() && response.hovered()),
+            "filter pointer: id={filter_id:?} original={filter_rect:?} pointer={pointer:?} response={:?} current={:?} top={:?} focused={:?} pointer_pos={:?} host_input={} owner_current={} modal={:?} popup={} visible={} pin={} action_sheet={}",
+            ctx.read_response(filter_id).map(|r| (r.rect, r.interact_rect, r.enabled(), r.hovered(), r.layer_id)),
+            app.plugin_editor.test_filter_response(), crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            ctx.memory(|m| m.focused()), ctx.pointer_interact_pos(),
+            app.native_ui_host_input_allowed(&ctx, true),
+            app.dedicated_settings_native_ui_owner_current(&ctx, true, &crate::settings_editor::catalog::SettingsSection::PluginEditor),
+            ctx.memory(|m| m.top_modal_layer()), egui::Popup::is_any_open(&ctx), app.visible_flag.load(Ordering::Relaxed), app.pin_list_open, app.action_sheet.is_open());
         run_settings_cross_owner_frame(
             &ctx,
             &mut app,
@@ -61760,11 +61983,16 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
-        assert_eq!(ctx.memory(|memory| memory.focused()), Some(filter_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(filter_id),
+            "filter={filter_id:?} rect={filter_rect:?} response={:?} current={:?} top={:?} pending={:?}",
+            ctx.read_response(filter_id).map(|r| (r.rect, r.enabled(), r.hovered(), r.layer_id)),
+            app.plugin_editor.test_filter_response(),
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            app.settings_editor.pending_settings_navigation.as_ref().map(|p| &p.control_id));
         assert!(!app.settings_save_pending());
         assert_eq!(
-            std::fs::read(&app.settings_path).unwrap(),
-            committed_settings
+            without_presentation(&std::fs::read(&app.settings_path).unwrap()),
+            without_presentation(&committed_settings)
         );
 
         // Queue another request from the real Settings owner, then change the
@@ -61774,7 +62002,7 @@ mod tests {
         return_to_settings_owner(&mut app);
         queue_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
         assert!(app.settings_editor.pending_settings_navigation.is_some());
-        assert!(app.show_plugins);
+        assert!(app.plugin_editor.host_open);
         app.plugins
             .register(Box::new(SettingsNavigationProbePlugin));
         run_settings_cross_owner_frame(
@@ -61789,8 +62017,8 @@ mod tests {
         assert_ne!(ctx.memory(|memory| memory.focused()), Some(actual_response));
         assert!(!app.settings_save_pending());
         assert_eq!(
-            std::fs::read(&app.settings_path).unwrap(),
-            committed_settings
+            without_presentation(&std::fs::read(&app.settings_path).unwrap()),
+            without_presentation(&committed_settings)
         );
 
         // The duplicate exact name makes both catalog rows unavailable; a
@@ -61800,8 +62028,8 @@ mod tests {
         assert!(app.settings_editor.pending_settings_navigation.is_none());
         assert!(!app.settings_save_pending());
         assert_eq!(
-            std::fs::read(&app.settings_path).unwrap(),
-            committed_settings
+            without_presentation(&std::fs::read(&app.settings_path).unwrap()),
+            without_presentation(&committed_settings)
         );
         drop(workspace);
     }
@@ -73787,6 +74015,957 @@ mod tests {
                 .map(|_| track_c3a_component_owner(&mut fixture))
                 .collect::<Vec<_>>();
             emit_track_c3a_component(mode, &fixture, &samples);
+        }
+    }
+    #[test]
+    fn popped_settings_opens_children_over_saved_docked_preferences() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let manager =
+            super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap();
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("theme-settings").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        app.plugins
+            .register(Box::new(SettingsNavigationProbePlugin));
+        let mut enabled_plugins = app.enabled_plugins.clone().unwrap_or_default();
+        enabled_plugins.insert("cross_owner_probe".to_owned());
+        app.enabled_plugins = Some(enabled_plugins);
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        let plugin_epoch = app
+            .plugins
+            .settings_catalog_snapshot_if_changed(None)
+            .unwrap()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.name == "cross_owner_probe")
+            .unwrap()
+            .epoch;
+        let capability_id = format!(
+            "plugin_editor.registered.cross_owner_probe.{plugin_epoch}.capability.probe_capability"
+        );
+        let infos = app.plugins.plugin_infos();
+        app.plugin_editor
+            .sync_committed_settings(&cross_owner_test_settings(), infos);
+        app.plugin_editor.set_test_filter("cross_owner_probe");
+        app.open_settings_dialog();
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (button, clip, enabled) = app.settings_window_host.test_host_button();
+        assert!(
+            enabled && clip.contains_rect(button),
+            "host button: rect={button:?} clip={clip:?} enabled={enabled} viewport={:?} focused={:?} top={:?}",
+            ctx.viewport_id(),
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.settings_window_host.is_popped_out());
+        let viewport = app.settings_window_host.test_viewport_id();
+        super::with_immediate_viewport_test_size(viewport, egui::vec2(960.0, 900.0), || {
+            app.settings_editor.settings_search_query = "typography scale".to_owned();
+            app.settings_editor.settings_search_selected_id = Some("theme.typography_scale".to_owned());
+            for _ in 0..3 {
+                super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            let (_, query) = app
+                .settings_editor
+                .test_search_query_response
+                .expect("native Settings query");
+            for pressed in [true, false] {
+                super::with_immediate_viewport_test_events_for(
+                    viewport,
+                    tool_dialog_pointer_events(query, pressed),
+                    || {
+                        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                            .0
+                            .drop_without_applying_deltas();
+                    },
+                );
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+            assert!(app.theme_settings_dialog.host_open);
+            assert!(app.theme_settings_host.is_popped_out());
+            let theme_viewport = super::super::utility_window_host::UtilityWindowHost::<
+                super::super::theme_settings_dialog::ThemeSettingsDialogState,
+            >::test_viewport(app.theme_settings_dialog.test_host_epoch());
+            super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(theme_viewport)));
+            super::with_immediate_viewport_test_events_for(theme_viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+            assert!(
+                app.settings_editor
+                    .pending_settings_navigation
+                    .as_ref()
+                    .is_some_and(|pending| pending.control_id == "theme.typography_scale"),
+                "discarded native child observation cannot consume navigation"
+            );
+            assert!(
+                app.settings_editor
+                    .test_last_dedicated_navigation_focus
+                    .is_none()
+            );
+            for _ in 0..3 {
+                super::with_immediate_viewport_test_events_for(theme_viewport, Vec::new(), || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            assert!(
+                app.theme_settings_dialog
+                    .test_scroll_offset
+                    .is_some_and(|offset| offset.y > 0.0),
+                "native Theme applied the requested scroll before the next paint"
+            );
+            super::with_immediate_viewport_test_events_for(theme_viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+            assert!(
+                app.settings_editor.pending_settings_navigation.is_none(),
+                "the retained native Theme response consumes the navigation request; pending={:?} history={:?} host={:?} scroll={:?}",
+                app.settings_editor
+                    .pending_settings_navigation
+                    .as_ref()
+                    .map(|p| (&p.control_id, p.stage, p.frames_remaining)),
+                app.settings_editor.test_search_navigation_history,
+                app.theme_settings_host.identity(),
+                app.theme_settings_dialog.test_scroll_area_history
+            );
+            assert!(
+                app.settings_editor
+                    .test_last_dedicated_navigation_focus
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == "theme.typography_scale")
+            );
+            manager.remember(
+                &ctx,
+                crate::settings::UtilityToolKey::parse("hotkey-directory").unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            );
+            app.settings_editor
+                .request_control_navigation("hotkeys.launcher", None, &app.plugins);
+            for _ in 0..4 {
+                super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            let (directory, clip, enabled) = app
+                .settings_editor
+                .test_hotkey_directory_button
+                .expect("native Settings directory button");
+            assert!(
+                enabled && clip.contains_rect(directory),
+                "Settings directory button: rect={directory:?} clip={clip:?} enabled={enabled} viewport={viewport:?} focused={:?} top={:?}",
+                ctx.memory(|m| m.focused()),
+                super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+            );
+            for pressed in [true, false] {
+                super::with_immediate_viewport_test_events_for(
+                    viewport,
+                    tool_dialog_pointer_events(directory, pressed),
+                    || {
+                        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                            .0
+                            .drop_without_applying_deltas();
+                    },
+                );
+            }
+            assert!(app.hotkey_directory_dialog.open);
+            assert!(app.hotkey_directory_host.is_popped_out());
+            manager.remember(
+                &ctx,
+                crate::settings::UtilityToolKey::parse("plugin-settings").unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            );
+            app.settings_editor.settings_search_query = "probe capability".to_owned();
+            app.settings_editor.settings_search_selected_id = Some(capability_id);
+            for _ in 0..3 {
+                super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            let (_, query) = app
+                .settings_editor
+                .test_search_query_response
+                .expect("native Settings query");
+            for pressed in [true, false] {
+                super::with_immediate_viewport_test_events_for(
+                    viewport,
+                    tool_dialog_pointer_events(query, pressed),
+                    || {
+                        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                            .0
+                            .drop_without_applying_deltas();
+                    },
+                );
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+            assert!(app.plugin_editor.host_open);
+            assert!(app.plugin_settings_host.is_popped_out());
+            assert_eq!(app.plugin_editor.test_filter(), "cross_owner_probe");
+            assert!(!app.panel_has_root_presentation(super::super::Panel::ThemeSettingsDialog));
+            assert!(!app.panel_has_root_presentation(super::super::Panel::Plugins));
+            assert!(!app.panel_has_root_presentation(super::super::Panel::HotkeyDirectoryDialog));
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            let query = ctx
+                .read_response(egui::Id::new("query_input"))
+                .expect("root query");
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                vec![egui::Event::PointerMoved(query.rect.center())],
+                false,
+            )
+            .drop_without_applying_deltas();
+            let query = ctx
+                .read_response(egui::Id::new("query_input"))
+                .expect("current root query");
+            assert!(query.enabled() && query.hovered());
+            for pressed in [true, false] {
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    tool_dialog_pointer_events(query.rect, pressed),
+                    false,
+                )
+                .drop_without_applying_deltas();
+            }
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text("q".into())], false)
+                .drop_without_applying_deltas();
+            assert!(app.query.contains('q'));
+            assert!(app.theme_settings_host.is_popped_out());
+            assert!(app.plugin_settings_host.is_popped_out());
+            assert!(app.hotkey_directory_host.is_popped_out());
+        });
+    }
+
+    #[test]
+    fn hosted_plugin_native_filter_rejects_discarded_input_and_keeps_draft() {
+        use crate::hotkey::reconfiguration::{
+            AppliedHotkeyReconfiguration, HotkeyRuntimeGeneration, HotkeyRuntimeMessage,
+            PreparedHotkeyReconfiguration,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let (wake, _wake_rx) = std::sync::mpsc::channel();
+        let owner =
+            crate::hotkey::reconfiguration::install_main_runtime(wake).expect("isolated hotkey owner");
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.plugins
+            .register(Box::new(SettingsNavigationProbePlugin));
+        let mut settings = cross_owner_test_settings();
+        settings.enabled_plugins = Some(std::collections::HashSet::from([
+            "cross_owner_probe".to_owned()
+        ]));
+        settings.save(&app.settings_path).unwrap();
+        app.enabled_plugins = settings.enabled_plugins.clone();
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        let infos = app.plugins.plugin_infos();
+        app.plugin_editor.sync_committed_settings(&settings, infos);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::Plugins);
+        app.plugin_editor.set_test_filter("draft");
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (button, clip, enabled) = app
+            .plugin_settings_host
+            .test_button
+            .expect("Plugin host button");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "host button: rect={button:?} clip={clip:?} enabled={enabled} viewport={:?} focused={:?} top={:?}",
+            ctx.viewport_id(),
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.plugin_settings_host.is_popped_out());
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            crate::plugin_editor::PluginEditor,
+        >::test_viewport(app.plugin_editor.host_session());
+        for _ in 0..2 {
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+        let (_, filter) = app
+            .plugin_editor
+            .test_filter_response()
+            .expect("native filter");
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(filter, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![egui::Event::Text("x".into())],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert_eq!(app.plugin_editor.test_filter(), "draft");
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![egui::Event::Text("y".into())],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert!(app.plugin_editor.test_filter().contains('y'));
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .expect("launcher query");
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(query.rect.center())],
+            false,
+        )
+        .drop_without_applying_deltas();
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(query.rect, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text("q".into())], false)
+            .drop_without_applying_deltas();
+        assert!(app.query.contains('q'));
+        assert!(app.plugin_settings_host.is_popped_out());
+        app.plugin_editor.set_test_filter("cross_owner_probe");
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (_, checkbox, clip, enabled) = app
+            .plugin_editor
+            .test_plugin_checkbox()
+            .expect("native plugin checkbox");
+        assert!(enabled && clip.contains_rect(checkbox));
+        for pressed in [true, false] {
+            if !pressed {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(checkbox, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(!app.settings_save_pending());
+        assert!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .enabled_plugins
+                .unwrap()
+                .contains("cross_owner_probe")
+        );
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (_, checkbox, clip, enabled) = app
+            .plugin_editor
+            .test_plugin_checkbox()
+            .expect("current plugin checkbox");
+        assert!(enabled && clip.contains_rect(checkbox));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(checkbox, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.settings_save_pending());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.settings_save_pending() {
+            if let Some(message) = owner.try_recv().unwrap() {
+                match message {
+                    HotkeyRuntimeMessage::Prepare(request) => {
+                        let prepared = PreparedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: HotkeyRuntimeGeneration(1),
+                            shared_invocation: false,
+                        };
+                        request.complete(Ok(prepared)).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Apply(request) => {
+                        let applied = AppliedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: request.generation(),
+                        };
+                        request.complete_applied(applied).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Cancel(_) => {
+                        panic!("accepted plugin save unexpectedly cancelled")
+                    }
+                }
+            }
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plugin save completed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.prepare_settings_save_shutdown();
+        assert!(
+            !crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .enabled_plugins
+                .unwrap()
+                .contains("cross_owner_probe")
+        );
+    }
+
+    #[test]
+    fn hosted_directory_native_sort_popup_keeps_owned_input_after_discard() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::HotkeyDirectoryDialog);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (button, clip, enabled) = app
+            .hotkey_directory_host
+            .test_button
+            .expect("Directory host button");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "host button: rect={button:?} clip={clip:?} enabled={enabled} viewport={:?} focused={:?} top={:?}",
+            ctx.viewport_id(),
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.hotkey_directory_host.is_popped_out());
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            super::super::hotkey_directory_dialog::HotkeyDirectoryDialog,
+        >::test_viewport(app.hotkey_directory_dialog.test_epoch());
+        for _ in 0..2 {
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+        let (sort, clip, enabled) = app
+            .hotkey_directory_dialog
+            .test_sort_response()
+            .expect("native sort control");
+        assert!(enabled && clip.contains_rect(sort));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(sort, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        // The first popup pass may be a non-interactive sizing pass.
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (status, clip, enabled) = app
+            .hotkey_directory_dialog
+            .test_status_response()
+            .expect("owned Status popup option");
+        assert!(
+            enabled && clip.contains_rect(status),
+            "Directory popup: rect={status:?} clip={clip:?} enabled={enabled} viewport={viewport:?} focused={:?} top={:?}",
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            if !pressed {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(status, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(!app.hotkey_directory_dialog.test_status_sort_selected());
+        for _ in 0..2 {
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+        let (sort, _, _) = app
+            .hotkey_directory_dialog
+            .test_sort_response()
+            .expect("fresh sort control");
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(sort, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (status, clip, enabled) = app
+            .hotkey_directory_dialog
+            .test_status_response()
+            .expect("current popup option");
+        assert!(
+            enabled && clip.contains_rect(status),
+            "Directory popup: rect={status:?} clip={clip:?} enabled={enabled} viewport={viewport:?} focused={:?} top={:?}",
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(status, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.hotkey_directory_dialog.test_status_sort_selected());
+    }
+
+    #[test]
+    fn native_directory_opens_current_gesture_binding_with_parent_presentation() {
+        use crate::mouse_gestures::db::{
+            BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION,
+        };
+        use crate::mouse_gestures::engine::DirMode;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _runtime_guard = crate::plugins::mouse_gestures::test_directory_runtime_guard();
+        let database = GestureDb {
+            schema_version: SCHEMA_VERSION,
+            gestures: vec![GestureEntry {
+                label: "Fixture gesture".into(),
+                tokens: "R".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: vec![BindingEntry {
+                    label: "Fixture binding".into(),
+                    kind: BindingKind::Execute,
+                    action: "launcher:show".into(),
+                    args: None,
+                    enabled: true,
+                }],
+            }],
+        };
+        let source =
+            crate::plugins::mouse_gestures::test_install_directory_runtime(database.clone(), 17);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.mouse_gestures_dialog
+            .test_open_with_loaded_database(database);
+        app.hotkey_directory = Some(Arc::new(crate::hotkey::directory::Snapshot::from_sources(
+            1,
+            vec![source],
+        )));
+        let manager =
+            super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap();
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("gesture-binding-editor").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::HotkeyDirectoryDialog);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (button, clip, enabled) = app
+            .hotkey_directory_host
+            .test_button
+            .expect("Directory host button");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "host button: rect={button:?} clip={clip:?} enabled={enabled} viewport={:?} focused={:?} top={:?}",
+            ctx.viewport_id(),
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.hotkey_directory_host.is_popped_out());
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            super::super::hotkey_directory_dialog::HotkeyDirectoryDialog,
+        >::test_viewport(app.hotkey_directory_dialog.test_epoch());
+        for _ in 0..3 {
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+        let (_, _, _, edit) = app
+            .hotkey_directory_dialog
+            .test_last_edit_response()
+            .expect("current gesture Edit control");
+        for pressed in [true, false] {
+            if !pressed {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(edit, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.hotkey_directory_dialog.open);
+        assert!(!app.mouse_gestures_dialog.binding_is_open());
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (_, _, _, edit) = app
+            .hotkey_directory_dialog
+            .test_last_edit_response()
+            .expect("current gesture Edit control after replay");
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(edit, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(!app.hotkey_directory_dialog.open);
+        assert!(app.mouse_gestures_dialog.binding_is_open());
+        assert!(app.gesture_binding_host.is_popped_out());
+    }
+
+    #[test]
+    fn hosted_theme_button_moves_live_child_without_resetting_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let mut settings = cross_owner_test_settings();
+        settings.theme.mode = crate::settings::ThemeMode::Light;
+        settings.save(&app.settings_path).unwrap();
+        app.focus_panel(super::super::Panel::ThemeSettingsDialog);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (button, clip, enabled) = app
+            .theme_settings_host
+            .test_button
+            .expect("Theme host button");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "host button: rect={button:?} clip={clip:?} enabled={enabled} viewport={:?} focused={:?} top={:?}",
+            ctx.viewport_id(),
+            ctx.memory(|m| m.focused()),
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx)
+        );
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.theme_settings_host.is_popped_out());
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            super::super::theme_settings_dialog::ThemeSettingsDialogState,
+        >::test_viewport(app.theme_settings_dialog.test_host_epoch());
+        for _ in 0..2 {
+            super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        }
+        let (dark, clip, enabled) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new("test/theme-dark"))
+            })
+            .expect("native Dark control");
+        assert!(enabled && clip.contains_rect(dark));
+        for pressed in [true, false] {
+            if !pressed {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dark, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert_eq!(
+            app.theme_settings_dialog.draft.mode,
+            crate::settings::ThemeMode::Light
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .theme
+                .mode,
+            crate::settings::ThemeMode::Light
+        );
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (dark, clip, enabled) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new("test/theme-dark"))
+            })
+            .unwrap();
+        assert!(enabled && clip.contains_rect(dark));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dark, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert_eq!(
+            app.theme_settings_dialog.draft.mode,
+            crate::settings::ThemeMode::Dark
+        );
+        assert!(app.theme_settings_dialog.dirty);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        let (apply, clip, enabled) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new("test/theme-apply"))
+            })
+            .expect("native Apply control");
+        assert!(enabled && clip.contains_rect(apply));
+        for pressed in [true, false] {
+            if !pressed {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(apply, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .theme
+                .mode,
+            crate::settings::ThemeMode::Light
+        );
+        super::with_immediate_viewport_test_events_for(viewport, Vec::new(), || {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        });
+        let (apply, clip, enabled) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new("test/theme-apply"))
+            })
+            .unwrap();
+        assert!(enabled && clip.contains_rect(apply));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(apply, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .theme
+                .mode,
+            crate::settings::ThemeMode::Dark
+        );
+        let previous_epoch = app.theme_settings_dialog.test_host_epoch();
+        app.force_close_panel(super::super::Panel::ThemeSettingsDialog);
+        assert!(!app.theme_settings_dialog.host_open);
+        app.focus_panel(super::super::Panel::ThemeSettingsDialog);
+        assert!(app.theme_settings_host.is_popped_out());
+        assert_ne!(app.theme_settings_dialog.test_host_epoch(), previous_epoch);
+    }
+
+    #[test]
+    fn hosted_settings_root_open_and_close_use_each_child_owner() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        for panel in [
+            super::super::Panel::ThemeSettingsDialog,
+            super::super::Panel::Plugins,
+            super::super::Panel::HotkeyDirectoryDialog,
+        ] {
+            app.focus_panel(panel);
+            run_dialog_frame(&ctx, &mut app);
+            assert!(app.is_panel_open(panel));
+            app.pinned_panels.push(panel);
+            assert!(!app.close_front_dialog(), "a pinned child refuses close-front");
+            assert!(app.is_panel_open(panel));
+            app.pinned_panels.retain(|pinned| *pinned != panel);
+            app.force_close_panel(panel);
+            assert!(!app.is_panel_open(panel));
         }
     }
 }

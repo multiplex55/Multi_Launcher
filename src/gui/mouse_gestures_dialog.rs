@@ -1174,6 +1174,11 @@ impl MgGesturesDialog {
         self.finish_opening();
     }
 
+    #[cfg(test)]
+    pub(super) fn test_open_with_loaded_database(&mut self, database: GestureDb) {
+        self.open_with_loaded_database(database);
+    }
+
     fn open_with_loaded_database(&mut self, database: GestureDb) {
         self.canvas_drag_active = false;
         self.install_loaded_database(database);

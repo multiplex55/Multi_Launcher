@@ -497,7 +497,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_theme_dialog(&mut self) {
-        self.open_theme_settings_dialog();
+        self.focus_panel(super::Panel::ThemeSettingsDialog);
     }
 
     fn open_volume_dialog(&mut self) {

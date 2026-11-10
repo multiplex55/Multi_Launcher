@@ -239,6 +239,8 @@ impl SettingsEditor {
             #[cfg(test)]
             test_search_navigation_trace_started: false,
             #[cfg(test)]
+            test_hotkey_directory_button: None,
+            #[cfg(test)]
             test_notes_external_open_response: None,
         };
         s.plugin_settings

@@ -294,6 +294,8 @@ pub struct SettingsEditor {
     #[cfg(test)]
     pub(crate) test_search_navigation_trace_started: bool,
     #[cfg(test)]
+    pub(crate) test_hotkey_directory_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     pub(crate) test_notes_external_open_response: Option<TestNotesControlResponse>,
 }
 

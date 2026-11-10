@@ -128,7 +128,7 @@ mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod utility_dialog_size;
 pub(crate) mod utility_presentation;
-mod utility_host;
+pub(crate) mod utility_host;
 mod utility_window_geometry;
 pub(crate) mod volume_data;
 mod volume_dialog;
@@ -1117,11 +1117,15 @@ pub struct LauncherApp {
     settings_window_host: settings_window_host::SettingsWindowHost,
     mouse_settings_host: mouse_form_host::MouseSettingsHost,
     mouse_gesture_settings_host: mouse_form_host::GestureSettingsHost,
-    pub show_plugins: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
+    plugin_settings_host: utility_window_host::UtilityWindowHost<PluginEditor>,
+    plugin_settings_catalog: Option<Arc<crate::plugin::PluginCatalogSnapshot>>,
+    pending_plugin_settings_origin: Option<settings_window_host::SettingsOpenOrigin>,
+    pending_plugin_toggle: Option<utility_host::ViewportPassProvenance>,
+    pending_hotkey_directory_origin: Option<utility_host::ChildOpenOrigin<u64>>,
     pub settings_path: String,
     pub(crate) settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry,
     pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
@@ -1188,6 +1192,7 @@ pub struct LauncherApp {
     /// Latest immutable hotkey directory assembled from owner publications.
     pub(crate) hotkey_directory: Option<Arc<crate::hotkey::directory::Snapshot>>,
     pub(crate) hotkey_directory_dialog: hotkey_directory_dialog::HotkeyDirectoryDialog,
+    hotkey_directory_host: utility_window_host::UtilityWindowHost<hotkey_directory_dialog::HotkeyDirectoryDialog>,
     paste_sequence_document_revision: Arc<AtomicU64>,
     hotkey_directory_main_wake: Option<Sender<()>>,
     visible_flag: Arc<AtomicBool>,
@@ -1279,8 +1284,9 @@ pub struct LauncherApp {
     gesture_window_picker_host: utility_window_host::UtilityWindowHost<mouse_gesture_settings_dialog::GestureWindowPicker>,
     pending_gesture_picker_open: Option<utility_host::AcceptedParentOpen<u64>>,
     mouse_settings_dialog: MouseSettingsDialog,
-    theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
+    theme_settings_host: utility_window_host::UtilityWindowHost<ThemeSettingsDialogState>,
+    pending_theme_settings_origin: Option<settings_window_host::SettingsOpenOrigin>,
     fav_dialog: FavDialog,
     file_search_dialog: FileSearchDialogState,
     file_search_host: file_search_window_host::FileSearchWindowHost,
@@ -1683,7 +1689,11 @@ impl LauncherApp {
     }
 
     pub(crate) fn request_hotkey_directory_open(&mut self) {
-        self.hotkey_directory_dialog.request_open();
+        self.pending_hotkey_directory_origin = Some(utility_host::ChildOpenOrigin::Root);
+    }
+
+    pub(crate) fn request_hotkey_directory_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) {
+        self.pending_hotkey_directory_origin = Some(utility_host::ChildOpenOrigin::Parent(source.0.clone()));
     }
 
     pub(crate) fn paste_sequence_document_revision_notifier(
@@ -2953,18 +2963,25 @@ impl LauncherApp {
     }
 
     pub fn open_theme_settings_dialog(&mut self) {
-        if self.theme_settings_dialog_open {
+        if self.theme_settings_dialog.host_open {
             return;
         }
-        self.theme_settings_dialog_open = true;
         let ctx = self.egui_ctx.clone();
         let settings_path = self.settings_path.clone();
-        self.theme_settings_dialog
-            .begin_session(&ctx, &settings_path);
+        self.theme_settings_dialog.start_host_session(&ctx, &settings_path);
     }
 
     pub fn is_theme_settings_dialog_open(&self) -> bool {
-        self.theme_settings_dialog_open
+        self.theme_settings_dialog.host_open
+    }
+
+    pub(crate) fn open_theme_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) -> bool {
+        self.pending_theme_settings_origin = Some(source.clone());
+        false
+    }
+
+    pub(crate) fn open_plugin_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) {
+        self.pending_plugin_settings_origin = Some(source.clone());
     }
 
     pub(crate) fn theme_accent_override_is_set(&self) -> bool {
@@ -2999,7 +3016,7 @@ impl LauncherApp {
 
     pub fn close_theme_settings_dialog(&mut self) {
         if self.pinned_panels.contains(&Panel::ThemeSettingsDialog) {
-            self.theme_settings_dialog_open = true;
+            self.theme_settings_dialog.host_open = true;
             self.panel_states.theme_settings_dialog = true;
             if !self.panel_stack.contains(&Panel::ThemeSettingsDialog) {
                 self.panel_stack.push(Panel::ThemeSettingsDialog);
@@ -3007,7 +3024,10 @@ impl LauncherApp {
             return;
         }
         self.retire_settings_navigation_for_panel(Panel::ThemeSettingsDialog);
-        self.theme_settings_dialog_open = false;
+        if self.theme_settings_dialog.host_open {
+            self.theme_settings_host.close_from_app(&self.egui_ctx);
+            self.theme_settings_dialog.host_open = false;
+        }
         self.theme_settings_dialog.end_session(&self.egui_ctx);
         self.panel_states.theme_settings_dialog = false;
         self.panel_stack
@@ -3015,6 +3035,7 @@ impl LauncherApp {
         self.update_panel_stack();
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_theme_settings_dialog_ui(
         &mut self,
         open: bool,
@@ -3022,11 +3043,13 @@ impl LauncherApp {
     ) {
         self.theme_settings_dialog = state;
         let pinned_close = !open && self.pinned_panels.contains(&Panel::ThemeSettingsDialog);
-        self.theme_settings_dialog_open = open || pinned_close;
         if pinned_close {
+            self.theme_settings_dialog.host_open = true;
             self.update_panel_stack();
         } else if !open {
             self.close_theme_settings_dialog();
+        } else {
+            self.theme_settings_dialog.host_open = true;
         }
     }
     fn apply_enabled_plugin_selection(&mut self, enabled_plugins: Option<HashSet<String>>) {
@@ -3955,11 +3978,15 @@ impl LauncherApp {
             settings_window_host: Default::default(),
             mouse_settings_host: Default::default(),
             mouse_gesture_settings_host: Default::default(),
-            show_plugins: false,
             actions_path,
             editor: ActionsEditor::default(),
             settings_editor,
             plugin_editor,
+            plugin_settings_host: Default::default(),
+            plugin_settings_catalog: None,
+            pending_plugin_settings_origin: None,
+            pending_plugin_toggle: None,
+            pending_hotkey_directory_origin: None,
             settings_path,
             settings_save_workers,
             utility_dialog_size_manager,
@@ -4021,6 +4048,7 @@ impl LauncherApp {
             sequence_routes: None,
             hotkey_directory: None,
             hotkey_directory_dialog: hotkey_directory_dialog::HotkeyDirectoryDialog::default(),
+            hotkey_directory_host: Default::default(),
             paste_sequence_document_revision: Arc::new(AtomicU64::new(0)),
             hotkey_directory_main_wake: None,
             visible_flag: visible_flag.clone(),
@@ -4106,8 +4134,9 @@ impl LauncherApp {
             gesture_window_picker_host: Default::default(),
             pending_gesture_picker_open: None,
             mouse_settings_dialog: MouseSettingsDialog::default(),
-            theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
+            theme_settings_host: Default::default(),
+            pending_theme_settings_origin: None,
             fav_dialog: FavDialog::default(),
             file_search_dialog: FileSearchDialogState::from_settings(file_search_settings.clone()),
             file_search_host: Default::default(),
@@ -5012,7 +5041,7 @@ impl LauncherApp {
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open,
             Panel::MouseSettingsDialog => self.mouse_settings_dialog.open,
-            Panel::ThemeSettingsDialog => self.theme_settings_dialog_open,
+            Panel::ThemeSettingsDialog => self.theme_settings_dialog.host_open,
             Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open,
             Panel::FavDialog => self.fav_dialog.open,
             Panel::FileSearchDialog => self.file_search_dialog.open,
@@ -5060,7 +5089,7 @@ impl LauncherApp {
             Panel::CalendarEventDetails => self.calendar_details_open,
             Panel::Editor => self.show_editor,
             Panel::Settings => self.show_settings,
-            Panel::Plugins => self.show_plugins,
+            Panel::Plugins => self.plugin_editor.host_open,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open,
             Panel::RadialEditor => self
@@ -5084,6 +5113,9 @@ impl LauncherApp {
     fn panel_has_root_presentation(&self, panel: Panel) -> bool {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
+            Panel::ThemeSettingsDialog => self.theme_settings_host.root_layer().is_some(),
+            Panel::Plugins => self.plugin_settings_host.root_layer().is_some(),
+            Panel::HotkeyDirectoryDialog => self.hotkey_directory_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
@@ -5240,7 +5272,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog | Panel::ThemeSettingsDialog | Panel::Plugins | Panel::HotkeyDirectoryDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5429,6 +5461,9 @@ impl LauncherApp {
                 self.close_theme_settings_dialog();
             }
             Panel::HotkeyDirectoryDialog => {
+                if self.hotkey_directory_dialog.open {
+                    self.hotkey_directory_host.close_from_app(&self.egui_ctx);
+                }
                 self.hotkey_directory_dialog.open = false;
                 self.hotkey_directory_dialog.clear_message();
                 self.panel_states.hotkey_directory_dialog = false;
@@ -5624,7 +5659,10 @@ impl LauncherApp {
                 self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::Plugins => {
-                self.show_plugins = false;
+                if self.plugin_editor.host_open {
+                    self.plugin_settings_host.close_from_app(&self.egui_ctx);
+                }
+                self.plugin_editor.host_open = false;
                 self.panel_states.plugins = false;
             }
             Panel::MultiManagerDialog => {
@@ -5776,6 +5814,9 @@ impl LauncherApp {
                 self.panel_states.mouse_settings_dialog = false;
             }
             Panel::HotkeyDirectoryDialog => {
+                if self.hotkey_directory_dialog.open {
+                    self.hotkey_directory_host.close_from_app(&self.egui_ctx);
+                }
                 self.hotkey_directory_dialog.open = false;
                 self.hotkey_directory_dialog.clear_message();
                 self.panel_states.hotkey_directory_dialog = false;
@@ -5965,7 +6006,10 @@ impl LauncherApp {
                 self.panel_states.settings = false;
             }
             Panel::Plugins => {
-                self.show_plugins = false;
+                if self.plugin_editor.host_open {
+                    self.plugin_settings_host.close_from_app(&self.egui_ctx);
+                }
+                self.plugin_editor.host_open = false;
                 self.panel_states.plugins = false;
             }
             Panel::MultiManagerDialog => {
@@ -6053,7 +6097,7 @@ impl LauncherApp {
                     self.open_mouse_settings_dialog();
                 }
             }
-            Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open = true,
+            Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.start_session(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.ensure_open(),
             Panel::FileSearchDialog => self.file_search_dialog.open(),
@@ -6189,7 +6233,7 @@ impl LauncherApp {
                     self.open_settings_dialog();
                 }
             }
-            Panel::Plugins => self.show_plugins = true,
+            Panel::Plugins => self.plugin_editor.start_host(),
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
             Panel::RadialEditor => {
@@ -6254,7 +6298,22 @@ impl LauncherApp {
         }
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
-        if panel == Panel::CalculationPadDialog {
+        if panel == Panel::ThemeSettingsDialog {
+            let was_open = self.theme_settings_dialog.host_open;
+            self.open_theme_settings_dialog();
+            let presentation = self.theme_settings_host.open_from_origin(&self.egui_ctx, &self.theme_settings_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+        } else if panel == Panel::Plugins {
+            let was_open = self.plugin_editor.host_open;
+            self.plugin_editor.start_host();
+            let presentation = self.plugin_settings_host.open_from_origin(&self.egui_ctx, &self.plugin_editor, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+        } else if panel == Panel::HotkeyDirectoryDialog {
+            let was_open = self.hotkey_directory_dialog.open;
+            self.hotkey_directory_dialog.start_session();
+            let presentation = self.hotkey_directory_host.open_from_origin(&self.egui_ctx, &self.hotkey_directory_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+        } else if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
             self.calculation_pad_dialog.prepare_open_presentation(&self.egui_ctx);
             if let Some(layer) = self.calculation_pad_dialog.host_layer_if_root() {
@@ -10259,8 +10318,29 @@ mod tests {
         persisted.theme.mode = crate::settings::ThemeMode::Dark;
         persisted.save(settings_path.to_str().unwrap()).unwrap();
 
-        let mut app = new_app(&ctx);
-        app.settings_path = settings_path.to_string_lossy().into_owned();
+        let mut app_settings = Settings::default();
+        app_settings.paste_sequence.next_hotkey = None;
+        app_settings.paste_sequence.cancel_hotkey = None;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings_path.to_string_lossy().into_owned(),
+            app_settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
         app.open_theme_settings_dialog();
         assert_eq!(ctx.theme(), egui::Theme::Dark);
 
@@ -10352,8 +10432,8 @@ mod tests {
             egui::Theme::Dark,
             "explicit close is idempotent"
         );
+        app.settings_save_workers.join_all();
     }
-
     #[test]
     fn theme_settings_dialog_pinned_close_refusal_retains_draft_and_preview() {
         let _guard = TEST_MUTEX.lock().unwrap();

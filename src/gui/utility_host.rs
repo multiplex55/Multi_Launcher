@@ -2,7 +2,7 @@ use eframe::egui;
 
 /// The presentation used by an ordinary tool's single live session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum UtilityPresentation {
+pub(crate) enum UtilityPresentation {
     Docked,
     Popout,
 }
@@ -260,7 +260,7 @@ impl UtilityHostState {
     }
 }
 
-pub(super) fn presentation_button(
+pub(crate) fn presentation_button(
     ui: &mut egui::Ui,
     presentation: UtilityPresentation,
     allowed: bool,
