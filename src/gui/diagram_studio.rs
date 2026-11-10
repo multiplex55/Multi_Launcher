@@ -7560,32 +7560,9 @@ impl DiagramStudioDialog {
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.heading("Diagram Studio");
-                    let viewer_button = ui.add_enabled(
-                        document_actions_allowed,
-                        egui::Button::new(if *viewer_open {
-                            "Focus viewer"
-                        } else {
-                            "Open viewer"
-                        }),
-                    );
-                    #[cfg(test)]
-                    test_action_rects.push((
-                        "open_viewer".into(),
-                        viewer_button.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    test_action_enabled.push((
-                        "open_viewer".into(),
-                        viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
-                    ));
-                    if viewer_button.clicked() {
-                        draw_effects.open_viewer_requested = true;
-                    }
-                    ui.separator();
                     let mut file_item_ids = Vec::new();
                     let mut file_sizing = false;
-                    let file_menu = ui.menu_button("File", |menu_ui| {
+                    let file_menu = ui.menu_button("File ▾", |menu_ui| {
                         file_sizing = menu_ui.is_sizing_pass();
                         egui::ScrollArea::vertical()
                             .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
@@ -7743,7 +7720,7 @@ impl DiagramStudioDialog {
                     }
                     let mut template_item_ids = Vec::new();
                     let mut templates_sizing_pass = false;
-                    let _templates_menu = ui.menu_button("Templates", |menu_ui| {
+                    let _templates_menu = ui.menu_button("Templates ▾", |menu_ui| {
                         templates_sizing_pass = menu_ui.is_sizing_pass();
                         for template in DiagramTemplate::ALL {
                             let response = menu_ui.add_enabled(
@@ -7808,22 +7785,9 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
                     }
-                    if let Some(path) = document_path.as_deref() {
-                        ui.weak(
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("diagram.mld"),
-                        );
-                    } else {
-                        ui.weak("Untitled");
-                    }
-                    if document_dirty {
-                        ui.weak("Modified");
-                    }
-                    ui.separator();
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
-                    let view = ui.menu_button("View", |menu_ui| {
+                    let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
                         let source = menu_ui.add_enabled(
                             menu_actions_allowed,
@@ -7892,7 +7856,7 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
-                    let edit = ui.menu_button("Edit", |menu_ui| {
+                    let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
                         for (label, enabled, mutation) in [
                             ("Undo", can_undo, PendingMutation::Undo),
@@ -7923,6 +7887,43 @@ impl DiagramStudioDialog {
                             sizing_pass: edit_sizing,
                         });
                     }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let viewer_button = ui.add_enabled(
+                        document_actions_allowed,
+                        egui::Button::new(if *viewer_open {
+                            "Focus viewer"
+                        } else {
+                            "Open viewer"
+                        }),
+                    );
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "open_viewer".into(),
+                        viewer_button.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_enabled.push((
+                        "open_viewer".into(),
+                        viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
+                    ));
+                    if viewer_button.clicked() {
+                        draw_effects.open_viewer_requested = true;
+                    }
+                    if let Some(path) = document_path.as_deref() {
+                        ui.weak(
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("diagram.mld"),
+                        );
+                    } else {
+                        ui.weak("Untitled");
+                    }
+                    if document_dirty {
+                        ui.weak("Modified");
+                    }
+                    ui.separator();
                     let background_actions_allowed = base_editing_allowed && active_menu_scope.is_none();
 
                     let zoom_out =
@@ -8184,57 +8185,78 @@ impl DiagramStudioDialog {
                 ui.separator();
 
                 match *view_mode {
-                    ViewMode::Source { .. } => source_editor(
-                        ui,
-                        session,
-                        render_document,
-                        source_edit_allowed,
-                        pending,
-                        *focus_source && source_focus_allowed,
-                        source_focus_requested,
-                        #[cfg(test)]
-                        test_source_editor_id,
-                        #[cfg(test)]
-                        test_source_editor_rect,
-                        #[cfg(test)]
-                        test_source_editor_enabled,
-                        #[cfg(test)]
-                        test_action_rects,
-                        #[cfg(test)]
-                        test_action_focus_ids,
-                    ),
-                    ViewMode::Visual => preview_workspace(
-                        ui,
-                        generic_family.is_some(),
-                        generic_texture,
-                        generic_canvas_placeholder,
-                        graph,
-                        cache.scene.as_ref(),
-                        native_editable,
-                        revision,
-                        camera,
-                        inspector_canvas_split_ratio,
-                        selection,
-                        selected_nodes,
-                        property_draft,
-                        drag,
-                        editing_allowed,
-                        pending,
-                        message,
-                        canvas_focus_requested,
-                        #[cfg(test)]
-                        test_canvas_rect,
-                        #[cfg(test)]
-                        test_canvas_id,
-                        #[cfg(test)]
-                        test_action_rects,
-                        #[cfg(test)]
-                        test_generic_preview_drawn,
-                        #[cfg(test)]
-                        test_native_inspector_visible,
-                        #[cfg(test)]
-                        test_generic_canvas_placeholder,
-                    ),
+                    ViewMode::Source { .. } => {
+                        draw_effects.mermaid_color_draft = source_editor(
+                            ui,
+                            session,
+                            render_document,
+                            source_edit_allowed,
+                            pending,
+                            *focus_source && source_focus_allowed,
+                            source_focus_requested,
+                            generic_family,
+                            mermaid_color_draft,
+                            base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            #[cfg(test)]
+                            test_source_editor_id,
+                            #[cfg(test)]
+                            test_source_editor_rect,
+                            #[cfg(test)]
+                            test_source_editor_enabled,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_action_focus_ids,
+                        );
+                    }
+                    ViewMode::Visual => {
+                        draw_effects.mermaid_color_draft = draw_mermaid_colors(
+                            ui,
+                            session.draft(),
+                            render_document,
+                            revision,
+                            generic_family,
+                            mermaid_color_draft,
+                            base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            pending,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_action_focus_ids,
+                        );
+                        preview_workspace(
+                            ui,
+                            generic_family.is_some(),
+                            generic_texture,
+                            generic_canvas_placeholder,
+                            graph,
+                            cache.scene.as_ref(),
+                            native_editable,
+                            revision,
+                            camera,
+                            inspector_canvas_split_ratio,
+                            selection,
+                            selected_nodes,
+                            property_draft,
+                            drag,
+                            editing_allowed,
+                            pending,
+                            message,
+                            canvas_focus_requested,
+                            #[cfg(test)]
+                            test_canvas_rect,
+                            #[cfg(test)]
+                            test_canvas_id,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_generic_preview_drawn,
+                            #[cfg(test)]
+                            test_native_inspector_visible,
+                            #[cfg(test)]
+                            test_generic_canvas_placeholder,
+                        );
+                    }
                     ViewMode::Split => {
                         #[cfg(test)]
                         let mut source_id = None;
@@ -8245,7 +8267,7 @@ impl DiagramStudioDialog {
                         #[cfg(test)]
                         let mut canvas_id = None;
                         if ui.available_width() < SPLIT_TWO_COLUMN_MIN_WIDTH {
-                            source_editor(
+                            draw_effects.mermaid_color_draft = source_editor(
                                 ui,
                                 session,
                                 render_document,
@@ -8253,6 +8275,9 @@ impl DiagramStudioDialog {
                                 pending,
                                 *focus_source && source_focus_allowed,
                                 source_focus_requested,
+                                generic_family,
+                                mermaid_color_draft,
+                                base_editing_allowed && draw_effects.active_menu_scope.is_none(),
                                 #[cfg(test)]
                                 &mut source_id,
                                 #[cfg(test)]
@@ -8321,7 +8346,7 @@ impl DiagramStudioDialog {
                                     egui::vec2(source_width, available_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        source_editor(
+                                        draw_effects.mermaid_color_draft = source_editor(
                                             ui,
                                             session,
                                             render_document,
@@ -8329,6 +8354,10 @@ impl DiagramStudioDialog {
                                             pending,
                                             *focus_source && source_focus_allowed,
                                             source_focus_requested,
+                                            generic_family,
+                                            mermaid_color_draft,
+                                            base_editing_allowed
+                                                && draw_effects.active_menu_scope.is_none(),
                                             #[cfg(test)]
                                             &mut source_id,
                                             #[cfg(test)]
@@ -8421,7 +8450,6 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
-                draw_effects.mermaid_color_draft = draw_mermaid_colors(ui, session.draft(), render_document, revision, generic_family, mermaid_color_draft, base_editing_allowed && draw_effects.active_menu_scope.is_none(), pending, #[cfg(test)] test_action_rects, #[cfg(test)] test_action_focus_ids);
                 if let Some(notice) = message.as_ref() {
                     match notice {
                         StudioNotice::Info(_) => { ui.label(notice.text()); }
@@ -8562,40 +8590,21 @@ impl DiagramStudioDialog {
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
                 let content_top = ui.cursor().top();
-                ui.horizontal_wrapped(|ui| {
-                    ui.heading("Diagram Studio");
-                    ui.strong("Visual document");
-                    ui.separator();
-                    let viewer = ui.add_enabled(
-                        document_actions_allowed,
-                        egui::Button::new(if self.viewer_open {
-                            "Focus viewer"
-                        } else {
-                            "Open viewer"
-                        }),
-                    );
-                    #[cfg(test)]
-                    self.test_action_rects.push((
-                        "open_viewer".into(),
-                        viewer.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
-                    if viewer.clicked() {
-                        effects.open_viewer_requested = true;
-                    }
-                    let export_busy = self.visual_asset_work.is_some()
+                let export_busy = self.visual_asset_work.is_some()
                         || self.completed_visual_asset_import.is_some()
                         || self.completed_visual_export.is_some()
                         || self.drawio_work.is_some()
                         || self.drawio_review.is_some();
-                    let file_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
-                    let export_allowed = file_allowed && pending.is_none() && !visual_draft_active;
-                    let drawio_allowed = export_allowed && !export_busy;
+                let file_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
+                let export_allowed = file_allowed && pending.is_none() && !visual_draft_active;
+                let drawio_allowed = export_allowed && !export_busy;
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading("Diagram Studio");
+                    ui.strong("Visual document");
+                    ui.separator();
                     let mut file_items = Vec::new();
                     let mut file_sizing = false;
-                    let (file_response, _) = egui::containers::menu::MenuButton::new("File")
+                    let (file_response, _) = egui::containers::menu::MenuButton::new("File ▾")
                         .config(
                             egui::containers::menu::MenuConfig::new()
                                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
@@ -8807,7 +8816,7 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
-                    let edit = ui.menu_button("Edit", |menu_ui| {
+                    let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
                         let allowed =
                             file_allowed && pending.is_none() && !visual_draft_active && inline_label.is_none();
@@ -8849,7 +8858,7 @@ impl DiagramStudioDialog {
                     }
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
-                    let view = ui.menu_button("View", |menu_ui| {
+                    let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
                         let response = menu_ui.add_enabled(
                             file_allowed,
@@ -8887,7 +8896,7 @@ impl DiagramStudioDialog {
                     let template_allowed = actions_allowed && !closing_requested && pending_transition.is_none() && pending.is_none() && !visual_draft_active;
                     let mut template_item_ids = Vec::new();
                     let mut template_sizing_pass = false;
-                    let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates", |menu_ui| {
+                    let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates ▾", |menu_ui| {
                         template_sizing_pass = menu_ui.is_sizing_pass();
                         for template in crate::diagram::VisualAuthoringTemplate::ALL {
                             let response = menu_ui.add_enabled(template_allowed, egui::Button::new(template.name()));
@@ -8920,6 +8929,27 @@ impl DiagramStudioDialog {
                     let help_popup = egui::Popup::default_response_id(&help);
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let viewer = ui.add_enabled(
+                        document_actions_allowed,
+                        egui::Button::new(if self.viewer_open {
+                            "Focus viewer"
+                        } else {
+                            "Open viewer"
+                        }),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "open_viewer".into(),
+                        viewer.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
+                    if viewer.clicked() {
+                        effects.open_viewer_requested = true;
                     }
                     let export_cancellable = self.completed_visual_export.is_some()
                         || self.visual_asset_work.as_ref().is_some_and(|work| {
@@ -12639,12 +12669,15 @@ fn source_editor(
     pending: &mut Option<PendingMutation>,
     focus_source: bool,
     source_focus_requested: &mut Option<egui::Id>,
+    family: Option<DiagramFamily>,
+    color_draft: &Option<MermaidColorDraft>,
+    color_enabled: bool,
     #[cfg(test)] test_editor_id: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_editor_enabled: &mut bool,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
-) {
+) -> Option<MermaidColorDraft> {
     ui.label("Mermaid source (raw text is retained exactly)");
     let editor_id = ui.make_persistent_id("diagram-studio-source-editor");
     if focus_source {
@@ -12733,7 +12766,22 @@ fn source_editor(
     if source_changed && pending.is_none() {
         *pending = Some(PendingMutation::ReplaceSource(source));
     }
+    let colors = draw_mermaid_colors(
+        ui,
+        session.draft(),
+        render_document,
+        session.revision(),
+        family,
+        color_draft,
+        color_enabled,
+        pending,
+        #[cfg(test)]
+        test_action_rects,
+        #[cfg(test)]
+        test_action_focus_ids,
+    );
     ui.small("Supported syntax is documented in the Diagram Studio help section.");
+    colors
 }
 
 fn clear_text_edit_undoer(ctx: &egui::Context, id: egui::Id) {
@@ -12808,22 +12856,43 @@ fn apply_color_field(style: &mut crate::diagram::MermaidStyle, field: MermaidCol
 }
 
 fn draw_mermaid_colors(
-    ui: &mut egui::Ui, source: &str, document: &RenderDocumentIdentity, revision: u64,
-    family: Option<DiagramFamily>, prior: &Option<MermaidColorDraft>, enabled: bool,
+    ui: &mut egui::Ui,
+    source: &str,
+    document: &RenderDocumentIdentity,
+    revision: u64,
+    family: Option<DiagramFamily>,
+    prior: &Option<MermaidColorDraft>,
+    enabled: bool,
     pending: &mut Option<PendingMutation>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
 ) -> Option<MermaidColorDraft> {
     use MermaidColorField as Field;
-    let mut draft = match prior.as_ref().filter(|d| d.document == *document && d.family == family).cloned() {
+    let mut draft = match prior
+        .as_ref()
+        .filter(|d| d.document == *document && d.family == family)
+        .cloned()
+    {
         Some(draft) => draft,
         None => match color_draft_for(source, document, revision, family) {
             Ok(draft) => draft,
-            Err(error) => { ui.collapsing("Colors", |ui| { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), format!("Resolve source configuration first: {error}")); }); return None; }
+            Err(error) => {
+                ui.collapsing("Colors", |ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(190, 65, 45),
+                        format!("Resolve source configuration first: {error}"),
+                    );
+                });
+                return None;
+            }
         },
     };
     let stale = draft.revision != revision;
     let _panel = ui.collapsing("Colors", |ui| {
+        let _color_scroll = egui::ScrollArea::vertical()
+            .id_salt("mermaid-colors-scroll")
+            .max_height(180.0)
+            .show(ui, |ui| {
         if stale {
             ui.label("Source changed. Reload colors before applying.");
             match color_draft_for(source, document, revision, family) {
@@ -12877,9 +12946,18 @@ fn draw_mermaid_colors(
                 }
             });
         });
+        ui.add_space(4.0);
+            });
+        #[cfg(test)]
+        test_action_rects.push(("mermaid_colors_scroll".into(), _color_scroll.inner_rect, ui.clip_rect()));
     });
-    #[cfg(test)] {
-        test_action_rects.push(("mermaid_colors".into(), _panel.header_response.rect, ui.clip_rect()));
+    #[cfg(test)]
+    {
+        test_action_rects.push((
+            "mermaid_colors".into(),
+            _panel.header_response.rect,
+            ui.clip_rect(),
+        ));
         test_action_focus_ids.push(("mermaid_colors".into(), _panel.header_response.id));
     }
     Some(draft)
@@ -14500,7 +14578,7 @@ fn studio_help_menu(
 ) -> (egui::Response, Vec<egui::Id>, bool) {
     let mut items = Vec::new();
     let mut sizing = false;
-    let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help", |ui| {
+    let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help ▾", |ui| {
         sizing = ui.is_sizing_pass();
         let help_scroll = egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 100.0).max(160.0)).show(ui, |ui| {
             ui.set_max_width(480.0);
@@ -18202,7 +18280,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {name} while scrolling"));
             if clip.contains_rect(*rect) { return; }
             let direction = if rect.bottom() > clip.bottom() { -150.0 } else { 150.0 };
-            let scroll = if name.starts_with("mermaid_color") || name.starts_with("menu_") {
+            let scroll = if name.starts_with("mermaid_color_") {
+                let body = dialog.test_body_scroll_rect.unwrap_or(*clip);
+                let inner = dialog.test_action_rect("mermaid_colors_scroll")
+                    .map(|(rect, owner_clip)| rect.intersect(owner_clip).intersect(body))
+                    .unwrap_or(egui::Rect::NOTHING);
+                if inner.is_positive() { inner } else { body }
+            } else if name == "mermaid_colors" || name.starts_with("menu_") {
                 dialog.test_body_scroll_rect.unwrap_or(*clip)
             } else if name.starts_with("help_") {
                 dialog.test_action_rects.iter().find(|(action, _, _)| action == "help_scroll").map_or(*clip, |(_, rect, _)| rect.intersect(*clip))
@@ -20496,6 +20580,248 @@ mod tests {
         );
         send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
         assert_eq!(dialog.test_session().draft(), source);
+    }
+
+    #[test]
+    fn m4a_colors_follow_suggestions_in_each_source_layout() {
+        fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, size: egui::Vec2) {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        for (mode, width, scale) in [
+            (
+                ViewMode::Source {
+                    restore: PreviewMode::Split,
+                },
+                1200.0,
+                1.0,
+            ),
+            (ViewMode::Split, 1200.0, 1.0),
+            (ViewMode::Split, 620.0, 1.35),
+        ] {
+            let mut dialog = initialized_dialog();
+            dialog.view_mode = mode;
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                for font in style.text_styles.values_mut() {
+                    font.size *= scale;
+                }
+            });
+            for _ in 0..3 {
+                draw(&mut dialog, &ctx, egui::vec2(width, 1000.0));
+            }
+            let (suggestions, source_clip) =
+                dialog.test_action_rect("mermaid_assist_menu").unwrap();
+            let (colors, colors_clip) = dialog.test_action_rect("mermaid_colors").unwrap();
+            assert_eq!(
+                source_clip, colors_clip,
+                "both controls belong to the same source pane"
+            );
+            assert!(colors.top() >= suggestions.bottom());
+            assert!(
+                colors.top() - suggestions.bottom() <= 12.0,
+                "suggestions={suggestions:?}, colors={colors:?}"
+            );
+            assert_eq!(
+                dialog
+                    .test_action_rects
+                    .iter()
+                    .filter(|(name, _, _)| name == "mermaid_colors")
+                    .count(),
+                1
+            );
+        }
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Visual;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, egui::vec2(1200.0, 900.0));
+        }
+        assert!(dialog.test_action_rect("mermaid_assist_menu").is_none());
+        assert!(
+            dialog.test_action_rect("mermaid_colors").is_some(),
+            "source-hidden view retains Colors"
+        );
+    }
+
+    #[test]
+    fn m4a_expanded_colors_footer_scrolls_inside_short_host() {
+        fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, events: Vec<egui::Event>) {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100.0, 720.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                    assert!(pending.is_none());
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        let original = dialog.test_session().draft().to_owned();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, Vec::new());
+        }
+        let id = dialog
+            .test_action_focus_ids
+            .iter()
+            .find(|(name, _)| name == "mermaid_colors")
+            .unwrap()
+            .1;
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, id, false);
+        state.set_open(true);
+        state.store(&ctx);
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, Vec::new());
+        }
+        let (_, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+        assert!(
+            clip.height() <= 180.0 + 1.0,
+            "Colors body is bounded: {clip:?}"
+        );
+        for _ in 0..12 {
+            let (footer, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+            if clip.contains_rect(footer) {
+                break;
+            }
+            let point = clip.center();
+            draw(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -120.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let (footer, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+        assert!(
+            clip.contains_rect(footer),
+            "footer={footer:?}, clip={clip:?}"
+        );
+        assert_eq!(dialog.test_session().draft(), original);
+    }
+
+    #[test]
+    fn m4a_menus_and_direct_controls_occupy_separate_strips() {
+        for visual in [false, true] {
+            for (width, scale) in [(1200.0, 1.0), (620.0, 1.35)] {
+                let mut dialog = if visual {
+                    initialized_visual_dialog()
+                } else {
+                    initialized_dialog()
+                };
+                let ctx = egui::Context::default();
+                ctx.all_styles_mut(|style| {
+                    for font in style.text_styles.values_mut() {
+                        font.size *= scale;
+                    }
+                });
+                for _ in 0..4 {
+                    frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+                }
+                let menus = [
+                    "menu_file",
+                    "menu_edit",
+                    "menu_view",
+                    "menu_help",
+                    if visual {
+                        "menu_visual_templates"
+                    } else {
+                        "menu_templates"
+                    },
+                ];
+                let bottom = menus
+                    .into_iter()
+                    .map(|name| {
+                        let (rect, clip) = dialog
+                            .test_action_rect(name)
+                            .unwrap_or_else(|| panic!("missing {name}"));
+                        assert!(
+                            rect.intersects(clip),
+                            "{name} must be reachable: {rect:?} / {clip:?}"
+                        );
+                        rect.bottom()
+                    })
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let ids: Vec<_> = dialog
+                    .test_action_focus_ids
+                    .iter()
+                    .filter(|(name, _)| menus.contains(&name.as_str()))
+                    .cloned()
+                    .collect();
+                let (viewer, clip) = dialog.test_action_rect("open_viewer").unwrap();
+                assert!(viewer.intersects(clip));
+                assert!(
+                    viewer.top() >= bottom,
+                    "viewer={viewer:?}, menu bottom={bottom}"
+                );
+                frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+                let next_ids: Vec<_> = dialog
+                    .test_action_focus_ids
+                    .iter()
+                    .filter(|(name, _)| menus.contains(&name.as_str()))
+                    .cloned()
+                    .collect();
+                assert_eq!(ids, next_ids, "menu widget identities remain stable");
+            }
+        }
     }
 
     #[test]

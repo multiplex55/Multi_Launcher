@@ -26,7 +26,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
 | M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
 | M3-B | H1/H2 custom hosts / accepted child origins | existing hosts and B2a already-hosted edges verified; ordinary B2b/c adapters pending |
-| M4-A | D1/D2 Mermaid Colors / menu strips | pending |
+| M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native pending |
 | M4-B | D4 toolbar / pinned inspector | pending |
 | M4-C | D3 owned-text endpoint captions | pending |
 | M4-D | D5 actual connector creation / reconnection | pending |
@@ -321,3 +321,18 @@ Final separate `cargo nextest run -p multi_launcher --cargo-profile fast-dev --l
 - `m3-b2a2-final-owner`: 4/4 after final cleanup compile; FileSearch authority, staged visibility, Calendar draft/occurrence behavior and actual Details Edit flow.
 
 All successful receipts exit 0/no timeout/cleanup and drain verified. Initial compile's two test accessor errors corrected; unrelated formatting churn removed before final verification. Parent inspected scoped diff/whitespace and status; task-created clipboard fixture artifact removed. Lanes returned. New FileSearch/Settings origin tests inject retained receipts; existing actual menu/native-viewport regressions provide separate integration evidence. No physical native observation is claimed. Global H1/H2 remain incomplete until B2b/c adapters; proceed with recorded M4 locality order.
+
+M3-B2a2 checkpoint `4e378c8d07c49077fb52a3800831dd2fc65eeaab` pushed successfully; clean tree before M4-A. Implementer owns Diagram D1/D2 only: source-pane Colors placement, menu/direct-control strips, bounded narrow/native layout and directly affected accepted color/focus/history tests. M4-B/C/D follow separately; B2b/c adapters remain pending as recorded. Parent ledger/Git; one source/Cargo lane.
+
+## M4-A acceptance: Diagram source Colors and menu strips
+
+Mermaid Source and both Split branches render the existing Colors editor immediately after Suggestions in their shared source pane; source-hidden Visual retains one reachable Colors placement before its preview. The old post-workspace editor is removed. Expanded Colors has an independent 180-point bounded scroll area plus normal bottom spacing so Apply can scroll fully into view. Mermaid and Visual Document headers separate top-level menus from direct viewer/mode/zoom controls, using existing popup ownership/MenuFocusScope and one color draft/accepted transaction path. No color/source/history semantics changed.
+
+Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` evidence under `target/utility-usability-and-insights/evidence/`:
+
+- `m4-a-layout-first`: 6/6, 2.321s; source/normal+narrow Split placement, short footer, distinct menu/direct strips/stable IDs, source position/status stability, Tab/undo and retained keyboard/Escape focus.
+- `m4-a-controls-first`: 2/3, 2.798s; Mermaid color history/save and visual template decisions passed. Mindmap exposed scroll-input routing to the old parent area, then a real 0.2-point footer clipping at maximum scroll. Helper uses observed inner Colors scroll rectangle; content bottom inset fixes reachability without weakening full-visibility/transaction/stale assertions.
+- `m4-a-controls-final`: 2/2, 3.752s; exact Mindmap regression and short footer passed after the concrete cause correction.
+- `m4-a-font-layout`: 2/2, actual 1.35× text-style sizes at fixed logical widths; enlarged Source/Split/menu layouts pass original assertions. DPI scaling alone was rejected as insufficient text-layout evidence. Initial compile used unsupported Context style API; corrected to this egui version's `all_styles_mut` before successful final compile.
+
+Successful receipts exit 0/no timeout/cleanup and output drain verified. Parent inspected scoped diff/whitespace/status; only Diagram source and ledger changed. Source/Cargo returned. These are rendered tests, not physical native observation; M9 remains pending. M4-B D4 layout follows; C/D and remaining approved features/adapters unchanged in scope.
