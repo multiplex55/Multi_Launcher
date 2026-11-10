@@ -205,6 +205,50 @@ impl FileLockDialogState {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_host_focus_pending(&self) -> bool { self.host_focus }
+
+    #[cfg(test)]
+    pub(super) fn test_stage_dock_with_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.ensure_open();
+        self.host
+            .transition(super::utility_host::UtilityPresentation::Popout);
+        self.apply_selected_path(path);
+        self.stage(
+            ctx,
+            vec![FileLockAction::Host(
+                super::utility_host::UtilityPresentation::Docked,
+            )],
+        );
+    }
+
+    pub(super) fn open_from_file_search(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        receipt: super::file_search_window_host::FileSearchOpenReceipt,
+    ) {
+        let was_open = self.open;
+        self.ensure_open();
+        self.prepare_open_presentation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host.presentation()),
+            remembered,
+            self.host.presentation(),
+            &super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        self.host.transition(desired);
+        self.request_host_focus();
+        if desired == super::utility_host::UtilityPresentation::Popout {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.apply_selected_path(path);
+    }
+
     pub(super) fn stage_file_search_prefill(
         &mut self,
         pass: ViewportPassProvenance,

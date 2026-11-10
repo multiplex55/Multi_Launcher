@@ -15,7 +15,7 @@ Contract: `docs/plans/CODEX_GOAL_UTILITY_USABILITY_AND_INSIGHTS.md` and its comp
 
 ## Checkpoint plan
 
-Goal section F supplies the authoritative objective, ownership, scope, invariants, tests and done criteria. Execute M1 through M9 in order; shared presentation precedes companion hosting, projections precede UI. Use configured planner/implementer/reviewer roles, sequential implementation packets and one cumulative independent review. Compile separately from targeted fast-dev Nextest execution; each execution batch uses the owned-process runner with a 100-second deadline. No full-suite campaign.
+Goal section F supplies the authoritative objective, ownership, scope, invariants, tests and done criteria. Follow the bounded order refinement recorded below: shared presentation precedes companion hosting, projections precede UI, remaining global adapters finish before M9. Use configured planner/implementer/reviewer roles, sequential implementation packets and one cumulative independent review. Compile separately from targeted fast-dev Nextest execution; each execution batch uses the owned-process runner with a 100-second deadline. No full-suite campaign.
 
 | Checkpoint | Outcomes / deliverable | State |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
 | M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
 | M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
-| M3-B | H1/H2 custom hosts / accepted child origins | existing B1 hosts integrated; B2a0/Pad edges verified; Notes/other B2 pending |
+| M3-B | H1/H2 custom hosts / accepted child origins | existing hosts and B2a already-hosted edges verified; ordinary B2b/c adapters pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | pending |
 | M4-B | D4 toolbar / pinned inspector | pending |
 | M4-C | D3 owned-text endpoint captions | pending |
@@ -141,6 +141,7 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | Calendar / event details / event editor / DateTime Studio / Timer | M3-B1c2 implemented / automated verified |
 | Diagram Studio / Viewer / Regex | M3-B1c3a implemented / automated verified |
 | Markdown / Diff / MkMacro main | M3-B1c3b implemented / automated verified |
+| Dashboard Editor | Missing B1 hooks found/fixed in B2a2; lifecycle/origin automated verified |
 | File Lock / Duplicate Finder / Folder Size / Image Compare / Recording / Table / XML / ZIP | M3-B1c4 implemented; policy verified, three existing-test limits below |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
@@ -295,3 +296,28 @@ Additional actual link inventory: `MarkdownLinkAction::TodoReference` → `open_
 Accepted list opens carry host/open-epoch authority; editor wiki/link opens carry host/prompt/slug/path authority. Dispatch follows normal target frame completion and revalidates live source/modal state. Fresh and live same-slug targets share the presentation resolver, preserve dirty contents/history/identity, and show root only for final Docked targets. Root/command opens that meet a staged target defer within NotePanel until normal completion; an accepted Popout/edit cannot be overwritten. Query activation retains the existing one-shot handoff. Closing/reopening via app ensure-open advances list lifetime, while closed editor entries awaiting cleanup cannot resurrect discarded drafts.
 
 Separate fast-dev lib no-run compile passed. Final owned 100-second `--no-fail-fast` batch `m3-b2a1b-lifecycle-final` passed 6/6 in 2.726s: actual rendered native list→fresh editor→existing dirty wiki target, retained target edits/deferred Root/source Dock and discard/actual app close-reopen, two authority tests, same-slug reuse and query handoff. Earlier scoped 6/6 and deferred-Root 3/3 receipts remain under `target/utility-usability-and-insights/evidence/m3-b2a1b-*`. Final receipt exit 0, no timeout, cleanup/drain verified. Only touched-hunk formatting followed tests; diff/whitespace inspected, source/Cargo returned. These are automated viewport interactions; physical native observation remains M9. Global H1/H2 remain pending other already-hosted edges and ordinary adapters.
+
+M3-B2a1b checkpoint `6095d87e1996f5034534daf9cb3712b55922e19f` pushed successfully; clean tree before consolidated M3-B2a2. Implementer owns all remaining already-hosted child edges in one checkpoint: FileSearch→FolderSize/FileLock; Calendar/DateTime children; Note/Markdown→Diagram→Viewer; Settings→existing hosted targets. Planner delivered current owner/receipt/pending-frame guards and narrow tests. New ordinary adapters remain B2b/c. Parent ledger/Git; one source/Cargo lane.
+
+Planned order refinement after B2a2: M4 Diagram work next for current-owner locality, then M5–M8 independent outcomes, then finish the inventoried B2b/c adapters before M9. Shared M3 preference/origin foundation is already available for new companion integration. This changes order only: every global host/child row and all 17 outcomes remain required. Planner has prepared adapter ownership packets; no parallel source/Cargo work.
+
+B2a2 current-source correction: DashboardEditor's custom host was omitted from the earlier preference integrations despite blanket inventory wording. Its Settings origin work exposed missing prepare/remember hooks. H2 Dashboard lifecycle is included in this checkpoint at the actual owner, with focused restore/close/origin coverage and M1 draft/token behavior preserved. Earlier “all existing families integrated” statements are superseded by this concrete finding; final inventory reconciliation remains required.
+
+Planner's bounded reconciliation checked all existing UtilityHostState owner modules, custom Dock producers, shared-host paths and stable-key prepare/remember calls. No additional existing-family omissions found beyond Dashboard. This is inventory/key-wiring evidence only, not deep lifecycle correctness or test execution; pending ordinary B2b/c adapters were deliberately not counted as covered.
+
+B2a2 implementation/verification still in progress: FileSearch receipts bind host instance/search ID/result revision and dispatch after normal FolderSize/FileLock completion; accepted same-path reuse always requests focus. Calendar/DateTime receipts bind host/session; live children retain drafts. Note/Markdown source-copy snapshots carry host authority validated before Diagram accepts ownership of its copied snapshot/dirty decision; no new post-decision protocol. Settings carries accepted origin through direct actions/navigation. Target-specific host visibility is resolved after queued promotions (FolderSize/FileLock/Dashboard/Mouse/Gesture/Clipboard), preserving independent root requests. Parent review caught Details Edit intentionally retiring its source; authority now validates before the accepted handoff, not retroactively afterward. Final compile/tests pending; initial focused batches passed FileSearch/Calendar 6/6 and Settings/Dashboard/query 5/5, Diagram 4/5 with an obsolete absent-preference assertion being migrated while preserving discarded-close/generation checks. No checkpoint acceptance yet.
+
+## M3-B2a2 acceptance: Remaining already-hosted child edges
+
+The preceding WIP findings are resolved. FileSearch→FolderSize/FileLock, Calendar/DateTime children, Note/Markdown→Diagram→Viewer and Settings→Dashboard/Mouse/Gesture/Clipboard use accepted source authority and common presentation precedence. Completion order preserves staged target actions and final target-specific visibility. Details same-occurrence focus preserves epoch; explicit different occurrence or changed occurrence metadata updates its read-only context. Editor drafts remain unchanged by promotion. Dashboard's missing H2 hooks now restore per actual open and remember accepted transitions/final close before retirement. New source opens use current source checks; a Diagram accepted copied snapshot and dirty decision remain target-owned.
+
+Final separate `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-run` passed with six pre-existing test warnings only. Targeted owned 100-second `--no-fail-fast` receipts under `target/utility-usability-and-insights/evidence/`:
+
+- `m3-b2a2-file-calendar`: 6/6, 2.944s; retained/discarded actual FileSearch→FileLock menus, source search/host authority and target reuse, Calendar draft promotion, DateTime root prepare guards.
+- `m3-b2a2-settings`: 5/5, 9.810s; Settings target selection, Dashboard close/reopen and real host controls, native-viewport Settings draft and detached-query matrix.
+- `m3-b2a2-diagram`: 4/5, 2.405s; dirty copied-source decision, viewer override, Note/Markdown stale-source handoff passed. Old viewer test absent-preference assertion conflicted with accepted inherited Popout persistence; migrated only preference expectation, retained close/generation assertions.
+- `m3-b2a2-corrections`: 5/5, 3.410s; staged target Dock→parent promotion keeps path/session and hidden root; FolderSize retained/discarded prefills without scans; real native-viewport Details Edit→editor; migrated viewer generation.
+- `m3-b2a2-calendar-occurrences`: 2/2, same/different Details context and real Edit handoff.
+- `m3-b2a2-final-owner`: 4/4 after final cleanup compile; FileSearch authority, staged visibility, Calendar draft/occurrence behavior and actual Details Edit flow.
+
+All successful receipts exit 0/no timeout/cleanup and drain verified. Initial compile's two test accessor errors corrected; unrelated formatting churn removed before final verification. Parent inspected scoped diff/whitespace and status; task-created clipboard fixture artifact removed. Lanes returned. New FileSearch/Settings origin tests inject retained receipts; existing actual menu/native-viewport regressions provide separate integration evidence. No physical native observation is claimed. Global H1/H2 remain incomplete until B2b/c adapters; proceed with recorded M4 locality order.

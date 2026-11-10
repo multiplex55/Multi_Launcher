@@ -100,12 +100,14 @@ pub(crate) struct MarkdownFenceOrigin {
     pub(crate) identity: DiagramSourceCopyOrigin,
     pub(crate) source_snapshot: String,
     pub(crate) fence_index: usize,
+    pub(super) host_origin: Option<super::utility_host::AcceptedParentOpen<(u64, Option<PathBuf>, Option<u64>)>>,
 }
 
 pub(crate) struct MarkdownStudioDialog {
     pub(crate) open: bool,
     host_state: UtilityHostState,
     presentation_prepared: bool,
+    host_epoch: u64,
     show_root_after_host_change: bool,
     document: MarkdownDocument,
     default_directory: PathBuf,
@@ -184,6 +186,7 @@ impl MarkdownStudioDialog {
             open: false,
             host_state: UtilityHostState::docked(),
             presentation_prepared: false,
+            host_epoch: 0,
             show_root_after_host_change: false,
             document: MarkdownDocument::new(),
             default_directory: root.path().to_path_buf(),
@@ -249,6 +252,7 @@ impl MarkdownStudioDialog {
         }
         if !self.open {
             self.presentation_prepared = false;
+            self.host_epoch = self.host_epoch.wrapping_add(1);
         }
         self.open = true;
         self.deferred_selection = None;
@@ -266,6 +270,7 @@ impl MarkdownStudioDialog {
         if self.document.source().is_some() {
             if !self.open {
                 self.presentation_prepared = false;
+                self.host_epoch = self.host_epoch.wrapping_add(1);
             }
             self.open = true;
         }
@@ -372,6 +377,23 @@ impl MarkdownStudioDialog {
         {
             self.active_diagram_origin = None;
         }
+    }
+
+    pub(super) fn accepts_diagram_origin(&self, origin: &MarkdownFenceOrigin) -> bool {
+        self.open
+            && !self.close_requested
+            && self.document.pending_transition().is_none()
+            && self.document.source() == Some(origin.source_snapshot.as_str())
+            && origin.host_origin.as_ref().is_some_and(|receipt| {
+                receipt.is_current(
+                    self.host_state.identity(),
+                    &(
+                        self.host_epoch,
+                        self.document.path().map(Path::to_path_buf),
+                        self.document.revision(),
+                    ),
+                )
+            })
     }
 
     pub(crate) fn track_diagram_source_origin(&mut self, origin: MarkdownFenceOrigin) {
@@ -857,6 +879,13 @@ impl MarkdownStudioDialog {
             {
                 self.picker_owner = None;
             }
+        }
+        if let Some(MarkdownStudioEffect::OpenDiagram { origin, .. }) = diagram_effect.as_mut() {
+            origin.host_origin = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, effects.host,
+                (self.host_epoch, self.document.path().map(Path::to_path_buf), self.document.revision()),
+                effects.root_pass, effects.owner_pass.unwrap_or(effects.root_pass),
+            );
         }
         if !self.open {
             let key = crate::settings::UtilityToolKey::parse("markdown-studio").expect("stable Markdown Studio key");
@@ -1580,6 +1609,7 @@ impl MarkdownStudioDialog {
                             identity: identity.clone(),
                             source_snapshot,
                             fence_index: index,
+                            host_origin: None,
                         };
                         return Some(MarkdownStudioEffect::OpenDiagram {
                             source: copy.with_origin(identity),
@@ -1607,6 +1637,7 @@ impl MarkdownStudioDialog {
     fn finish_transition(&mut self, outcome: MarkdownTransitionOutcome, closes: bool) {
         match outcome {
             MarkdownTransitionOutcome::Applied => {
+                self.host_epoch = self.host_epoch.wrapping_add(1);
                 self.cache = None;
                 self.selection = 0..0;
                 self.deferred_selection = Some(0..0);
@@ -2572,6 +2603,7 @@ mod tests {
             identity: identity.clone(),
             source_snapshot: source.into(),
             fence_index: 0,
+                            host_origin: None,
         });
         let revision = dialog.document.revision().unwrap();
         let undo_depth = dialog.document.undo_depth();
@@ -2601,6 +2633,7 @@ mod tests {
             identity: identity.clone(),
             source_snapshot: source.into(),
             fence_index: 0,
+                            host_origin: None,
         });
         let changed = format!("{source}\nchanged\n");
         dialog.document.replace_source(&changed).unwrap();

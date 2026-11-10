@@ -45,7 +45,7 @@ enum RootDialogEffect {
     SaveConverterPreferences,
     PrepareCalendar {
         instant_utc: chrono::DateTime<chrono::Utc>,
-        presentation: super::utility_host::UtilityPresentation,
+        origin: super::utility_host::AcceptedParentOpen<u64>,
     },
 }
 
@@ -5237,12 +5237,17 @@ impl LauncherApp {
             self.calendar_editor_open,
             editor_epoch,
         );
-        let show_root = calendar.as_ref().is_some_and(|(_, _, show)| *show)
-            || details.as_ref().is_some_and(|(_, _, show)| *show)
-            || editor.as_ref().is_some_and(|(_, _, show)| *show);
+        let calendar_show = calendar.as_ref().is_some_and(|(_, _, show)| *show)
+            | self.calendar_popover_host.take_deferred_show_root();
+        let details_show = details.as_ref().is_some_and(|(_, _, show)| *show)
+            | self.calendar_details_host.take_deferred_show_root();
+        let editor_show = editor.as_ref().is_some_and(|(_, _, show)| *show)
+            | self.calendar_editor_host.take_deferred_show_root();
         let path = self.calendar_event_store_path().to_owned();
         let calendar_dispatch = calendar.and_then(|(actions, presentation, _)| {
-            if actions.host_request.is_some() && !actions.close {
+            if !self.calendar_popover_host.accepts_origin(
+                self.calendar_popover_open, self.calendar_popover.host_session_epoch(), &presentation,
+            ) || (actions.host_request.is_some() && !actions.close) {
                 return None;
             }
             let mut dialog = std::mem::take(&mut self.calendar_popover);
@@ -5254,7 +5259,9 @@ impl LauncherApp {
             dispatch.map(|dispatch| (dispatch, presentation))
         });
         let details_dispatch = details.and_then(|(actions, presentation, _)| {
-            if actions.host_request.is_some() && !actions.close {
+            if !self.calendar_details_host.accepts_origin(
+                self.calendar_details_open, self.calendar_event_details.host_session_epoch(), &presentation,
+            ) || (actions.host_request.is_some() && !actions.close) {
                 return None;
             }
             let mut dialog = std::mem::take(&mut self.calendar_event_details);
@@ -5276,24 +5283,35 @@ impl LauncherApp {
             }
         }
 
-        if let Some((dispatch, presentation)) = calendar_dispatch {
+        if let Some((dispatch, receipt)) = calendar_dispatch {
+            let origin = super::utility_host::ChildOpenOrigin::Parent(receipt);
             ctx.request_repaint_of(egui::ViewportId::ROOT);
             match dispatch {
                 CalendarPopoverDispatch::OpenDetails(instance) => {
-                    self.open_calendar_details_from(instance, presentation)
+                    self.open_calendar_details_from(instance, &origin)
                 }
                 CalendarPopoverDispatch::OpenEditor(event) => {
-                    self.open_calendar_editor_from(event, None, presentation)
+                    self.open_calendar_editor_from(event, None, &origin)
                 }
             }
         }
-        if let Some((CalendarDetailsDispatch::OpenEditor(event, scope), presentation)) =
-            details_dispatch
-        {
+        if let Some((CalendarDetailsDispatch::OpenEditor(event, scope), receipt)) = details_dispatch {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
-            self.open_calendar_editor_from(Some(event), scope, presentation);
+            self.open_calendar_editor_from(
+                Some(event),
+                scope,
+                &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            );
         }
-        show_root
+        (calendar_show
+            && self.calendar_popover_host.presentation()
+                == super::utility_host::UtilityPresentation::Docked)
+            || (details_show
+                && self.calendar_details_host.presentation()
+                    == super::utility_host::UtilityPresentation::Docked)
+            || (editor_show
+                && self.calendar_editor_host.presentation()
+                    == super::utility_host::UtilityPresentation::Docked)
     }
 
     fn show_timer_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
@@ -5576,6 +5594,7 @@ impl LauncherApp {
     pub(crate) fn open_dashboard_editor(&mut self) {
         let registry = self.dashboard.registry().clone();
         self.dashboard_editor.open(&self.dashboard_path, &registry);
+        self.dashboard_editor.prepare_open_presentation(&self.egui_ctx);
         self.show_dashboard_editor = true;
         if let Some(layer) = self.dashboard_editor.host_layer_if_root() {
             self.egui_ctx.move_to_top(layer);
@@ -5591,6 +5610,7 @@ impl LauncherApp {
         if root_visible && self.show_dashboard_editor && !self.dashboard_editor.open {
             self.open_dashboard_editor();
         }
+        self.dashboard_editor.prepare_open_presentation(ctx);
         if !self.show_dashboard_editor
             || (!root_visible && !self.dashboard_editor.needs_root_ui_when_hidden())
         {
@@ -6530,26 +6550,29 @@ impl LauncherApp {
         );
     }
 
-    fn complete_file_search_host(&mut self, ctx: &egui::Context) {
+    fn complete_file_search_host(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Vec<(
+        super::file_search_window_host::FileSearchOpenReceipt,
+        super::FileSearchUiCommand,
+    )> {
+        let mut child_opens = Vec::new();
         let Some(completion) = self.file_search_host.complete(
             ctx,
             &mut self.file_search_dialog,
             &mut self.file_search_coordinator,
         ) else {
-            return;
+            return child_opens;
         };
         let mut show_root = completion.show_root;
         for command in completion.commands {
             match command {
-                super::FileSearchUiCommand::OpenFolderSize(path) => {
-                    self.folder_size_dialog
-                        .stage_file_search_prefill(completion.root_pass, path);
-                    show_root = true;
-                }
-                super::FileSearchUiCommand::InspectFileUsers(path) => {
-                    self.file_lock_dialog
-                        .stage_file_search_prefill(completion.root_pass, path);
-                    show_root = true;
+                command @ (super::FileSearchUiCommand::OpenFolderSize(_)
+                | super::FileSearchUiCommand::InspectFileUsers(_)) => {
+                    if let Some(origin) = completion.origin.clone() {
+                        child_opens.push((origin, command));
+                    }
                 }
                 super::FileSearchUiCommand::OpenHash(path) => {
                     self.handle_file_search_ui_command(
@@ -6570,6 +6593,7 @@ impl LauncherApp {
         if show_root {
             self.request_launcher_visibility(true);
         }
+        child_opens
     }
 
     fn show_mouse_gestures_host(
@@ -6939,7 +6963,9 @@ impl LauncherApp {
         }
     }
 
-    fn complete_mouse_settings_hosts(&mut self, ctx: &egui::Context) {
+    fn complete_mouse_settings_hosts(&mut self, ctx: &egui::Context) -> (bool, bool) {
+        let mut gesture_show_root = false;
+        let mut mouse_show_root = false;
         use super::mouse_form_host::{GESTURE_SETTINGS, MOUSE_SETTINGS};
         let mut gesture = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         let gesture_open = gesture.open;
@@ -6956,7 +6982,8 @@ impl LauncherApp {
             let request = actions.host_request;
             gesture.complete_host_actions(self, actions);
             if !gesture.open {
-                self.mouse_gesture_settings_host.remember_current(ctx, GESTURE_SETTINGS);
+                self.mouse_gesture_settings_host
+                    .remember_current(ctx, GESTURE_SETTINGS);
                 self.mouse_gesture_settings_host
                     .retire(ctx, GESTURE_SETTINGS);
                 self.panel_states.mouse_gesture_settings_dialog = false;
@@ -6968,7 +6995,7 @@ impl LauncherApp {
                     .mouse_gesture_settings_host
                     .transition(ctx, GESTURE_SETTINGS, popout)
             {
-                self.request_launcher_visibility(true);
+                gesture_show_root = true;
             }
         }
         self.mouse_gesture_settings_dialog = gesture;
@@ -6990,7 +7017,8 @@ impl LauncherApp {
             self.mouse_settings_dialog
                 .complete_host_actions(&mut self.coordinate_tool, actions);
             if !self.mouse_settings_dialog.open {
-                self.mouse_settings_host.remember_current(ctx, MOUSE_SETTINGS);
+                self.mouse_settings_host
+                    .remember_current(ctx, MOUSE_SETTINGS);
                 self.mouse_settings_host.retire(ctx, MOUSE_SETTINGS);
                 self.panel_states.mouse_settings_dialog = false;
                 self.retire_settings_navigation_for_panel(super::Panel::MouseSettingsDialog);
@@ -7001,9 +7029,10 @@ impl LauncherApp {
                     .mouse_settings_host
                     .transition(ctx, MOUSE_SETTINGS, popout)
             {
-                self.request_launcher_visibility(true);
+                mouse_show_root = true;
             }
         }
+        (gesture_show_root, mouse_show_root)
     }
 
     fn show_mkmacro_editor(
@@ -12512,16 +12541,27 @@ impl LauncherApp {
                     let open_result = self
                         .note_panels
                         .iter()
-                        .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
+                        .find(|panel| {
+                            panel.tracks_diagram_source_origin(&origin.identity)
+                                && origin
+                                    .host_origin
+                                    .as_ref()
+                                    .is_some_and(|receipt| panel.accepts_note_open(receipt))
+                        })
                         .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
                         .unwrap_or(Err("The originating Note is no longer open."));
                     match open_result {
                         Err(error) => self.report_error("notes.mermaid", error),
                         Ok(()) => {
-                            if self
-                                .diagram_studio_dialog
-                                .open_source_copy(source)
-                                .is_some()
+                            if let Some(receipt) = origin.host_origin.clone()
+                                && self
+                                    .diagram_studio_dialog
+                                    .open_source_copy_from_origin(
+                                        ctx,
+                                        source,
+                                        &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                                    )
+                                    .is_some()
                             {
                                 if let Some(panel) = self.note_panels.iter_mut().find(|panel| {
                                     panel.tracks_diagram_source_origin(&origin.identity)
@@ -12647,9 +12687,6 @@ impl LauncherApp {
     }
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
-        let mut host = std::mem::take(&mut self.settings_window_host);
-        host.complete(ctx, self);
-        self.settings_window_host = host;
         let mut effects = Vec::new();
         if let Some(text) = self.complete_mouse_gestures_host(ctx) {
             effects.push(RootDialogEffect::CopyText {
@@ -12657,8 +12694,14 @@ impl LauncherApp {
                 text,
             });
         }
-        self.complete_mouse_settings_hosts(ctx);
-        self.complete_file_search_host(ctx);
+        let (gesture_show_root, mouse_show_root) = self.complete_mouse_settings_hosts(ctx);
+        let mut dashboard_show_root = false;
+        let mut clipboard_modify_show_root = false;
+        let mut folder_show_root = false;
+        let mut folder_focus = false;
+        let mut file_lock_show_root = false;
+        let mut file_lock_focus = false;
+        let file_search_child_opens = self.complete_file_search_host(ctx);
         if self.complete_calendar_hosts(ctx) {
             effects.push(RootDialogEffect::ShowRoot);
         }
@@ -12792,9 +12835,7 @@ impl LauncherApp {
                     }
                 }
             }
-            if completion.show_root {
-                effects.push(RootDialogEffect::ShowRoot);
-            }
+            clipboard_modify_show_root = completion.show_root;
         }
         if let Some(completion) = self.snippet_window_host.complete(ctx, &mut self.snippet_dialog) {
             use super::utility_window_host::SnippetHostCommand;
@@ -12880,9 +12921,7 @@ impl LauncherApp {
                 &self.dashboard_path,
             );
             self.show_dashboard_editor = completion.editor_open;
-            if completion.show_root {
-                effects.push(RootDialogEffect::ShowRoot);
-            }
+            dashboard_show_root = completion.show_root;
             if completion.dashboard_saved {
                 self.dashboard.reload();
                 if self.enable_toasts {
@@ -13070,10 +13109,13 @@ impl LauncherApp {
                     text,
                 });
             }
-            Some((super::DateTimeStudioEffect::PrepareCalendar { instant_utc }, presentation)) => {
+            Some((
+                super::DateTimeStudioEffect::PrepareCalendar { instant_utc },
+                origin,
+            )) => {
                 effects.push(RootDialogEffect::PrepareCalendar {
                     instant_utc,
-                    presentation,
+                    origin,
                 });
             }
             None => {}
@@ -13103,16 +13145,8 @@ impl LauncherApp {
                     effects.push(RootDialogEffect::OpenPath(path));
                 }
                 super::FolderSizeDialogEffect::Reveal(request) => effects.push(RootDialogEffect::RevealFolderSize(request)),
-                super::FolderSizeDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
-                super::FolderSizeDialogEffect::FocusPanel => {
-                    self.focus_panel(super::Panel::FolderSizeDialog);
-                    if let Some(layer) =
-                        self.query_focus_panel_layer(super::Panel::FolderSizeDialog)
-                    {
-                        ctx.move_to_top(layer);
-                    }
-                    ctx.request_repaint_of(egui::ViewportId::ROOT);
-                }
+                super::FolderSizeDialogEffect::ShowRoot => folder_show_root = true,
+                super::FolderSizeDialogEffect::FocusPanel => folder_focus = true,
             }
         }
 
@@ -13128,16 +13162,75 @@ impl LauncherApp {
                 super::FileLockDialogEffect::RevealExecutable(request) => {
                     effects.push(RootDialogEffect::RevealFileLockExecutable(request));
                 }
-                super::FileLockDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
-                super::FileLockDialogEffect::FocusPanel => {
-                    self.focus_panel(super::Panel::FileLockDialog);
-                    if let Some(layer) = self.query_focus_panel_layer(super::Panel::FileLockDialog)
-                    {
-                        ctx.move_to_top(layer);
-                    }
-                    ctx.request_repaint_of(egui::ViewportId::ROOT);
-                }
+                super::FileLockDialogEffect::ShowRoot => file_lock_show_root = true,
+                super::FileLockDialogEffect::FocusPanel => file_lock_focus = true,
             }
+        }
+
+        let mut host = std::mem::take(&mut self.settings_window_host);
+        host.complete(ctx, self);
+        self.settings_window_host = host;
+        let stale_navigation = self
+            .settings_editor
+            .pending_source_origin()
+            .cloned()
+            .is_some_and(|origin| {
+                !self
+                    .settings_window_host
+                    .accepts_origin(self.show_settings, &origin)
+            });
+        if stale_navigation {
+            self.settings_editor.pending_settings_navigation = None;
+        }
+
+        for (origin, command) in file_search_child_opens {
+            if !self
+                .file_search_host
+                .accepts_child_open(&self.file_search_dialog, &origin)
+            {
+                continue;
+            }
+            match command {
+                super::FileSearchUiCommand::OpenFolderSize(path) => {
+                    self.folder_size_dialog
+                        .open_from_file_search(ctx, path, origin);
+                    folder_focus = true;
+                }
+                super::FileSearchUiCommand::InspectFileUsers(path) => {
+                    self.file_lock_dialog
+                        .open_from_file_search(ctx, path, origin);
+                    file_lock_focus = true;
+                }
+                _ => unreachable!("only File Search child opens are queued"),
+            }
+        }
+
+        if folder_focus && self.folder_size_dialog.open {
+            self.focus_panel(super::Panel::FolderSizeDialog);
+        }
+        if file_lock_focus && self.file_lock_dialog.open {
+            self.focus_panel(super::Panel::FileLockDialog);
+        }
+        if (folder_show_root
+            && self.folder_size_dialog.open
+            && !self.folder_size_dialog.is_popped_out())
+            || (file_lock_show_root
+                && self.file_lock_dialog.open
+                && !self.file_lock_dialog.is_popped_out())
+            || (gesture_show_root
+                && self.mouse_gesture_settings_dialog.open
+                && !self.mouse_gesture_settings_host.is_popped_out())
+            || (mouse_show_root
+                && self.mouse_settings_dialog.open
+                && !self.mouse_settings_host.is_popped_out())
+            || (dashboard_show_root
+                && self.dashboard_editor.open
+                && !self.dashboard_editor.is_popped_out())
+            || (clipboard_modify_show_root
+                && self.clipboard_modify_dialog.open
+                && !self.clipboard_modify_host.is_popped_out())
+        {
+            effects.push(RootDialogEffect::ShowRoot);
         }
 
         if !self.calculation_pad_dialog.open {
@@ -13377,8 +13470,11 @@ impl LauncherApp {
                 RootDialogEffect::SaveConverterPreferences => {
                     self.convert_panel.save_preferences();
                 }
-                RootDialogEffect::PrepareCalendar { instant_utc, presentation } => {
-                    let result = self.prepare_calendar_event_from(instant_utc, presentation);
+                RootDialogEffect::PrepareCalendar { instant_utc, origin, .. } => {
+                    if !self.date_time_studio_dialog.accepts_calendar_origin(&origin) {
+                        continue;
+                    }
+                    let result = self.prepare_calendar_event_from(instant_utc, &super::utility_host::ChildOpenOrigin::Parent(origin));
                     _ctx.request_repaint_of(egui::ViewportId::ROOT);
                     self.date_time_studio_dialog
                         .calendar_prepare_completed(result);
@@ -13503,9 +13599,15 @@ impl eframe::App for LauncherApp {
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
+            && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
+            && let Some(receipt) = origin.host_origin.clone()
             && self
                 .diagram_studio_dialog
-                .open_source_copy(source)
+                .open_source_copy_from_origin(
+                    _ctx,
+                    source,
+                    &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                )
                 .is_some()
         {
             self.markdown_studio_dialog
@@ -13727,11 +13829,12 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
-        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect {
-            if self
-                .diagram_studio_dialog
-                .open_source_copy(source)
-                .is_some()
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
+            && self.markdown_studio_dialog.accepts_diagram_origin(&origin) {
+            if let Some(receipt) = origin.host_origin.clone()
+                && self.diagram_studio_dialog.open_source_copy_from_origin(
+                    ctx, source, &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                ).is_some()
             {
                 self.markdown_studio_dialog
                     .track_diagram_source_origin(origin);
@@ -17713,6 +17816,44 @@ mod tests {
         app.file_lock_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn file_search_parent_promotion_suppresses_staged_target_dock_visibility() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("staged-file.txt");
+        std::fs::write(&path, "fixture").unwrap();
+        app.file_search_dialog.open = true;
+        app.file_search_dialog.active_search_id = Some(crate::file_search::model::SearchId(41));
+        app.request_launcher_visibility(false);
+        app.file_lock_dialog
+            .test_stage_dock_with_path(&ctx, path.clone());
+        let generation = app.file_lock_dialog.session_view_for_test().generation();
+        app.file_search_host.test_stage_native_child_open(
+            &ctx,
+            super::super::FileSearchUiCommand::InspectFileUsers(path.clone()),
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let effects = app.complete_retained_tool_dialogs(&ctx);
+        assert!(app.file_lock_dialog.is_popped_out());
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(path.as_path())
+        );
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, RootDialogEffect::ShowRoot))
+        );
+        assert!(!app.visible_flag_state());
+        output.drop_without_applying_deltas();
+        app.file_lock_dialog.shutdown();
     }
 
     #[test]
@@ -22702,8 +22843,8 @@ mod tests {
                     .and_utc();
                 assert!(
                     matches!(effects.as_slice(), [RootDialogEffect::PrepareCalendar {
-                    instant_utc, presentation: super::super::utility_host::UtilityPresentation::Popout,
-                }] if *instant_utc == expected)
+                    instant_utc, origin,
+                }] if *instant_utc == expected && origin.presentation() == super::super::utility_host::UtilityPresentation::Popout)
                 );
                 let local = super::super::date_time_studio_dialog::machine_local_datetime(expected)
                     .unwrap();
@@ -25904,6 +26045,63 @@ mod tests {
             owner: DialogCopyOwner::ImageCompare, text,
         }] if text.trim().parse::<f32>().ok() == Some(before.4)));
         assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+    }
+
+    #[test]
+    fn calendar_parent_open_promotes_live_editor_without_replacing_draft() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.open_calendar_editor(None, None);
+        app.calendar_event_editor.test_set_title("unsaved event");
+        let epoch = app.calendar_event_editor.host_session_epoch();
+        let source = super::super::utility_host::UtilityHostState::popped_out();
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            source.identity(),
+            1_u64,
+            pass,
+            pass,
+        )
+        .unwrap();
+        app.open_calendar_editor_from(
+            None,
+            None,
+            &super::super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        assert_eq!(app.calendar_event_editor.test_title(), "unsaved event");
+        assert_eq!(app.calendar_event_editor.host_session_epoch(), epoch);
+        assert_eq!(
+            app.calendar_editor_host.presentation(),
+            super::super::utility_host::UtilityPresentation::Popout
+        );
+        app.open_calendar_editor(None, None);
+        assert_eq!(
+            app.calendar_editor_host.presentation(),
+            super::super::utility_host::UtilityPresentation::Popout
+        );
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let first = crate::plugins::calendar::EventInstance {
+            instance_id: "first".into(), source_event_id: "event".into(),
+            start, end: start + chrono::Duration::minutes(30), all_day: false, recurrence: None,
+        };
+        app.open_calendar_details_from(first.clone(), &super::super::utility_host::ChildOpenOrigin::<()>::Root);
+        let details_epoch = app.calendar_event_details.host_session_epoch();
+        app.open_calendar_details_from(first.clone(), &super::super::utility_host::ChildOpenOrigin::<()>::Root);
+        assert_eq!(app.calendar_event_details.host_session_epoch(), details_epoch);
+        let mut second = first;
+        second.instance_id = "second".into();
+        second.start += chrono::Duration::days(1);
+        second.end += chrono::Duration::days(1);
+        app.open_calendar_details_from(second.clone(), &super::super::utility_host::ChildOpenOrigin::<()>::Root);
+        assert_eq!(app.calendar_event_details.test_instance().unwrap().instance_id, second.instance_id);
+        assert_ne!(app.calendar_event_details.host_session_epoch(), details_epoch);
+        output.drop_without_applying_deltas();
     }
 
     #[test]

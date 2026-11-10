@@ -381,6 +381,18 @@ pub(crate) struct FileSearchHostActions {
     commands: Vec<FileSearchUiCommand>,
 }
 
+#[cfg(test)]
+impl FileSearchHostActions {
+    pub(super) fn test_command(command: FileSearchUiCommand) -> Self {
+        Self {
+            host_request: None,
+            host_button: (egui::Rect::NOTHING, egui::Rect::NOTHING, false),
+            actions: Vec::new(),
+            commands: vec![command],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
@@ -615,6 +627,10 @@ fn validate_ripgrep_selection(path: &std::path::Path) -> Result<PathBuf, String>
 }
 
 impl FileSearchDialogState {
+    pub(super) fn child_open_revision(&self) -> (Option<SearchId>, u64) {
+        (self.active_search_id, self.jump_mode_results_revision)
+    }
+
     pub(crate) fn from_settings(settings: FileSearchSettings) -> Self {
         Self {
             ui_preferences: settings.ui_preferences.clone(),

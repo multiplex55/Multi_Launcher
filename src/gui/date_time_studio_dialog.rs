@@ -209,7 +209,7 @@ struct HostedFrame {
 pub(super) struct DateTimeStudioHostOutcome {
     pub(super) effect: Option<(
         DateTimeStudioEffect,
-        super::utility_host::UtilityPresentation,
+        super::utility_host::AcceptedParentOpen<u64>,
     )>,
     pub(super) copies: Vec<String>,
     pub(super) show_root: bool,
@@ -432,6 +432,13 @@ impl DateTimeStudioDialog {
         self.on_hosted_frame_complete(ctx)
             .effect
             .map(|(effect, _)| effect)
+    }
+
+    pub(super) fn accepts_calendar_origin(
+        &self,
+        receipt: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        self.open && receipt.is_current(self.host.identity(), &self.host_epoch)
     }
 
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
@@ -984,9 +991,12 @@ impl DateTimeStudioDialog {
         {
             ctx.request_repaint();
         }
+        let receipt = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, frame.host, frame.epoch, frame.root, frame.owner,
+        );
         DateTimeStudioHostOutcome {
             effect: if frame.request.is_none() {
-                frame.effect.map(|effect| (effect, origin))
+                frame.effect.zip(receipt)
             } else {
                 None
             },

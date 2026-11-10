@@ -1290,7 +1290,7 @@ impl SettingsEditor {
                 actions.actions.push(action);
             }
         } else {
-            self.complete_settings_action(ctx, app, action);
+            self.complete_settings_action(ctx, app, action, None);
         }
     }
 
@@ -1299,6 +1299,7 @@ impl SettingsEditor {
         ctx: &egui::Context,
         app: &mut LauncherApp,
         action: SettingsHostAction,
+        source: Option<&crate::gui::settings_window_host::SettingsOpenOrigin>,
     ) -> bool {
         match action {
             SettingsHostAction::Save => self.save_settings(ctx, app),
@@ -1311,7 +1312,7 @@ impl SettingsEditor {
                 app.show_settings = false;
             }
             SettingsHostAction::Navigate(entry, instance) => {
-                self.activate_settings_search_result(app, instance, entry);
+                self.activate_settings_search_result(app, instance, entry, source);
                 return self
                     .pending_settings_navigation
                     .as_ref()
@@ -1319,8 +1320,18 @@ impl SettingsEditor {
                         pending.stage == SettingsNavigationStage::DedicatedOwner
                             && settings_destination_owner_open(app, &pending.section)
                             && match pending.section {
-                                SettingsSection::Mouse => app.mouse_settings_has_root_presentation(),
-                                SettingsSection::MouseGestures => app.mouse_gesture_settings_has_root_presentation(),
+                                SettingsSection::Mouse if source.is_some() => {
+                                    !app.mouse_settings_is_popped(false)
+                                }
+                                SettingsSection::MouseGestures if source.is_some() => {
+                                    !app.mouse_settings_is_popped(true)
+                                }
+                                SettingsSection::Mouse => {
+                                    app.mouse_settings_has_root_presentation()
+                                }
+                                SettingsSection::MouseGestures => {
+                                    app.mouse_gesture_settings_has_root_presentation()
+                                }
                                 _ => true,
                             }
                     });
@@ -1341,15 +1352,24 @@ impl SettingsEditor {
                 return true;
             }
             SettingsHostAction::DashboardEditor => {
+                if let Some(source) = source {
+                    return app.open_dashboard_from_settings(source);
+                }
                 app.open_dashboard_editor();
                 return app.dashboard_editor.host_layer_if_root().is_some();
             }
             SettingsHostAction::MouseGestureSettings => {
+                if let Some(source) = source {
+                    return app.open_mouse_from_settings(true, source);
+                }
                 app.open_mouse_gesture_settings_dialog();
                 return app.mouse_gesture_settings_has_root_presentation();
             }
             SettingsHostAction::ClipboardModify(command) => match command {
                 ClipboardModifySettingsCommand::OpenDialog => {
+                    if let Some(source) = source {
+                        return app.open_clipboard_from_settings(source);
+                    }
                     app.open_clipboard_modify_dialog();
                     return app.clipboard_modify_has_root_presentation();
                 }
@@ -1396,11 +1416,42 @@ impl SettingsEditor {
         app: &mut LauncherApp,
         actions: SettingsUiActions,
     ) -> bool {
+        self.complete_host_actions_from_origin(ctx, app, actions, None)
+    }
+
+    pub(crate) fn complete_host_actions_from_origin(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        actions: SettingsUiActions,
+        source: Option<crate::gui::settings_window_host::SettingsOpenOrigin>,
+    ) -> bool {
         let mut show_root = false;
         for action in actions.actions {
-            show_root |= self.complete_settings_action(ctx, app, action);
+            if actions.host_request.is_some()
+                && matches!(
+                    &action,
+                    SettingsHostAction::Navigate(..)
+                        | SettingsHostAction::DashboardEditor
+                        | SettingsHostAction::MouseGestureSettings
+                        | SettingsHostAction::ClipboardModify(
+                            ClipboardModifySettingsCommand::OpenDialog
+                        )
+                )
+            {
+                continue;
+            }
+            show_root |= self.complete_settings_action(ctx, app, action, source.as_ref());
         }
         show_root
+    }
+
+    pub(crate) fn pending_source_origin(
+        &self,
+    ) -> Option<&crate::gui::settings_window_host::SettingsOpenOrigin> {
+        self.pending_settings_navigation
+            .as_ref()
+            .and_then(|pending| pending.source_origin.as_ref())
     }
 
     pub(crate) fn request_control_navigation(
@@ -1461,6 +1512,7 @@ impl SettingsEditor {
             section: entry.section.clone(),
             catalog_revision: self.search_catalog.plugin_revision(),
             settings_instance,
+            source_origin: None,
             stage,
             frames_remaining: PENDING_SETTINGS_NAVIGATION_FRAME_BUDGET,
             scroll_requested: false,
@@ -3232,6 +3284,7 @@ impl SettingsEditor {
         app: &mut LauncherApp,
         settings_owner_instance: Option<u64>,
         entry: SettingsCatalogEntry,
+        source: Option<&crate::gui::settings_window_host::SettingsOpenOrigin>,
     ) {
         let Some(settings_instance) = settings_owner_instance else {
             return;
@@ -3293,6 +3346,10 @@ impl SettingsEditor {
             delivery,
         );
 
+        if let Some(pending) = self.pending_settings_navigation.as_mut() {
+            pending.source_origin = source.cloned();
+        }
+
         match &navigation_entry.section {
             SettingsSection::Main(_) | SettingsSection::Notes | SettingsSection::Plugin { .. } => {}
             SettingsSection::Theme => {
@@ -3300,14 +3357,18 @@ impl SettingsEditor {
                 app.focus_panel(crate::gui::Panel::ThemeSettingsDialog);
             }
             SettingsSection::Mouse => {
-                app.open_mouse_settings_dialog();
-                app.focus_panel(crate::gui::Panel::MouseSettingsDialog);
+                if let Some(source) = source { app.open_mouse_from_settings(false, source); }
+                else {
+                    app.open_mouse_settings_dialog();
+                    app.focus_panel(crate::gui::Panel::MouseSettingsDialog);
+                }
             }
             SettingsSection::MouseGestures => {
-                if !app.is_mouse_gesture_settings_dialog_open() {
-                    app.open_mouse_gesture_settings_dialog();
+                if let Some(source) = source { app.open_mouse_from_settings(true, source); }
+                else {
+                    if !app.is_mouse_gesture_settings_dialog_open() { app.open_mouse_gesture_settings_dialog(); }
+                    app.focus_panel(crate::gui::Panel::MouseGestureSettingsDialog);
                 }
-                app.focus_panel(crate::gui::Panel::MouseGestureSettingsDialog);
             }
             SettingsSection::PluginEditor => {
                 app.show_plugins = true;
@@ -5108,6 +5169,7 @@ mod settings_shell_tests {
             section: SettingsSection::Main(TopLevelSettingsSection::PasteSequences),
             catalog_revision: 3,
             settings_instance: Some(11),
+            source_origin: None,
             stage: SettingsNavigationStage::MainControl,
             frames_remaining: 0,
             scroll_requested: false,
@@ -5284,6 +5346,28 @@ mod settings_shell_tests {
         });
         output.drop_without_applying_deltas();
         actions.expect("Settings rendered")
+    }
+
+    #[test]
+    fn settings_accepted_native_origin_opens_hosted_targets_without_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = settings_test_app(&ctx, &directory, crate::settings::Settings::default());
+        let source = crate::gui::settings_window_host::SettingsOpenOrigin::test_native(&ctx);
+        let mut editor = std::mem::take(&mut app.settings_editor);
+        let mut actions = SettingsUiActions::default();
+        actions.actions.push(SettingsHostAction::DashboardEditor);
+        actions
+            .actions
+            .push(SettingsHostAction::MouseGestureSettings);
+        actions.actions.push(SettingsHostAction::ClipboardModify(
+            ClipboardModifySettingsCommand::OpenDialog,
+        ));
+        assert!(!editor.complete_host_actions_from_origin(&ctx, &mut app, actions, Some(source)));
+        assert!(app.dashboard_editor.is_popped_out());
+        assert!(app.mouse_settings_is_popped(true));
+        assert!(!app.clipboard_modify_has_root_presentation());
+        app.settings_editor = editor;
     }
 
     #[test]

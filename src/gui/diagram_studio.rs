@@ -1829,6 +1829,38 @@ impl DiagramStudioDialog {
         }
     }
 
+    pub(super) fn open_source_copy_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        source: DiagramSourceCopy,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<TransitionOutcome> {
+        let was_open = self.open;
+        let outcome = self.open_source_copy(source)?;
+        self.prepare_open_presentation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio")
+            .expect("stable Diagram Studio key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.owner_host.presentation()),
+            remembered,
+            self.owner_host.presentation(),
+            origin,
+        );
+        if self.owner_host.transition(desired) {
+            self.viewport_bootstrap_pending = desired == UtilityPresentation::Popout;
+            self.focus_viewport = true;
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        Some(outcome)
+    }
+
     pub(crate) fn take_markdown_source_handoff(&mut self) -> Option<DiagramMarkdownSource> {
         self.pending_markdown_source.take()
     }
@@ -3762,27 +3794,15 @@ impl DiagramStudioDialog {
                 ctx.request_repaint_of(viewer_viewport_id());
             }
         }
-        let owner_viewer_request_is_current =
-            effects.open_viewer_requested && self.open && owner_pass_current;
-        if owner_viewer_request_is_current {
-            if !self.viewer_open {
-                self.viewer_host = UtilityHostState::popped_out();
-                self.viewer_presentation_prepared = false;
-                self.viewer_generation = self.viewer_generation.wrapping_add(1);
-                self.viewer_embedded_root_focused_id = None;
-                self.viewer_open = true;
-                self.visual_viewer_fit_follow = true;
-                self.visual_viewer_fit_size = None;
-                self.visual_viewer_minimap_drag = None;
-                self.prepare_open_presentation(ctx);
-                if self.viewer_host.presentation() == UtilityPresentation::Docked {
-                    self.show_root_after_host_change = true;
-                }
-            }
-            self.viewer_focus_pending = true;
-            self.viewer_bootstrap_pending = true;
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
-        }
+        let viewer_open_origin = if effects.open_viewer_requested && self.open && owner_pass_current {
+            super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, effects.host, effects.owner_generation, effects.root_pass,
+                effects.owner_pass.unwrap_or(effects.root_pass),
+            )
+        } else {
+            None
+        };
+        let root_before_viewer_completion = self.show_root_after_host_change;
         if effects.close_viewport && accepted_close {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
         } else if effects.os_close_requested && !accepted_close {
@@ -3910,6 +3930,44 @@ impl DiagramStudioDialog {
             } else if viewer_effects.native_close_requested {
                 ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::CancelClose);
             }
+        }
+        if let Some(receipt) = viewer_open_origin
+            && self.open && receipt.is_current(self.owner_host.identity(), &self.owner_generation)
+        {
+            let was_open = self.viewer_open;
+            if !was_open {
+                self.viewer_host = UtilityHostState::popped_out();
+                self.viewer_presentation_prepared = false;
+                self.viewer_generation = self.viewer_generation.wrapping_add(1);
+                self.viewer_embedded_root_focused_id = None;
+                self.viewer_open = true;
+                self.visual_viewer_fit_follow = true;
+                self.visual_viewer_fit_size = None;
+                self.visual_viewer_minimap_drag = None;
+                self.prepare_open_presentation(ctx);
+            }
+            let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+            let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                .and_then(|manager| manager.preference(key)).map(Into::into);
+            let desired = super::utility_host::resolve_child_presentation(
+                was_open.then(|| self.viewer_host.presentation()), remembered,
+                self.viewer_host.presentation(), &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            );
+            let promoted = self.viewer_host.transition(desired);
+            if desired == UtilityPresentation::Popout {
+                super::utility_host::remember_presentation(ctx, key, desired);
+                self.show_root_after_host_change = root_before_viewer_completion;
+            } else {
+                self.show_root_after_host_change = true;
+            }
+            if promoted {
+                self.viewer_embedded_root_layer = None;
+                self.viewer_embedded_root_focused_id = None;
+                self.deferred_viewer_canvas_focus = None;
+            }
+            self.viewer_focus_pending = true;
+            self.viewer_bootstrap_pending |= promoted || !was_open;
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         if effects.close_dialog {
             self.close_pending = false;
@@ -22001,11 +22059,18 @@ mod tests {
             "a discarded viewer child cannot retire the viewer"
         );
 
-        assert_eq!(manager.preference(key), None);
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         let _ = viewer_close_request_commands_with_root_discard(&mut dialog, &ctx);
         assert!(
             dialog.viewer_open,
             "a discarded ROOT pass cannot retire the viewer"
+        );
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
         );
 
         let _ = viewer_close_request_commands(&mut dialog, &ctx);
@@ -22249,6 +22314,82 @@ mod tests {
         assert!(!dialog.test_body_rendered);
         assert!(dialog.test_viewer_body_rendered);
         assert!(dialog.open && dialog.viewer_open);
+    }
+
+    #[test]
+    fn inherited_source_open_keeps_dirty_diagram_decision() {
+        let ctx = egui::Context::default();
+        let mut dialog = initialized_dialog();
+        dialog.owner_host.transition(UtilityPresentation::Docked);
+        let original = dialog.documents.session().unwrap().draft().to_owned();
+        let source = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            source.identity(),
+            1_u64,
+            pass,
+            pass,
+        )
+        .unwrap();
+        let copy = crate::diagram::DiagramSourceCopy::new("flowchart LR\nA --> B")
+            .unwrap()
+            .with_origin(crate::diagram::DiagramSourceCopyOrigin::fresh());
+        assert!(
+            dialog
+                .open_source_copy_from_origin(
+                    &ctx,
+                    copy,
+                    &super::super::utility_host::ChildOpenOrigin::Parent(receipt),
+                )
+                .is_some()
+        );
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(dialog.documents.session().unwrap().draft(), original);
+        assert!(dialog.documents.pending_source_copy_origin().is_some());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn native_diagram_owner_inherits_viewer_over_saved_docked() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default().save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = crate::gui::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-viewer").unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
+        let mut dialog = initialized_dialog();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        open_viewer(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.viewer_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        assert!(!dialog.take_show_root_after_host_change());
+        workers.join_all();
     }
 
     #[test]

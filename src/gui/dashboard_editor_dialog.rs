@@ -277,6 +277,7 @@ fn register_editor_target_at_order(
 pub struct DashboardEditorDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     owner_instance: u64,
     show_root_after_host_change: bool,
     pending_host_frame: Option<DashboardEditorHostFrame>,
@@ -329,6 +330,7 @@ impl Default for DashboardEditorDialog {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             owner_instance: 0,
             show_root_after_host_change: false,
             pending_host_frame: None,
@@ -386,6 +388,55 @@ impl DashboardEditorDialog {
             ),
         );
         dialog
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY)
+                .expect("stable Dashboard Editor key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    fn remember_host_presentation(&self, ctx: &egui::Context, value: UtilityPresentation) {
+        let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY)
+            .expect("stable Dashboard Editor key");
+        super::utility_host::remember_presentation(ctx, key, value);
+    }
+
+    pub(super) fn apply_open_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        let key = crate::settings::UtilityToolKey::parse("dashboard-editor")
+            .expect("stable Dashboard Editor key");
+        self.prepare_open_presentation(ctx);
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host_state.presentation()),
+            remembered,
+            self.host_state.presentation(),
+            origin,
+        );
+        if self.pending_host_frame.is_some() {
+            return None;
+        }
+        if self.host_state.transition(desired) {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.request_host_focus();
+        Some(desired)
     }
 
     pub(crate) fn is_popped_out(&self) -> bool {
@@ -459,6 +510,7 @@ impl DashboardEditorDialog {
         let identity =
             dashboard_editor_native_identity(self.host_state.identity(), self.owner_instance);
         self.open = false;
+        self.presentation_prepared = false;
         if let Some(identity) = identity {
             crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
@@ -513,6 +565,7 @@ impl DashboardEditorDialog {
             self.retained_host_checkpoint = None;
             self.pending_launcher_close = false;
         }
+        if !self.open { self.presentation_prepared = false; }
         self.path = path.to_string();
         self.reload(registry);
         self.open = true;
@@ -2312,6 +2365,8 @@ impl DashboardEditorDialog {
 
         self.pending_launcher_close = false;
         if !self.open {
+            self.remember_host_presentation(ctx, frame.host.host);
+            self.presentation_prepared = false;
             if let Some(identity) = native_identity {
                 crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx, identity,
@@ -2335,6 +2390,7 @@ impl DashboardEditorDialog {
                 }
             }
             if self.host_state.transition(requested) {
+                self.remember_host_presentation(ctx, requested);
                 self.native_jump_mode.cancel_all();
                 self.native_jump_frame = None;
                 if requested == UtilityPresentation::Docked {
@@ -3847,6 +3903,72 @@ mod persistence_tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    #[test]
+    fn dashboard_restores_and_remembers_inherited_presentation_on_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default()
+            .save(&settings_path)
+            .unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY).unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
+        let path = directory
+            .path()
+            .join("dashboard.json")
+            .to_string_lossy()
+            .into_owned();
+        let registry = WidgetRegistry::with_defaults();
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.open(&path, &registry);
+        dialog.prepare_open_presentation(&ctx);
+        assert!(!dialog.is_popped_out());
+        dialog.config.grid.rows = 7;
+        let source = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            source.identity(),
+            1_u64,
+            pass,
+            pass,
+        )
+        .unwrap();
+        dialog.apply_open_origin(
+            &ctx,
+            true,
+            &super::super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        assert!(dialog.is_popped_out());
+        assert_eq!(dialog.config.grid.rows, 7);
+        output.drop_without_applying_deltas();
+        dialog.request_close();
+        for _ in 0..3 {
+            dashboard_host_frame(&mut dialog, &ctx, Vec::new(), true, true);
+        }
+        assert!(!dialog.open);
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        dialog.open(&path, &registry);
+        dialog.prepare_open_presentation(&ctx);
+        assert!(dialog.is_popped_out());
+        workers.join_all();
     }
 
     #[test]

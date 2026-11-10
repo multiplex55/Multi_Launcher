@@ -44,6 +44,23 @@ pub(super) struct SettingsWindowHost {
     test_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsOpenOrigin(pub(super) super::utility_host::AcceptedParentOpen<u64>);
+
+#[cfg(test)]
+impl SettingsOpenOrigin {
+    pub(crate) fn test_native(ctx: &egui::Context) -> Self {
+        let host = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, host.identity(), 1, pass, pass,
+        ).unwrap();
+        output.drop_without_applying_deltas();
+        Self(receipt)
+    }
+}
+
 struct SettingsHostFrame {
     root: ViewportPassProvenance,
     owner: Option<ViewportPassProvenance>,
@@ -70,6 +87,10 @@ impl SettingsWindowHost {
     #[cfg(test)]
     pub(super) fn test_viewport_id(&self) -> egui::ViewportId {
         viewport(self.instance)
+    }
+
+    pub(super) fn accepts_origin(&self, open: bool, origin: &SettingsOpenOrigin) -> bool {
+        open && self.close_pending.is_none() && origin.0.is_current(self.state.identity(), &self.instance)
     }
 
     pub(super) fn is_popped_out(&self) -> bool {
@@ -412,8 +433,15 @@ impl SettingsWindowHost {
             actions.request_close();
         }
         let requested = actions.host_request;
+        let origin = if requested.is_none() && !frame.close && !frame.os_close {
+            frame.owner.and_then(|owner| super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, frame.host, frame.instance, frame.root, owner,
+            )).map(SettingsOpenOrigin)
+        } else {
+            None
+        };
         let mut editor = std::mem::take(&mut app.settings_editor);
-        let show_root = editor.complete_host_actions(ctx, app, actions);
+        let show_root = editor.complete_host_actions_from_origin(ctx, app, actions, origin);
         app.settings_editor = editor;
         if show_root {
             app.request_launcher_visibility(true);

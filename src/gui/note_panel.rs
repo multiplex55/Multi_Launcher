@@ -1383,6 +1383,7 @@ pub(crate) struct NoteMermaidOrigin {
     note_path: PathBuf,
     source_snapshot: String,
     fence_index: usize,
+    pub(super) host_origin: Option<NoteOpenReceipt>,
 }
 
 struct PendingNoteRootEffect {
@@ -2887,7 +2888,15 @@ impl NotePanel {
             }
         };
         if retained && still_matches {
-            Some(staged.effect)
+            let mut effect = staged.effect;
+            if let NotePanelEffect::OpenDiagram { origin, .. } = &mut effect {
+                origin.host_origin = super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, self.host_state.identity(),
+                    (self.prompt_identity, self.note.slug.clone(), self.note.path.clone()),
+                    staged.root_pass, staged.owner_pass.unwrap_or(staged.root_pass),
+                );
+            }
+            Some(effect)
         } else {
             if let NotePanelEffect::InsertCustomTable(request) = &staged.effect
                 && let Some(builder) = self.custom_table_builder.as_mut()
@@ -7618,6 +7627,7 @@ impl NotePanel {
             note_path: self.note.path.clone(),
             source_snapshot: source_snapshot.clone(),
             fence_index: index,
+            host_origin: None,
         };
         match fence.to_diagram_source_copy() {
             Ok(source) => {
@@ -18656,6 +18666,7 @@ More text.
             note_path: panel.note.path.clone(),
             source_snapshot: original.to_owned(),
             fence_index: 1,
+            host_origin: None,
         });
 
         panel.apply_diagram_source_handoff(
@@ -18696,6 +18707,7 @@ More text.
             note_path: panel.note.path.clone(),
             source_snapshot: original.to_owned(),
             fence_index: 1,
+            host_origin: None,
         });
         panel.apply_diagram_source_handoff(
             &ctx,
@@ -18716,6 +18728,7 @@ More text.
             note_path: stale_panel.note.path.clone(),
             source_snapshot: original.to_owned(),
             fence_index: 1,
+            host_origin: None,
         });
         let changed = format!("{original}changed outside the fence\n");
         stale_panel.replace_content_from_mutation(changed, 2.0);
@@ -18740,6 +18753,7 @@ More text.
             note_path: protected_panel.note.path.clone(),
             source_snapshot: original.to_owned(),
             fence_index: 0,
+            host_origin: None,
         });
         protected_panel.link_dialog_open = true;
         app.show_inline_errors = true;

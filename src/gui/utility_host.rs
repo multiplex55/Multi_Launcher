@@ -106,6 +106,11 @@ impl<S: PartialEq> AcceptedParentOpen<S> {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn presentation(&self) -> UtilityPresentation {
+        self.host.host
+    }
+
     pub(super) fn is_current(&self, host: HostIdentity, session: &S) -> bool {
         self.host == host && &self.session == session
     }

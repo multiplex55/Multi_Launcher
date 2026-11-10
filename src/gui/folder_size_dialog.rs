@@ -522,6 +522,46 @@ impl FolderSizeDialogState {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_host_focus_pending(&self) -> bool { self.host_focus }
+
+    pub(super) fn open_from_file_search(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        receipt: super::file_search_window_host::FileSearchOpenReceipt,
+    ) {
+        let was_open = self.open;
+        self.open();
+        self.prepare_open_presentation(ctx);
+        let key =
+            crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host.presentation()),
+            remembered,
+            self.host.presentation(),
+            &super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        self.host.transition(desired);
+        self.request_host_focus();
+        if desired == super::utility_host::UtilityPresentation::Popout {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        let current = self.session.view();
+        match ExplicitDirectoryRoot::new(path) {
+            Ok(root) if self.selected_root.as_ref() != Some(&root) => {
+                self.apply_selected_root(root, &current)
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.notice = Some(format!("The File Search folder is not usable: {error:?}."))
+            }
+        }
+    }
+
     pub(super) fn stage_file_search_prefill(
         &mut self,
         pass: ViewportPassProvenance,

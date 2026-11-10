@@ -101,7 +101,7 @@ pub(crate) mod screenshot_countdown;
 mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
-mod settings_window_host;
+pub(crate) mod settings_window_host;
 mod mouse_form_host;
 mod shell_cmd_dialog;
 mod snippet_dialog;
@@ -2174,6 +2174,95 @@ impl LauncherApp {
         self.mouse_settings_host.request_focus();
         if !self.mouse_settings_host.is_popped_out() {
             self.request_launcher_visibility(true);
+        }
+    }
+
+    pub(crate) fn open_mouse_from_settings(
+        &mut self,
+        gesture: bool,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) -> bool {
+        let origin = utility_host::ChildOpenOrigin::Parent(source.0.clone());
+        let desired = if gesture {
+            let was_open = self.mouse_gesture_settings_dialog.open;
+            if !was_open {
+                self.mouse_gesture_settings_dialog.open();
+            }
+            self.mouse_gesture_settings_host.open_from_origin(
+                &self.egui_ctx,
+                mouse_form_host::GESTURE_SETTINGS,
+                was_open,
+                &origin,
+            )
+        } else {
+            let was_open = self.mouse_settings_dialog.open;
+            if !was_open {
+                let preferences = self.coordinate_tool.preferences().clone();
+                self.mouse_settings_dialog.open(&preferences);
+            }
+            self.mouse_settings_host.open_from_origin(
+                &self.egui_ctx,
+                mouse_form_host::MOUSE_SETTINGS,
+                was_open,
+                &origin,
+            )
+        };
+        self.update_panel_stack();
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn mouse_settings_is_popped(&self, gesture: bool) -> bool {
+        if gesture {
+            self.mouse_gesture_settings_host.is_popped_out()
+        } else {
+            self.mouse_settings_host.is_popped_out()
+        }
+    }
+
+    pub(crate) fn open_clipboard_from_settings(
+        &mut self,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) -> bool {
+        let was_open = self.clipboard_modify_dialog.open;
+        self.load_clipboard_modify_section(ClipboardModifyDialogSection::Modify);
+        let desired = self.clipboard_modify_host.open_from_origin(
+            &self.egui_ctx,
+            &self.clipboard_modify_dialog,
+            was_open,
+            &utility_host::ChildOpenOrigin::Parent(source.0.clone()),
+        );
+        self.update_panel_stack();
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn open_dashboard_from_settings(
+        &mut self,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) -> bool {
+        let was_open = self.dashboard_editor.open;
+        let registry = self.dashboard.registry().clone();
+        self.dashboard_editor.open(&self.dashboard_path, &registry);
+        let desired = self.dashboard_editor.apply_open_origin(
+            &self.egui_ctx,
+            was_open,
+            &utility_host::ChildOpenOrigin::Parent(source.0.clone()),
+        );
+        self.show_dashboard_editor = true;
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
         }
     }
 
@@ -6763,66 +6852,84 @@ impl LauncherApp {
         self.open_calendar_editor_from(
             event,
             split_scope,
-            utility_host::UtilityPresentation::Docked,
+            &utility_host::ChildOpenOrigin::<()>::Root,
         );
     }
 
-    fn open_calendar_editor_from(
+    fn open_calendar_editor_from<S>(
         &mut self,
         event: Option<crate::plugins::calendar::CalendarEvent>,
         split_scope: Option<(
             crate::gui::calendar_event_details::RecurrenceScope,
             chrono::NaiveDateTime,
         )>,
-        presentation: utility_host::UtilityPresentation,
+        origin: &utility_host::ChildOpenOrigin<S>,
     ) {
-        if !self.calendar_editor_open {
-            self.calendar_editor_host.initialize(
+        let was_open = self.calendar_editor_open;
+        if !was_open {
+            if let Some(event) = event {
+                self.calendar_event_editor.open(Some(event), split_scope);
+            } else {
+                let date = self
+                    .calendar_selected_date
+                    .unwrap_or_else(|| chrono::Local::now().naive_local().date());
+                self.calendar_event_editor.open_new(date);
+            }
+            self.calendar_editor_open = true;
+        }
+        let epoch = self.calendar_event_editor.host_session_epoch();
+        if self
+            .calendar_editor_host
+            .open_from_origin(
                 &self.egui_ctx,
                 &Self::calendar_host_spec(Panel::CalendarEventEditor),
-                presentation,
-            );
+                was_open,
+                epoch,
+                origin,
+            )
+            .is_some()
+        {
+            self.focus_panel(Panel::CalendarEventEditor);
         }
-        if let Some(event) = event {
-            self.calendar_event_editor.open(Some(event), split_scope);
-        } else {
-            let date = self
-                .calendar_selected_date
-                .unwrap_or_else(|| chrono::Local::now().naive_local().date());
-            self.calendar_event_editor.open_new(date);
-        }
-        self.calendar_editor_open = true;
-        self.focus_panel(Panel::CalendarEventEditor);
     }
 
-    fn open_calendar_details_from(
+    fn open_calendar_details_from<S>(
         &mut self,
         instance: crate::plugins::calendar::EventInstance,
-        presentation: utility_host::UtilityPresentation,
+        origin: &utility_host::ChildOpenOrigin<S>,
     ) {
-        if !self.calendar_details_open {
-            self.calendar_details_host.initialize(
+        let was_open = self.calendar_details_open;
+        if !was_open || !self.calendar_event_details.shows_occurrence(&instance) {
+            self.calendar_event_details.open(instance);
+            self.calendar_details_open = true;
+        }
+        let epoch = self.calendar_event_details.host_session_epoch();
+        if self
+            .calendar_details_host
+            .open_from_origin(
                 &self.egui_ctx,
                 &Self::calendar_host_spec(Panel::CalendarEventDetails),
-                presentation,
-            );
+                was_open,
+                epoch,
+                origin,
+            )
+            .is_some()
+        {
+            self.focus_panel(Panel::CalendarEventDetails);
         }
-        self.calendar_event_details.open(instance);
-        self.calendar_details_open = true;
-        self.focus_panel(Panel::CalendarEventDetails);
     }
 
     pub(crate) fn prepare_calendar_event_at(
         &mut self,
         instant_utc: chrono::DateTime<chrono::Utc>,
     ) -> Result<String, String> {
-        self.prepare_calendar_event_from(instant_utc, utility_host::UtilityPresentation::Docked)
+        self.prepare_calendar_event_from(instant_utc, &utility_host::ChildOpenOrigin::<()>::Root)
     }
 
-    fn prepare_calendar_event_from(
+    fn prepare_calendar_event_from<S>(
         &mut self,
         instant_utc: chrono::DateTime<chrono::Utc>,
-        presentation: utility_host::UtilityPresentation,
+        origin: &utility_host::ChildOpenOrigin<S>,
     ) -> Result<String, String> {
         if self.calendar_editor_open {
             return Err("The Calendar Event editor is already open.".into());
@@ -6835,12 +6942,11 @@ impl LauncherApp {
             );
         }
         self.calendar_event_editor.open_new_at(local)?;
-        self.calendar_editor_host.initialize(
-            &self.egui_ctx,
-            &Self::calendar_host_spec(Panel::CalendarEventEditor),
-            presentation,
-        );
         self.calendar_editor_open = true;
+        self.calendar_editor_host.open_from_origin(
+            &self.egui_ctx, &Self::calendar_host_spec(Panel::CalendarEventEditor), false,
+            self.calendar_event_editor.host_session_epoch(), origin,
+        );
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);
         Ok(format!(

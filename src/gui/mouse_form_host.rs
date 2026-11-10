@@ -372,6 +372,40 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
         }
     }
 
+    pub fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        spec: MouseFormSpec,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        self.prepare_open(ctx, spec, true);
+        let key =
+            crate::settings::UtilityToolKey::parse(spec.key).expect("registered mouse form key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.state.presentation()),
+            remembered,
+            self.state.presentation(),
+            origin,
+        );
+        if self.pending.is_some() {
+            return None;
+        }
+        if self.state.transition(desired) {
+            self.clear_jump();
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.request_focus();
+        Some(desired)
+    }
+
     pub fn remember_current(&self, ctx: &egui::Context, spec: MouseFormSpec) {
         let key =
             crate::settings::UtilityToolKey::parse(spec.key).expect("registered mouse form key");
