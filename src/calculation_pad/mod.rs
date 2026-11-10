@@ -5,6 +5,7 @@
 
 mod bit_labels;
 mod comparison;
+mod dependencies;
 mod document;
 mod examples;
 mod inspector;
@@ -21,6 +22,7 @@ pub use comparison::{
     ComparisonContext, ComparisonRelation, ComparisonRequest, ComparisonResult,
     ComparisonResultRef, ComparisonRow, ComparisonSide, ComparisonSlot,
 };
+pub use dependencies::{DependencyLocation, DependencyRow, DependencySnapshot};
 pub use document::{
     CalculationDocument, CalculationEvaluation, CalculationLineResult, CalculationValue,
     Diagnostic, DiagnosticKind, DocumentDiagnostic, EditError, LineOutcome, MAX_DEPENDENCIES,
