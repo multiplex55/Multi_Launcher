@@ -21,6 +21,7 @@ pub(super) enum FolderViewAction {
     },
     NavigateBack,
     RequestRescan,
+    OpenRules,
     RequestMutation(MutationKind),
 }
 
@@ -238,7 +239,7 @@ pub(super) fn show(
             }
         });
         if ui.button("Folder Rules…").clicked() {
-            super::folder_rules_dialog::open(state);
+            action = FolderViewAction::OpenRules;
         }
         let required = state.rescan_required();
         ui.label(format!(
@@ -554,7 +555,7 @@ pub(super) fn mutation_menu(
         ui.close();
     }
     if ui.button("Edit filters…").clicked() {
-        super::folder_rules_dialog::open(state);
+        *action = FolderViewAction::OpenRules;
         ui.close();
     }
 }

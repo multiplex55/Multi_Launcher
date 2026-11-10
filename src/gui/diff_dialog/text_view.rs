@@ -41,9 +41,6 @@ pub fn show(
     model.poll();
     let mut effects = Vec::new();
     let action = show_with_effects(ui, workspace, view, model, &mut effects);
-    if let Some(rules) = super::rules_dialog::show(ui.ctx(), workspace, view, ui.is_enabled()) {
-        model.set_rules(rules);
-    }
     for effect in effects {
         match effect {
             ViewEffect::SaveText(save) => {
@@ -55,6 +52,7 @@ pub fn show(
                 }
             }
             ViewEffect::SetTextRules(rules) => model.set_rules(rules),
+            ViewEffect::OpenTextRules => {},
             ViewEffect::ResolveTextConflict { .. } => {}
         }
     }
@@ -261,12 +259,7 @@ pub(super) fn show_with_effects(
                 ui.menu_button("More", |ui| {
                     super::export::text_menu(ui, model, effects);
                     if ui.button("Rules…").clicked() {
-                        ui.ctx().data_mut(|d| {
-                            d.insert_temp(
-                                super::rules_dialog::state_id(workspace, view),
-                                super::rules_dialog::RulesDialogState::new(&model.rules),
-                            )
-                        });
+                        effects.push(ViewEffect::OpenTextRules);
                         ui.close();
                     }
                     if ui.button("First").clicked() {

@@ -9,6 +9,7 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
 mod binary_view;
+mod child_hosts;
 mod effects;
 mod export;
 mod folder_rules_dialog;
@@ -99,8 +100,6 @@ enum DiffUiAction {
     PickPath(crate::diff::model::DiffSide, bool),
     BeginTextInput(TextInputPurpose),
     PasteTextInput(crate::diff::model::DiffSide),
-    ApplyTextInput,
-    DismissTextInput,
     CompareSelectionWithClipboard(u64),
     OpenRecent(crate::diff::persistence::DisplayPathPairV1),
     Folder(u64, folder_view::FolderViewAction),
@@ -127,7 +126,7 @@ struct WorkspaceRenderOutcome {
     recent_to_open: Option<crate::diff::persistence::DisplayPathPairV1>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TextInputPurpose {
     NewComparison,
     EditInputs { view_id: u64 },
@@ -165,6 +164,108 @@ fn paste_memory_input(
     crate::diff::model::validate_memory_text(&text)?;
     *accepted = text;
     Ok(())
+}
+
+fn render_text_input_contents(
+    ui: &mut egui::Ui,
+    draft: &mut TextInputDraft,
+    workspace: u64,
+    identity: u64,
+    session: u64,
+    actions: &mut Vec<DiffUiAction>,
+    submit: &mut bool,
+    cancel: &mut bool,
+) {
+    let footer_height =
+        rules_dialog::action_footer_reserved_height(ui, &["Apply Inputs", "Cancel"]);
+    let body_height = (ui.available_height() - footer_height).max(0.0);
+    egui::ScrollArea::both()
+        .id_salt(("diff-text-input-body", session))
+        .max_height(body_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.label("Enter text for both sides. Empty text is allowed.");
+            ui.label(
+                "Each side is limited to 8 MiB and 100,000 lines. Oversized input is rejected without truncation.",
+            );
+            ui.label("Text remains in Diff memory until you explicitly use Save As or Export.");
+            ui.columns(2, |columns| {
+                for (side, input, label) in [
+                    (
+                        crate::diff::model::DiffSide::Left,
+                        &mut draft.left,
+                        "Left text",
+                    ),
+                    (
+                        crate::diff::model::DiffSide::Right,
+                        &mut draft.right,
+                        "Right text",
+                    ),
+                ] {
+                    let column = if side == crate::diff::model::DiffSide::Left {
+                        &mut columns[0]
+                    } else {
+                        &mut columns[1]
+                    };
+                    column.label(label);
+                    let response = column.add(
+                        egui::TextEdit::multiline(input)
+                            .id(egui::Id::new((
+                                workspace,
+                                "memory_text_source",
+                                identity,
+                                session,
+                                side,
+                            )))
+                            .desired_rows(16)
+                            .desired_width(f32::INFINITY)
+                            .code_editor(),
+                    );
+                    #[cfg(test)]
+                    if side == crate::diff::model::DiffSide::Left {
+                        column.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::new(("diff-input-left-test", session)),
+                                (response.rect, column.clip_rect(), response.enabled()),
+                            )
+                        });
+                    }
+                    #[cfg(not(test))]
+                    let _ = response;
+                    column.horizontal(|ui| {
+                        if ui.button(format!("Paste {side:?}")).clicked() {
+                            actions.push(DiffUiAction::PasteTextInput(side));
+                        }
+                        ui.label(format!("{} bytes", input.len()));
+                    });
+                }
+            });
+            if let Some(error) = &draft.error {
+                semantic_status(ui, StatusTone::Error, error, None);
+            }
+        });
+    ui.separator();
+    ui.horizontal(|ui| {
+        let label = match draft.purpose {
+            TextInputPurpose::NewComparison => "Compare",
+            TextInputPurpose::EditInputs { .. } => "Apply Inputs",
+        };
+        let apply = ui.button(label);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(("diff-input-apply-test", session)),
+                (apply.rect, ui.clip_rect(), apply.enabled()),
+            )
+        });
+        if apply.clicked() {
+            *submit = true;
+        }
+        if ui.button("Cancel").clicked() {
+            *cancel = true;
+            ui.close();
+        }
+    });
 }
 
 fn configure_text_model(
@@ -281,10 +382,19 @@ pub struct DiffDialogState {
     watch_views: HashMap<u64, crate::diff::watch::ViewWatchRuntime>,
     restored_text_preferences: HashMap<u64, RestoredTextPreferences>,
     text_input: Option<TextInputDraft>,
+    children: child_hosts::Children,
+    pending_child_opens: Vec<(
+        child_hosts::Open,
+        crate::gui::utility_host::AcceptedParentOpen<(u64, u64)>,
+    )>,
     close_prompt: bool,
     host: host::DiffWindowHost,
     #[cfg(test)]
     host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    compare_text_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    header_scroll: Option<(egui::Id, egui::Rect, egui::Vec2, egui::Vec2)>,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
 
@@ -511,118 +621,6 @@ impl DiffDialogState {
                     Err(error) => Err((draft, error)),
                 }
             }
-        }
-    }
-
-    #[cfg(test)]
-    fn show_text_input(&mut self, ctx: &egui::Context) {
-        let mut actions = Vec::new();
-        self.render_text_input(ctx, &mut actions, true);
-        self.apply_ui_actions(actions, effects::PickerOwner::Legacy);
-    }
-
-    fn render_text_input(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<DiffUiAction>,
-        input_allowed: bool,
-    ) {
-        let Some(draft) = self.text_input.as_mut() else {
-            return;
-        };
-        let mut open = true;
-        let mut submit = false;
-        let mut cancel = false;
-        let title = match draft.purpose {
-            TextInputPurpose::NewComparison => "Compare Text",
-            TextInputPurpose::EditInputs { .. } => "Edit Text Inputs",
-        };
-        let identity = match draft.purpose {
-            TextInputPurpose::NewComparison => 0,
-            TextInputPurpose::EditInputs { view_id } => view_id,
-        };
-        egui::Window::new(title)
-            .id(egui::Id::new((self.workspace.workspace_id, "text_input", identity)))
-            .enabled(input_allowed)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(egui::vec2(760.0, 540.0))
-            .show_utility(
-                ctx,
-                "diff-text-input",
-                egui::Id::new((self.workspace.workspace_id, "text_input", identity)),
-                Some(&mut open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(
-                    egui::vec2(760.0, 540.0),
-                ),
-                |ui| {
-                ui.label("Enter text for both sides. Empty text is allowed.");
-                ui.label(
-                    "Each side is limited to 8 MiB and 100,000 lines. Oversized input is rejected without truncation.",
-                );
-                ui.label(
-                    "Text remains in Diff memory until you explicitly use Save As or Export.",
-                );
-                ui.columns(2, |columns| {
-                    for (side, input, label) in [
-                        (crate::diff::model::DiffSide::Left, &mut draft.left, "Left text"),
-                        (
-                            crate::diff::model::DiffSide::Right,
-                            &mut draft.right,
-                            "Right text",
-                        ),
-                    ] {
-                        let column = if side == crate::diff::model::DiffSide::Left {
-                            &mut columns[0]
-                        } else {
-                            &mut columns[1]
-                        };
-                        column.label(label);
-                        column.add(
-                            egui::TextEdit::multiline(input)
-                                .id(egui::Id::new((
-                                    self.workspace.workspace_id,
-                                    "memory_text_source",
-                                    identity,
-                                    side,
-                                )))
-                                .desired_rows(16)
-                                .desired_width(f32::INFINITY)
-                                .code_editor(),
-                        );
-                        column.horizontal(|ui| {
-                            if ui.button(format!("Paste {side:?}")).clicked() {
-                                actions.push(DiffUiAction::PasteTextInput(side));
-                            }
-                            ui.label(format!("{} bytes", input.len()));
-                        });
-                    }
-                });
-                if let Some(error) = &draft.error {
-                    semantic_status(ui, StatusTone::Error, error, None);
-                }
-                ui.horizontal(|ui| {
-                    let label = match draft.purpose {
-                        TextInputPurpose::NewComparison => "Compare",
-                        TextInputPurpose::EditInputs { .. } => "Apply Inputs",
-                    };
-                    if ui.button(label).clicked() {
-                        submit = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                        ui.close();
-                    }
-                });
-                },
-            );
-        if !input_allowed {
-            return;
-        }
-        if submit {
-            actions.push(DiffUiAction::ApplyTextInput);
-        } else if cancel || !open {
-            actions.push(DiffUiAction::DismissTextInput);
         }
     }
 
@@ -1097,50 +1095,9 @@ impl DiffDialogState {
         let view = self.workspace.current_view.id;
         let child_input =
             |id| input_allowed && (!hosted || host::child_input_allowed(ctx, id, parent_layer));
-        let rules_allowed =
-            !self.close_prompt && self.text_input.is_none() && self.operation_preview.is_none();
-        let text_allowed = input_allowed
-            && !self.close_prompt
-            && self.text_input.as_ref().is_some_and(|draft| {
-                let id = match draft.purpose {
-                    TextInputPurpose::NewComparison => 0,
-                    TextInputPurpose::EditInputs { view_id } => view_id,
-                };
-                child_input(egui::Id::new((workspace, "text_input", id)))
-            });
         let operation_allowed = input_allowed
             && !self.close_prompt
-            && self.text_input.is_none()
             && child_input(egui::Id::new(("folder-operation-preview", view)));
-        match &mut self.workspace.current_view.view {
-            DiffView::TextCompare(_) => {
-                if let Some(rules) = rules_dialog::show(
-                    ctx,
-                    workspace,
-                    view,
-                    rules_allowed && child_input(rules_dialog::window_id(workspace, view)),
-                ) {
-                    actions.push(DiffUiAction::ViewEffects(
-                        view,
-                        vec![effects::ViewEffect::SetTextRules(rules)],
-                    ));
-                }
-            }
-            DiffView::FolderCompare(state) => {
-                if folder_rules_dialog::show(
-                    ctx,
-                    state,
-                    rules_allowed && child_input(folder_rules_dialog::window_id()),
-                ) {
-                    actions.push(DiffUiAction::Folder(
-                        view,
-                        folder_view::FolderViewAction::RequestRescan,
-                    ));
-                }
-            }
-            _ => {}
-        }
-        self.render_text_input(ctx, actions, text_allowed);
         self.render_operation_preview(ctx, actions, operation_allowed);
         if !self.close_prompt {
             return;
@@ -1194,30 +1151,8 @@ impl DiffDialogState {
                     }
                     Err(error) => self.workspace.error = Some(error.to_owned()),
                 },
-                DiffUiAction::BeginTextInput(purpose) => self.begin_text_input(purpose),
-                DiffUiAction::PasteTextInput(side) => {
-                    if let Some(draft) = self.text_input.as_mut() {
-                        let input = match side {
-                            crate::diff::model::DiffSide::Left => &mut draft.left,
-                            crate::diff::model::DiffSide::Right => &mut draft.right,
-                        };
-                        draft.error = paste_memory_input(input, || {
-                            crate::actions::clipboard::get_text().map_err(|_| {
-                                "Clipboard is unavailable or does not contain plain text".to_owned()
-                            })
-                        })
-                        .err();
-                    }
-                }
-                DiffUiAction::ApplyTextInput => {
-                    if let Some(draft) = self.text_input.take()
-                        && let Err((mut draft, error)) = self.apply_text_input(draft)
-                    {
-                        draft.error = Some(error);
-                        self.text_input = Some(draft);
-                    }
-                }
-                DiffUiAction::DismissTextInput => self.text_input = None,
+                // Hosted editors consume these intents at the retained child boundary.
+                DiffUiAction::BeginTextInput(_) | DiffUiAction::PasteTextInput(_) => {}
                 DiffUiAction::CompareSelectionWithClipboard(view_id) => {
                     if let Err(error) = self.compare_selection_with_clipboard_using(view_id, || {
                         crate::actions::clipboard::get_text()
@@ -1316,7 +1251,7 @@ impl DiffDialogState {
             }
             let header_height = ui.spacing().interact_size.y;
             let header_width = ui.available_width().max(0.0);
-            egui::ScrollArea::horizontal()
+            let header_scroll = egui::ScrollArea::horizontal()
                 .max_height(header_height)
                 .show(ui, |ui| {
                     ui.allocate_ui_with_layout(
@@ -1361,7 +1296,9 @@ impl DiffDialogState {
                                     .hint_text("Right file or folder"),
                             );
                             picker_menu(ui, actions, crate::diff::model::DiffSide::Right);
-                            if ui.button("Compare Text…").clicked() {
+                            let compare_text = ui.button("Compare Text…");
+                            #[cfg(test)] { self.compare_text_button = Some((compare_text.rect, ui.clip_rect(), compare_text.enabled())); }
+                            if compare_text.clicked() {
                                 actions.push(DiffUiAction::BeginTextInput(
                                     TextInputPurpose::NewComparison,
                                 ));
@@ -1445,6 +1382,10 @@ impl DiffDialogState {
                         },
                     );
                 });
+            #[cfg(test)] {
+                self.header_scroll = Some((header_scroll.id, header_scroll.inner_rect, header_scroll.content_size, header_scroll.state.offset));
+            }
+            #[cfg(not(test))] let _ = header_scroll;
             if let Some(error) = &self.workspace.error {
                 bounded_message(ui, error, 48.0);
             }
@@ -1499,6 +1440,7 @@ impl DiffDialogState {
                         self.workspace.error = Some(error);
                     }
                 }
+                effects::ViewEffect::OpenTextRules => {},
                 effects::ViewEffect::SetTextRules(rules) => {
                     if let Some(model) = self.text_views.get_mut(&view_id) {
                         model.set_rules(rules);
@@ -1817,6 +1759,7 @@ impl DiffDialogState {
             folder_view::FolderViewAction::NavigateBack => {
                 self.navigate_back();
             }
+            folder_view::FolderViewAction::OpenRules => {},
             folder_view::FolderViewAction::RequestRescan => {
                 if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view
                     && state.apply_draft().is_ok()
@@ -4047,18 +3990,24 @@ mod tests {
         input.screen_rect = Some(screen);
         let mut dialog = DiffDialogState::default();
         dialog.begin_text_input(TextInputPurpose::NewComparison);
-        let draft = dialog.text_input.as_mut().unwrap();
+        let mut draft = dialog.text_input.take().unwrap();
         draft.left = "typed left".into();
         draft.right = "typed right".into();
-        let frame = context.run_ui(input, |ctx| dialog.show_text_input(ctx));
+        let mut editor = child_hosts::Editor::<child_hosts::Input>::new(
+            1, dialog.workspace.workspace_id, dialog.workspace.current_view.id, draft,
+        );
+        use crate::gui::utility_window_host::HostedUtilityDialog;
+        let frame = context.run_ui(input, |ui| {
+            let _ = editor.render_host(ui.ctx(), (None, None), crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+                true, crate::gui::jump_mode::ui::NavigationOwner::Blocked, true, 0, &(), None,
+                crate::gui::utility_host::UtilityPresentation::Docked);
+        });
         assert!(!frame.shapes.is_empty());
         frame.drop_without_applying_deltas();
-        assert_eq!(dialog.text_input.as_ref().unwrap().left, "typed left");
-        assert_eq!(dialog.text_input.as_ref().unwrap().right, "typed right");
-
-        let mut draft = dialog.text_input.take().unwrap();
-        draft.left = "x".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES + 1);
-        let (mut draft, error) = dialog.apply_text_input(draft).unwrap_err();
+        assert_eq!(editor.draft.left, "typed left");
+        assert_eq!(editor.draft.right, "typed right");
+        editor.draft.left = "x".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES + 1);
+        let (mut draft, error) = dialog.apply_text_input(editor.draft.clone()).unwrap_err();
         draft.error = Some(error);
         assert!(dialog.workspace.navigation_stack.is_empty());
         assert_eq!(dialog.text_views.len(), 0);

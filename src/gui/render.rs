@@ -2037,6 +2037,7 @@ impl LauncherApp {
             || (self.file_search_dialog.open
                 && self.file_search_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || self.diff_dialog.host_layer_if_root().is_some_and(|layer| !ordinary_layer_is_allowed(layer))
+            || self.diff_dialog.child_root_layers().into_iter().any(|layer| !ordinary_layer_is_allowed(layer))
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
             || self.snippet_prompt_has_root_presentation()
@@ -2140,6 +2141,7 @@ impl LauncherApp {
             .filter_map(|panel| self.query_focus_panel_layer(panel))
             .chain(self.dashboard_editor.host_layer_if_root())
             .chain(self.diff_dialog.host_layer_if_root())
+            .chain(self.diff_dialog.child_root_layers())
             .chain(self.pin_list_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("screenshot-pin-list"),
@@ -6165,6 +6167,7 @@ impl LauncherApp {
             && !self.pin_list_open;
         self.diff_dialog.show_hosted(
             ctx, &self.activity_center, first, root_visible, root_input, native_input,
+            self.jump_mode_ui.active_session().is_some(),
         );
     }
 
@@ -19138,6 +19141,179 @@ mod tests {
         }
         assert_eq!(app.image_panels.len(), 1);
         assert_ne!(app.image_panels[0].session(), session);
+    }
+
+    #[test]
+    fn native_diff_text_child_inherits_and_keeps_retained_draft() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut app = boxed_app(&ctx, workspace.root());
+        let settings_path = workspace
+            .root()
+            .join("diff-host-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .utility_presentations
+            .set(
+                crate::settings::UtilityToolKey::parse("diff-text-input").unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            )
+            .unwrap();
+        settings.save(&settings_path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            settings.utility_presentations,
+        )
+        .install_in_context(&ctx);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.diff_dialog.open = true;
+        for _ in 0..5 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let (popout, clip, enabled) = app.diff_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.diff_dialog.is_popped_out());
+        app.request_launcher_visibility(false);
+        let parent = app.diff_dialog.test_host_viewport();
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        let (open, _, _) = app
+            .diff_dialog
+            .test_compare_text_button()
+            .expect("Compare Text control");
+        app.diff_dialog.test_reveal_header_control(&ctx, open);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        let (open, clip, enabled) = app
+            .diff_dialog
+            .test_compare_text_button()
+            .expect("visible Compare Text control");
+        assert!(
+            enabled && clip.contains_rect(open),
+            "open={open:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(open, pressed),
+                false,
+                false,
+            );
+        }
+        let (session, popped, _) = app
+            .diff_dialog
+            .test_input_child()
+            .expect("hosted text input");
+        assert!(popped && !app.visible_flag_state());
+        let child = app.diff_dialog.test_input_viewport().unwrap();
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let control = |name: &str| {
+            ctx.data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new((name, session)))
+                    .unwrap()
+            })
+        };
+        let (left, clip, enabled) = control("diff-input-left-test");
+        assert!(
+            enabled && clip.contains_rect(left),
+            "left={left:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(left, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            true,
+        );
+        assert_eq!(app.diff_dialog.test_input_child().unwrap().2, "");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("retained".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.diff_dialog.test_input_child().unwrap().2, "retained");
+        run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), true, false);
+        assert_eq!(app.diff_dialog.test_input_child().unwrap().2, "retained");
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        assert!(app.diff_dialog.is_popped_out());
+        assert_eq!(app.diff_dialog.test_input_child().unwrap().2, "retained");
+        app.request_launcher_visibility(false);
+        run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        let (apply, clip, enabled) = control("diff-input-apply-test");
+        assert!(
+            enabled && clip.contains_rect(apply),
+            "apply={apply:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(apply, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.diff_dialog.test_input_child().is_none());
+        app.settings_save_workers.join_all();
+        workers.join_all();
     }
 
     #[test]
