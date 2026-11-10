@@ -28,7 +28,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M3-B | H1/H2 custom hosts / accepted child origins | existing hosts and B2a already-hosted edges verified; ordinary B2b/c adapters pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native pending |
 | M4-B | D4 toolbar / pinned inspector | complete; automated verified, native pending |
-| M4-C | D3 owned-text endpoint captions | pending |
+| M4-C | D3 owned-text endpoint captions | complete; automated verified, native pending |
 | M4-D | D5 actual connector creation / reconnection | pending |
 | M5-A | I1 bounded label-file exchange | pending |
 | M6-A | R1/R2 explicit duration / encoder timeline | pending |
@@ -352,3 +352,13 @@ Final owned 100-second `--no-fail-fast` evidence under `target/utility-usability
 - `m4-b-undo-observed`: exact diagnostic confirmation passed; initial/correction/observed receipts remain `m4-b-*`, including failures truthfully retained for cause evidence.
 
 Final receipts exit 0/no timeout/cleanup and drain verified. Parent inspected scoped diff/whitespace/status; no duplicate lower arrangement implementation or diagnostics. Large unchanged canvas/property bodies retain baseline formatting to avoid about 1,800 lines of unrelated indentation churn; new boundary/tests formatted. Source/Cargo returned. Physical native observation remains M9. M4-C endpoint captions and M4-D actual connector gestures remain pending.
+
+M4-B checkpoint `e20d7f7ff7a9f34162cab2c106c21a144dae9127` pushed successfully; clean tree before M4-C. Implementer owns owned-text/ID endpoint display and full tooltip only, preserving eligibility, ID/anchor storage and Apply behavior. M4-D actual creation/reconnection follows. Parent ledger/Git; one source/Cargo lane.
+
+## M4-C acceptance: Owned-text endpoint choices
+
+The existing shared object-caption owner uses each primitive's owned label, Text content or container/lane label, normalizes whitespace into a Unicode-safe bounded excerpt and appends stable IDs/type fallback. Current From/To and choice rows use the same caption; full original text remains in tooltips. Missing targets remain truthful. A streaming formatter avoids constructing the entire normalized label in hot object-list paths. Eligibility and typed object-ID/anchor storage remain unchanged; no proximity inference or reconnect occurs during a rename.
+
+Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` batches `m4-c-first` (3/3, new formatter/combo plus existing connector Apply regression) and `m4-c-streaming` (2/2, formatter+actual combo after bounded-allocation correction) passed. Fixtures cover duplicate IDs, labelled rectangle/ellipse, Text/container/lane/empty/missing/multiline Unicode/long labels, actual combo selection and committed rename without anchor/endpoint change. Receipts/selectors/output under `target/utility-usability-and-insights/evidence/m4-c-*`; exit 0/no timeout/cleanup and drain verified.
+
+Parent inspected final scoped diff/whitespace/status; old truncation paths removed, only Diagram source/ledger changed. Source/Cargo returned; physical native pending M9. M4-D actual endpoint reassignment and interactive creation remains required; neither route-point editing nor existing attached-object movement counts as its proof.

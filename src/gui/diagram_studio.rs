@@ -10838,7 +10838,9 @@ impl DiagramStudioDialog {
                                     &mut connector.from,
                                     selected_id,
                                     &scene.objects,
-                                    |option_id, action, rect, clip| {
+                                    |option_id, action, caption, rect, clip| {
+                                        #[cfg(test)]
+                                        let _ = caption;
                                         #[cfg(test)]
                                         self.test_action_rects.push((
                                             option_id.map_or_else(
@@ -10849,7 +10851,7 @@ impl DiagramStudioDialog {
                                             clip,
                                         ));
                                         #[cfg(not(test))]
-                                        let _ = (option_id, action, rect, clip);
+                                        let _ = (option_id, action, caption, rect, clip);
                                     },
                                 );
                                 visual_connector_endpoint_editor(
@@ -10860,7 +10862,9 @@ impl DiagramStudioDialog {
                                     &mut connector.to,
                                     selected_id,
                                     &scene.objects,
-                                    |option_id, action, rect, clip| {
+                                    |option_id, action, caption, rect, clip| {
+                                        #[cfg(test)]
+                                        let _ = caption;
                                         #[cfg(test)]
                                         self.test_action_rects.push((
                                             option_id.map_or_else(
@@ -10871,7 +10875,7 @@ impl DiagramStudioDialog {
                                             clip,
                                         ));
                                         #[cfg(not(test))]
-                                        let _ = (option_id, action, rect, clip);
+                                        let _ = (option_id, action, caption, rect, clip);
                                     },
                                 );
                                 ui.horizontal_wrapped(|ui| {
@@ -12462,36 +12466,64 @@ const fn visual_shape_label(shape: VisualPrimitiveShape) -> &'static str {
     }
 }
 
-fn visual_object_label(object: &VisualObject) -> String {
-    let label = match &object.kind {
-        VisualObjectKind::Primitive { shape } => visual_shape_label(*shape),
-        VisualObjectKind::Text { text } if object.id == crate::diagram::TITLE_OBJECT_ID => {
-            return format!("Title — {}", text.chars().take(32).collect::<String>());
+fn visual_object_owned_text(object: &VisualObject) -> Option<&str> {
+    match &object.kind {
+        VisualObjectKind::Primitive { .. } => {
+            object.owned_label.as_ref().map(|label| label.text.as_str())
         }
+        VisualObjectKind::Text { text } => Some(text),
+        VisualObjectKind::Container { label } | VisualObjectKind::Swimlane { label, .. } => {
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
+fn visual_object_label(object: &VisualObject) -> String {
+    let kind = match &object.kind {
+        VisualObjectKind::Primitive { shape } => visual_shape_label(*shape),
+        VisualObjectKind::Text { .. } if object.id == crate::diagram::TITLE_OBJECT_ID => "Title",
         VisualObjectKind::Text { .. } => "Text",
         VisualObjectKind::PresetInstance { .. } => "Preset instance",
         VisualObjectKind::ImageReference { .. } => "Image reference",
         VisualObjectKind::Connector { .. } => "Connector",
-        VisualObjectKind::Container { label } => {
-            return format!(
-                "Container — {} #{}",
-                label.chars().take(24).collect::<String>(),
-                object.id.get()
-            );
-        }
-        VisualObjectKind::Swimlane { orientation, label } => {
-            let orientation = match orientation {
-                VisualSwimlaneOrientation::Horizontal => "Horizontal lane",
-                VisualSwimlaneOrientation::Vertical => "Vertical lane",
-            };
-            return format!(
-                "{orientation} — {} #{}",
-                label.chars().take(24).collect::<String>(),
-                object.id.get()
-            );
-        }
+        VisualObjectKind::Container { .. } => "Container",
+        VisualObjectKind::Swimlane { orientation, .. } => match orientation {
+            VisualSwimlaneOrientation::Horizontal => "Horizontal lane",
+            VisualSwimlaneOrientation::Vertical => "Vertical lane",
+        },
     };
-    format!("{label} #{}", object.id.get())
+    let mut seen_text = false;
+    let mut pending_space = false;
+    let mut chars = visual_object_owned_text(object)
+        .unwrap_or_default()
+        .chars()
+        .flat_map(|character| {
+            if character.is_whitespace() {
+                pending_space |= seen_text;
+                [None, None]
+            } else {
+                let separator = pending_space.then_some(' ');
+                seen_text = true;
+                pending_space = false;
+                [separator, Some(character)]
+            }
+            .into_iter()
+            .flatten()
+        });
+    let excerpt: String = chars.by_ref().take(32).collect();
+    if excerpt.is_empty() {
+        return format!("{kind} #{}", object.id.get());
+    }
+    let ellipsis = if chars.next().is_some() { "…" } else { "" };
+    format!("{kind} — {excerpt}{ellipsis} #{}", object.id.get())
+}
+
+fn visual_endpoint_label(objects: &[VisualObject], id: VisualObjectId) -> String {
+    objects
+        .iter()
+        .find(|object| object.id == id)
+        .map_or_else(|| format!("Missing #{}", id.get()), visual_object_label)
 }
 
 fn visual_group_roots(
@@ -12550,35 +12582,48 @@ fn visual_connector_endpoint_editor(
     endpoint: &mut VisualConnectorEndpoint,
     connector_id: VisualObjectId,
     objects: &[VisualObject],
-    mut record_action: impl FnMut(Option<VisualObjectId>, &str, egui::Rect, egui::Rect),
+    mut record_action: impl FnMut(Option<VisualObjectId>, &str, &str, egui::Rect, egui::Rect),
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.label(label);
         let endpoint_object = objects
             .iter()
             .find(|object| object.id == endpoint.object_id);
+        let selected_caption = visual_endpoint_label(objects, endpoint.object_id);
         let object_combo = egui::ComboBox::from_id_salt((id_salt, "object"))
-            .selected_text(endpoint_object.map_or_else(
-                || format!("Missing #{}", endpoint.object_id.get()),
-                visual_object_label,
-            ))
+            .selected_text(&selected_caption)
             .show_ui(ui, |ui| {
                 for object in objects.iter().filter(|object| {
                     object.id != connector_id
                         && !matches!(&object.kind, VisualObjectKind::Connector { .. })
                 }) {
-                    let response = ui.selectable_value(
-                        &mut endpoint.object_id,
-                        object.id,
-                        visual_object_label(object),
+                    let caption = visual_object_label(object);
+                    let response =
+                        ui.selectable_value(&mut endpoint.object_id, object.id, &caption);
+                    let response = if let Some(text) = visual_object_owned_text(object) {
+                        response.on_hover_text(text)
+                    } else {
+                        response
+                    };
+                    record_action(
+                        Some(object.id),
+                        action_name,
+                        &caption,
+                        response.rect,
+                        ui.clip_rect(),
                     );
-                    record_action(Some(object.id), action_name, response.rect, ui.clip_rect());
                 }
             });
+        let response = if let Some(text) = endpoint_object.and_then(visual_object_owned_text) {
+            object_combo.response.on_hover_text(text)
+        } else {
+            object_combo.response
+        };
         record_action(
             None,
             action_name,
-            object_combo.response.rect,
+            &selected_caption,
+            response.rect,
             ui.clip_rect(),
         );
         egui::ComboBox::from_id_salt((id_salt, "anchor"))
@@ -21167,6 +21212,230 @@ mod tests {
                 assert_eq!(dialog.documents.is_dirty(), dirty);
             },
         );
+    }
+
+    #[test]
+    fn m4c_object_captions_use_owned_text_and_stable_ids() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let scene = dialog.documents.visual_scene().unwrap();
+        let mut rectangle = scene
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        rectangle.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "  Alpha\n  βeta   ".into(),
+            style: VisualStyle::default(),
+        });
+        assert_eq!(
+            visual_object_label(&rectangle),
+            format!("Rectangle — Alpha βeta #{}", ids[0].get())
+        );
+        let mut ellipse = rectangle.clone();
+        ellipse.id = ids[1];
+        ellipse.kind = VisualObjectKind::Primitive {
+            shape: VisualPrimitiveShape::Ellipse,
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse — Alpha βeta #{}", ids[1].get())
+        );
+        assert_ne!(
+            visual_object_label(&rectangle),
+            visual_object_label(&ellipse)
+        );
+        let mut duplicate = rectangle.clone();
+        duplicate.id = ids[2];
+        assert_ne!(
+            visual_object_label(&rectangle),
+            visual_object_label(&duplicate)
+        );
+        ellipse.owned_label.as_mut().unwrap().text = "  \n".into();
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse #{}", ids[1].get())
+        );
+        ellipse.owned_label = None;
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse #{}", ids[1].get())
+        );
+        rectangle.owned_label.as_mut().unwrap().text = "界".repeat(40);
+        assert_eq!(
+            visual_object_label(&rectangle),
+            format!("Rectangle — {}… #{}", "界".repeat(32), ids[0].get())
+        );
+        assert_eq!(
+            visual_object_owned_text(&rectangle).unwrap(),
+            "界".repeat(40)
+        );
+        ellipse.kind = VisualObjectKind::Text {
+            text: "Free\ntext".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Text — Free text #{}", ids[1].get())
+        );
+        ellipse.kind = VisualObjectKind::Container {
+            label: "Group\n A".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Container — Group A #{}", ids[1].get())
+        );
+        ellipse.kind = VisualObjectKind::Swimlane {
+            orientation: VisualSwimlaneOrientation::Horizontal,
+            label: "Lane A".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Horizontal lane — Lane A #{}", ids[1].get())
+        );
+        assert_eq!(
+            visual_endpoint_label(&[rectangle], ids[1]),
+            format!("Missing #{}", ids[1].get())
+        );
+    }
+
+    #[test]
+    fn m4c_endpoint_editor_shares_captions_and_tracks_renames() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let mut objects: Vec<_> = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|object| ids.contains(&object.id))
+            .cloned()
+            .collect();
+        for object in &mut objects {
+            object.owned_label = Some(crate::diagram::VisualOwnedLabel {
+                text: "Same label".into(),
+                style: VisualStyle::default(),
+            });
+        }
+        let mut endpoint = VisualConnectorEndpoint {
+            object_id: ids[0],
+            anchor: VisualAnchor::East,
+        };
+        let ctx = egui::Context::default();
+        fn draw(
+            ctx: &egui::Context,
+            endpoint: &mut VisualConnectorEndpoint,
+            objects: &[VisualObject],
+            events: Vec<egui::Event>,
+        ) -> Vec<(Option<VisualObjectId>, String, egui::Rect)> {
+            let mut observed = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    visual_connector_endpoint_editor(
+                        ui,
+                        "From",
+                        "m4c-endpoint",
+                        "endpoint",
+                        endpoint,
+                        crate::diagram::TITLE_OBJECT_ID,
+                        objects,
+                        |id, _, caption, rect, _| observed.push((id, caption.to_owned(), rect)),
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            observed
+        }
+        let initial = draw(&ctx, &mut endpoint, &objects, vec![]);
+        let selected = initial.iter().find(|(id, _, _)| id.is_none()).unwrap();
+        assert_eq!(selected.1, visual_object_label(&objects[0]));
+        let click = selected.2.center();
+        for pressed in [true, false] {
+            draw(
+                &ctx,
+                &mut endpoint,
+                &objects,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let choices = draw(&ctx, &mut endpoint, &objects, vec![]);
+        for object in &objects {
+            let choice = choices
+                .iter()
+                .find(|(id, _, _)| *id == Some(object.id))
+                .unwrap();
+            assert_eq!(choice.1, visual_object_label(object));
+        }
+        let target = choices
+            .iter()
+            .find(|(id, _, _)| *id == Some(ids[1]))
+            .unwrap()
+            .2
+            .center();
+        for pressed in [true, false] {
+            draw(
+                &ctx,
+                &mut endpoint,
+                &objects,
+                vec![
+                    egui::Event::PointerMoved(target),
+                    egui::Event::PointerButton {
+                        pos: target,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(endpoint.object_id, ids[1]);
+        assert_eq!(endpoint.anchor, VisualAnchor::East);
+        let mut renamed_object = objects
+            .iter()
+            .find(|object| object.id == ids[1])
+            .unwrap()
+            .clone();
+        renamed_object.owned_label.as_mut().unwrap().text = "Renamed".into();
+        let previous_revision = dialog.documents.visual_revision().unwrap();
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::ReplaceObject(renamed_object)])
+            .unwrap();
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(previous_revision + 1)
+        );
+        objects = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|object| ids.contains(&object.id))
+            .cloned()
+            .collect();
+        let renamed = draw(&ctx, &mut endpoint, &objects, vec![]);
+        let selected = renamed.iter().find(|(id, _, _)| id.is_none()).unwrap();
+        assert_eq!(selected.1, format!("Rectangle — Renamed #{}", ids[1].get()));
+        assert_eq!(endpoint.object_id, ids[1]);
     }
 
     #[test]
