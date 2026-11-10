@@ -398,13 +398,21 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let session = dialog.session();
         if self.presentation_session != Some(session) {
             self.presentation_session = Some(session);
-            if let (Some(manager), Ok(key)) = (
-                super::utility_presentation::UtilityPresentationManager::for_context(ctx),
-                crate::settings::UtilityToolKey::parse(D::KEY),
-            ) && let Some(preference) = manager.preference(key)
-            {
-                self.state.transition(preference.into());
-            }
+            let remembered =
+                super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                    .and_then(|manager| {
+                        crate::settings::UtilityToolKey::parse(D::KEY)
+                            .ok()
+                            .and_then(|key| manager.preference(key))
+                    })
+                    .map(Into::into);
+            let presentation = super::utility_host::resolve_child_presentation(
+                None,
+                remembered,
+                self.state.presentation(),
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            self.state.transition(presentation);
         }
     }
 

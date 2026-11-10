@@ -80,6 +80,63 @@ impl ViewportPassProvenance {
     }
 }
 
+/// A parent-originated open is authorized by both retained passes and by the
+/// originating host and domain session, which its owner must revalidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AcceptedParentOpen<S> {
+    host: HostIdentity,
+    session: S,
+    root: ViewportPassProvenance,
+    owner: ViewportPassProvenance,
+}
+
+impl<S: PartialEq> AcceptedParentOpen<S> {
+    pub(super) fn from_retained(
+        ctx: &egui::Context,
+        host: HostIdentity,
+        session: S,
+        root: ViewportPassProvenance,
+        owner: ViewportPassProvenance,
+    ) -> Option<Self> {
+        (root.was_retained(ctx) && owner.was_retained(ctx)).then_some(Self {
+            host,
+            session,
+            root,
+            owner,
+        })
+    }
+
+    pub(super) fn is_current(&self, host: HostIdentity, session: &S) -> bool {
+        self.host == host && &self.session == session
+    }
+}
+
+/// The parent variant is only usable after its owner validates the receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ChildOpenOrigin<S> {
+    Root,
+    Parent(AcceptedParentOpen<S>),
+}
+
+/// Resolve a newly accepted open without demoting a live popped-out child.
+pub(super) fn resolve_child_presentation<S>(
+    current: Option<UtilityPresentation>,
+    remembered: Option<UtilityPresentation>,
+    default: UtilityPresentation,
+    origin: &ChildOpenOrigin<S>,
+) -> UtilityPresentation {
+    let requested = match origin {
+        ChildOpenOrigin::Parent(parent) if parent.host.host == UtilityPresentation::Popout => {
+            UtilityPresentation::Popout
+        }
+        _ => remembered.unwrap_or(default),
+    };
+    match current {
+        Some(UtilityPresentation::Popout) => UtilityPresentation::Popout,
+        _ => requested,
+    }
+}
+
 /// Session-independent lifecycle state shared by ordinary utility hosts.
 /// Tool documents, close decisions, workers, and accepted effects stay with
 /// their existing owners.
@@ -214,6 +271,80 @@ pub(super) fn presentation_button(
 mod tests {
     use super::{UtilityHostState, UtilityPresentation};
     use eframe::egui;
+
+    #[test]
+    fn child_open_policy_uses_retained_parent_and_preserves_live_popout() {
+        use super::{
+            AcceptedParentOpen, ChildOpenOrigin, HostIdentity, ViewportPassProvenance,
+            resolve_child_presentation,
+        };
+        use UtilityPresentation::{Docked, Popout};
+
+        let ctx = egui::Context::default();
+        let root = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let parent = HostIdentity {
+            host: Popout,
+            generation: 7,
+        };
+        assert!(AcceptedParentOpen::from_retained(&ctx, parent, 42_u64, root, root).is_none());
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let receipt = AcceptedParentOpen::from_retained(&ctx, parent, 42_u64, root, root).unwrap();
+        assert!(receipt.is_current(parent, &42));
+        assert!(!receipt.is_current(
+            HostIdentity {
+                host: Docked,
+                generation: 8
+            },
+            &42
+        ));
+        assert!(!receipt.is_current(parent, &43));
+        let parent_origin = ChildOpenOrigin::Parent(receipt.clone());
+        let root_origin = ChildOpenOrigin::<u64>::Root;
+        let cases = [
+            (None, None, Docked, &root_origin, Docked),
+            (None, Some(Popout), Docked, &root_origin, Popout),
+            (Some(Docked), Some(Popout), Docked, &root_origin, Popout),
+            (Some(Popout), Some(Docked), Docked, &root_origin, Popout),
+            (Some(Docked), Some(Docked), Docked, &root_origin, Docked),
+            (None, Some(Docked), Docked, &parent_origin, Popout),
+            (Some(Docked), Some(Docked), Docked, &parent_origin, Popout),
+            (Some(Popout), Some(Docked), Docked, &parent_origin, Popout),
+        ];
+        for (current, remembered, default, origin, expected) in cases {
+            assert_eq!(
+                resolve_child_presentation(current, remembered, default, origin),
+                expected
+            );
+        }
+        let docked_parent = ChildOpenOrigin::Parent(
+            AcceptedParentOpen::from_retained(
+                &ctx,
+                HostIdentity {
+                    host: Docked,
+                    generation: 2,
+                },
+                9,
+                root,
+                root,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            resolve_child_presentation(None, Some(Popout), Docked, &docked_parent),
+            Popout
+        );
+        assert_eq!(
+            resolve_child_presentation(None, None, Docked, &docked_parent),
+            Docked
+        );
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        assert!(
+            receipt.is_current(parent, &42),
+            "an accepted receipt survives later frames"
+        );
+    }
 
     #[test]
     fn transition_is_idempotent_and_retired_generations_are_stale() {
