@@ -1252,6 +1252,8 @@ pub(crate) struct DiagramStudioDialog {
     pub(crate) open: bool,
     owner_host: UtilityHostState,
     viewer_host: UtilityHostState,
+    owner_presentation_prepared: bool,
+    viewer_presentation_prepared: bool,
     show_root_after_host_change: bool,
     #[cfg(all(windows, not(test)))]
     picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
@@ -1474,6 +1476,8 @@ impl DiagramStudioDialog {
             owner_generation: 0,
             owner_host: UtilityHostState::popped_out(),
             viewer_host: UtilityHostState::popped_out(),
+            owner_presentation_prepared: false,
+            viewer_presentation_prepared: false,
             show_root_after_host_change: false,
             #[cfg(all(windows, not(test)))]
             picker_owner: None,
@@ -1670,6 +1674,8 @@ impl DiagramStudioDialog {
             return;
         }
         if !self.open {
+            self.owner_host = UtilityHostState::popped_out();
+            self.owner_presentation_prepared = false;
             self.owner_generation = self.owner_generation.wrapping_add(1);
             self.viewport_bootstrap_pending = true;
         }
@@ -1694,10 +1700,31 @@ impl DiagramStudioDialog {
             return;
         }
         if !self.open {
+            self.owner_host = UtilityHostState::popped_out();
+            self.owner_presentation_prepared = false;
             self.owner_generation = self.owner_generation.wrapping_add(1);
             self.viewport_bootstrap_pending = true;
         }
         self.open = true;
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.owner_presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio")
+                .expect("stable Diagram Studio key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.owner_host);
+            self.owner_presentation_prepared = true;
+        }
+        if self.viewer_open && !self.viewer_presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diagram-viewer")
+                .expect("stable Diagram Viewer key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.viewer_host);
+            self.viewer_presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn owner_is_popped_out(&self) -> bool {
+        self.owner_host.presentation() == UtilityPresentation::Popout
     }
 
     pub(super) fn take_show_root_after_host_change(&mut self) -> bool {
@@ -1843,9 +1870,11 @@ impl DiagramStudioDialog {
             .complete_bootstrap(self.owner_host.identity(), None, None);
         self.owner_generation = self.owner_generation.wrapping_add(1);
         self.open = false;
+        self.owner_presentation_prepared = false;
         self.close_pending = false;
         self.viewport_bootstrap_pending = false;
         self.viewer_open = false;
+        self.viewer_presentation_prepared = false;
         self.viewer_bootstrap_pending = false;
         self.viewer_focus_pending = false;
         self.viewer_generation = self.viewer_generation.wrapping_add(1);
@@ -1897,6 +1926,7 @@ impl DiagramStudioDialog {
         root_visible: bool,
         root_input_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.show_impl(
             ctx,
@@ -3675,6 +3705,14 @@ impl DiagramStudioDialog {
                     owner_pass_current,
                 )
             });
+        if accepted_close {
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio").expect("stable Diagram Studio key");
+            super::utility_host::remember_presentation(ctx, key, effects.host.host);
+            if viewer_was_open {
+                let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                super::utility_host::remember_presentation(ctx, key, self.viewer_host.presentation());
+            }
+        }
         self.publish_completed_visual_export(ctx, completion_pass, effects.close_dialog || effects.os_close_requested, accepted_close, effects.visual_export_cancel_pointer_down);
         self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
         #[cfg(all(windows, not(test)))]
@@ -3698,6 +3736,8 @@ impl DiagramStudioDialog {
         {
             self.show_root_after_host_change |=
                 transition_diagram_host(ctx, &mut self.owner_host, viewport_id());
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio").expect("stable Diagram Studio key");
+            super::utility_host::remember_presentation(ctx, key, self.owner_host.presentation());
             self.viewport_bootstrap_pending =
                 self.owner_host.presentation() == UtilityPresentation::Popout;
             self.focus_viewport = true;
@@ -3726,12 +3766,18 @@ impl DiagramStudioDialog {
             effects.open_viewer_requested && self.open && owner_pass_current;
         if owner_viewer_request_is_current {
             if !self.viewer_open {
+                self.viewer_host = UtilityHostState::popped_out();
+                self.viewer_presentation_prepared = false;
                 self.viewer_generation = self.viewer_generation.wrapping_add(1);
                 self.viewer_embedded_root_focused_id = None;
                 self.viewer_open = true;
                 self.visual_viewer_fit_follow = true;
                 self.visual_viewer_fit_size = None;
                 self.visual_viewer_minimap_drag = None;
+                self.prepare_open_presentation(ctx);
+                if self.viewer_host.presentation() == UtilityPresentation::Docked {
+                    self.show_root_after_host_change = true;
+                }
             }
             self.viewer_focus_pending = true;
             self.viewer_bootstrap_pending = true;
@@ -3812,7 +3858,10 @@ impl DiagramStudioDialog {
                         Some((viewer_effects.callback_viewport_id, id));
                 }
                 if viewer_effects.close_requested {
+                    let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                    super::utility_host::remember_presentation(ctx, key, viewer_effects.host.host);
                     self.viewer_open = false;
+                    self.viewer_presentation_prepared = false;
                     self.viewer_generation = self.viewer_generation.wrapping_add(1);
                     self.viewer_bootstrap_pending = false;
                     self.viewer_focus_pending = false;
@@ -3823,6 +3872,8 @@ impl DiagramStudioDialog {
                 } else if viewer_effects.change_host {
                     self.show_root_after_host_change |=
                         transition_diagram_host(ctx, &mut self.viewer_host, viewer_viewport_id());
+                    let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                    super::utility_host::remember_presentation(ctx, key, self.viewer_host.presentation());
                     self.viewer_bootstrap_pending =
                         self.viewer_host.presentation() == UtilityPresentation::Popout;
                     self.viewer_focus_pending = true;
@@ -18967,6 +19018,20 @@ mod tests {
         let undo_depth = dialog.test_session().undo_depth();
         let redo_depth = dialog.test_session().redo_depth();
         let ctx = egui::Context::default();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Popout);
         for _ in 0..3 {
             frame(&mut dialog, &ctx);
         }
@@ -19017,6 +19082,11 @@ mod tests {
         click_action(&mut dialog, &ctx, "decision_cancel");
         assert!(dialog.open);
         assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        workers.join_all();
         assert_eq!(dialog.test_session().draft(), source);
         assert_eq!(dialog.test_session().revision(), revision);
         assert_eq!(dialog.test_session().undo_depth(), undo_depth);
@@ -21877,6 +21947,20 @@ mod tests {
     fn studio_usability_diagram_viewer_discard_close_and_reopen_are_generation_scoped() {
         let mut dialog = initialized_dialog();
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-viewer").unwrap();
         frame(&mut dialog, &ctx);
         click_action_with_child_discard(&mut dialog, &ctx, "open_viewer");
         assert!(
@@ -21917,6 +22001,7 @@ mod tests {
             "a discarded viewer child cannot retire the viewer"
         );
 
+        assert_eq!(manager.preference(key), None);
         let _ = viewer_close_request_commands_with_root_discard(&mut dialog, &ctx);
         assert!(
             dialog.viewer_open,
@@ -21929,6 +22014,10 @@ mod tests {
             "an accepted viewer X closes only that window"
         );
         assert!(dialog.open, "the owning editor remains open");
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         assert_eq!(
             dialog.test_session().revision(),
             original_key.accepted_revision
@@ -21950,6 +22039,7 @@ mod tests {
             dialog.documents.session().unwrap().revision(),
             original_key.accepted_revision
         );
+        workers.join_all();
     }
 
     #[test]
@@ -22162,9 +22252,86 @@ mod tests {
     }
 
     #[test]
+    fn diagram_owner_and_viewer_restore_independent_saved_presentations() {
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager =
+            UtilityPresentationManager::new(path, workers.clone(), UtilityPresentations::default());
+        manager.install_in_context(&ctx);
+        let owner = UtilityToolKey::parse("diagram-studio").unwrap();
+        let viewer = UtilityToolKey::parse("diagram-viewer").unwrap();
+        let mut default = DiagramStudioDialog::default();
+        assert!(!default.open);
+        default.open();
+        default.prepare_open_presentation(&ctx);
+        assert_eq!(
+            default.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        manager.remember(&ctx, owner, RememberedPresentation::Docked);
+        manager.remember(&ctx, viewer, RememberedPresentation::Docked);
+        default.prepare_open_presentation(&ctx);
+        assert_eq!(
+            default.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        let mut restored = DiagramStudioDialog::default();
+        restored.open();
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        restored.viewer_open = true;
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.viewer_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        manager.remember(&ctx, owner, RememberedPresentation::Popout);
+        manager.remember(&ctx, viewer, RememberedPresentation::Popout);
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(
+            restored.viewer_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        workers.join_all();
+    }
+
+    #[test]
     fn diagram_visual_host_discards_unretained_dock_click() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
 
         click_action_with_root_discard(&mut dialog, &ctx, "owner_presentation");
         assert_eq!(
@@ -22172,6 +22339,7 @@ mod tests {
             UtilityPresentation::Popout
         );
         assert!(!dialog.take_show_root_after_host_change());
+        assert_eq!(manager.preference(key), None);
 
         click_action(&mut dialog, &ctx, "owner_presentation");
         assert_eq!(
@@ -22179,6 +22347,18 @@ mod tests {
             UtilityPresentation::Docked
         );
         assert!(dialog.take_show_root_after_host_change());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        workers.join_all();
+        assert_eq!(
+            crate::settings::Settings::load(&path)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
         assert_eq!(
             dialog.documents.authoring_kind(),
             Some(crate::diagram::DiagramAuthoringKind::Visual),

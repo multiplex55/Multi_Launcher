@@ -139,6 +139,8 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | Notes list and note editors | M3-B1b implemented / automated verified |
 | File Search / Settings / Mouse Settings / Gesture Settings / Mouse Gestures | M3-B1c1 implemented / automated verified |
 | Calendar / event details / event editor / DateTime Studio / Timer | M3-B1c2 implemented / automated verified |
+| Diagram Studio / Viewer / Regex | M3-B1c3a implemented / automated verified |
+| Markdown / Diff / MkMacro main | pending M3-B1c3b |
 | Other existing custom families enumerated above | pending remaining B1c groups |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
@@ -208,3 +210,18 @@ Separate final fast-dev lib no-run compile passed; final post-test edit was inde
 - `m3-b1c2-calendar-timer`: 3/3 passed, run `445763ae-6127-4b4a-bab3-a7097664079f`, runner 3.244s: retained Calendar save/delete occurrence, Timer submission failure/success and Timer/Alarm authoring host moves.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c2-{date,calendar-timer}/`; cleanup/drain verified. Parent inspected source/open/close/command diff and whitespace; lanes returned. Other document and analysis/output custom hosts and B2 remain pending; native pending M9.
+
+M3-B1c2 checkpoint `98c08e7831e9c8a0aa01c3cfd431558170cccc94` pushed successfully; clean tree before document-host M3-B1c3. Implementer owns existing Diagram owner/viewer, Markdown, Diff, Regex and MkMacro main preference integration; nested children remain B2. Remaining analysis/output hosts follow. Parent ledger/Git; single source/Cargo lane.
+
+Final NoteGraph caller clarification: production opens via `note graph` launcher command (`commands/handlers/note_link.rs` → command host) or root panel focus/pin; radial command handoff is an excluded overlay origin. No Quick Notes/NotePanel/Markdown/other ordinary-tool Graph open was found. Dashboard graph widget opens notes, not the Graph dialog. Retain root-only/no existing Dock exclusion for Graph parent; Graph→Note editor resolves the editor's remembered preference. Existing command-route test: `note_graph_dialog_action_opens_dialog`. This supersedes the pending classification note above; no adapter is invented.
+
+## M3-B1c3a partial acceptance: Default-Popout document hosts
+
+Diagram Studio, Diagram Viewer and Regex restore saved presentation once per real open while retaining Popout when no preference exists. Accepted transitions and successful final owner/viewer closes remember effective presentation; Diagram dirty decision cancellation retains its choice and draft. Root open/focus paths prepare early and show root only for actual Docked presentation. Existing document, viewer and pass-generation fences retained. Markdown/Diff/MkMacro main form the separate remaining document group.
+
+Separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` batches:
+
+- `m3-b1c3-diagram`: 4/4 passed, run `c1470625-20fb-43ba-89e1-895132232adc`, runner 2.475s: independent owner/viewer preferences, dirty native-close decision, discarded Dock and viewer close/reopen generation scope.
+- `m3-b1c3-regex-focus`: 3/3 passed, run `9ee911d4-483a-4a83-b6bd-fcaea7640cd2`, runner 9.586s: Regex saved-Docked/live-Popout policy, retained revision/copy host moves and full existing detached-query coexistence matrix after the Diagram change.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c3-{diagram,regex-focus}/`; cleanup/drain verified. Parent inspected source/open/close diff and whitespace; lanes returned. Other document/analysis hosts and B2 remain pending; native pending M9.

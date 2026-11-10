@@ -6027,6 +6027,8 @@ impl LauncherApp {
             }
         }
         match panel {
+            Panel::RegexTesterDialog => self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::TimerDialog => self.timer_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::FileSearchDialog => self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open),
@@ -6160,6 +6162,10 @@ impl LauncherApp {
             self.xml_toolkit_dialog.open();
         } else if panel == Panel::RegexTesterDialog {
             self.regex_tester_dialog.open();
+            self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx);
+            if !self.regex_tester_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ProgrammerInspectorDialog {
             self.programmer_inspector_dialog.open();
             self.programmer_inspector_host.prepare_open(&self.egui_ctx, &self.programmer_inspector_dialog);
@@ -6202,6 +6208,10 @@ impl LauncherApp {
             self.open_mouse_gesture_settings_dialog();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
+            self.diagram_studio_dialog.prepare_open_presentation(&self.egui_ctx);
+            if self.diagram_studio_dialog.open && !self.diagram_studio_dialog.owner_is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::MarkdownStudioDialog {
             self.markdown_studio_dialog.open();
         } else if panel == Panel::ConvertPanel {

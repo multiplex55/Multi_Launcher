@@ -4841,6 +4841,8 @@ impl LauncherApp {
         self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_settings_host.prepare_open(ctx, super::mouse_form_host::MOUSE_SETTINGS, self.mouse_settings_dialog.open);
         self.mouse_gesture_settings_host.prepare_open(ctx, super::mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open);
+        self.regex_tester_dialog.prepare_open_presentation(ctx);
+        self.diagram_studio_dialog.prepare_open_presentation(ctx);
         self.date_time_studio_dialog.prepare_open_presentation(ctx);
         self.timer_dialog.prepare_open_presentation(ctx);
         self.calculation_pad_dialog.prepare_open_presentation(ctx);
