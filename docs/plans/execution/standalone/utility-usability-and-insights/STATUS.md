@@ -33,7 +33,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M5-A | I1 bounded label-file exchange | complete; automated verified, native pending |
 | M6-A | R1/R2 explicit duration / encoder timeline | complete foundation; UI pending M6-B |
 | M6-B | R1/R2 exact typing / 25-second steps | complete; automated verified, native pending |
-| M7-A | F1 retained-tree treemap model | pending |
+| M7-A | F1 retained-tree treemap model | complete foundation; linked UI pending M7-B |
 | M7-B | F1/F2 linked navigation / visibility | pending |
 | M8-A | C1 cached stable dependency snapshot | pending |
 | M8-B | C1 companion explorer / navigation | pending |
@@ -420,3 +420,15 @@ Displayed duration text is the single selection value validated for a request: w
 Separate final fast-dev lib no-run compile passed without introduced warnings. Owned 100-second `--no-fail-fast` receipts under `target/utility-usability-and-insights/evidence/`: `m6-b-first` 3/3 (actual typing/blur, button/arrow/raw wheel, 0/1,000/invalid, retained same-pass frozen request and status); `m6-b-scroll-parent` 1/1 (genuinely scrollable parent at nonzero offset unchanged by owned 17→42 wheel step); `m6-b-regressions` 3/3 (cancelled path/frozen 17, reciprocal capture guards, hidden retained Stop). All exit 0/no timeout/cleanup and drain verified.
 
 Parent inspected scoped diff/whitespace/status; only Recording UI, current README and ledger changed. Source/Cargo returned. R1/R2 implementation and automated evidence complete; physical short timed GIF/MP4/Unlimited recording and playback remain M9. No real 1,000-second wait performed or required. M7/M8/global adapters continue.
+
+M6-B checkpoint `a2bb87de4bd1f376fbdfd476b21d17779301eb5b` pushed successfully; clean tree before M7-A. Implementer owns deterministic pure immediate-child treemap measurement/layout and accepted-publication/geometry cache seam, with exact u128 accounting and no-scan proof. M7-B linked UI/visibility and the directly relevant known selection-after-Dock failure follow; A is not full F1/F2 completion. Parent ledger/Git; one source/Cargo lane.
+
+## M7-A acceptance: Retained-child treemap projection
+
+Pure local-coordinate area subdivision uses original row IDs, measured directory subtree totals/direct-file lengths, checked u128 displayed totals and deterministic byte/ID ordering. Immediate children only prevent ancestor/descendant double counting. Zero, unknown, omitted and provisional entries remain distinct metadata without invented area. Geometry rejects invalid/nonfinite dimensions and stays finite/bounded/non-overlapping; tiny positive measurements retain identity and exact totals even when floating-point area rounds away. No path/filesystem/scanner dependency.
+
+The GUI-owned on-demand cache maps accepted projection rows into narrow inputs and keys by generation/publication/result, directory, filter and dimensions independently of table sort. No renderer/hidden-frame work is added in A. Transitional dormant-seam allowances are explicitly removed when B wires the UI.
+
+Separate final fast-dev lib no-run compile passed after correcting one test-only function-name shadowing error. Owned 100-second `--no-fail-fast` receipts `m7-a-treemap` passed 5/5 in 1.888s (exact bounds/ties/counts, cache reuse and same-count publication/result/directory/filter/size invalidation with held-scan counter, existing projection/zero-total/cancel regressions); `m7-a-tiny` passed 1/1 (one u64::MAX child plus 128 one-byte children, exact u128 sum/all identities/finite bounds/non-overlap/honest zero and unknown counts). Evidence under `target/utility-usability-and-insights/evidence/`; exit 0/no timeout/cleanup and drain verified.
+
+Parent inspected scoped diff/whitespace/status; only pure module/export, cache seam/tests and ledger changed. Source/Cargo returned. B still owns all visible chart/linked selection/toggles and real UI no-scan evidence. Planner isolated existing selection loss: Drill selects the entered directory, then passive child-cache rebuild clears it because it is not its own child; settling frames expose this before Dock. Fix that owner boundary in B, preserve original regression and Reveal guards; no OS/focus workaround.

@@ -414,6 +414,65 @@ struct PendingFolderSizePass {
     projection: Option<Arc<FolderSizeProjection>>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct TreemapKey {
+    projection: ProjectionKey,
+    directory: usize,
+    filter: KindFilter,
+    width: u64,
+    height: u64,
+}
+
+#[derive(Default)]
+struct TreemapCache {
+    value: Option<(TreemapKey, Arc<crate::folder_size::treemap::Layout>)>,
+}
+
+impl TreemapCache {
+    fn layout(
+        &mut self,
+        projection: ProjectionKey,
+        rows: &[FolderSizeRow],
+        children: &[Vec<usize>],
+        directory: usize,
+        filter: KindFilter,
+        width: f64,
+        height: f64,
+    ) -> Option<Arc<crate::folder_size::treemap::Layout>> {
+        use crate::folder_size::treemap::{self, Item, Measurement};
+        let key = TreemapKey {
+            projection,
+            directory,
+            filter,
+            width: width.to_bits(),
+            height: height.to_bits(),
+        };
+        if let Some((cached_key, layout)) = &self.value {
+            if *cached_key == key {
+                return Some(layout.clone());
+            }
+        }
+        let indices = children.get(directory)?;
+        let items = indices.iter().filter_map(|&index| {
+            let row = rows.get(index)?;
+            if !filter_matches(filter, row.kind) {
+                return None;
+            }
+            let measurement = match row.kind {
+                FolderSizeEntryKind::Omitted(_) => Measurement::Omitted,
+                _ => row_sort_measurement(row).map_or(Measurement::Unknown, Measurement::Bytes),
+            };
+            Some(Item {
+                row: index,
+                measurement,
+                provisional: matches!(row.kind, FolderSizeEntryKind::Directory) && !row.complete,
+            })
+        });
+        let layout = Arc::new(treemap::layout(items, width, height)?);
+        self.value = Some((key, layout.clone()));
+        Some(layout)
+    }
+}
 pub(crate) struct FolderSizeDialogState {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
@@ -435,6 +494,8 @@ pub(crate) struct FolderSizeDialogState {
     sort_direction: SortDirection,
     filter: KindFilter,
     visible_rows: Option<VisibleRows>,
+    #[allow(dead_code)]
+    treemap_cache: TreemapCache,
     pending: Option<PendingFolderSizePass>,
     notice: Option<String>,
     #[cfg(test)]
@@ -495,6 +556,7 @@ impl FolderSizeDialogState {
             sort_direction: SortDirection::Descending,
             filter: KindFilter::All,
             visible_rows: None,
+            treemap_cache: TreemapCache::default(),
             pending: None,
             notice: None,
             #[cfg(test)]
@@ -1532,6 +1594,29 @@ impl FolderSizeDialogState {
         });
     }
 
+    // Called only when the treemap is requested; table rendering does no layout work.
+    #[allow(dead_code)]
+    fn treemap_layout(
+        &mut self,
+        width: f64,
+        height: f64,
+    ) -> Option<Arc<crate::folder_size::treemap::Layout>> {
+        let projection = self.projection.as_ref()?;
+        let directory = self
+            .current_directory
+            .filter(|(generation, _)| *generation == projection.key.generation)
+            .map(|(_, index)| index)
+            .or(projection.root_index)?;
+        self.treemap_cache.layout(
+            projection.key,
+            &projection.rows,
+            &projection.children,
+            directory,
+            self.filter,
+            width,
+            height,
+        )
+    }
     fn sync_visible_rows(&mut self) {
         let Some(projection) = self.projection.as_ref() else { self.visible_rows = None; return; };
         let Some(directory) = self.current_directory.filter(|(generation, _)| *generation == projection.key.generation)
@@ -2109,6 +2194,83 @@ mod tests {
             subtree_logical_bytes,
             complete: true,
         }
+    }
+
+    #[test]
+    fn folder_size_treemap_cache_tracks_projection_directory_filter_and_size_without_scans() {
+        let root = crate::folder_size::disposable_scan_fixture_root();
+        let (session, control) = FolderSizeSession::with_held_test_scan(|| {});
+        session
+            .refresh(
+                ExplicitDirectoryRoot::new(root.path().to_path_buf()).unwrap(),
+                true,
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while control.started().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(control.started().len(), 1);
+        let mut rows = vec![
+            row("root", None, FolderSizeEntryKind::Directory, None, 30),
+            row("folder", Some(0), FolderSizeEntryKind::Directory, None, 20),
+            row("direct", Some(0), FolderSizeEntryKind::File, Some(10), 0),
+            row("nested", Some(1), FolderSizeEntryKind::File, Some(20), 0),
+            row("unknown", Some(0), FolderSizeEntryKind::File, None, 0),
+        ];
+        rows[1].complete = false;
+        let children = vec![vec![1, 2, 4], vec![3], vec![], vec![], vec![]];
+        let mut cache = TreemapCache::default();
+        let key = ProjectionKey {
+            generation: 1,
+            version: ProjectionVersion::Progress(1),
+        };
+        let first = cache
+            .layout(key, &rows, &children, 0, KindFilter::All, 300.0, 200.0)
+            .unwrap();
+        assert_eq!(
+            (first.total, first.unknown_count, first.provisional_count),
+            (30, 1, 1)
+        );
+        assert_eq!(
+            first.tiles.iter().map(|tile| tile.row).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let same = cache
+            .layout(key, &rows, &children, 0, KindFilter::All, 300.0, 200.0)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &same));
+        let newer = ProjectionKey {
+            version: ProjectionVersion::Progress(2),
+            ..key
+        };
+        let changed = cache
+            .layout(newer, &rows, &children, 0, KindFilter::All, 300.0, 200.0)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        let result = ProjectionKey {
+            version: ProjectionVersion::Result,
+            ..key
+        };
+        let complete = cache
+            .layout(result, &rows, &children, 0, KindFilter::All, 300.0, 200.0)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&changed, &complete));
+        let files = cache
+            .layout(result, &rows, &children, 0, KindFilter::Files, 300.0, 200.0)
+            .unwrap();
+        assert_eq!(files.total, 10);
+        let nested = cache
+            .layout(result, &rows, &children, 1, KindFilter::All, 300.0, 200.0)
+            .unwrap();
+        assert_eq!(nested.total, 20);
+        let resized = cache
+            .layout(result, &rows, &children, 1, KindFilter::All, 200.0, 200.0)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&nested, &resized));
+        assert_eq!(control.started().len(), 1);
+        control.release();
+        session.close();
     }
 
     #[test]

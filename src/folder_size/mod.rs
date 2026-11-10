@@ -1,6 +1,8 @@
 mod model;
 mod scan;
 mod session;
+#[allow(dead_code)]
+pub(crate) mod treemap;
 
 #[cfg(test)]
 pub(crate) use model::FolderSizeAccumulator;
