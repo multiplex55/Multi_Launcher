@@ -2842,6 +2842,19 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(super) fn test_stage_image_open(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        host_request: Option<UtilityPresentation>,
+    ) {
+        self.test_stage_retained_note_frame(ctx, None, None, host_request);
+        if let Some(frame) = self.pending_host_frame.as_mut() {
+            frame.actions.open_image_paths.push(path);
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_wiki_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_wiki_open
     }

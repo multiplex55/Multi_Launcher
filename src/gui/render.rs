@@ -2054,10 +2054,7 @@ impl LauncherApp {
             || (self.notes_dialog.host_layer_if_root().is_some()
                 && self.notes_dialog.jump_mode_unsupported_nested_owner_open())
             || (self.unused_assets_dialog.open
-                && !ordinary_layer_is_allowed(egui::LayerId::new(
-                    egui::Order::Middle,
-                    egui::Id::new(Some("Unused Note Assets")),
-                )))
+                && self.unused_assets_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || self
                 .note_panels
                 .iter()
@@ -2157,12 +2154,13 @@ impl LauncherApp {
                 self.image_panels
                     .iter()
                     .filter(|panel| panel.open)
-                    .map(|panel| panel.query_focus_layer_id()),
+                    .filter_map(|panel| panel.host.root_layer()),
             )
             .chain(self.show_plugins.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("Plugin Settings"),
             )))
+            .chain(self.notes_dialog.template_manager.is_open().then(|| self.note_templates_host.root_layer()).flatten())
             .chain(self.calculation_pad_dialog.examples_layer_if_root())
             .chain(self.diagram_studio_dialog.owner_layer_if_root())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
@@ -2205,7 +2203,7 @@ impl LauncherApp {
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer(),
             Panel::NotesDialog => self.notes_dialog.host_layer_if_root(),
             Panel::NoteGraphDialog => middle(egui::Id::new(Some("Note Graph"))),
-            Panel::UnusedAssetsDialog => middle(egui::Id::new(Some("Unused Note Assets"))),
+            Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer(),
             Panel::ScreenshotEditor => middle(egui::Id::new("Screenshot Editor")),
             Panel::TodoDialog => Some(crate::gui::jump_mode::ui::todo_dialog_layer_id()),
             Panel::TodoViewDialog => middle(egui::Id::new(Some("View Todos"))),
@@ -2492,7 +2490,7 @@ impl LauncherApp {
             && focused_response_layer(ctx)
                 .is_none_or(|layer| layer == notes_layer || layer.order != egui::Order::Middle)
             && !self.notes_dialog.jump_mode_unsupported_nested_owner_open()
-            && !self.unused_assets_dialog.open
+            && self.unused_assets_host.root_layer().is_none_or(|_| !self.unused_assets_dialog.open)
             && !self.query_focus_owner_blocks(ctx, true)
             && self.query_show_geometry_is_eligible(ctx, geometry) == Some(true)
     }
@@ -4872,6 +4870,13 @@ impl LauncherApp {
         self.search_replace_host.prepare_open(ctx, &self.search_replace_dialog);
         self.hash_generator_host.prepare_open(ctx, &self.hash_generator_dialog);
         self.file_preview_host.prepare_open(ctx, &self.file_search_dialog.preview_dialog);
+        self.note_templates_host.prepare_open(ctx, &self.notes_dialog.template_manager);
+        self.unused_assets_host.prepare_open(ctx, &self.unused_assets_dialog);
+        for panel in &mut self.image_panels {
+            let mut host = std::mem::take(&mut panel.host);
+            host.prepare_open(ctx, panel);
+            panel.host = host;
+        }
         self.programmer_inspector_host.prepare_open(ctx, &self.programmer_inspector_dialog);
         self.calculation_dependency_host.prepare_open(ctx, &self.calculation_dependency_dialog);
         self.explorer_tabs_host.prepare_open(ctx, &self.explorer_tabs_dialog);
@@ -4962,6 +4967,9 @@ impl LauncherApp {
                 || self.file_preview_host.needs_root_ui_when_hidden(self.file_search_dialog.preview_dialog.open)
                 || self.hash_generator_host.needs_root_ui_when_hidden(self.hash_generator_dialog.open)
                 || self.hash_generator_dialog.has_job()
+                || self.note_templates_host.needs_root_ui_when_hidden(self.notes_dialog.template_manager.is_open())
+                || self.unused_assets_host.needs_root_ui_when_hidden(self.unused_assets_dialog.open)
+                || self.image_panels.iter().any(|panel| panel.host.needs_root_ui_when_hidden(panel.open))
                 || self.explorer_tabs_host.needs_root_ui_when_hidden(self.explorer_tabs_dialog.open)
                 || self.explorer_tabs_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -5569,6 +5577,98 @@ impl LauncherApp {
                 root_scopes: (None, None),
             },
         );
+        self.show_note_auxiliaries(ctx, first, root_visible);
+    }
+
+    fn show_note_auxiliaries(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let is_owner = |layer: Option<egui::LayerId>| {
+            root_input
+                && layer.is_some()
+                && visible_top_middle_layer(ctx) == layer
+                && !egui::Popup::is_any_open(ctx)
+                && focused_response_layer(ctx).is_none_or(|focus| {
+                    Some(focus) == layer || focus.order == egui::Order::Background
+                })
+        };
+        let template_layer = self.note_templates_host.root_layer();
+        let template_owner = is_owner(template_layer)
+            || (root_input && self.notes_dialog.template_manager.owns_input(ctx));
+        self.note_templates_host.show(
+            ctx,
+            &mut self.notes_dialog.template_manager,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: template_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        let assets_layer = self.unused_assets_host.root_layer();
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::UnusedAssetsDialog);
+        self.unused_assets_host.show(
+            ctx,
+            &mut self.unused_assets_dialog,
+            &pinned,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: is_owner(assets_layer),
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        for panel in &mut self.image_panels {
+            let mut host = std::mem::take(&mut panel.host);
+            let layer = host.root_layer();
+            host.show(
+                ctx,
+                panel,
+                &(),
+                HostInput {
+                    first,
+                    root_visible,
+                    root_input,
+                    native_input,
+                    root_owner: NavigationOwner::Blocked,
+                    parent_owner: is_owner(layer),
+                    root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                    close_shortcut: true,
+                    allow_os_close: true,
+                    confirmation_owner: NavigationOwner::Blocked,
+                    parent_instance: 0,
+                    root_scopes: (None, None),
+                },
+            );
+            panel.host = host;
+        }
     }
 
     fn show_calculation_dependencies(
@@ -5707,24 +5807,6 @@ impl LauncherApp {
         if root_visible || self.notes_dialog.needs_root_ui_when_hidden() {
             let application_input_allowed = self.native_ui_application_input_allowed(ctx);
             let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
-            let template_delete_layer = egui::LayerId::new(
-                egui::Order::Middle,
-                egui::Id::new(Some("Delete Template?")),
-            );
-            let root_template_input_allowed = root_visible
-                && self.visible_flag.load(Ordering::Relaxed)
-                && !self.pin_list_open
-                && !self.ocr_surface_visible()
-                && !self.confirm_modal.is_open()
-                && !self.action_sheet.is_open()
-                && application_input_allowed
-                && ctx.viewport_id() == egui::ViewportId::ROOT
-                && ctx.input(|input| input.focused)
-                && ctx.memory(|memory| {
-                    memory
-                        .top_modal_layer()
-                        .is_none_or(|layer| layer == template_delete_layer)
-                });
             let owner_instance = self.jump_mode_ui.notes_instance();
             let jump_mode_enabled = self.jump_mode_enabled()
                 && !self.mouse_gestures_dialog.recorder_canvas_active();
@@ -5737,7 +5819,7 @@ impl LauncherApp {
                 application_input_allowed,
                 root_visible,
                 root_input_allowed,
-                root_template_input_allowed,
+                false,
                 owner_instance,
                 jump_mode_enabled,
                 true,
@@ -9115,7 +9197,7 @@ impl LauncherApp {
                 NavigationOwner::Notes { .. }
                     if self.notes_dialog.host_layer_if_root().is_none()
                         || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
-                        || self.unused_assets_dialog.open =>
+                        || (self.unused_assets_dialog.open && self.unused_assets_host.root_layer().is_some()) =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
                 }
@@ -11910,9 +11992,6 @@ impl LauncherApp {
             crate::plugins::note::note_version(),
         );
         self.note_graph_dialog = graph_dlg;
-        let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
-        assets_dlg.ui(&ctx, self);
-        self.unused_assets_dialog = assets_dlg;
         let mut note_close_frame = self
             .radial_query_observation
             .has_note_close_request()
@@ -11923,15 +12002,6 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             note_close_frame.as_mut(),
         );
-        let mut i = 0;
-        while i < self.image_panels.len() {
-            let mut panel = self.image_panels.remove(i);
-            panel.ui(&ctx);
-            if panel.open {
-                self.image_panels.insert(i, panel);
-                i += 1;
-            }
-        }
         let mut i = 0;
         while i < self.screenshot_editors.len() {
             let mut editor = self.screenshot_editors.remove(i);
@@ -12578,6 +12648,81 @@ pub(crate) fn persist_launcher_close_preferences(
 }
 
 impl LauncherApp {
+    fn complete_note_auxiliaries(&mut self, ctx: &egui::Context) -> (bool, bool, Vec<u64>) {
+        use super::utility_window_host::{
+            ImageHostCommand, NoteTemplatesHostCommand, UnusedAssetsHostCommand,
+        };
+        let mut template_show = false;
+        if let Some(completion) = self
+            .note_templates_host
+            .complete(ctx, &mut self.notes_dialog.template_manager)
+        {
+            template_show = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    NoteTemplatesHostCommand::Closed => self.notes_dialog.template_manager.close(),
+                    NoteTemplatesHostCommand::Apply(actions) => {
+                        let mut notes = std::mem::take(&mut self.notes_dialog);
+                        notes.template_manager.apply_host_actions(actions, self);
+                        self.notes_dialog = notes;
+                    }
+                }
+            }
+        }
+        let mut assets_show = false;
+        if let Some(completion) = self
+            .unused_assets_host
+            .complete(ctx, &mut self.unused_assets_dialog)
+        {
+            assets_show = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    UnusedAssetsHostCommand::Closed => self.unused_assets_dialog.open = false,
+                    UnusedAssetsHostCommand::Apply(actions) => {
+                        let mut assets = std::mem::take(&mut self.unused_assets_dialog);
+                        assets.apply_host_actions(actions, self);
+                        self.unused_assets_dialog = assets;
+                    }
+                }
+            }
+        }
+        let mut image_show = Vec::new();
+        for panel in &mut self.image_panels {
+            let mut host = std::mem::take(&mut panel.host);
+            if let Some(completion) = host.complete(ctx, panel) {
+                if completion.show_root {
+                    image_show.push(panel.session());
+                }
+                for command in completion.commands {
+                    match command {
+                        ImageHostCommand::Closed => panel.open = false,
+                        ImageHostCommand::Apply(actions) => panel.apply_host_actions(actions),
+                    }
+                }
+            }
+            panel.host = host;
+        }
+        self.image_panels.retain(|panel| panel.open);
+        (template_show, assets_show, image_show)
+    }
+
+    fn finish_note_auxiliary_visibility(&mut self, pending: (bool, bool, Vec<u64>)) {
+        let (template_show, assets_show, image_show) = pending;
+        if (template_show
+            && self.notes_dialog.template_manager.is_open()
+            && !self.note_templates_host.is_popped_out())
+            || (assets_show
+                && self.unused_assets_dialog.open
+                && !self.unused_assets_host.is_popped_out())
+            || self
+                .image_panels
+                .iter()
+                .any(|panel| image_show.contains(&panel.session()) && !panel.host.is_popped_out())
+        {
+            self.request_launcher_visibility(true);
+        }
+    }
+
     fn complete_markdown_diagram_handoff(&mut self, ctx: &egui::Context) {
         let note_instances: Vec<_> = self
             .note_panels
@@ -12616,8 +12761,8 @@ impl LauncherApp {
                         .into_iter()
                         .map(|link| (origin.clone(), link)),
                 );
+                image_open_requests.extend(completion.open_image_paths.into_iter().map(|path| (origin.clone(), path)));
             }
-            image_open_requests.extend(completion.open_image_paths);
             if !completion.closed && panel.open {
                 self.note_panels
                     .insert(index.min(self.note_panels.len()), panel);
@@ -12644,10 +12789,10 @@ impl LauncherApp {
                 );
             }
         }
-        for path in image_open_requests {
-            let previous_count = self.image_panels.len();
-            self.open_image_panel(&path);
-            show_root |= self.image_panels.len() > previous_count;
+        for (origin, path) in image_open_requests {
+            if self.note_panels.iter().any(|panel| panel.accepts_note_open(&origin)) {
+                show_root |= self.open_image_panel_from_origin(&path, &super::utility_host::ChildOpenOrigin::Parent(origin));
+            }
         }
         for (origin, link) in note_links {
             if self
@@ -13645,8 +13790,8 @@ impl LauncherApp {
         if completion.show_root {
             self.request_launcher_visibility(true);
         }
-        if let Some(origin) = completion.note_open_origin
-            && self.notes_dialog.accepts_note_open(&origin)
+        if let Some(origin) = completion.note_open_origin.as_ref()
+            && self.notes_dialog.accepts_note_open(origin)
         {
             for slug in completion.open_note_panels {
                 self.open_note_panel_from_origin(
@@ -13654,10 +13799,15 @@ impl LauncherApp {
                 );
             }
         }
-        if completion.open_unused_assets {
-            self.unused_assets_dialog.open();
-            self.focus_panel(super::Panel::UnusedAssetsDialog);
-            self.request_launcher_visibility(true);
+        if let Some(origin) = completion.note_open_origin.as_ref()
+            && self.notes_dialog.accepts_note_open(origin)
+        {
+            if completion.open_unused_assets {
+                self.open_unused_assets_from_origin(&super::utility_host::ChildOpenOrigin::Parent(origin.clone()));
+            }
+            if completion.open_templates {
+                self.open_note_templates_from_origin(&super::utility_host::ChildOpenOrigin::Parent(origin.clone()));
+            }
         }
         for text in completion.clipboard_texts {
             if let Err(error) = crate::actions::clipboard::set_text(&text) {
@@ -13896,6 +14046,9 @@ impl eframe::App for LauncherApp {
             || self.image_compare_dialog.needs_root_ui_when_hidden()
             || self.duplicate_finder_dialog.needs_root_ui_when_hidden()
             || self.zip_extractor_dialog.needs_root_ui_when_hidden()
+            || self.note_templates_host.needs_root_ui_when_hidden(self.notes_dialog.template_manager.is_open())
+            || self.unused_assets_host.needs_root_ui_when_hidden(self.unused_assets_dialog.open)
+            || self.image_panels.iter().any(|panel| panel.host.needs_root_ui_when_hidden(panel.open))
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -13949,8 +14102,10 @@ impl eframe::App for LauncherApp {
             self.focus_panel(super::Panel::DiagramStudioDialog);
             _ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+        let note_aux_visibility = self.complete_note_auxiliaries(_ctx);
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_quick_notes_dialog(_ctx);
+        self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
@@ -14176,8 +14331,10 @@ impl LauncherApp {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
         }
+        let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
         self.complete_quick_notes_dialog(ctx);
+        self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
@@ -18150,6 +18307,502 @@ mod tests {
         app.file_lock_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn native_notes_buttons_open_independent_auxiliaries() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        struct TemplateDir(Option<std::ffi::OsString>);
+        impl Drop for TemplateDir {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", value) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTE_TEMPLATES_DIR") };
+                }
+            }
+        }
+        let _template_dir = TemplateDir(std::env::var_os("ML_NOTE_TEMPLATES_DIR"));
+        unsafe { std::env::set_var("ML_NOTE_TEMPLATES_DIR", workspace.root()) };
+        let ctx = egui::Context::default();
+        let mut app = boxed_app(&ctx, workspace.root());
+        app.note_settings.templates_enabled = true;
+        app.notes_dialog.open();
+        app.notes_dialog.test_popout();
+        app.request_launcher_visibility(false);
+        let viewport = egui::ViewportId::from_hash_of("quick_notes_viewport");
+        for name in ["templates", "assets"] {
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+            }
+            let (rect, clip, enabled) = app
+                .notes_dialog
+                .test_aux_control(name)
+                .expect("Notes control rendered");
+            let visible = rect.intersect(clip);
+            assert!(
+                enabled && visible.is_positive(),
+                "{name}: rect={rect:?} clip={clip:?} enabled={enabled}"
+            );
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    viewport,
+                    tool_dialog_pointer_events(visible, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert!(app.note_templates_host.is_popped_out());
+        assert!(app.unused_assets_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        app.request_launcher_visibility(false);
+        app.notes_dialog
+            .template_manager
+            .test_prepare_edit("draft", "body");
+        let template_view =
+            super::super::utility_window_host::NoteTemplatesWindowHost::test_viewport(
+                app.notes_dialog.template_manager.epoch(),
+            );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, template_view, Vec::new(), false, false);
+        }
+        let control = |app: &LauncherApp, name: &str| {
+            let (rect, clip, enabled) = app
+                .notes_dialog
+                .template_manager
+                .test_control(name)
+                .unwrap();
+            let visible = rect.intersect(clip);
+            assert!(
+                enabled && visible.is_positive(),
+                "{name}: rect={rect:?} clip={clip:?} enabled={enabled}"
+            );
+            visible
+        };
+        let name = control(&app, "name");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                template_view,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            template_view,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            true,
+        );
+        assert_eq!(app.notes_dialog.template_manager.test_draft().0, "draft");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            template_view,
+            vec![egui::Event::Text("x".into())],
+            false,
+            false,
+        );
+        assert!(
+            app.notes_dialog
+                .template_manager
+                .test_draft()
+                .0
+                .contains('x')
+        );
+        let name = app.notes_dialog.template_manager.test_draft().0.to_owned();
+        let path = crate::plugins::note::template_path(&name).unwrap();
+        let save = control(&app, "save");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            template_view,
+            tool_dialog_pointer_events(save, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            template_view,
+            tool_dialog_pointer_events(save, false),
+            false,
+            true,
+        );
+        assert!(!path.exists(), "discarded child Save must not write");
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, template_view, Vec::new(), false, false);
+        }
+        let save = control(&app, "save");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                template_view,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(path.exists(), "retained child Save writes the template");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "body");
+        let host = control(&app, "host");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                template_view,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.note_templates_host.is_popped_out());
+        assert_eq!(app.notes_dialog.template_manager.test_draft().0, name);
+        let old_epoch = app.notes_dialog.template_manager.epoch();
+        app.notes_dialog.template_manager.close();
+        app.notes_dialog.template_manager.open();
+        let stale_path = crate::plugins::note::template_path("stale").unwrap();
+        let mut notes = std::mem::take(&mut app.notes_dialog);
+        let actions = notes.template_manager.test_actions(
+            old_epoch,
+            vec![
+                super::super::notes_dialog::TemplateManagerAction::Save {
+                    name: "stale".into(),
+                    content: "bad".into(),
+                },
+                super::super::notes_dialog::TemplateManagerAction::Delete { name: name.clone() },
+                super::super::notes_dialog::TemplateManagerAction::Open { name: name.clone() },
+            ],
+        );
+        notes.template_manager.apply_host_actions(actions, &mut app);
+        assert!(!stale_path.exists());
+        assert!(path.exists());
+        assert_eq!(notes.template_manager.test_external_opens(), 0);
+        let current = notes.template_manager.epoch();
+        let actions = notes.template_manager.test_actions(
+            current,
+            vec![
+                super::super::notes_dialog::TemplateManagerAction::Open { name: name.clone() },
+                super::super::notes_dialog::TemplateManagerAction::Delete { name: name.clone() },
+            ],
+        );
+        notes.template_manager.apply_host_actions(actions, &mut app);
+        assert_eq!(notes.template_manager.test_external_opens(), 1);
+        assert!(!path.exists());
+        app.notes_dialog = notes;
+        app.notes_dialog.close_from_app(&ctx);
+        app.notes_dialog.open();
+        assert!(
+            !app.notes_dialog.template_manager.is_open()
+                || app.notes_dialog.template_manager.epoch() != old_epoch
+        );
+    }
+
+    #[test]
+    fn retained_notes_auxiliary_open_reuses_drafts_and_rejects_retired_source() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = boxed_app(&ctx, workspace.root());
+        let settings_path = workspace
+            .root()
+            .join("aux-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = crate::settings::Settings::default();
+        for name in ["note-templates", "unused-note-assets"] {
+            settings
+                .utility_presentations
+                .set(
+                    crate::settings::UtilityToolKey::parse(name).unwrap(),
+                    crate::settings::RememberedPresentation::Docked,
+                )
+                .unwrap();
+        }
+        settings.save(&settings_path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            settings.utility_presentations,
+        )
+        .install_in_context(&ctx);
+        app.notes_dialog.open();
+        app.notes_dialog.test_popout();
+        app.request_launcher_visibility(false);
+        app.notes_dialog
+            .test_stage_auxiliary_open(&ctx, true, true, None);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_quick_notes_dialog(&ctx);
+        assert!(app.note_templates_host.is_popped_out());
+        assert!(app.unused_assets_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        output.drop_without_applying_deltas();
+        app.notes_dialog
+            .template_manager
+            .test_set_draft("draft", "content");
+        app.notes_dialog
+            .test_stage_auxiliary_open(&ctx, true, true, None);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_quick_notes_dialog(&ctx);
+        assert_eq!(
+            app.notes_dialog.template_manager.test_draft(),
+            ("draft", "content", Some("pending"))
+        );
+        output.drop_without_applying_deltas();
+        app.notes_dialog.test_stage_auxiliary_open(
+            &ctx,
+            true,
+            false,
+            Some(super::super::utility_host::UtilityPresentation::Docked),
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_quick_notes_dialog(&ctx);
+        assert_eq!(
+            app.notes_dialog.template_manager.test_draft(),
+            ("draft", "content", Some("pending"))
+        );
+        output.drop_without_applying_deltas();
+        workers.join_all();
+    }
+
+    #[test]
+    fn retained_note_image_open_inherits_and_rejects_retired_source() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        struct NotesDir(Option<std::ffi::OsString>);
+        impl Drop for NotesDir {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let _notes_dir = NotesDir(std::env::var_os("ML_NOTES_DIR"));
+        unsafe { std::env::set_var("ML_NOTES_DIR", workspace.root()) };
+        std::fs::write(workspace.root().join("source.md"), "# Source").unwrap();
+        let first = workspace.root().join("first.png");
+        let second = workspace.root().join("second.png");
+        let stale = workspace.root().join("stale.png");
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 60, 90, 255]));
+        image.save(&first).unwrap();
+        image.save(&second).unwrap();
+        image.save(&stale).unwrap();
+        crate::plugins::note::refresh_cache().unwrap();
+        let ctx = egui::Context::default();
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let mut app = boxed_app(&ctx, workspace.root());
+        unsafe { std::env::set_var("ML_NOTES_DIR", workspace.root()) };
+        crate::plugins::note::refresh_cache().unwrap();
+        app.open_note_panel("source", None);
+        app.note_panels[0].test_pop_out();
+        app.request_launcher_visibility(false);
+        app.note_panels[0].test_stage_image_open(&ctx, first.clone(), None);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(app.image_panels.len(), 1);
+        assert!(app.image_panels[0].host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        output.drop_without_applying_deltas();
+        app.note_panels[0].test_stage_image_open(&ctx, second, None);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(app.image_panels.len(), 2);
+        output.drop_without_applying_deltas();
+        app.note_panels[0].test_stage_image_open(
+            &ctx,
+            stale,
+            Some(super::super::utility_host::UtilityPresentation::Docked),
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(
+            app.image_panels.len(),
+            2,
+            "source host transition rejects its stale open"
+        );
+        output.drop_without_applying_deltas();
+        app.request_launcher_visibility(false);
+        let session = app.image_panels[0].session();
+        let viewport = super::super::utility_window_host::ImageWindowHost::test_viewport(session);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let texture = app.image_panels[0]
+            .test_texture_id()
+            .expect("valid PNG is loaded");
+        let control = |app: &LauncherApp, name: &str| {
+            let panel = app
+                .image_panels
+                .iter()
+                .find(|panel| panel.session() == session)
+                .unwrap();
+            let (rect, clip, enabled) = panel.test_control(name).unwrap();
+            let visible = rect.intersect(clip);
+            assert!(
+                enabled && visible.is_positive(),
+                "{name}: rect={rect:?} clip={clip:?} enabled={enabled}"
+            );
+            visible
+        };
+        let zoom = control(&app, "zoom");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(zoom, pressed),
+                false,
+                false,
+            );
+        }
+        let zoom_value = app.image_panels[0].test_zoom();
+        assert_ne!(zoom_value, 1.0);
+        let external = control(&app, "external");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            tool_dialog_pointer_events(external, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            tool_dialog_pointer_events(external, false),
+            false,
+            true,
+        );
+        assert_eq!(app.image_panels[0].test_external_opens(), 0);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let external = control(&app, "external");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(external, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.image_panels[0].test_external_opens(), 1);
+        app.open_image_panel(&first);
+        assert_eq!(app.image_panels.len(), 2);
+        assert_eq!(app.image_panels[0].test_zoom(), zoom_value);
+        assert_eq!(app.image_panels[0].test_texture_id(), Some(texture));
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let close = control(&app, "close");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(close, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.image_panels.len(), 1);
+        assert_ne!(app.image_panels[0].session(), session);
+    }
+
+    #[test]
+    fn note_auxiliary_hosts_reuse_instances_and_parent_presentation() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = boxed_app(&ctx, workspace.root());
+        let first = workspace.root().join("first.png");
+        let second = workspace.root().join("second.png");
+        std::fs::write(&first, b"image").unwrap();
+        std::fs::write(&second, b"image").unwrap();
+        app.notes_dialog.open();
+        app.notes_dialog.test_popout();
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let origin = app.notes_dialog.test_open_receipt(&ctx, pass).unwrap();
+        assert!(app.notes_dialog.accepts_note_open(&origin));
+        let parent = super::super::utility_host::ChildOpenOrigin::Parent(origin.clone());
+        assert!(!app.open_unused_assets_from_origin(&parent));
+        assert!(app.unused_assets_host.is_popped_out());
+        app.notes_dialog.template_manager.open();
+        app.notes_dialog
+            .template_manager
+            .test_set_draft("draft", "content");
+        app.note_templates_host.open_from_origin(
+            &ctx,
+            &app.notes_dialog.template_manager,
+            false,
+            &parent,
+        );
+        assert!(app.note_templates_host.is_popped_out());
+        app.notes_dialog.open();
+        assert_eq!(
+            app.notes_dialog.template_manager.test_draft(),
+            ("draft", "content", Some("pending"))
+        );
+        app.open_image_panel_from_origin(&first, &parent);
+        let session = app.image_panels[0].session();
+        app.image_panels[0].test_set_zoom(2.5);
+        app.open_image_panel_from_origin(&first, &parent);
+        assert_eq!(app.image_panels.len(), 1);
+        assert_eq!(app.image_panels[0].session(), session);
+        assert_eq!(app.image_panels[0].test_zoom(), 2.5);
+        assert!(app.image_panels[0].host.is_popped_out());
+        app.open_image_panel_from_origin(&second, &parent);
+        assert_eq!(app.image_panels.len(), 2);
+        assert_ne!(app.image_panels[0].session(), app.image_panels[1].session());
+        app.notes_dialog.close_from_app(&ctx);
+        assert!(!app.notes_dialog.accepts_note_open(&origin));
+        output.drop_without_applying_deltas();
     }
 
     #[test]

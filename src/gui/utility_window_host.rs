@@ -52,6 +52,8 @@ pub(super) trait HostedUtilityDialog: Sized {
         Self::KIND.and_then(NavigationDialogKind::layer_id).expect("utility window layer")
     }
 
+    fn dialog_layer(&self) -> egui::LayerId { Self::layer() }
+
     fn navigation_owner(instance: u64) -> NavigationOwner {
         NavigationOwner::Dialog {
             kind: Self::KIND.expect("utility window navigation kind"),
@@ -176,6 +178,7 @@ pub(super) enum SnippetHostCommand {
 
 pub(super) struct UtilityWindowHost<D: HostedUtilityDialog> {
     state: UtilityHostState,
+    dialog_layer: Option<egui::LayerId>,
     presentation_session: Option<u64>,
     native_session: Option<u64>,
     pending: Option<HostFrame<D>>,
@@ -192,6 +195,7 @@ impl<D: HostedUtilityDialog> Default for UtilityWindowHost<D> {
     fn default() -> Self {
         Self {
             state: UtilityHostState::default(),
+            dialog_layer: None,
             presentation_session: None,
             native_session: None,
             pending: None,
@@ -263,8 +267,8 @@ pub(super) trait UtilityWindowCompanion {
 }
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
-    fn docked_layer() -> egui::LayerId {
-        D::layer()
+    fn docked_layer(&self) -> egui::LayerId {
+        self.dialog_layer.unwrap_or_else(D::layer)
     }
 
     fn viewport(session: u64) -> egui::ViewportId {
@@ -302,7 +306,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
 
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
         if self.state.presentation() == UtilityPresentation::Docked {
-            Some(Self::docked_layer())
+            Some(self.docked_layer())
         } else {
             self.state.embedded_root_layer()
         }
@@ -347,6 +351,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let (chord, alphabet) = root.configuration();
         self.native_jump.set_configuration(chord, alphabet);
         self.native_jump.set_enabled(enabled);
+    }
+
+    pub(super) fn close_from_app(&mut self, ctx: &egui::Context) {
+        self.remember_presentation(ctx, self.state.presentation());
+        self.retire(ctx);
     }
 
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
@@ -400,6 +409,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             return;
         }
         let session = dialog.session();
+        self.dialog_layer = Some(dialog.dialog_layer());
         if self.presentation_session != Some(session) {
             self.presentation_session = Some(session);
             let remembered =
@@ -578,7 +588,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                     *companion,
                     scope.clone(),
                     &frame,
-                    Self::docked_layer(),
+                    self.docked_layer(),
                     input.root_input,
                 );
             }
@@ -675,7 +685,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         companion: &mut Option<(&mut dyn UtilityWindowCompanion, Option<JumpModeScope>)>,
     ) {
         let instance = frame.session;
-        let layer = Self::docked_layer();
+        let layer = self.docked_layer();
         let parent = NavigationViewportBinding {
             viewport,
             base_layer: layer,
@@ -898,7 +908,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             } else if let Some(layer) = frame.embedded_layer {
                 ctx.move_to_top(layer);
             } else if frame.host.host == UtilityPresentation::Docked {
-                ctx.move_to_top(Self::docked_layer());
+                ctx.move_to_top(self.docked_layer());
                 self.docked_focus_pending = false;
             }
             self.state.complete_focus(frame.host);
@@ -931,7 +941,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             self.cancel_jump();
             show_root = presentation == UtilityPresentation::Docked;
             if show_root {
-                ctx.move_to_top(Self::docked_layer());
+                ctx.move_to_top(self.docked_layer());
             }
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
@@ -2028,6 +2038,326 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     #[cfg(test)]
     fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
         actions.host_button
+    }
+}
+
+pub(super) type ImageWindowHost = UtilityWindowHost<super::image_panel::ImagePanel>;
+pub(super) enum ImageHostCommand {
+    Closed,
+    Apply(super::image_panel::ImageHostActions),
+}
+impl HostedUtilityDialog for super::image_panel::ImagePanel {
+    const KEY: &'static str = "image-viewer";
+    const TITLE: &'static str = "Image Viewer";
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 480.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(200.0, 160.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = super::image_panel::ImageHostActions;
+    type Checkpoint = ();
+    type Command = ImageHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("image-viewer"))
+    }
+    fn dialog_layer(&self) -> egui::LayerId {
+        self.query_focus_layer_id()
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.session()
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        ImageHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, ImageHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![ImageHostCommand::Closed]
+        } else {
+            vec![ImageHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type NoteTemplatesWindowHost =
+    UtilityWindowHost<super::notes_dialog::TemplateManagerState>;
+pub(super) enum NoteTemplatesHostCommand {
+    Closed,
+    Apply(super::notes_dialog::TemplateHostActions),
+}
+impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
+    const KEY: &'static str = "note-templates";
+    const TITLE: &'static str = "Note Templates";
+    const SIZE: egui::Vec2 = egui::vec2(520.0, 360.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = super::notes_dialog::TemplateHostActions;
+    type Checkpoint = ();
+    type Command = NoteTemplatesHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Note Templates")))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.is_open()
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && (self.owns_input(ctx)
+                || (ctx.memory(|memory| memory.top_modal_layer().is_none())
+                    && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                        .is_none_or(|layer| layer == binding.base_layer)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        layer == binding.base_layer
+                            || Some(layer) == popup
+                            || layer == egui::LayerId::background()
+                    })))
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        super::notes_dialog::TemplateManagerState::render_host(
+            self,
+            ctx,
+            allowed,
+            first,
+            child,
+            presentation,
+        )
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        NoteTemplatesHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, NoteTemplatesHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![NoteTemplatesHostCommand::Closed]
+        } else {
+            vec![NoteTemplatesHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type UnusedAssetsWindowHost =
+    UtilityWindowHost<super::unused_assets_dialog::UnusedAssetsDialog>;
+pub(super) enum UnusedAssetsHostCommand {
+    Closed,
+    Apply(super::unused_assets_dialog::UnusedAssetsHostActions),
+}
+impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
+    const KEY: &'static str = "unused-note-assets";
+    const TITLE: &'static str = "Unused Note Assets";
+    const SIZE: egui::Vec2 = egui::vec2(300.0, 200.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(160.0, 120.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = bool;
+    type Actions = super::unused_assets_dialog::UnusedAssetsHostActions;
+    type Checkpoint = ();
+    type Command = UnusedAssetsHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some("Unused Note Assets")),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        pinned: &bool,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        let mut actions = self.render_host(ctx, allowed, first, child, presentation);
+        if *pinned {
+            actions.close = false;
+        }
+        actions
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        UnusedAssetsHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, UnusedAssetsHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![UnusedAssetsHostCommand::Closed]
+        } else {
+            vec![UnusedAssetsHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
     }
 }
 

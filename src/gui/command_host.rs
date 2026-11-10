@@ -739,7 +739,7 @@ impl NoteCommandHost for LauncherApp {
     }
 
     fn open_unused_note_assets_dialog(&mut self) {
-        self.unused_assets_dialog.open();
+        self.open_unused_assets_from_origin(&super::utility_host::ChildOpenOrigin::<()>::Root);
     }
 
     fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {

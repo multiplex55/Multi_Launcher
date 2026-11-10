@@ -1261,6 +1261,8 @@ pub struct LauncherApp {
     pub hash_generator_dialog: HashGeneratorDialogState,
     hash_generator_host: utility_window_host::HashGeneratorWindowHost,
     file_preview_host: utility_window_host::FilePreviewWindowHost,
+    note_templates_host: utility_window_host::NoteTemplatesWindowHost,
+    unused_assets_host: utility_window_host::UnusedAssetsWindowHost,
     file_preview_search: Option<crate::file_search::model::SearchId>,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
@@ -1304,6 +1306,7 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) note_mutation_search_count: usize,
     image_panels: Vec<ImagePanel>,
+    next_image_session: u64,
     screenshot_editors: Vec<ScreenshotEditor>,
     pub(crate) screenshot_capture: screenshot_capture::ScreenshotCaptureOwner,
     pub(crate) screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation,
@@ -4077,6 +4080,8 @@ impl LauncherApp {
             hash_generator_dialog: HashGeneratorDialogState::default(),
             hash_generator_host: Default::default(),
             file_preview_host: Default::default(),
+            note_templates_host: Default::default(),
+            unused_assets_host: Default::default(),
             file_preview_search: None,
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
@@ -4120,6 +4125,7 @@ impl LauncherApp {
             #[cfg(test)]
             note_mutation_search_count: 0,
             image_panels: Vec::new(),
+            next_image_session: 0,
             screenshot_editors: Vec::new(),
             screenshot_capture: screenshot_capture::ScreenshotCaptureOwner::new(),
             screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation::default(),
@@ -5051,6 +5057,7 @@ impl LauncherApp {
 
     fn any_panel_open(&self) -> bool {
         self.pin_list_open
+            || self.notes_dialog.template_manager.is_open()
             || self.ocr_surface_visible()
             || Self::TRACKED_PANELS
                 .iter()
@@ -5064,6 +5071,8 @@ impl LauncherApp {
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
+            Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
+            Panel::ImagePanel => self.image_panels.iter().any(|panel| panel.open && panel.host.root_layer().is_some()),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
@@ -5432,7 +5441,10 @@ impl LauncherApp {
                 self.panel_states.note_graph_dialog = false;
             }
             Panel::UnusedAssetsDialog => {
-                self.unused_assets_dialog.open = false;
+                if self.unused_assets_dialog.open {
+                    self.unused_assets_host.close_from_app(&self.egui_ctx);
+                    self.unused_assets_dialog.open = false;
+                }
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
@@ -5462,8 +5474,10 @@ impl LauncherApp {
                 }
             }
             Panel::ImagePanel => {
-                let _ = self.image_panels.pop();
-                self.panel_states.image_panel = false;
+                if let Some(mut panel) = self.image_panels.pop() {
+                    panel.host.close_from_app(&self.egui_ctx);
+                }
+                self.panel_states.image_panel = !self.image_panels.is_empty();
             }
             Panel::ScreenshotEditor => {
                 let _ = self.screenshot_editors.pop();
@@ -5771,7 +5785,10 @@ impl LauncherApp {
                 self.panel_states.note_graph_dialog = false;
             }
             Panel::UnusedAssetsDialog => {
-                self.unused_assets_dialog.open = false;
+                if self.unused_assets_dialog.open {
+                    self.unused_assets_host.close_from_app(&self.egui_ctx);
+                    self.unused_assets_dialog.open = false;
+                }
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
@@ -5788,8 +5805,10 @@ impl LauncherApp {
                 }
             }
             Panel::ImagePanel => {
-                let _ = self.image_panels.pop();
-                self.panel_states.image_panel = false;
+                if let Some(mut panel) = self.image_panels.pop() {
+                    panel.host.close_from_app(&self.egui_ctx);
+                }
+                self.panel_states.image_panel = !self.image_panels.is_empty();
             }
             Panel::ScreenshotEditor => {
                 let _ = self.screenshot_editors.pop();
@@ -6021,7 +6040,11 @@ impl LauncherApp {
                 self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
             }
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
-            Panel::UnusedAssetsDialog => self.unused_assets_dialog.ensure_open(),
+            Panel::UnusedAssetsDialog => {
+                if !self.unused_assets_dialog.open {
+                    self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
+                }
+            },
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::ScreenshotEditor => {}
@@ -6327,6 +6350,8 @@ impl LauncherApp {
             if !self.regex_tester_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
+        } else if panel == Panel::UnusedAssetsDialog {
+            self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::HashGeneratorDialog {
             let was_open = self.hash_generator_dialog.open;
             self.hash_generator_dialog.ensure_open();
@@ -6722,21 +6747,89 @@ impl LauncherApp {
         self.update_panel_stack();
     }
 
+    fn open_note_templates_from_origin<S>(
+        &mut self,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
+        let was_open = self.notes_dialog.template_manager.is_open();
+        self.notes_dialog.template_manager.open();
+        let desired = self.note_templates_host.open_from_origin(
+            &self.egui_ctx,
+            &self.notes_dialog.template_manager,
+            was_open,
+            origin,
+        );
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn open_unused_assets_from_origin<S>(
+        &mut self,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
+        let was_open = self.unused_assets_dialog.open;
+        self.unused_assets_dialog.ensure_open();
+        let desired = self.unused_assets_host.open_from_origin(
+            &self.egui_ctx,
+            &self.unused_assets_dialog,
+            was_open,
+            origin,
+        );
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Open an image viewer panel for the given file path.
     pub fn open_image_panel(&mut self, path: &Path) {
+        self.open_image_panel_from_origin(path, &utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    fn open_image_panel_from_origin<S>(
+        &mut self,
+        path: &Path,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
         if !path.exists() {
             self.report_error_message("launcher", format!("Image not found: {}", path.display()));
-            return;
+            return false;
         }
         if image::ImageFormat::from_path(path).is_err() {
             self.report_error_message(
                 "launcher",
                 format!("Unsupported image format: {}", path.display()),
             );
-            return;
+            return false;
         }
-        self.image_panels.push(ImagePanel::new(path.to_path_buf()));
+        let existing = self
+            .image_panels
+            .iter()
+            .position(|panel| panel.open && panel.path() == path);
+        let was_open = existing.is_some();
+        let index = existing.unwrap_or_else(|| {
+            self.next_image_session = self.next_image_session.wrapping_add(1);
+            self.image_panels
+                .push(ImagePanel::new(path.to_path_buf(), self.next_image_session));
+            self.image_panels.len() - 1
+        });
+        let panel = &mut self.image_panels[index];
+        let mut host = std::mem::take(&mut panel.host);
+        let desired = host.open_from_origin(&self.egui_ctx, panel, was_open, origin);
+        panel.host = host;
         self.update_panel_stack();
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
     }
 
     /// Open the screenshot editor for a captured image.
@@ -11443,8 +11536,11 @@ mod tests {
 
     #[test]
     fn image_panel_closes_with_escape() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
         let path = dir.path().join("img.png");
         RgbaImage::new(1, 1).save(&path).unwrap();
 
@@ -11453,6 +11549,9 @@ mod tests {
         assert_eq!(app.image_panels.len(), 1);
         assert!(app.close_front_dialog());
         assert!(app.image_panels.is_empty());
+        app.settings_save_workers.join_all();
+        drop(app);
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
