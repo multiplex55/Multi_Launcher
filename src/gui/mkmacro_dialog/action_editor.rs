@@ -30,7 +30,7 @@ pub(super) fn record_editor_combo<R>(ctx: egui::Context, result: egui::InnerResp
 }
 
 fn record_editor_popup(ctx: &egui::Context, popup: egui::Id) {
-    let observer = editor_popup_observer_id(&ctx);
+    let observer = editor_popup_observer_id(ctx);
     ctx.data_mut(|data| {
         if let Some(mut ids) = data.get_temp::<Vec<egui::Id>>(observer) {
             if !ids.contains(&popup) { ids.push(popup); }
@@ -5913,16 +5913,14 @@ pub(super) fn complete_editor_actions(
             }
         }
     }
-    if refresh_monitors {
-        if let Some(state) = d.action_editor.image_search.as_mut() {
-            state.refresh_monitors();
-        }
+    if refresh_monitors && let Some(state) = d.action_editor.image_search.as_mut() {
+        state.refresh_monitors();
     }
-    if let Some(request) = window_request {
-        if let Some(origin) = origin.clone() { d.pending_window_picker_open = Some((request, super::PickerOpenOrigin::Editor(origin))); }
+    if let Some(request) = window_request && let Some(origin) = origin.clone() {
+        d.pending_window_picker_open = Some((request, super::PickerOpenOrigin::Editor(origin)));
     }
-    if let Some(request) = launcher_request {
-        if let Some(origin) = origin.clone() { d.pending_launcher_picker_open = Some((request, origin)); }
+    if let Some(request) = launcher_request && let Some(origin) = origin.clone() {
+        d.pending_launcher_picker_open = Some((request, origin));
     }
     if let Some(picker) = native_file_picker.take() {
         queue_native_file_picker_from_child(ctx, d, picker, hwnd);
@@ -6000,8 +5998,9 @@ pub(super) fn complete_editor_actions(
                     .as_mut()
                     .and_then(|step| matcher_at_path(&mut step.action, &path))
                     .cloned();
-                if let Some(original) = original {
-                    if let Some(origin) = origin.clone() { d.pending_window_picker_open = Some((super::window_picker::MatcherEditRequest {
+                if let Some(original) = original && let Some(origin) = origin.clone() {
+                    d.pending_window_picker_open = Some((
+                        super::window_picker::MatcherEditRequest {
                             destination: super::window_picker::MatcherDestination::Action {
                                 macro_id,
                                 draft_generation: d.action_editor.draft_generation,
@@ -6009,7 +6008,9 @@ pub(super) fn complete_editor_actions(
                                 path,
                             },
                             original,
-                        }, super::PickerOpenOrigin::Editor(origin))); }
+                        },
+                        super::PickerOpenOrigin::Editor(origin),
+                    ));
                 }
             }
             ConditionOcrOperation::AddActivateWindowBefore => {
@@ -6856,6 +6857,10 @@ pub(in crate::gui) struct EditorHostActions {
     effects: Option<EditorUiActions>,
     owner_instance: u64,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded inline effects avoid an extra allocation on each active editor frame."
+)]
 pub(in crate::gui) enum EditorCommand {
     Effects {
         effects: EditorUiActions,

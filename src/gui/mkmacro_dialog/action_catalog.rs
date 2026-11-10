@@ -2823,11 +2823,11 @@ impl super::super::utility_window_host::HostedUtilityDialog for CatalogState {
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                let query =
+                let _query =
                     ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search actions"));
                 #[cfg(test)]
                 {
-                    self.test_query = Some((query.rect, ui.clip_rect(), query.enabled()));
+                    self.test_query = Some((_query.rect, ui.clip_rect(), _query.enabled()));
                 }
                 let footer = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
                 let available = ui

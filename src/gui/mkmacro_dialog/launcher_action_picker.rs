@@ -341,7 +341,7 @@ fn render_contents(
         })
         .map(|(index, _)| index)
         .collect();
-    let ranked = matching_action_indices(&actions, &state.search);
+    let ranked = matching_action_indices(actions, &state.search);
     let visible: Vec<usize> = ranked
         .into_iter()
         .filter(|index| eligible.contains(index))
@@ -491,20 +491,19 @@ fn render_contents(
     let _ = (body_output, footer_height);
     if cancel {
         result.intent = Some(LauncherPickerIntent::Close);
-    } else if choose {
-        if let (Some(index), Some(request)) = (state.selected, state.request.as_ref())
-            && let Some(action) = actions.get(index)
-        {
-            if request.purpose == PickerPurpose::Process && !is_direct_program(&action.action) {
-                if launcher_query_suggestion(action).is_some() {
-                    state.conversion_confirmation = Some(action.clone());
-                }
-            } else {
-                result.intent = Some(LauncherPickerIntent::Choose {
-                    action: action.clone(),
-                    convert: false,
-                });
+    } else if choose
+        && let (Some(index), Some(request)) = (state.selected, state.request.as_ref())
+        && let Some(action) = actions.get(index)
+    {
+        if request.purpose == PickerPurpose::Process && !is_direct_program(&action.action) {
+            if launcher_query_suggestion(action).is_some() {
+                state.conversion_confirmation = Some(action.clone());
             }
+        } else {
+            result.intent = Some(LauncherPickerIntent::Choose {
+                action: action.clone(),
+                convert: false,
+            });
         }
     }
 }

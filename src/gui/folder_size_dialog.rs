@@ -470,10 +470,10 @@ impl TreemapCache {
             width: width.to_bits(),
             height: height.to_bits(),
         };
-        if let Some((cached_key, layout)) = &self.value {
-            if *cached_key == key {
-                return Some(layout.clone());
-            }
+        if let Some((cached_key, layout)) = &self.value
+            && *cached_key == key
+        {
+            return Some(layout.clone());
         }
         let indices = children.get(directory)?;
         let items = indices.iter().filter_map(|&index| {
@@ -2308,7 +2308,7 @@ fn show_treemap(
 }
 fn folder_row_context(
     response: &egui::Response,
-    row: &FolderSizeRow,
+    _row: &FolderSizeRow,
     generation: u64,
     index: usize,
     owned_popup: Option<egui::Id>,
@@ -2332,14 +2332,14 @@ fn folder_row_context(
     response.context_menu(|ui| {
         let copy = ui.button("Copy path");
         #[cfg(test)]
-        rects.push((format!("copy-row/{}", row.name), copy.rect, ui.clip_rect()));
+        rects.push((format!("copy-row/{}", _row.name), copy.rect, ui.clip_rect()));
         if copy.clicked() && menu_allowed {
             actions.push(FolderSizeAction::CopyRow { generation, index });
             ui.close();
         }
         let reveal = ui.button("Reveal in File Explorer");
         #[cfg(test)]
-        rects.push((format!("reveal/{}", row.name), reveal.rect, ui.clip_rect()));
+        rects.push((format!("reveal/{}", _row.name), reveal.rect, ui.clip_rect()));
         if reveal.clicked() && menu_allowed {
             actions.push(FolderSizeAction::RevealRow { generation, index });
             ui.close();

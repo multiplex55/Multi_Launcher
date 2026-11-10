@@ -2744,6 +2744,10 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
 
 pub(super) type TodoViewWindowHost =
     UtilityWindowHost<super::todo_view_dialog::TodoViewDialog>;
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded inline action avoids an extra allocation on each active host frame."
+)]
 pub(super) enum TodoViewHostCommand {
     Closed,
     Apply(super::todo_view_dialog::TodoViewHostActions),

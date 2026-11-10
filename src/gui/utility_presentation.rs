@@ -129,12 +129,12 @@ impl UtilityPresentationManager {
         }
         let waiting = state.waiting.clone();
         for (key, revision) in waiting {
-            if let Some((failed, error)) = state.workers.utility_presentation_failure(key) {
-                if failed == revision {
-                    state.waiting.remove(&key);
-                    if state.reported.insert(key, revision) != Some(revision) {
-                        failures.push((key, error));
-                    }
+            if let Some((failed, error)) = state.workers.utility_presentation_failure(key)
+                && failed == revision
+            {
+                state.waiting.remove(&key);
+                if state.reported.insert(key, revision) != Some(revision) {
+                    failures.push((key, error));
                 }
             }
         }

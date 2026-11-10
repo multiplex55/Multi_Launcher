@@ -231,6 +231,20 @@ Lines that exceed a line-level bound receive a diagnostic; documents beyond
 the byte or line bound receive a document diagnostic without partial
 evaluation.
 
+## Dependency Explorer
+
+Choose **Dependencies…** to browse the current cached evaluation. Select a
+physical `rN` row or named assignment in the chooser to see its source and exact
+result or diagnostic. **Upstream inputs** and **Downstream dependents** show
+**Direct** relationships and expandable **Transitive** relationships. Select a
+relationship row or choose **Go to source** to navigate to that Pad line.
+
+The explorer uses the current evaluated document and stable line identity. A
+surviving line can still be found after edits once the Pad has evaluated them;
+a stale, deleted or reopened document context is rejected. Browsing and jumping
+do not edit source, history, dirty state or Inspector comparison. Closing the
+explorer leaves the Pad open.
+
 ## Programmer Inspector and comparison
 
 Open **Inspect bits…** beside an exact integer result. Bit 0 is the least
@@ -249,6 +263,22 @@ saved; working bits, labels, expressions and comparison results are transient.
 Spans extending beyond the current width remain in the draft and are marked
 invalid until the width or span is changed. The grid's bit grouping is separate
 from the grouping preference used for copied numbers.
+
+Within **Bit labels**, **Import labels…** and **Export labels…** exchange only
+labels in a version 1 UTF-8 JSON file. For example, the half-open range `0..8`
+displays as `Status [7:0]`:
+
+```json
+{"version": 1, "source_width": 8, "labels": [{"label": "Status", "start": 0, "end_exclusive": 8}]}
+```
+
+`source_width` is an optional hint and never changes the Inspector mode. A file
+is limited to 128 KiB and 128 labels, each label to 128 UTF-8 bytes; every range
+must satisfy `0 <= start < end_exclusive <= 128`. The whole file is validated
+before replacement. When existing labels would change, including replacement by
+an empty list, confirm the replacement. Import leaves numeric bits, width,
+signedness, Pad source and comparison unchanged. Labels outside the current
+width remain marked invalid and can still be exported.
 
 For example, `123 >> 12` uses the default `u64` mode and yields zero;
 `i8(-1) >> 1` stays negative, and `u8(255) << 1` masks to 254. A value such

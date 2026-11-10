@@ -1998,7 +1998,7 @@ impl MgGesturesDialog {
                             {
                                 continue;
                             }
-                            let choice_identity = action_choice_identity(&action, index);
+                            let choice_identity = action_choice_identity(action, index);
                             let mut clicked = false;
                             let button = ui.push_id(
                                 (
@@ -2031,7 +2031,7 @@ impl MgGesturesDialog {
                             );
                             if clicked && authorized_owner_pass {
                                 let additional_args = editor.add_args.clone();
-                                apply_action_pick(editor, &action, &additional_args);
+                                apply_action_pick(editor, action, &additional_args);
                             }
                         }
                     });
@@ -2129,7 +2129,8 @@ impl MgGesturesDialog {
             close: close_requested,
             validation_error,
             host_request: None,
-            ..Default::default()
+            #[cfg(test)]
+            host_button: None,
         }
     }
 

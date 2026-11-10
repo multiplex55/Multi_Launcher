@@ -177,8 +177,8 @@ impl HotkeyDirectoryDialog {
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut sort, DirectorySort::Owner, "Owner");
-                                let status = ui.selectable_value(&mut sort, DirectorySort::Status, "Status");
-                                #[cfg(test)] { self.test_status_response = Some((status.rect, ui.clip_rect(), status.enabled())); }
+                                let _status = ui.selectable_value(&mut sort, DirectorySort::Status, "Status");
+                                #[cfg(test)] { self.test_status_response = Some((_status.rect, ui.clip_rect(), _status.enabled())); }
                                 ui.selectable_value(
                                     &mut sort,
                                     DirectorySort::Conflicts,

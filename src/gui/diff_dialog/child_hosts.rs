@@ -593,16 +593,16 @@ impl Children {
                 presentation
             }
             Open::Input(purpose, _) => {
-                if let Some(slot) = &mut self.input {
-                    if slot.editor.open && slot.editor.workspace == workspace {
-                        if slot.editor.draft.purpose != purpose {
-                            slot.editor.draft.error = Some(
-                                "Finish or cancel the current text input before opening another."
-                                    .into(),
-                            );
-                        }
-                        return slot.host.open_from_origin(ctx, &slot.editor, true, &origin);
+                if let Some(slot) = &mut self.input
+                    && slot.editor.open && slot.editor.workspace == workspace
+                {
+                    if slot.editor.draft.purpose != purpose {
+                        slot.editor.draft.error = Some(
+                            "Finish or cancel the current text input before opening another."
+                                .into(),
+                        );
                     }
+                    return slot.host.open_from_origin(ctx, &slot.editor, true, &origin);
                 }
                 parent.begin_text_input(purpose);
                 let draft = parent.text_input.take()?;

@@ -661,14 +661,14 @@ impl HashGeneratorDialogState {
                         HashInputMode::Clipboard,
                         HashInputMode::File,
                     ] {
-                        let response =
+                        let _response =
                             ui.selectable_value(&mut mode, candidate, mode_label(candidate));
                         #[cfg(test)]
                         test_controls.push((
                             format!("mode/{}", mode_label(candidate)),
-                            response.rect,
+                            _response.rect,
                             ui.clip_rect(),
-                            response.enabled(),
+                            _response.enabled(),
                         ));
                     }
                 });
@@ -691,14 +691,14 @@ impl HashGeneratorDialogState {
                         HashAlgorithm::Sha512,
                         HashAlgorithm::Sha1,
                     ] {
-                        let response =
+                        let _response =
                             ui.selectable_value(&mut algorithm, candidate, candidate.name());
                         #[cfg(test)]
                         test_controls.push((
                             format!("algorithm/{}", candidate.name()),
-                            response.rect,
+                            _response.rect,
                             ui.clip_rect(),
-                            response.enabled(),
+                            _response.enabled(),
                         ));
                     }
                 });
@@ -730,7 +730,7 @@ impl HashGeneratorDialogState {
                     ui.available_width(),
                     (ui.available_height() * 0.36).clamp(72.0, 150.0),
                 );
-                let response = ui.add_sized(
+                let _response = ui.add_sized(
                     editor_size,
                     egui::TextEdit::multiline(&mut draft.text)
                         .id(egui::Id::new("hash_generator_text"))
@@ -741,9 +741,9 @@ impl HashGeneratorDialogState {
                 #[cfg(test)]
                 test_controls.push((
                     "text".into(),
-                    response.rect,
+                    _response.rect,
                     ui.clip_rect(),
-                    response.enabled(),
+                    _response.enabled(),
                 ));
                 if self.focus_text {
                     *focus = true;

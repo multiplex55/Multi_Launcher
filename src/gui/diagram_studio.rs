@@ -15125,6 +15125,9 @@ fn studio_help_menu(
             ui.strong("Diagram Studio — Mermaid guide");
             ui.label("Flowcharts are editable on the canvas. Other supported families render from source. Source remains authoritative.");
             ui.label("Tab indents; Shift+Tab removes indentation. Ctrl+Z and Ctrl+Y use document history.");
+            ui.label("File, Edit, View, Templates and Help are in the menu strip; mode, tools and zoom are in the action strip. Colors sits below Suggestions in Source and Split; use View to restore source.");
+            ui.label("In Visual documents, Align and Distribute are above the canvas. Show properties or Hide properties controls the independently scrolling sidebar.");
+            ui.label("From and To show an object's own text and ID. Add connector connects two selected objects, or lets you choose source then destination; Escape cancels. Drag a connector endpoint handle to reconnect it. Double-click a connector for properties or a primitive to edit its label.");
             ui.label("Use File for New, Open, Save and Export. A stale preview shows the last successful result until the new source renders.");
             ui.label("Sources are limited to 65,536 bytes, 4,096 lines and 8,192 bytes per line. Unsupported CSS, frontmatter and configuration remain in the draft with a diagnostic.");
             ui.label("Colors accepts #RGB or #RRGGBB. Presets and overrides use a bounded Mermaid JSON init directive; native nodes support style ID fill, stroke and color.");

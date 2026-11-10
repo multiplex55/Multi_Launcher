@@ -8532,18 +8532,18 @@ impl MkMacroDialog {
                         }
                     }
                     ReviewIntent::Retarget(id) => {
-                        if self.draft.macros.iter().any(|item| item.id == id) {
-                            if let Some(review) = &mut self.recording_review {
-                                review.retarget_append(id);
-                            }
+                        if self.draft.macros.iter().any(|item| item.id == id)
+                            && let Some(review) = &mut self.recording_review
+                        {
+                            review.retarget_append(id);
                         }
                     }
                     ReviewIntent::StopPreview => self.stop_owned_recording_preview(),
                     ReviewIntent::Preview(selected) => {
-                        if let Err(error) = self.preview_recording_review(selected) {
-                            if let Some(review) = &mut self.recording_review {
-                                review.message = Some(error.to_string());
-                            }
+                        if let Err(error) = self.preview_recording_review(selected)
+                            && let Some(review) = &mut self.recording_review
+                        {
+                            review.message = Some(error.to_string());
                         }
                     }
                     ReviewIntent::Apply => {
@@ -8996,13 +8996,12 @@ impl MkMacroDialog {
                 .crop_destination_is_current(&destination, self.selected_macro_id)
         {
             let was_open = self.image_crop_editor.is_open();
-            if !was_open {
-                if let Err(error) = self
+            if !was_open
+                && let Err(error) = self
                     .image_crop_editor
                     .open(self.store.clone(), destination.clone())
-                {
-                    self.action_editor.capture_message = Some(error.into());
-                }
+            {
+                self.action_editor.capture_message = Some(error.into());
             }
             if self.image_crop_editor.is_open()
                 && self.image_crop_editor.destination() == &destination
@@ -9226,23 +9225,22 @@ impl MkMacroDialog {
                             && self.action_editor.draft_generation == generation
                             && self.action_editor.owner_macro_id() == Some(owner)
                             && self.action_editor.review_epoch().is_none_or(|epoch| self.recording_review.as_ref().is_some_and(|review| review.epoch == epoch))
+                            && let Some(origin) = completion.origin.clone()
                         {
-                            if let Some(origin) = completion.origin.clone() {
-                                let before_revision = self.draft_revision;
-                                action_editor::complete_editor_actions(
-                                    ctx,
-                                    self,
-                                    effects,
-                                    hwnd,
-                                    Some(origin),
-                                );
-                                if self.catalog.open
-                                    && self.catalog.owner == self.owner_instance
-                                    && self.catalog.macro_id == self.selected_macro_id
-                                    && self.catalog.revision == before_revision
-                                {
-                                    self.catalog.revision = self.draft_revision;
-                                }
+                            let before_revision = self.draft_revision;
+                            action_editor::complete_editor_actions(
+                                ctx,
+                                self,
+                                effects,
+                                hwnd,
+                                Some(origin),
+                            );
+                            if self.catalog.open
+                                && self.catalog.owner == self.owner_instance
+                                && self.catalog.macro_id == self.selected_macro_id
+                                && self.catalog.revision == before_revision
+                            {
+                                self.catalog.revision = self.draft_revision;
                             }
                         }
                     }
@@ -9976,10 +9974,10 @@ impl MkMacroDialog {
                     ctx, frame.host, frame.owner_instance, frame.root_pass, owner,
                 )
             });
-            if self.pending_review_open.as_ref().is_some_and(|(origin, _)| origin.is_none()) {
-                if let Some(origin) = child_origin.as_ref() {
-                    self.pending_review_open = Some((Some(origin.clone()), false));
-                }
+            if self.pending_review_open.as_ref().is_some_and(|(origin, _)| origin.is_none())
+                && let Some(origin) = child_origin.as_ref()
+            {
+                self.pending_review_open = Some((Some(origin.clone()), false));
             }
             for action in frame.effects.actions.drain(..) {
                 if !self.host_action_is_current(&action, frame.host, frame.owner_instance) {

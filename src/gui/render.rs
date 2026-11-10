@@ -13111,31 +13111,30 @@ impl LauncherApp {
                                     actions.root,
                                     actions.owner,
                                 )
-                            {
-                                if self.todo_view_dialog.accepts_note_origin(
+                                && self.todo_view_dialog.accepts_note_origin(
                                     self.todo_view_host.identity(),
                                     &receipt,
                                     &request,
                                     session.0,
-                                ) {
-                                    let missing_anchor =
-                                        super::todo_view_dialog::TodoViewDialog::missing_note_anchor(
-                                            &request,
-                                        );
-                                    show_root |= self.open_note_panel_from_origin(
-                                        &request.slug,
-                                        None,
-                                        &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                                )
+                            {
+                                let missing_anchor =
+                                    super::todo_view_dialog::TodoViewDialog::missing_note_anchor(
+                                        &request,
                                     );
-                                    if let Some((anchor, title)) = missing_anchor {
-                                        self.report_error_message(
-                                            "ui operation",
-                                            format!(
-                                                "Anchor '{}' not found in note '{}'; opened note top.",
-                                                anchor, title
-                                            ),
-                                        );
-                                    }
+                                show_root |= self.open_note_panel_from_origin(
+                                    &request.slug,
+                                    None,
+                                    &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                                );
+                                if let Some((anchor, title)) = missing_anchor {
+                                    self.report_error_message(
+                                        "ui operation",
+                                        format!(
+                                            "Anchor '{}' not found in note '{}'; opened note top.",
+                                            anchor, title
+                                        ),
+                                    );
                                 }
                             }
                         }
@@ -13144,12 +13143,11 @@ impl LauncherApp {
             }
             todo_show_root = completion.show_root;
         }
-        if !self.todo_view_host.has_pending_frame() {
-            if let Some(id) = self.pending_todo_entry.take() {
-                if self.todo_view_dialog.open {
-                    self.todo_view_dialog.open_entry(&id);
-                }
-            }
+        if !self.todo_view_host.has_pending_frame()
+            && let Some(id) = self.pending_todo_entry.take()
+            && self.todo_view_dialog.open
+        {
+            self.todo_view_dialog.open_entry(&id);
         }
         for (origin, request) in form_open_requests {
             let Some(panel) = self.note_panels.iter_mut().find(|panel| panel.accepts_note_open(&origin)) else { continue; };
@@ -13672,14 +13670,10 @@ impl LauncherApp {
                             && let Some(pad_host) = pad_host
                             && !self.confirm_modal.is_open()
                             && !self.action_sheet.is_open()
+                            && self.calculation_pad_dialog.navigate_dependency(nav, pad_host, ctx)
+                            && self.calculation_pad_dialog.host_layer_if_root().is_some()
                         {
-                            if self
-                                .calculation_pad_dialog
-                                .navigate_dependency(nav, pad_host, ctx)
-                                && self.calculation_pad_dialog.host_layer_if_root().is_some()
-                            {
-                                effects.push(RootDialogEffect::ShowRoot);
-                            }
+                            effects.push(RootDialogEffect::ShowRoot);
                         }
                     }
                 }
