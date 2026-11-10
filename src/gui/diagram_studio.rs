@@ -1015,6 +1015,8 @@ struct DrawBodyEffects {
     recent_panel: Option<RecentPanelEffects>,
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
+    visual_inspector_open: Option<bool>,
+    visual_inspector_ratio: Option<f32>,
     visual_middle_capture: Option<VisualMiddleCapture>,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
@@ -1088,6 +1090,8 @@ struct PendingRootEffects {
     recent_panel: Option<RecentPanelEffects>,
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
+    visual_inspector_open: Option<bool>,
+    visual_inspector_ratio: Option<f32>,
     visual_middle_capture: Option<VisualMiddleCapture>,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
@@ -1312,6 +1316,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_viewer_middle_capture: VisualMiddleCapture,
     visual_editor_middle_capture: VisualMiddleCapture,
     visual_canvas_height_ratio: f32,
+    visual_inspector_open: bool,
+    visual_inspector_ratio: f32,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset: Option<crate::diagram::MermaidTheme>,
     visual_viewer_minimap_drag: Option<MinimapDrag>,
@@ -1535,6 +1541,8 @@ impl DiagramStudioDialog {
             visual_viewer_middle_capture: VisualMiddleCapture::default(),
             visual_editor_middle_capture: VisualMiddleCapture::default(),
             visual_canvas_height_ratio: 1.0,
+            visual_inspector_open: true,
+            visual_inspector_ratio: 0.66,
             mermaid_color_draft: None,
             template_preset: None,
             visual_viewer_minimap_drag: None,
@@ -2052,6 +2060,8 @@ impl DiagramStudioDialog {
         let mut recent_panel = None;
         let mut visual_camera_reset = None;
         let mut visual_canvas_ratio = None;
+        let mut visual_inspector_open = None;
+        let mut visual_inspector_ratio = None;
         let mut visual_middle_capture = None;
         let mut mermaid_color_draft = None;
         let mut template_preset_requested = None;
@@ -2250,6 +2260,8 @@ impl DiagramStudioDialog {
                     visual_middle_capture = effects.visual_middle_capture;
                     visual_camera_reset = effects.visual_camera_reset;
                     visual_canvas_ratio = effects.visual_canvas_ratio;
+                    visual_inspector_open = effects.visual_inspector_open;
+                    visual_inspector_ratio = effects.visual_inspector_ratio;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -2290,6 +2302,8 @@ impl DiagramStudioDialog {
                 visual_middle_capture = effects.visual_middle_capture;
                 visual_camera_reset = effects.visual_camera_reset;
                 visual_canvas_ratio = effects.visual_canvas_ratio;
+                visual_inspector_open = effects.visual_inspector_open;
+                visual_inspector_ratio = effects.visual_inspector_ratio;
             }
             if body_rendered
                 && pass_authorized
@@ -2521,6 +2535,10 @@ impl DiagramStudioDialog {
                     .then_some(visual_camera_reset).flatten(),
                 visual_canvas_ratio: (child_pass_accepted && body_rendered && !close_requested)
                     .then_some(visual_canvas_ratio).flatten(),
+                visual_inspector_open: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_inspector_open).flatten(),
+                visual_inspector_ratio: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_inspector_ratio).flatten(),
             });
         }
         #[cfg(test)]
@@ -3372,6 +3390,12 @@ impl DiagramStudioDialog {
             }
             if let Some(ratio) = effects.visual_canvas_ratio {
                 self.visual_canvas_height_ratio = ratio;
+            }
+            if let Some(open) = effects.visual_inspector_open {
+                self.visual_inspector_open = open;
+            }
+            if let Some(ratio) = effects.visual_inspector_ratio {
+                self.visual_inspector_ratio = ratio;
             }
         }
         else {
@@ -9118,6 +9142,125 @@ impl DiagramStudioDialog {
                         camera.fit_next = false;
                     }
                 });
+                let base_projection = projection
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(Arc::as_ref);
+                let base_painted_prefix = base_projection.map_or(0, visual_painted_item_prefix);
+                let resolved_layout_selection = scene_snapshot.as_deref().and_then(|scene| {
+                    crate::diagram::visual_canvas_resolve_membership(
+                        scene,
+                        &selection_state.objects,
+                    )
+                });
+                let transformable_selection_count = resolved_layout_selection
+                    .as_ref()
+                    .map_or(0, |selection| selection.roots.len());
+                let layout_owner_available = scene_snapshot
+                    .as_deref()
+                    .zip(base_projection)
+                    .is_some_and(|(scene, projection)| {
+                        resolved_layout_selection.is_some()
+                            && visual_canvas_selection_bounds(
+                                scene,
+                                projection,
+                                &selection_state.objects,
+                                base_painted_prefix,
+                            )
+                            .is_some()
+                    });
+                let layout_actions_allowed = visual_canvas_editing_allowed
+                    && document_intent.is_none()
+                    && self.visual_gesture.is_none()
+                    && layout_owner_available;
+                let align_enabled = layout_actions_allowed && transformable_selection_count >= 2;
+                let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("Align");
+                    for (_name, label, alignment) in [
+                        ("visual_align_left", "Left", VisualAlign::Left),
+                        ("visual_align_center_x", "Center X", VisualAlign::HorizontalCenter),
+                        ("visual_align_right", "Right", VisualAlign::Right),
+                        ("visual_align_top", "Top", VisualAlign::Top),
+                        ("visual_align_center_y", "Center Y", VisualAlign::VerticalCenter),
+                        ("visual_align_bottom", "Bottom", VisualAlign::Bottom),
+                    ] {
+                        let response = ui.add_enabled(align_enabled, egui::Button::new(label));
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
+                                (scene_snapshot.as_deref(), base_projection)
+                        {
+                            match visual_canvas_align_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                alignment,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ui.weak("Distribute");
+                    for (_name, label, distribution) in [
+                        ("visual_distribute_horizontal", "Horizontal", VisualDistribution::Horizontal),
+                        ("visual_distribute_vertical", "Vertical", VisualDistribution::Vertical),
+                    ] {
+                        let response = ui.add_enabled(
+                            distribute_enabled,
+                            egui::Button::new(label),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
+                                (scene_snapshot.as_deref(), base_projection)
+                        {
+                            match visual_canvas_distribute_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                distribution,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+
                 let mut canvas_ratio = self.visual_canvas_height_ratio;
                 let size_control = ui.add_enabled(
                     navigation_controls_allowed,
@@ -9126,10 +9269,52 @@ impl DiagramStudioDialog {
                 #[cfg(test)]
                 self.test_action_rects.push(("visual_canvas_size".into(), size_control.rect, ui.clip_rect()));
                 if size_control.changed() { effects.visual_canvas_ratio = Some(canvas_ratio); }
+                let inspector_toggle = ui.add_enabled(
+                    navigation_controls_allowed,
+                    egui::Button::new(if self.visual_inspector_open {
+                        "Hide properties ▸"
+                    } else {
+                        "Show properties ◂"
+                    }),
+                );
+                #[cfg(test)]
+                self.test_action_rects.push((
+                    "visual_inspector_toggle".into(), inspector_toggle.rect, ui.clip_rect(),
+                ));
+                if inspector_toggle.clicked() {
+                    effects.visual_inspector_open = Some(!self.visual_inspector_open);
+                }
                 let header_height = (ui.cursor().top() - content_top).max(0.0);
-                let remaining = (ui.clip_rect().height() - header_height - 8.0).max(240.0);
-                let canvas_height = if remaining.is_finite() { (remaining * canvas_ratio).max(240.0) } else { 340.0 };
-                let canvas_size = egui::vec2(ui.available_width().max(240.0), canvas_height);
+                let remaining = (ui.clip_rect().height() - header_height - 8.0).max(180.0);
+                let canvas_height = if remaining.is_finite() {
+                    (remaining * canvas_ratio).max(180.0)
+                } else {
+                    340.0
+                };
+                let total_width = ui
+                    .available_width()
+                    .min((ui.clip_rect().right() - ui.cursor().left()).max(0.0));
+                let min_canvas = (total_width - SPLITTER_WIDTH - 340.0).max(120.0);
+                let (canvas_width, sidebar_width) = if self.visual_inspector_open {
+                    split_pane_widths(
+                        total_width, self.visual_inspector_ratio, min_canvas, 240.0, 0.66,
+                    )
+                } else {
+                    (total_width, 0.0)
+                };
+                let (body_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(total_width, canvas_height), egui::Sense::hover(),
+                );
+                let canvas_area = egui::Rect::from_min_size(
+                    body_rect.min, egui::vec2(canvas_width, canvas_height),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(canvas_area)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(canvas_area));
+                let canvas_size = egui::vec2(ui.available_width(), canvas_height);
                 let focused_widget_before_canvas = ui.memory(|memory| memory.focused());
                 let (canvas_response, canvas_painter) = ui.allocate_painter(
                     canvas_size,
@@ -9143,10 +9328,6 @@ impl DiagramStudioDialog {
                     egui::Color32::from_gray(249),
                 );
                 let canvas_painter = canvas_painter.with_clip_rect(canvas_mapping_rect(canvas_mapping));
-                let base_projection = projection
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .map(Arc::as_ref);
                 let canvas_bounds = base_projection.and_then(|projection| projection.bounds);
                 if camera.fit_next {
                     fit_visual_camera(&mut camera, canvas_bounds, canvas_rect.shrink(12.0));
@@ -9195,7 +9376,6 @@ impl DiagramStudioDialog {
                     viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
                 }
 
-                let base_painted_prefix = base_projection.map_or(0, visual_painted_item_prefix);
                 let widget_focus_allows_canvas = ui
                     .memory(|memory| memory.focused())
                     .is_none_or(|focused| focused == canvas_response.id);
@@ -9895,120 +10075,56 @@ impl DiagramStudioDialog {
                     ));
                 }
 
-                let resolved_layout_selection = scene_snapshot.as_deref().and_then(|scene| {
-                    crate::diagram::visual_canvas_resolve_membership(
-                        scene,
-                        &selection_state.objects,
-                    )
                 });
-                let transformable_selection_count = resolved_layout_selection
-                    .as_ref()
-                    .map_or(0, |selection| selection.roots.len());
-                let layout_owner_available = scene_snapshot
-                    .as_deref()
-                    .zip(base_projection)
-                    .is_some_and(|(scene, projection)| {
-                        resolved_layout_selection.is_some()
-                            && visual_canvas_selection_bounds(
-                                scene,
-                                projection,
-                                &selection_state.objects,
-                                base_painted_prefix,
-                            )
-                            .is_some()
-                    });
-                let layout_actions_allowed = visual_canvas_editing_allowed
-                    && document_intent.is_none()
-                    && self.visual_gesture.is_none()
-                    && layout_owner_available;
-                let align_enabled = layout_actions_allowed && transformable_selection_count >= 2;
-                let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak("Align");
-                    for (_name, label, alignment) in [
-                        ("visual_align_left", "Left", VisualAlign::Left),
-                        ("visual_align_center_x", "Center X", VisualAlign::HorizontalCenter),
-                        ("visual_align_right", "Right", VisualAlign::Right),
-                        ("visual_align_top", "Top", VisualAlign::Top),
-                        ("visual_align_center_y", "Center Y", VisualAlign::VerticalCenter),
-                        ("visual_align_bottom", "Bottom", VisualAlign::Bottom),
-                    ] {
-                        let response = ui.add_enabled(align_enabled, egui::Button::new(label));
-                        #[cfg(test)]
-                        self.test_action_rects
-                            .push((_name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked()
-                            && pending.is_none()
-                            && let (Some(scene), Some(projected)) =
-                                (scene_snapshot.as_deref(), base_projection)
-                        {
-                            match visual_canvas_align_selection(
-                                scene,
-                                projected,
-                                &selection_state.objects,
-                                projected.items.len(),
-                                alignment,
-                            ) {
-                                Some(operations) if operations.is_empty() => {}
-                                Some(operations)
-                                    if operations.len()
-                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                {
-                                    staged_operations = Some((operations, None));
-                                }
-                                _ => {
-                                    *pending = Some(PendingMutation::VisualLayoutFailure {
-                                        message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                        expected_document: visual_identity.clone(),
-                                        expected_revision: visual_revision,
-                                    });
-                                }
-                            }
-                        }
+                if self.visual_inspector_open {
+                    let splitter_rect = egui::Rect::from_min_size(
+                        egui::pos2(body_rect.left() + canvas_width, body_rect.top()),
+                        egui::vec2(SPLITTER_WIDTH, canvas_height),
+                    );
+                    let splitter = ui.interact(
+                        splitter_rect,
+                        ui.make_persistent_id(("diagram-studio-splitter", "visual-properties")),
+                        if navigation_controls_allowed {
+                            egui::Sense::drag()
+                        } else {
+                            egui::Sense::hover()
+                        },
+                    );
+                    ui.painter().rect_filled(
+                        splitter_rect, 2.0, ui.visuals().widgets.inactive.bg_fill,
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_inspector_splitter".into(), splitter_rect, ui.clip_rect(),
+                    ));
+                    if splitter.dragged_by(egui::PointerButton::Primary)
+                        && let Some(pointer) = splitter.interact_pointer_pos()
+                    {
+                        effects.visual_inspector_ratio = Some(validated_split_ratio(
+                            split_ratio_from_pointer(
+                                pointer.x, splitter_rect.left(), canvas_width, total_width,
+                            ),
+                            total_width, SPLITTER_WIDTH, min_canvas, 240.0, 0.66,
+                        ));
                     }
-                    ui.weak("Distribute");
-                    for (_name, label, distribution) in [
-                        ("visual_distribute_horizontal", "Horizontal", VisualDistribution::Horizontal),
-                        ("visual_distribute_vertical", "Vertical", VisualDistribution::Vertical),
-                    ] {
-                        let response = ui.add_enabled(
-                            distribute_enabled,
-                            egui::Button::new(label),
-                        );
-                        #[cfg(test)]
-                        self.test_action_rects
-                            .push((_name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked()
-                            && pending.is_none()
-                            && let (Some(scene), Some(projected)) =
-                                (scene_snapshot.as_deref(), base_projection)
-                        {
-                            match visual_canvas_distribute_selection(
-                                scene,
-                                projected,
-                                &selection_state.objects,
-                                projected.items.len(),
-                                distribution,
-                            ) {
-                                Some(operations) if operations.is_empty() => {}
-                                Some(operations)
-                                    if operations.len()
-                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                {
-                                    staged_operations = Some((operations, None));
-                                }
-                                _ => {
-                                    *pending = Some(PendingMutation::VisualLayoutFailure {
-                                        message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                        expected_document: visual_identity.clone(),
-                                        expected_revision: visual_revision,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                });
-
+                    let sidebar_area = egui::Rect::from_min_size(
+                        egui::pos2(body_rect.right() - sidebar_width, body_rect.top()),
+                        egui::vec2(sidebar_width, canvas_height),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(sidebar_area)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                        |ui| {
+                        ui.set_clip_rect(ui.clip_rect().intersect(sidebar_area));
+                        ui.set_max_width(sidebar_width);
+                        ui.spacing_mut().slider_width = (sidebar_width - 24.0).max(60.0);
+                        let _inspector_scroll = egui::ScrollArea::both()
+                            .id_salt("visual-properties-scroll")
+                            .auto_shrink([false, false])
+                            .max_width(sidebar_width)
+                            .max_height(canvas_height)
+                            .show(ui, |ui| {
                 ui.separator();
                 ui.add_enabled_ui(visual_edits_allowed && !visual_draft_active, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -10707,7 +10823,7 @@ impl DiagramStudioDialog {
                                 ui.weak("Image assets are not loaded in this checkpoint.");
                             }
                             VisualObjectKind::PresetInstance { .. } => {
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     ui.label("Preset instance opacity");
                                     ui.add(egui::DragValue::new(&mut object.style.opacity).range(0.0..=1.0).speed(0.02));
                                 });
@@ -10962,7 +11078,7 @@ impl DiagramStudioDialog {
                             .checked_sub(1)
                             .and_then(|position| same_layer_indices.get(position).copied());
                         let forward_target = same_layer_indices.get(layer_position + 1).copied();
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let back = ui.add_enabled(structural_edits_allowed && back_target.is_some(), egui::Button::new("Send back"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_send_back".into(), back.rect, ui.clip_rect()));
@@ -10992,7 +11108,10 @@ impl DiagramStudioDialog {
                             let changed = scene.objects.iter().find(|candidate| candidate.id == selected_id).is_some_and(|saved| *saved != *object);
                             let apply = ui.add_enabled(visual_edits_allowed && changed, egui::Button::new("Apply properties"));
                             #[cfg(test)]
-                            self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
+                            {
+                                self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
+                                self.test_action_enabled.push(("visual_apply_properties".into(), apply.enabled()));
+                            }
                             if apply.clicked() && pending.is_none() && document_intent.is_none() {
                                 if let Some(operations) = crate::diagram::visual_canvas_property_transform_operations(scene, object) {
                                     staged_operations = Some((operations, Some(selected_id)));
@@ -11008,6 +11127,15 @@ impl DiagramStudioDialog {
                             }
                         });
                     });
+                    });
+                }
+
+                            ui.add_space(4.0);
+                            });
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "visual_inspector_scroll".into(), _inspector_scroll.inner_rect, ui.clip_rect(),
+                        ));
                     });
                 }
 
@@ -17217,6 +17345,7 @@ mod tests {
                 .iter()
                 .all(|top| (top - aligned_tops[0]).abs() < 1e-8)
         );
+        assert!(dialog.visual_property_draft.is_none(), "alignment must not create a property draft");
         click_action(&mut dialog, &ctx, "visual_undo");
         assert_eq!(
             dialog.documents.visual_revision(),
@@ -18329,8 +18458,9 @@ mod tests {
                 120.0
             };
             let scroll = dialog
-                .test_visual_scroll_rect
-                .expect("visual owner scroll rect");
+                .test_action_rect("visual_inspector_scroll")
+                .map(|(rect, clip)| rect.intersect(clip))
+                .expect("visual inspector scroll rect");
             let pos = egui::pos2(
                 scroll.right() - 4.0,
                 if direction < 0.0 {
@@ -18377,6 +18507,13 @@ mod tests {
         }
         if matches!(name, "visual_undo" | "visual_redo") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
             click_action(dialog, ctx, "menu_edit");
+            let mut previous = None;
+            for _ in 0..8 {
+                frame(dialog, ctx);
+                let current = dialog.test_action_rect(name);
+                if current.is_some() && current == previous { break; }
+                previous = current;
+            }
         }
         if (name.starts_with("view_") || name == "show_preview") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
             click_action(dialog, ctx, "menu_view");
@@ -20898,6 +21035,141 @@ mod tests {
     }
 
     #[test]
+    fn m4b_visual_arrangement_and_inspector_follow_canvas_layout() {
+        for (width, font_scale) in [(1200.0, 1.0), (620.0, 1.35)] {
+            let mut dialog = initialized_visual_dialog();
+            let revision = dialog.documents.visual_revision();
+            let dirty = dialog.documents.is_dirty();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                for font in style.text_styles.values_mut() {
+                    font.size *= font_scale;
+                }
+            });
+            for _ in 0..3 {
+                frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+            }
+            let (canvas, _) = dialog.test_action_rect("visual_canvas").unwrap();
+            let (align, _) = dialog.test_action_rect("visual_align_left").unwrap();
+            let (inspector, clip) = dialog.test_action_rect("visual_inspector_scroll").unwrap();
+            assert!(align.bottom() <= canvas.top());
+            assert!(inspector.left() >= canvas.right());
+            assert!(
+                inspector.right() <= clip.right(),
+                "inspector={inspector:?} clip={clip:?}"
+            );
+            assert!(canvas.width() >= 120.0);
+            if width == 1200.0 {
+                let splitter = dialog
+                    .test_action_rect("visual_inspector_splitter")
+                    .unwrap()
+                    .0
+                    .center();
+                let end = splitter + egui::vec2(45.0, 0.0);
+                let button = |pos, pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame_with_child_events(
+                    &mut dialog,
+                    &ctx,
+                    vec![egui::Event::PointerMoved(splitter), button(splitter, true)],
+                );
+                frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+                frame_with_child_events(
+                    &mut dialog,
+                    &ctx,
+                    vec![egui::Event::PointerMoved(end), button(end, false)],
+                );
+                frame(&mut dialog, &ctx);
+                assert!(dialog.test_visual_canvas_rect.unwrap().width() > canvas.width());
+            }
+            click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+            assert!(!dialog.visual_inspector_open);
+            frame(&mut dialog, &ctx);
+            assert!(dialog.test_action_rect("visual_inspector_scroll").is_none());
+            click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+            assert!(dialog.visual_inspector_open);
+            frame(&mut dialog, &ctx);
+            assert!(dialog.test_action_rect("visual_inspector_scroll").is_some());
+            assert_eq!(dialog.documents.visual_revision(), revision);
+            assert_eq!(dialog.documents.is_dirty(), dirty);
+        }
+    }
+
+    #[test]
+    fn m4b_inspector_preserves_draft_and_scrolls_independently() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.35;
+            }
+        });
+        let mut edited = dialog.documents.visual_scene().unwrap().objects[0].clone();
+        edited.transform.x += 20.0;
+        let revision = dialog.documents.visual_revision().unwrap();
+        let scene = dialog.documents.visual_scene().unwrap().clone();
+        let dirty = dialog.documents.is_dirty();
+        dialog.visual_selection = Some(edited.id);
+        dialog.visual_selected_objects.insert(edited.id);
+        dialog.visual_property_draft = Some(VisualPropertyDraft {
+            document: dialog.render_document.clone(),
+            basis_revision: revision,
+            object: edited.clone(),
+        });
+        super::super::render::with_immediate_viewport_test_size(
+            viewport_id(),
+            egui::vec2(620.0, 700.0),
+            || {
+                for _ in 0..3 {
+                    frame(&mut dialog, &ctx);
+                }
+                let canvas = dialog.test_visual_canvas_rect.unwrap();
+                let camera = dialog.camera;
+                let (inspector, clip) = dialog.test_action_rect("visual_inspector_scroll").unwrap();
+                assert!(
+                    inspector.right() <= clip.right(),
+                    "inspector={inspector:?} clip={clip:?}"
+                );
+                reveal_visual_action(&mut dialog, &ctx, "visual_apply_properties");
+                let (apply, clip) = dialog.test_action_rect("visual_apply_properties").unwrap();
+                assert!(clip.contains_rect(apply), "apply={apply:?} clip={clip:?}");
+                assert_eq!(
+                    dialog.test_action_enabled("visual_apply_properties"),
+                    Some(true)
+                );
+                assert_eq!(dialog.test_visual_canvas_rect, Some(canvas));
+                assert_eq!(dialog.camera.center, camera.center);
+                assert_eq!(dialog.camera.zoom, camera.zoom);
+                click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+                click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+                assert_eq!(
+                    dialog
+                        .visual_property_draft
+                        .as_ref()
+                        .map(|draft| &draft.object),
+                    Some(&edited)
+                );
+                dialog.owner_host.transition(UtilityPresentation::Docked);
+                frame(&mut dialog, &ctx);
+                assert_eq!(
+                    dialog
+                        .visual_property_draft
+                        .as_ref()
+                        .map(|draft| &draft.object),
+                    Some(&edited)
+                );
+                assert_eq!(dialog.documents.visual_scene().unwrap(), &scene);
+                assert_eq!(dialog.documents.visual_revision(), Some(revision));
+                assert_eq!(dialog.documents.is_dirty(), dirty);
+            },
+        );
+    }
+
+    #[test]
     fn visual_editor_canvas_scales_with_host_and_height_control() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
@@ -20915,7 +21187,20 @@ mod tests {
         };
         let small = draw(&mut dialog, egui::vec2(900.0, 800.0));
         let large = draw(&mut dialog, egui::vec2(1800.0, 1400.0));
-        assert!(large.width() > 1400.0 && large.height() > small.height() && large.height() > 340.0);
+        assert!(large.width() > small.width() && large.width() < 1800.0 && large.height() > small.height() && large.height() > 340.0);
+        let scene = dialog.documents.visual_scene().unwrap();
+        let projection = project_visual_scene(scene).unwrap();
+        let item = projection.items.iter().find(|item| item.object_id == crate::diagram::TITLE_OBJECT_ID).unwrap();
+        let world = ScenePoint {
+            x: (item.bounds.min.x + item.bounds.max.x) / 2.0,
+            y: (item.bounds.min.y + item.bounds.max.y) / 2.0,
+        };
+        let mapping = pure_canvas_mapping(large.shrink(12.0), dialog.camera);
+        let screen = scene_point_from_screen(world_to_screen(world, large.shrink(12.0), dialog.camera));
+        assert_eq!(
+            visual_canvas_hit_test(&projection, visual_painted_item_prefix(&projection), &[], mapping, screen, 9.0),
+            CanvasHit::Object(crate::diagram::TITLE_OBJECT_ID)
+        );
         dialog.visual_canvas_height_ratio = 0.5;
         let adjusted = draw(&mut dialog, egui::vec2(1800.0, 1400.0));
         assert!(adjusted.height() < large.height());

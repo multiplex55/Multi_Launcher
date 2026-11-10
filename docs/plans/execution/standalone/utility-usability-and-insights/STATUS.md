@@ -27,7 +27,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
 | M3-B | H1/H2 custom hosts / accepted child origins | existing hosts and B2a already-hosted edges verified; ordinary B2b/c adapters pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native pending |
-| M4-B | D4 toolbar / pinned inspector | pending |
+| M4-B | D4 toolbar / pinned inspector | complete; automated verified, native pending |
 | M4-C | D3 owned-text endpoint captions | pending |
 | M4-D | D5 actual connector creation / reconnection | pending |
 | M5-A | I1 bounded label-file exchange | pending |
@@ -336,3 +336,19 @@ Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-f
 - `m4-a-font-layout`: 2/2, actual 1.35× text-style sizes at fixed logical widths; enlarged Source/Split/menu layouts pass original assertions. DPI scaling alone was rejected as insufficient text-layout evidence. Initial compile used unsupported Context style API; corrected to this egui version's `all_styles_mut` before successful final compile.
 
 Successful receipts exit 0/no timeout/cleanup and output drain verified. Parent inspected scoped diff/whitespace/status; only Diagram source and ledger changed. Source/Cargo returned. These are rendered tests, not physical native observation; M9 remains pending. M4-B D4 layout follows; C/D and remaining approved features/adapters unchanged in scope.
+
+M4-A checkpoint `901891321ad539f7aa75bdbbcd8ec62da61aeebe` pushed successfully; clean tree before M4-B. Implementer owns VisualDocument arrangement strip/right inspector only, preserving current property draft/accepted transactions/camera and view-only collapse/resize invariants. Narrow real-font/mapping/Apply coverage plus immediate editing regressions; C/D remain subsequent. Parent ledger/Git; one source/Cargo lane.
+
+## M4-B acceptance: Visual arrangement and pinned inspector
+
+VisualDocument's single existing Align/Distribute implementation now precedes the canvas. Its single existing property/action renderer lives in a right-hand independently scrolling inspector with reachable collapse/reopen and a bounded draggable splitter. Fixed body rectangles use the actual visible clip rather than egui's potentially expanded available width; narrow forms wrap/bound controls and permit horizontal scrolling for intrinsically wider content. Accepted view effects own collapse/ratio updates under existing host/input fences. Layout changes preserve source, scene, revision/dirty/history, valid property drafts and camera; existing mapping-change cancellation remains authoritative.
+
+Separate final fast-dev lib no-run compile passed. Initial focused tests exposed real inspector overflow and an Undo helper timing defect. Investigation confirmed parent available width 642.6 versus visible clip 620 and vertical-only ScrollArea content expansion; actual-clip bounds/fixed regions/explicit scroll sizing resolve this. Observed Undo was disabled during its popup sizing pass and enabled after settling; the helper now clicks settled observed geometry. Accepted VisualHistory and the original revision assertions pass. No transaction expectations weakened; temporary diagnostics removed.
+
+Final owned 100-second `--no-fail-fast` evidence under `target/utility-usability-and-insights/evidence/`:
+
+- `m4-b-splitter`: 5/5, 2.235s; normal+narrow actual 1.35× fonts, arrangement/sidebar bounds, accepted collapse and splitter resize, full-visible enabled Apply after independent scroll, preserved selected-object draft through collapse/host change, current mapping after resize, align/distribute and property edit single-undo/cache invariants.
+- `m4-b-canvas`: 2/2, 6.050s; existing inline-label commit/reedit/cancel/stale and accepted middle-click fit regressions.
+- `m4-b-undo-observed`: exact diagnostic confirmation passed; initial/correction/observed receipts remain `m4-b-*`, including failures truthfully retained for cause evidence.
+
+Final receipts exit 0/no timeout/cleanup and drain verified. Parent inspected scoped diff/whitespace/status; no duplicate lower arrangement implementation or diagnostics. Large unchanged canvas/property bodies retain baseline formatting to avoid about 1,800 lines of unrelated indentation churn; new boundary/tests formatted. Source/Cargo returned. Physical native observation remains M9. M4-C endpoint captions and M4-D actual connector gestures remain pending.
