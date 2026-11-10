@@ -798,10 +798,24 @@ impl MouseGestureCommandHost for LauncherApp {
     }
 
     fn open_mouse_gesture_binding_dialog(&mut self) {
+        let was_open = self.mouse_gestures_dialog.binding_is_open();
         self.mouse_gestures_dialog.open_binding_editor();
         self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
-        self.mouse_gestures_host.request_focus();
-        if !self.mouse_gestures_host.is_popped_out() {
+        if !self.mouse_gestures_dialog.binding_is_open() {
+            self.mouse_gestures_host.request_focus();
+            if !self.mouse_gestures_host.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
+            return;
+        }
+        self.mouse_gestures_dialog.set_binding_parent_instance(self.mouse_gestures_host.session());
+        let presentation = self.gesture_binding_host.open_from_origin(
+            &self.egui_ctx,
+            self.mouse_gestures_dialog.binding_dialog_mut(),
+            was_open,
+            &super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        if presentation == Some(super::utility_host::UtilityPresentation::Docked) {
             self.request_launcher_visibility(true);
         }
     }

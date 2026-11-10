@@ -1273,7 +1273,11 @@ pub struct LauncherApp {
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gestures_host: mouse_form_host::MouseGesturesHost,
+    gesture_binding_host: utility_window_host::UtilityWindowHost<mouse_gestures_dialog::BindingDialog>,
+    pending_gesture_binding_open: Option<(mouse_gestures_dialog::BindingOpenIntent, utility_host::AcceptedParentOpen<u64>)>,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
+    gesture_window_picker_host: utility_window_host::UtilityWindowHost<mouse_gesture_settings_dialog::GestureWindowPicker>,
+    pending_gesture_picker_open: Option<utility_host::AcceptedParentOpen<u64>>,
     mouse_settings_dialog: MouseSettingsDialog,
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
@@ -2176,6 +2180,7 @@ impl LauncherApp {
     /// This is exposed so non-`gui` modules (e.g. `settings_editor`) can
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
+        self.gesture_binding_host.cancel_docked_focus_request();
         self.mouse_gesture_settings_dialog.open();
         self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, true);
         self.mouse_gesture_settings_host.request_focus();
@@ -4095,7 +4100,11 @@ impl LauncherApp {
             macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi::new(ctx),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gestures_host: Default::default(),
+            gesture_binding_host: Default::default(),
+            pending_gesture_binding_open: None,
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
+            gesture_window_picker_host: Default::default(),
+            pending_gesture_picker_open: None,
             mouse_settings_dialog: MouseSettingsDialog::default(),
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
@@ -5737,6 +5746,10 @@ impl LauncherApp {
                 if self.mouse_gestures_dialog.open {
                     self.mouse_gestures_host.remember_current(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 }
+                if self.mouse_gestures_dialog.binding_is_open() {
+                    self.gesture_binding_host.close_from_app(&self.egui_ctx);
+                    self.mouse_gestures_dialog.binding_dialog_mut().close();
+                }
                 self.mouse_gestures_dialog.open = false;
                 self.mouse_gestures_dialog.reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
                 self.mouse_gestures_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
@@ -5745,6 +5758,10 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => {
                 if self.mouse_gesture_settings_dialog.open {
                     self.mouse_gesture_settings_host.remember_current(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
+                }
+                if self.mouse_gesture_settings_dialog.window_picker_is_open() {
+                    self.gesture_window_picker_host.close_from_app(&self.egui_ctx);
+                    self.mouse_gesture_settings_dialog.close_picker();
                 }
                 self.mouse_gesture_settings_dialog.open = false;
                 self.mouse_gesture_settings_host.retire(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);

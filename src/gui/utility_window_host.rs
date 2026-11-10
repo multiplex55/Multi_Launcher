@@ -62,6 +62,18 @@ pub(super) trait HostedUtilityDialog: Sized {
         }
     }
 
+    fn dialog_navigation_owner(&self, instance: u64) -> NavigationOwner {
+        Self::navigation_owner(instance)
+    }
+
+    fn dialog_surface(&self, instance: u64) -> SurfaceId {
+        SurfaceId::dialog(Self::SURFACE_KIND, instance)
+    }
+
+    fn dialog_namespace(&self) -> String {
+        format!("{}/form", Self::KEY)
+    }
+
     fn is_open(&self) -> bool;
     fn session(&self) -> u64;
     fn target_generation(&self) -> TargetGeneration {
@@ -268,6 +280,22 @@ pub(super) trait UtilityWindowCompanion {
 }
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
+    #[cfg(test)]
+    pub(super) fn test_target_rect(&self, label: &str) -> egui::Rect {
+        self.native_jump.retained_registry().targets().iter()
+            .find(|target| target.eligible() && target.metadata().label() == label)
+            .unwrap_or_else(|| {
+                let labels: Vec<_> = self.native_jump.retained_registry().targets().iter()
+                    .map(|target| (target.metadata().label(), target.eligible())).collect();
+                panic!("missing hosted target {label:?}, owner {:?}, targets {labels:?}", self.native_jump.frame_navigation_owner())
+            })
+            .clipped_rect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_owner(&self) -> NavigationOwner {
+        self.native_jump.frame_navigation_owner()
+    }
     fn docked_layer(&self) -> egui::LayerId {
         self.dialog_layer.unwrap_or_else(D::layer)
     }
@@ -342,6 +370,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         } else {
             self.state.request_focus();
         }
+    }
+
+    pub(super) fn cancel_docked_focus_request(&mut self) {
+        self.docked_focus_pending = false;
     }
 
     pub(super) fn has_pending_frame(&self) -> bool {
@@ -694,7 +726,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let parent = NavigationViewportBinding {
             viewport,
             base_layer: layer,
-            owner: D::navigation_owner(instance),
+            owner: dialog.dialog_navigation_owner(instance),
         };
         let dialog_child = dialog.confirmation_binding(viewport, instance);
         let companion_binding = companion
@@ -734,14 +766,14 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.native_jump
             .handle_viewport_input(ctx, jump_current, frame.first, viewport);
         self.native_jump.begin_ui_pass();
-        let surface = SurfaceId::dialog(D::SURFACE_KIND, instance);
+        let surface = dialog.dialog_surface(instance);
         let parent_scope =
             (jump_current && child.is_none() && dialog.parent_targets_allowed(runtime))
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
                         dialog.target_generation(),
-                        format!("{}/form", D::KEY),
+                        dialog.dialog_namespace(),
                         binding,
                     )
                 })

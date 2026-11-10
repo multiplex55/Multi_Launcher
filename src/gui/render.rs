@@ -2038,6 +2038,8 @@ impl LauncherApp {
                 && self.file_search_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || self.diff_dialog.host_layer_if_root().is_some_and(|layer| !ordinary_layer_is_allowed(layer))
             || self.diff_dialog.child_root_layers().into_iter().any(|layer| !ordinary_layer_is_allowed(layer))
+            || (self.mouse_gestures_dialog.binding_is_open() && self.gesture_binding_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
+            || (self.mouse_gesture_settings_dialog.window_picker_is_open() && self.gesture_window_picker_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
             || self.snippet_prompt_has_root_presentation()
@@ -2142,6 +2144,8 @@ impl LauncherApp {
             .chain(self.dashboard_editor.host_layer_if_root())
             .chain(self.diff_dialog.host_layer_if_root())
             .chain(self.diff_dialog.child_root_layers())
+            .chain(self.mouse_gestures_dialog.binding_is_open().then(|| self.gesture_binding_host.root_layer()).flatten())
+            .chain(self.mouse_gesture_settings_dialog.window_picker_is_open().then(|| self.gesture_window_picker_host.root_layer()).flatten())
             .chain(self.pin_list_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("screenshot-pin-list"),
@@ -4983,7 +4987,8 @@ impl LauncherApp {
             self.mkmacro_dialog.needs_root_ui_when_hidden(),
             self.dashboard_editor.needs_root_ui_when_hidden(),
             self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
-            self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open),
+            self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open)
+                || self.gesture_binding_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.binding_is_open()),
             self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
             self.diff_dialog.needs_root_ui_when_hidden(),
             self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open),
@@ -4994,7 +4999,8 @@ impl LauncherApp {
             self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open),
             self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
-            self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
+            self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open)
+                || self.gesture_window_picker_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.window_picker_is_open()),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
@@ -6901,7 +6907,9 @@ impl LauncherApp {
             instance,
         });
         let child = instance
-            .and_then(|instance| self.mouse_gestures_dialog.jump_mode_child_owner(instance));
+            .and_then(|instance| self.mouse_gestures_dialog.jump_mode_child_owner(instance))
+            .filter(|owner| !matches!(owner, NavigationOwner::MouseGestureBinding { .. })
+                || !self.gesture_binding_host.is_popped_out());
         let jump_enabled = self.jump_mode_enabled();
         let canvas_active = self.mouse_gestures_dialog.recorder_canvas_active();
         let root_scope = if root_visible
@@ -6993,6 +7001,177 @@ impl LauncherApp {
         self.mouse_gestures_host = host;
     }
 
+    fn show_mouse_gesture_children(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open();
+        let jump_active = self.jump_mode_ui.active_session().is_some();
+        let mut gestures = std::mem::take(&mut self.mouse_gestures_dialog);
+        gestures.bind_unassigned_parent(self.mouse_gestures_host.session());
+        let runtime = if gestures.binding_is_open() {
+            gestures.binding_runtime(self)
+        } else {
+            Default::default()
+        };
+        let mut host = std::mem::take(&mut self.gesture_binding_host);
+        host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let layer = host.root_layer();
+        let owner = root_input && layer.is_some() && visible_top_middle_layer(ctx) == layer;
+        let root_owner = self.jump_mode_ui.frame_navigation_owner();
+        let parent_instance = self.mouse_gestures_host.session();
+        let scope = gestures
+            .jump_mode_child_owner(parent_instance)
+            .filter(|child| *child == root_owner)
+            .and_then(|child| {
+                let (surface, namespace) =
+                    super::mouse_form_host::mouse_gestures_navigation_surface(
+                        parent_instance,
+                        child,
+                    );
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface,
+                    gestures.jump_mode_target_generation(),
+                    namespace,
+                    ctx.viewport_id(),
+                    child,
+                    false,
+                )
+            });
+        host.show(
+            ctx,
+            gestures.binding_dialog_mut(),
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner,
+                parent_owner: owner,
+                root_jump_active: jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+        self.gesture_binding_host = host;
+        self.mouse_gestures_dialog = gestures;
+
+        let layer = self.gesture_window_picker_host.root_layer();
+        let owner = root_input && layer.is_some() && visible_top_middle_layer(ctx) == layer;
+        self.gesture_window_picker_host.show(
+            ctx,
+            self.mouse_gesture_settings_dialog.picker_mut(),
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    fn complete_mouse_gesture_children(&mut self, ctx: &egui::Context) -> bool {
+        use super::mouse_gesture_settings_dialog::PickerCommand;
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+
+        let mut gestures = std::mem::take(&mut self.mouse_gestures_dialog);
+        let mut binding_host = std::mem::take(&mut self.gesture_binding_host);
+        let completion = binding_host.complete(ctx, gestures.binding_dialog_mut());
+        let mut binding_show = completion.as_ref().is_some_and(|done| done.show_root);
+        let binding_parent_session = self.mouse_gestures_host.session();
+        if let Some(done) = completion {
+            for command in done.commands {
+                let is_save = matches!(
+                    &command,
+                    super::mouse_gestures_dialog::BindingHostCommand::Save(..)
+                );
+                gestures.complete_binding_command(self, binding_parent_session, command);
+                if is_save && !gestures.binding_is_open() {
+                    binding_host.close_from_app(ctx);
+                }
+            }
+        }
+        if let Some((intent, origin)) = self.pending_gesture_binding_open.take()
+            && self
+                .mouse_gestures_host
+                .accepts_origin(gestures.open, &origin)
+        {
+            let was_open = gestures.binding_is_open();
+            if gestures.accept_binding_open(intent) {
+                gestures.set_binding_parent_instance(self.mouse_gestures_host.session());
+                let result = binding_host.open_from_origin(
+                    ctx,
+                    gestures.binding_dialog_mut(),
+                    was_open,
+                    &ChildOpenOrigin::Parent(origin),
+                );
+                binding_show |= result == Some(UtilityPresentation::Docked);
+            }
+        }
+        binding_show &= gestures.binding_is_open() && !binding_host.is_popped_out();
+        self.gesture_binding_host = binding_host;
+        self.mouse_gestures_dialog = gestures;
+
+        let completion = self
+            .gesture_window_picker_host
+            .complete(ctx, self.mouse_gesture_settings_dialog.picker_mut());
+        let mut picker_show = completion.as_ref().is_some_and(|done| done.show_root);
+        if let Some(done) = completion {
+            for command in done.commands {
+                match command {
+                    PickerCommand::Close => self.mouse_gesture_settings_dialog.close_picker(),
+                    PickerCommand::Add(title, epoch) => {
+                        self.mouse_gesture_settings_dialog.accept_picker_title(
+                            self.mouse_gesture_settings_host.session(),
+                            epoch,
+                            &title,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(origin) = self.pending_gesture_picker_open.take()
+            && self
+                .mouse_gesture_settings_host
+                .accepts_origin(self.mouse_gesture_settings_dialog.open, &origin)
+        {
+            let was_open = self.mouse_gesture_settings_dialog.window_picker_is_open();
+            self.mouse_gesture_settings_dialog
+                .open_picker(self.mouse_gesture_settings_host.session());
+            let result = self.gesture_window_picker_host.open_from_origin(
+                ctx,
+                self.mouse_gesture_settings_dialog.picker_mut(),
+                was_open,
+                &ChildOpenOrigin::Parent(origin),
+            );
+            picker_show |= result == Some(UtilityPresentation::Docked);
+        }
+        picker_show &= self.mouse_gesture_settings_dialog.window_picker_is_open()
+            && !self.gesture_window_picker_host.is_popped_out();
+        binding_show || picker_show
+    }
+
     fn complete_mouse_gestures_host(&mut self, ctx: &egui::Context) -> Option<String> {
         use super::mouse_form_host::MOUSE_GESTURES;
         let mut draft = std::mem::take(&mut self.mouse_gestures_dialog);
@@ -7011,11 +7190,22 @@ impl LauncherApp {
                 actions.request_close();
             }
             let request = actions.host_request;
+            let binding_was_open = draft.binding_is_open();
+            let reloaded = actions.reload;
+            let binding_open = actions.take_binding_open();
+            let origin = self.mouse_gestures_host.take_accepted_origin();
             let focus_launcher = self
                 .mouse_gestures_host
                 .root_layer(MOUSE_GESTURES)
                 .is_some();
             copy = draft.complete_host_actions(self, actions, focus_launcher);
+            self.pending_gesture_binding_open = binding_open.zip(origin);
+            if binding_was_open
+                && (!draft.open || reloaded || (!draft.source_is_read_only() && !draft.binding_source_exists()))
+            {
+                self.gesture_binding_host.close_from_app(ctx);
+                draft.binding_dialog_mut().close();
+            }
             if !draft.open {
                 self.mouse_gestures_host.remember_current(ctx, MOUSE_GESTURES);
                 self.mouse_gestures_host.retire(ctx, MOUSE_GESTURES);
@@ -7061,20 +7251,16 @@ impl LauncherApp {
             let scope = self.mouse_form_scope(ctx, GESTURE_SETTINGS, root_visible);
             let instance = self.jump_mode_ui.dialog_instance(GESTURE_SETTINGS.kind);
             let root_owner = self.mouse_gesture_settings_native_ui_owner_current(ctx, root_visible);
-            let root_picker_owner =
-                self.mouse_gesture_settings_picker_native_ui_owner_current(ctx, root_visible);
             let root_layer = self
                 .mouse_gesture_settings_host
                 .root_layer(GESTURE_SETTINGS);
-            let picker_open = self.mouse_gesture_settings_dialog.window_picker_is_open();
             let input = FormInput {
                 first,
                 root_input,
                 root_owner,
                 root_jump_active,
                 application_input,
-                close_shortcut: !picker_open
-                    && (self.mouse_gesture_settings_host.is_popped_out()
+                close_shortcut: (self.mouse_gesture_settings_host.is_popped_out()
                         || self.mouse_form_root_close_allowed(
                             ctx,
                             super::Panel::MouseGestureSettingsDialog,
@@ -7108,14 +7294,7 @@ impl LauncherApp {
                 scope.as_ref(),
                 |draft, ui| {
                     use crate::gui::jump_mode::ui::visible_top_middle_layer;
-                    let picker_owner =
-                        if ui.native {
-                            ui.input && picker_open && visible_top_middle_layer(ui.ctx)
-                        == Some(super::mouse_gesture_settings_dialog::window_picker_layer_id())
-                        } else {
-                            root_picker_owner
-                        };
-                    let owner = ui.owner && !picker_open;
+                    let owner = ui.owner;
                     let mut observation = if !ui.first {
                         None
                     } else if ui.native {
@@ -7135,7 +7314,7 @@ impl LauncherApp {
                         ui.scope,
                         instance,
                         owner,
-                        picker_owner,
+                        false,
                         ui.first,
                         ui.child,
                         ui.popout,
@@ -7143,7 +7322,6 @@ impl LauncherApp {
                     drop(installed);
                     if let Some(observation) = &mut observation {
                         observation.current = owner
-                            && !draft.window_picker_is_open()
                             && visible_top_middle_layer(ui.ctx)
                                 == if ui.native { None } else { root_layer };
                     }
@@ -7255,8 +7433,16 @@ impl LauncherApp {
                 observation.finish(&mut self.settings_editor);
             }
             let request = actions.host_request;
+            let picker_was_open = gesture.window_picker_is_open();
+            let open_picker = actions.take_open_picker();
+            let origin = self.mouse_gesture_settings_host.take_accepted_origin();
             gesture.complete_host_actions(self, actions);
+            self.pending_gesture_picker_open = origin.filter(|_| open_picker);
             if !gesture.open {
+                if picker_was_open {
+                    self.gesture_window_picker_host.close_from_app(ctx);
+                    gesture.close_picker();
+                }
                 self.mouse_gesture_settings_host
                     .remember_current(ctx, GESTURE_SETTINGS);
                 self.mouse_gesture_settings_host
@@ -8131,10 +8317,8 @@ impl LauncherApp {
                 kind: NavigationDialogKind::MouseGestures,
                 instance,
             } if instance == parent_instance
-                && self
-                    .mouse_gestures_dialog
-                    .jump_mode_child_owner(parent_instance)
-                    .is_none() =>
+                && (self.mouse_gestures_dialog.jump_mode_child_owner(parent_instance).is_none()
+                    || self.gesture_binding_host.is_popped_out()) =>
             {
                 crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(parent_layer)
                     && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
@@ -8411,8 +8595,6 @@ impl LauncherApp {
 
         if !self.native_ui_host_input_allowed(ctx, root_visible)
             || egui::Popup::is_any_open(ctx)
-            || (section == &SettingsSection::MouseGestures
-                && self.mouse_gesture_settings_dialog.window_picker_is_open())
         {
             return true;
         }
@@ -8525,7 +8707,6 @@ impl LauncherApp {
         use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         self.mouse_gesture_settings_dialog.open
-            && !self.mouse_gesture_settings_dialog.window_picker_is_open()
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && self.mouse_gesture_settings_host
                 .root_layer(super::mouse_form_host::GESTURE_SETTINGS)
@@ -8655,18 +8836,6 @@ impl LauncherApp {
         resolve_batch_rename_confirmation_owner_with_parent(
             ctx, parent_instance, confirmation_instance, kind, Some(parent_layer),
         )
-    }
-
-    fn mouse_gesture_settings_picker_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
-    ) -> bool {
-        self.mouse_gesture_settings_dialog.open
-            && self.mouse_gesture_settings_dialog.window_picker_is_open()
-            && self.native_ui_host_input_allowed(ctx, root_visible)
-            && Some(crate::gui::mouse_gesture_settings_dialog::window_picker_layer_id())
-                == crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
     }
 
     fn json_utility_native_ui_owner_current(
@@ -9285,6 +9454,7 @@ impl LauncherApp {
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures)
             && let Some(parent_layer) = self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES)
+                .or(self.gesture_binding_host.root_layer())
             && let Some(child_owner) = self
                 .mouse_gestures_dialog
                 .jump_mode_child_owner(parent_instance)
@@ -9324,7 +9494,7 @@ impl LauncherApp {
                             combo_popup.as_ref(),
                         );
                 }
-                Some(layer) if layer == parent_layer => {
+                Some(layer) if layer == parent_layer && !matches!(child_owner, NavigationOwner::MouseGestureBinding { .. }) => {
                     // While the child is pending but has not become the visible
                     // owner, keep the parent from receiving its stale hints.
                     candidate = NavigationOwner::Blocked;
@@ -9863,6 +10033,7 @@ impl LauncherApp {
             self.show_dashboard_editor_host(&ctx, first_ui_pass, false);
             self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_mouse_gesture_children(&ctx, first_ui_pass, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
@@ -11722,6 +11893,7 @@ impl LauncherApp {
                 self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             }
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_mouse_gesture_children(&ctx, first_ui_pass, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
@@ -11945,6 +12117,7 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
+        self.show_mouse_gesture_children(&ctx, first_ui_pass, frame_logic.should_be_visible);
         if self.theme_settings_dialog_open {
             let theme_settings_section = crate::settings_editor::catalog::SettingsSection::Theme;
             let theme_settings_native_owner = self.dedicated_settings_native_ui_owner_current(
@@ -13125,6 +13298,9 @@ impl LauncherApp {
             });
         }
         let (gesture_show_root, mouse_show_root) = self.complete_mouse_settings_hosts(ctx);
+        if self.complete_mouse_gesture_children(ctx) {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let mut dashboard_show_root = false;
         let mut clipboard_modify_show_root = false;
         let mut folder_show_root = false;
@@ -48537,6 +48713,524 @@ mod tests {
     }
 
     #[test]
+    fn native_mouse_binding_inherits_parent_and_keeps_its_session() {
+        use super::super::mouse_form_host::MOUSE_GESTURES;
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("mouse-child-preferences.json");
+        let mut settings = crate::settings::Settings::default();
+        let key = crate::settings::UtilityToolKey::parse("gesture-binding-editor").unwrap();
+        settings
+            .utility_presentations
+            .set(key, crate::settings::RememberedPresentation::Docked)
+            .unwrap();
+        settings.save(path.to_str().unwrap()).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path.to_string_lossy().into_owned(),
+            workers.clone(),
+            settings.utility_presentations,
+        );
+        manager.install_in_context(&ctx);
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![mouse_gesture_fixture("Swipe", "R")],
+        );
+        let (popout, clip, enabled) = app.mouse_gestures_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_mouse_settings_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        app.request_launcher_visibility(false);
+        let parent = app.mouse_gestures_host.test_viewport_id(MOUSE_GESTURES);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        let scroll = app
+            .mouse_gestures_dialog
+            .test_right_panel_scroll_area_id()
+            .unwrap();
+        let mut state = egui::scroll_area::State::load(&ctx, scroll).unwrap_or_default();
+        state.offset.y = app
+            .mouse_gestures_dialog
+            .test_right_panel_scroll_max_offset_y();
+        state.store(&ctx, scroll);
+        run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        let add = app.mouse_gestures_host.test_target_rect("Add binding");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.mouse_gestures_dialog.binding_is_open());
+        assert!(app.gesture_binding_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        let session = app.mouse_gestures_dialog.test_binding_session();
+        let child = super::super::utility_window_host::UtilityWindowHost::<
+            super::super::mouse_gestures_dialog::BindingDialog,
+        >::test_viewport(session);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let label = app.gesture_binding_host.test_target_rect("Binding label");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(label, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("draft".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.mouse_gestures_dialog.test_binding_label(), "draft");
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(child)));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.mouse_gestures_dialog.test_binding_label(), "draft");
+        assert_eq!(app.mouse_gestures_dialog.test_binding_session(), session);
+        run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        let action = app
+            .gesture_binding_host
+            .test_target_rect("Action identifier");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(action, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("test:action".into())],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.mouse_gestures_dialog.test_binding_action(),
+            "test:action"
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        for label in ["Add gesture", "Rename gesture"] {
+            if label == "Rename gesture" {
+                let scroll = app
+                    .mouse_gestures_dialog
+                    .test_right_panel_scroll_area_id()
+                    .unwrap();
+                let mut state = egui::scroll_area::State::load(&ctx, scroll).unwrap_or_default();
+                state.offset.y = 0.0;
+                state.store(&ctx, scroll);
+                run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+            }
+            let control = app.mouse_gestures_host.test_target_rect(label);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(control, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(control, false),
+                false,
+                true,
+            );
+            assert!(app.mouse_gestures_dialog.binding_is_open());
+            assert_eq!(app.mouse_gestures_dialog.test_binding_session(), session);
+            assert_eq!(app.mouse_gestures_dialog.test_binding_label(), "draft");
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        for _ in 0..8 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+            if matches!(
+                app.gesture_binding_host.test_native_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            ) && app
+                .gesture_binding_host
+                .test_native_target("Action category")
+                .is_some()
+            {
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                app.gesture_binding_host.test_native_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            ),
+            "owner {:?}",
+            app.gesture_binding_host.test_native_owner()
+        );
+        let (category_rect, category_clip, category_enabled, category_scoped) = app
+            .mouse_gestures_dialog
+            .test_binding_category_observation()
+            .unwrap();
+        assert!(
+            category_enabled && category_scoped && category_clip.contains_rect(category_rect),
+            "category {:?}",
+            app.mouse_gestures_dialog
+                .test_binding_category_observation()
+        );
+        assert!(
+            app.gesture_binding_host
+                .test_native_target("Action category")
+                .is_some()
+        );
+        let category = app.gesture_binding_host.test_target_rect("Action category");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(category, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        let option = app
+            .gesture_binding_host
+            .test_native_target("Category option")
+            .expect("the native category popup owns an eligible option");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(option, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.mouse_gestures_dialog.test_binding_category(),
+            Some("app")
+        );
+        run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        let (dock, clip, enabled) = app.gesture_binding_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.gesture_binding_host.is_popped_out());
+        assert_eq!(app.mouse_gestures_dialog.test_binding_session(), session);
+        assert_eq!(app.mouse_gestures_dialog.test_binding_label(), "draft");
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        crate::commands::MouseGestureCommandHost::open_mouse_gesture_binding_dialog(&mut app);
+        for _ in 0..3 {
+            run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        assert_eq!(app.mouse_gestures_dialog.test_binding_session(), session);
+        assert_eq!(app.mouse_gestures_dialog.test_binding_label(), "draft");
+        let (popout, clip, enabled) = app.gesture_binding_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_mouse_settings_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.gesture_binding_host.is_popped_out());
+        assert_eq!(app.mouse_gestures_dialog.test_binding_session(), session);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .expect("root query rendered");
+        assert!(query.enabled() && query.rect.is_positive());
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(query.rect.center())],
+        );
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .expect("current query response");
+        assert!(
+            query.hovered(),
+            "the root query owns the pointer before activation"
+        );
+        for pressed in [true, false] {
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(query.rect, pressed),
+            );
+        }
+        assert!(
+            ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+            "query {:?}, visible {}, child layer {:?}, parent layer {:?}, top {:?}, focused {:?}",
+            ctx.read_response(egui::Id::new("query_input")),
+            app.visible_flag_state(),
+            app.gesture_binding_host.root_layer(),
+            app.mouse_gestures_host.root_layer(MOUSE_GESTURES),
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+        );
+        run_mouse_settings_frame(&ctx, &mut app, vec![egui::Event::Text("query test".into())]);
+        assert!(app.query.contains("query test"));
+        assert!(app.gesture_binding_host.is_popped_out());
+        assert_eq!(
+            app.mouse_gestures_dialog.test_binding_action(),
+            "test:action"
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let before_save = app.mouse_gestures_dialog.test_binding_save_count();
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.25;
+            }
+        });
+        super::with_immediate_viewport_test_size(child, egui::vec2(360.0, 260.0), || {
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+            }
+            let (save_rect, cancel_rect, footer_clip, enabled) =
+                app.mouse_gestures_dialog.test_binding_footer().unwrap();
+            assert!(
+                enabled
+                    && footer_clip.contains_rect(save_rect)
+                    && footer_clip.contains_rect(cancel_rect),
+                "save {save_rect:?}, cancel {cancel_rect:?}, clip {footer_clip:?}, enabled {enabled}"
+            );
+            let save = app.gesture_binding_host.test_target_rect("Save binding");
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    child,
+                    tool_dialog_pointer_events(save, pressed),
+                    false,
+                    false,
+                );
+            }
+        });
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size /= 1.25;
+            }
+        });
+        assert_eq!(
+            app.mouse_gestures_dialog.test_binding_save_count(),
+            before_save + 1
+        );
+        let saved =
+            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
+                .unwrap();
+        assert_eq!(saved.gestures[0].bindings.len(), 1);
+        assert_eq!(saved.gestures[0].bindings[0].label, "draft");
+        assert_eq!(saved.gestures[0].bindings[0].action, "test:action");
+        assert!(!app.mouse_gestures_dialog.binding_is_open());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        crate::commands::MouseGestureCommandHost::open_mouse_gesture_binding_dialog(&mut app);
+        assert!(app.gesture_binding_host.is_popped_out());
+        assert_ne!(app.mouse_gestures_dialog.test_binding_session(), session);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        let close = app
+            .mouse_gestures_host
+            .test_target_rect("Close Mouse Gestures");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(close, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.mouse_gestures_dialog.open);
+        assert!(!app.mouse_gestures_dialog.binding_is_open());
+        assert!(!app.gesture_binding_host.is_popped_out());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn native_gesture_window_picker_inherits_and_adds_accepted_title() {
+        use super::super::mouse_form_host::GESTURE_SETTINGS;
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        initialize_mouse_gesture_settings_store(&app);
+        prepare_actual_mouse_gesture_settings_dialog(&ctx, &mut app, true);
+        let before = app.mouse_gesture_settings_dialog.test_settings().clone();
+        let (popout, clip, enabled) = app.mouse_gesture_settings_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_mouse_settings_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        let parent = app
+            .mouse_gesture_settings_host
+            .test_viewport_id(GESTURE_SETTINGS);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        }
+        let scroll = app
+            .mouse_gesture_settings_dialog
+            .test_scroll_area_id()
+            .unwrap();
+        let mut state = egui::scroll_area::State::load(&ctx, scroll).unwrap_or_default();
+        state.offset.y = app.mouse_gesture_settings_dialog.test_scroll_max_offset_y();
+        state.store(&ctx, scroll);
+        run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        let select = app
+            .mouse_gesture_settings_host
+            .test_target_rect("Select window");
+        super::super::mouse_gesture_settings_dialog::MouseGestureSettingsDialog::test_set_next_window_titles(vec!["Test window".into()]);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            parent,
+            tool_dialog_pointer_events(select, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            parent,
+            tool_dialog_pointer_events(select, false),
+            false,
+            true,
+        );
+        assert!(!app.mouse_gesture_settings_dialog.window_picker_is_open());
+        run_host_viewport_frame(&ctx, &mut app, parent, Vec::new(), false, false);
+        let select = app
+            .mouse_gesture_settings_host
+            .test_target_rect("Select window");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                parent,
+                tool_dialog_pointer_events(select, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.gesture_window_picker_host.is_popped_out());
+        let session = app.mouse_gesture_settings_dialog.test_picker_epoch();
+        let child = super::super::utility_window_host::UtilityWindowHost::<
+            super::super::mouse_gesture_settings_dialog::GestureWindowPicker,
+        >::test_viewport(session);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let (add, clip, enabled) = app
+            .mouse_gesture_settings_dialog
+            .test_picker_add_button()
+            .unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        let (close, clip, enabled) = app
+            .mouse_gesture_settings_dialog
+            .test_picker_close_button()
+            .unwrap();
+        assert!(enabled && clip.contains_rect(close));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            tool_dialog_pointer_events(add, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            tool_dialog_pointer_events(add, false),
+            false,
+            true,
+        );
+        assert!(
+            !app.mouse_gesture_settings_dialog
+                .test_settings()
+                .ignore_window_titles
+                .iter()
+                .any(|title| title == "Test window")
+        );
+        run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        let (add, clip, enabled) = app
+            .mouse_gesture_settings_dialog
+            .test_picker_add_button()
+            .unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .ignore_window_titles
+                .iter()
+                .any(|title| title == "Test window")
+        );
+        assert_eq!(
+            app.mouse_gesture_settings_dialog.test_settings().enabled,
+            before.enabled
+        );
+        crate::plugins::mouse_gestures::apply_runtime_settings(before);
+    }
+
+    #[test]
     fn jump_mode_mouse_gestures_binding_child_and_category_popup_are_exact() {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
         use crate::gui::jump_mode::{SurfaceId, TargetKind};
@@ -48593,11 +49287,18 @@ mod tests {
             } if current_parent == parent_instance
         ));
         assert_eq!(gesture_fixture_bytes(), initial_file);
-        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert!(app.jump_mode_ui.retained_registry().targets().iter().all(|target|
+            target.id() != add.id()), "the parent Add target cannot be reused after the child opens");
 
         release_mouse_settings_enter(&ctx, &mut app);
         run_mouse_settings_frame(&ctx, &mut app, Vec::new());
         assert_eq!(app.jump_mode_ui.frame_navigation_owner(), binding_owner);
+        assert!(!app.mouse_gestures_dialog.test_binding_waits_for_release(),
+            "the retained owner accepted the activation-key release");
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        let (category_rect, category_clip, category_enabled, category_scoped) = app.mouse_gestures_dialog.test_binding_category_observation().unwrap();
+        assert!(category_enabled && category_scoped && category_clip.contains_rect(category_rect));
+        assert!(app.jump_mode_ui.retained_registry().targets().iter().any(|target| target.metadata().label() == "Action category"));
         let category = mouse_gesture_target(&app, "Action category");
         assert_eq!(category.metadata().kind(), TargetKind::ComboBox);
         click_mouse_settings_target(&ctx, &mut app, &category);
