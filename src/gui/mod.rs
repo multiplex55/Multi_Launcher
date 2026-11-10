@@ -5904,7 +5904,7 @@ impl LauncherApp {
                 self.search_replace_dialog.open();
             }
             Panel::NotesDialog => {
-                self.notes_dialog.open = true;
+                self.notes_dialog.ensure_open();
                 self.notes_dialog.prepare_open_presentation(&self.egui_ctx);
             }
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
@@ -6465,6 +6465,15 @@ impl LauncherApp {
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
+        self.open_note_panel_from_origin(slug, template, &utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    fn open_note_panel_from_origin<S>(
+        &mut self,
+        slug: &str,
+        template: Option<&str>,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
         use crate::plugins::note::{
             Note, expand_template_variables, extract_aliases, get_template, load_notes,
         };
@@ -6509,22 +6518,23 @@ impl LauncherApp {
                     entity_refs: Vec::new(),
                 }
             });
-        // A note activation takes precedence over a queued launcher query-focus
-        // request. The note consumes a one-shot layer handoff after its own
-        // window has rendered, so later deliberate focus changes remain intact.
         self.focus_query = false;
         self.pending_show_query_focus = None;
         self.query_focus_session = None;
         if let Some(existing_idx) = self
             .note_panels
             .iter()
-            .position(|panel| panel.note_slug() == note.slug)
+            .position(|panel| panel.open && panel.note_slug() == note.slug)
         {
             let mut panel = self.note_panels.remove(existing_idx);
-            panel.request_activation_handoff();
+            let desired = panel.open_from_origin(&self.egui_ctx, true, origin);
             self.note_panels.push(panel);
             self.update_panel_stack();
-            return;
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+                return true;
+            }
+            return false;
         }
 
         let word_count = note.content.split_whitespace().count();
@@ -6550,19 +6560,17 @@ impl LauncherApp {
             self.note_show_details,
             &self.note_settings,
         );
-        panel.prepare_open_presentation(&self.egui_ctx);
-        panel.request_activation_handoff();
+        let desired = panel.open_from_origin(&self.egui_ctx, false, origin);
         panel.load_collapsed_sections_state(self);
         self.note_panels.push(panel);
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
         self.update_panel_stack();
-    }
-
-    fn open_note_panel_from_link(&mut self, slug: &str) -> bool {
-        self.open_note_panel(slug, None);
-        self.note_panels
-            .last()
-            .is_some_and(|panel| panel.host_layer_if_root().is_some())
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn push_note_panel(&mut self, mut panel: NotePanel) {

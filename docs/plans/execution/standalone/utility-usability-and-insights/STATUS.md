@@ -190,6 +190,7 @@ The planner traced these actual ordinary edges. Every row remains pending until 
 | File Search | File Preview; Hash Generator | B2b adapters |
 | Notes list | Template manager; Unused Assets | B2b adapters |
 | Note editor | Image viewer; custom Markdown table; Insert Link / Link new note forms | B2b adapters |
+| Note editor todo reference / Todo View | Editable Todo View; Todo View's Open note and Open at anchor → note editor | B2b adapter + transitive origin |
 | Diff | Comparison Rules; Folder Rules; memory New/Edit Inputs | B2b adapters |
 | Settings | Theme Settings; Plugin Editor; Hotkey Directory | B2b adapters |
 | Mouse Gestures / Gesture Settings | Binding editor; app-owned window-candidate picker | B2b adapters |
@@ -284,3 +285,13 @@ Final owned 100-second `--no-fail-fast` evidence:
 Receipts/output/selectors under `target/utility-usability-and-insights/evidence/m3-b2a1-pad-*`; final three receipts exit 0/no timeout/cleanup and drain verified. Parent inspected final source diff and whitespace; lanes returned. These are automated viewport tests, not physical native observation.
 
 Goal test-anchor wording clarified from actual source: `calculation_reference_is_ordinary_root_context_when_pad_is_native` opens Reference **before** moving Pad native. Its Docked Reference expectation legitimately protects already-open child independence and remains intact; new rendered tests cover the requested open-from-already-popped-parent contract. No retroactive child movement is introduced. Notes and all other B2 edges/adapters remain pending; global H1/H2 are not complete.
+
+M3-B2a1a checkpoint `91c87fb7b3662549529ef9e867012866709c9117` pushed successfully; clean tree before B2a1b Notes→note editors. Implementer owns qualified list/editor source receipts and fresh/reused note-editor promotion after normal target completion; no ordinary companion adapters yet. Preserve private dirty state/same-slug identity and use actual resolved host for root visibility. Parent ledger/Git; one source/Cargo lane.
+
+Additional actual link inventory: `MarkdownLinkAction::TodoReference` → `open_todo_reference` opens editable `TodoViewDialog` (`todo_view_dialog.rs`), not main launcher navigation. It requires a B2b ordinary adapter with a distinct stable kind (existing `todos` size key belongs separate root-only TodoDialog). Its Open note / Open at anchor handlers also need actual accepted Todo View origin once hosted. Keep existing live edits when focusing/promoting rather than unconditionally reloading via open_edit. Separate TodoDialog has no Dock or ordinary parent edge found and remains scoped root-only; no TodoDialog→TodoView edge is invented. Current B2a1b only covers note-editor link targets, not this pending Todo View adapter.
+
+## M3-B2a1b acceptance: Notes list/editor → note editors
+
+Accepted list opens carry host/open-epoch authority; editor wiki/link opens carry host/prompt/slug/path authority. Dispatch follows normal target frame completion and revalidates live source/modal state. Fresh and live same-slug targets share the presentation resolver, preserve dirty contents/history/identity, and show root only for final Docked targets. Root/command opens that meet a staged target defer within NotePanel until normal completion; an accepted Popout/edit cannot be overwritten. Query activation retains the existing one-shot handoff. Closing/reopening via app ensure-open advances list lifetime, while closed editor entries awaiting cleanup cannot resurrect discarded drafts.
+
+Separate fast-dev lib no-run compile passed. Final owned 100-second `--no-fail-fast` batch `m3-b2a1b-lifecycle-final` passed 6/6 in 2.726s: actual rendered native list→fresh editor→existing dirty wiki target, retained target edits/deferred Root/source Dock and discard/actual app close-reopen, two authority tests, same-slug reuse and query handoff. Earlier scoped 6/6 and deferred-Root 3/3 receipts remain under `target/utility-usability-and-insights/evidence/m3-b2a1b-*`. Final receipt exit 0, no timeout, cleanup/drain verified. Only touched-hunk formatting followed tests; diff/whitespace inspected, source/Cargo returned. These are automated viewport interactions; physical native observation remains M9. Global H1/H2 remain pending other already-hosted edges and ordinary adapters.

@@ -12403,6 +12403,7 @@ impl LauncherApp {
         let mut note_open_requests = Vec::new();
         let mut image_open_requests = Vec::new();
         let mut note_links = Vec::new();
+        let mut docked_host_requests = Vec::new();
         let mut show_root = false;
         for identity in note_instances {
             let Some(index) = self
@@ -12414,10 +12415,24 @@ impl LauncherApp {
             };
             let mut panel = self.note_panels.remove(index);
             let completion = panel.on_host_frame_complete(ctx, self);
-            show_root |= completion.show_root;
-            note_open_requests.extend(completion.open_note_slugs);
+            if completion.show_root {
+                docked_host_requests.push(identity);
+            }
+            if let Some(origin) = completion.note_open_origin {
+                note_open_requests.extend(
+                    completion
+                        .open_note_slugs
+                        .into_iter()
+                        .map(|slug| (origin.clone(), slug)),
+                );
+                note_links.extend(
+                    completion
+                        .links
+                        .into_iter()
+                        .map(|link| (origin.clone(), link)),
+                );
+            }
             image_open_requests.extend(completion.open_image_paths);
-            note_links.extend(completion.links);
             if !completion.closed && panel.open {
                 self.note_panels
                     .insert(index.min(self.note_panels.len()), panel);
@@ -12431,17 +12446,43 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::NotePanel);
         }
-        for slug in note_open_requests {
-            show_root |= self.open_note_panel_from_link(&slug);
+        for (origin, slug) in note_open_requests {
+            if self
+                .note_panels
+                .iter()
+                .any(|panel| panel.accepts_note_open(&origin))
+            {
+                show_root |= self.open_note_panel_from_origin(
+                    &slug,
+                    None,
+                    &super::utility_host::ChildOpenOrigin::Parent(origin),
+                );
+            }
         }
         for path in image_open_requests {
             let previous_count = self.image_panels.len();
             self.open_image_panel(&path);
             show_root |= self.image_panels.len() > previous_count;
         }
-        for link in note_links {
-            show_root |= super::note_panel::dispatch_note_link(ctx, self, link);
+        for (origin, link) in note_links {
+            if self
+                .note_panels
+                .iter()
+                .any(|panel| panel.accepts_note_open(&origin))
+            {
+                show_root |= super::note_panel::dispatch_note_link_from_origin(
+                    ctx,
+                    self,
+                    link,
+                    &super::utility_host::ChildOpenOrigin::Parent(origin),
+                );
+            }
         }
+        show_root |= docked_host_requests.into_iter().any(|identity| {
+            self.note_panels.iter().any(|panel| {
+                panel.prompt_identity() == identity && panel.open && !panel.is_popped_out()
+            })
+        });
         if show_root {
             self.request_launcher_visibility(true);
         }
@@ -13177,8 +13218,14 @@ impl LauncherApp {
         if completion.show_root {
             self.request_launcher_visibility(true);
         }
-        for slug in completion.open_note_panels {
-            self.open_note_panel(&slug, None);
+        if let Some(origin) = completion.note_open_origin
+            && self.notes_dialog.accepts_note_open(&origin)
+        {
+            for slug in completion.open_note_panels {
+                self.open_note_panel_from_origin(
+                    &slug, None, &super::utility_host::ChildOpenOrigin::Parent(origin.clone()),
+                );
+            }
         }
         if completion.open_unused_assets {
             self.unused_assets_dialog.open();
@@ -18347,6 +18394,372 @@ mod tests {
         notes.prepare_open_presentation(&ctx2);
         assert!(!notes.test_host_identity().0);
         workers2.join_all();
+    }
+
+    #[test]
+    fn native_notes_and_wiki_open_reuse_dirty_editor_with_inherited_popout() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        struct NotesDir(Option<std::ffi::OsString>);
+        impl Drop for NotesDir {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let _notes_dir = NotesDir(std::env::var_os("ML_NOTES_DIR"));
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        std::fs::write(
+            dir.path().join("origin-source.md"),
+            "# Origin Source\n\n[[Origin Target]]",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("origin-target.md"),
+            "# Origin Target\n\noriginal",
+        )
+        .unwrap();
+        let path = dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let key = crate::settings::UtilityToolKey::parse("note-editor").unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .utility_presentations
+            .set(key, crate::settings::RememberedPresentation::Docked)
+            .unwrap();
+        settings.save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        crate::plugins::note::refresh_cache().unwrap();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            settings.utility_presentations,
+        );
+        manager.install_in_context(&ctx);
+        app.set_jump_mode_enabled(false);
+        app.note_show_details = true;
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.open_note_panel("origin-target", None);
+        let target_id = app.note_panels[0].prompt_identity();
+        app.note_panels[0]
+            .replace_content_from_mutation("# Origin Target\n\ndirty draft".into(), 0.0);
+        let target_revision = app.note_panels[0].test_content_revision();
+        let target_history = app.note_panels[0].test_replacement_history_counts();
+        app.focus_panel(super::super::Panel::NotesDialog);
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (_, host, clip, enabled) = app.notes_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(host));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.notes_dialog.is_popped_out());
+        app.request_launcher_visibility(false);
+        let list = egui::ViewportId::from_hash_of("quick_notes_viewport");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, list, Vec::new(), false, false);
+        }
+        let (rows, _) = app.notes_dialog.test_note_open_controls();
+        let (_, row, clip, enabled) = rows
+            .into_iter()
+            .find(|(slug, ..)| slug == "origin-source")
+            .unwrap();
+        let visible_row = row.intersect(clip);
+        assert!(
+            enabled && visible_row.is_positive(),
+            "row={row:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let pos = visible_row.center();
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                list,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, list, Vec::new(), false, false);
+        }
+        let (_, open) = app.notes_dialog.test_note_open_controls();
+        let (button, clip, enabled) = open.unwrap();
+        let visible_button = button.intersect(clip);
+        assert!(
+            enabled,
+            "Open button disabled: button={button:?}, clip={clip:?}"
+        );
+        assert!(
+            visible_button.is_positive(),
+            "Open button clipped: button={button:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                list,
+                tool_dialog_pointer_events(visible_button, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.note_panels.len(), 2);
+        let source_id = app
+            .note_panels
+            .iter()
+            .find(|p| p.note_slug() == "origin-source")
+            .unwrap()
+            .prompt_identity();
+        assert!(
+            app.note_panels
+                .iter()
+                .find(|p| p.prompt_identity() == source_id)
+                .unwrap()
+                .test_host_identity()
+                .0
+        );
+        assert!(!app.visible_flag_state());
+        let source = egui::ViewportId::from_hash_of(("note-panel-editor", source_id));
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, source, Vec::new(), false, false);
+        }
+        let source_panel = app
+            .note_panels
+            .iter()
+            .find(|p| p.prompt_identity() == source_id)
+            .unwrap();
+        let (wiki, clip, enabled) = source_panel.test_wiki_open().unwrap();
+        assert!(enabled && clip.contains_rect(wiki));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                source,
+                tool_dialog_pointer_events(wiki, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.note_panels.len(), 2);
+        let target = app
+            .note_panels
+            .iter()
+            .find(|p| p.prompt_identity() == target_id)
+            .unwrap();
+        assert!(target.test_host_identity().0);
+        assert_eq!(target.note_content(), "# Origin Target\n\ndirty draft");
+        assert_eq!(target.test_content_revision(), target_revision);
+        assert_eq!(target.test_replacement_history_counts(), target_history);
+        assert!(!app.visible_flag_state());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn retained_note_edit_finishes_before_inherited_promotion() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        struct NotesDir(Option<std::ffi::OsString>);
+        impl Drop for NotesDir {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let _notes_dir = NotesDir(std::env::var_os("ML_NOTES_DIR"));
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        std::fs::write(
+            dir.path().join("origin-source.md"),
+            "# Origin Source\n\n[[Origin Target]]",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("origin-target.md"),
+            "# Origin Target\n\noriginal",
+        )
+        .unwrap();
+        let path = dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default().save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        crate::plugins::note::refresh_cache().unwrap();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("note-editor").unwrap();
+        app.open_note_panel("origin-target", None);
+        let target_id = app.note_panels[0].prompt_identity();
+        app.note_panels[0].test_stage_retained_note_frame(
+            &ctx,
+            None,
+            Some("# Origin Target\n\nroot retained edit"),
+            None,
+        );
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Popout);
+        app.open_note_panel("origin-target", None);
+        assert!(!app.note_panels[0].test_host_identity().0);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert!(app.note_panels[0].test_host_identity().0);
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "# Origin Target\n\nroot retained edit"
+        );
+        output.drop_without_applying_deltas();
+        app.open_note_panel("origin-source", None);
+        let source_id = app.note_panels[1].prompt_identity();
+        assert!(app.note_panels[1].test_host_identity().0);
+        assert!(app.note_panels[0].test_host_identity().0);
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
+        app.request_launcher_visibility(false);
+        app.note_panels[0].test_stage_retained_note_frame(
+            &ctx,
+            None,
+            Some("# Origin Target\n\nretained edit"),
+            Some(super::super::utility_host::UtilityPresentation::Docked),
+        );
+        app.note_panels[1].test_stage_retained_note_frame(&ctx, Some("origin-target"), None, None);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(app.note_panels.len(), 2);
+        let target = app
+            .note_panels
+            .iter()
+            .find(|p| p.prompt_identity() == target_id)
+            .unwrap();
+        assert!(target.test_host_identity().0);
+        assert!(!app.visible_flag_state());
+        assert_eq!(target.note_content(), "# Origin Target\n\nretained edit");
+        assert!(
+            app.note_panels
+                .iter()
+                .any(|p| p.prompt_identity() == source_id)
+        );
+        output.drop_without_applying_deltas();
+
+        std::fs::write(dir.path().join("origin-third.md"), "# Origin Third").unwrap();
+        let source = app
+            .note_panels
+            .iter_mut()
+            .find(|p| p.prompt_identity() == source_id)
+            .unwrap();
+        source.test_stage_retained_note_frame(
+            &ctx,
+            Some("origin-third"),
+            None,
+            Some(super::super::utility_host::UtilityPresentation::Docked),
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(
+            app.note_panels.len(),
+            2,
+            "source Dock invalidates its queued open"
+        );
+        assert!(
+            !app.note_panels
+                .iter()
+                .find(|p| p.prompt_identity() == source_id)
+                .unwrap()
+                .test_host_identity()
+                .0
+        );
+        output.drop_without_applying_deltas();
+
+        let source = app
+            .note_panels
+            .iter_mut()
+            .find(|p| p.prompt_identity() == source_id)
+            .unwrap();
+        source.test_stage_retained_note_frame(&ctx, Some("origin-third"), None, None);
+        let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            if ctx.current_pass_index() == 0 {
+                ctx.request_discard("test discarded source open");
+            }
+        });
+        app.complete_markdown_diagram_handoff(&ctx);
+        assert_eq!(
+            app.note_panels.len(),
+            2,
+            "discarded source pass cannot open a note"
+        );
+        output.drop_without_applying_deltas();
+
+        app.notes_dialog.open();
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = app.notes_dialog.test_open_receipt(&ctx, pass).unwrap();
+        assert!(app.notes_dialog.accepts_note_open(&receipt));
+        app.notes_dialog.close_from_app(&ctx);
+        app.ensure_open(super::super::Panel::NotesDialog);
+        assert!(!app.notes_dialog.accepts_note_open(&receipt));
+        output.drop_without_applying_deltas();
+
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = false;
+        let index = app
+            .note_panels
+            .iter()
+            .position(|p| p.prompt_identity() == target_id)
+            .unwrap();
+        let mut closed = app.note_panels.remove(index);
+        closed.request_close(&mut app);
+        assert!(!closed.open);
+        app.note_panels.insert(index, closed);
+        app.open_note_panel("origin-target", None);
+        let reopened = app
+            .note_panels
+            .iter()
+            .find(|p| p.open && p.note_slug() == "origin-target")
+            .unwrap();
+        assert_ne!(reopened.prompt_identity(), target_id);
+        assert_eq!(reopened.note_content(), "# Origin Target\n\noriginal");
+        workers.join_all();
     }
 
     #[test]

@@ -935,11 +935,22 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
 pub(super) fn dispatch_note_link(
     ctx: &egui::Context,
     app: &mut LauncherApp,
+    open_url: egui::OpenUrl,
+) -> bool {
+    dispatch_note_link_from_origin(
+        ctx, app, open_url, &super::utility_host::ChildOpenOrigin::<()>::Root,
+    )
+}
+
+pub(super) fn dispatch_note_link_from_origin<S>(
+    ctx: &egui::Context,
+    app: &mut LauncherApp,
     mut open_url: egui::OpenUrl,
+    origin: &super::utility_host::ChildOpenOrigin<S>,
 ) -> bool {
     match classify_markdown_link(&open_url.url) {
         MarkdownLinkAction::NoteReference(slug) => {
-            return app.open_note_panel_from_link(&slug);
+            return app.open_note_panel_from_origin(&slug, None, origin);
         }
         MarkdownLinkAction::TodoReference(todo_id) => {
             open_todo_reference(app, &todo_id);
@@ -1103,6 +1114,7 @@ pub struct NotePanel {
     presentation_prepared: bool,
     show_root_after_host_change: bool,
     pending_host_frame: Option<PendingNotePanelHostFrame>,
+    deferred_root_open: Option<(String, PathBuf, UtilityPresentation)>,
     active_host_pass: Option<(HostIdentity, ViewportPassProvenance)>,
     active_host_layer: Option<egui::LayerId>,
     accepted_host_effect_receipt: Option<(HostIdentity, Option<ViewportPassProvenance>)>,
@@ -1264,6 +1276,8 @@ pub struct NotePanel {
     test_markdown_export_feedback_rect: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_note_toolbar_edit_button: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_wiki_open: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_markdown_tool_rects: Vec<(String, egui::Id, egui::Rect, egui::Rect)>,
     #[cfg(test)]
@@ -1505,12 +1519,16 @@ pub(crate) enum NotePanelEffect {
     Export(NoteExportRequest),
 }
 
+pub(super) type NoteOpenSession = (u64, String, PathBuf);
+pub(super) type NoteOpenReceipt = super::utility_host::AcceptedParentOpen<NoteOpenSession>;
+
 pub(crate) struct NotePanelHostCompletion {
     pub(crate) panel_identity: u64,
     pub(crate) effect: Option<NotePanelEffect>,
     pub(crate) closed: bool,
     pub(crate) show_root: bool,
     pub(crate) open_note_slugs: Vec<String>,
+    pub(super) note_open_origin: Option<NoteOpenReceipt>,
     pub(crate) open_image_paths: Vec<PathBuf>,
     pub(crate) links: Vec<egui::OpenUrl>,
 }
@@ -1808,6 +1826,7 @@ impl NotePanel {
             presentation_prepared: false,
             show_root_after_host_change: false,
             pending_host_frame: None,
+            deferred_root_open: None,
             active_host_pass: None,
             active_host_layer: None,
             accepted_host_effect_receipt: None,
@@ -1965,6 +1984,8 @@ impl NotePanel {
             test_markdown_export_feedback_rect: None,
             #[cfg(test)]
             test_note_toolbar_edit_button: None,
+            #[cfg(test)]
+            test_wiki_open: None,
             #[cfg(test)]
             test_markdown_tool_rects: Vec::new(),
             #[cfg(test)]
@@ -2605,10 +2626,104 @@ impl NotePanel {
         }
     }
 
+    pub(super) fn accepts_note_open(&self, receipt: &NoteOpenReceipt) -> bool {
+        self.open
+            && !self.pending_close_after_save
+            && !self.discard_unsaved_prompt
+            && !self.overwrite_prompt
+            && receipt.is_current(
+                self.host_state.identity(),
+                &(
+                    self.prompt_identity,
+                    self.note.slug.clone(),
+                    self.note.path.clone(),
+                ),
+            )
+    }
+
+    pub(super) fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        self.prepare_open_presentation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("note-editor")
+            .expect("Note editor has a registered tool key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host_state.presentation()),
+            remembered,
+            self.host_state.presentation(),
+            origin,
+        );
+        if self.pending_host_frame.is_some() {
+            if matches!(origin, super::utility_host::ChildOpenOrigin::Root) {
+                self.deferred_root_open =
+                    Some((self.note.slug.clone(), self.note.path.clone(), desired));
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+            return None;
+        }
+        self.apply_open_presentation(
+            ctx,
+            desired,
+            matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_)),
+        );
+        Some(desired)
+    }
+
+    fn apply_open_presentation(
+        &mut self,
+        ctx: &egui::Context,
+        desired: UtilityPresentation,
+        inherited: bool,
+    ) {
+        if self.host_state.transition(desired) {
+            self.accepted_host_effect_receipt = None;
+            self.accepted_host_modal_layer = None;
+            self.activation_handoff_pending = false;
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        if inherited && desired == UtilityPresentation::Popout {
+            self.remember_current_presentation(ctx);
+        }
+        self.request_activation_handoff();
+    }
+
+    fn complete_deferred_root_open(&mut self, ctx: &egui::Context) -> bool {
+        let Some((slug, path, requested)) = self.deferred_root_open.take() else {
+            return false;
+        };
+        if !self.open
+            || self.note.slug != slug
+            || self.note.path != path
+            || self.pending_close_after_save
+            || self.discard_unsaved_prompt
+            || self.overwrite_prompt
+        {
+            return false;
+        }
+        let desired = super::utility_host::resolve_child_presentation(
+            Some(self.host_state.presentation()),
+            Some(requested),
+            requested,
+            &super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        self.apply_open_presentation(ctx, desired, false);
+        desired == UtilityPresentation::Docked
+    }
+
     fn remember_current_presentation(&self, ctx: &egui::Context) {
         let key = crate::settings::UtilityToolKey::parse("note-editor")
             .expect("Note editor has a registered tool key");
         super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == UtilityPresentation::Popout
     }
 
     pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -2684,6 +2799,50 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_pop_out(&mut self) {
         self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_stage_retained_note_frame(
+        &mut self,
+        ctx: &egui::Context,
+        open_slug: Option<&str>,
+        edit: Option<&str>,
+        host_request: Option<UtilityPresentation>,
+    ) {
+        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let checkpoint = NotePanelDraftCheckpoint::capture(self);
+        if let Some(content) = edit {
+            self.replace_content_from_mutation(content.to_owned(), 0.0);
+        }
+        let mut actions = NotePanelPendingHostActions::default();
+        actions.host_request = host_request;
+        if let Some(slug) = open_slug {
+            actions.open_note_slugs.push(slug.to_owned());
+        }
+        let host = self.host_state.identity();
+        self.pending_host_frame = Some(PendingNotePanelHostFrame {
+            root_pass: pass,
+            host,
+            owner_context: ctx.clone(),
+            owner_viewport_id: egui::ViewportId::ROOT,
+            owner_pass: (host.host == UtilityPresentation::Popout).then_some(pass),
+            owner_pass_accepted: true,
+            callback_observed: true,
+            callback_class: egui::ViewportClass::Root,
+            native_viewport: None,
+            embedded_root_layer: None,
+            embedded_root_focused_id: None,
+            owner_modal_layer: None,
+            close_requested: false,
+            os_close_requested: false,
+            draft_checkpoint: checkpoint,
+            actions,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_wiki_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_wiki_open
     }
 
     #[cfg(test)]
@@ -2766,6 +2925,7 @@ impl NotePanel {
                 closed: !self.open,
                 show_root: self.take_show_root_after_host_change(),
                 open_note_slugs: Vec::new(),
+                note_open_origin: None,
                 open_image_paths: Vec::new(),
                 links: Vec::new(),
             };
@@ -2803,17 +2963,26 @@ impl NotePanel {
                 );
             }
             let effect = self.on_ui_frame_complete(ctx);
+            let show_root = self.complete_deferred_root_open(ctx);
             return NotePanelHostCompletion {
                 panel_identity,
                 effect,
                 closed: false,
-                show_root: false,
+                show_root,
                 open_note_slugs: Vec::new(),
+                note_open_origin: None,
                 open_image_paths: Vec::new(),
                 links: Vec::new(),
             };
         }
 
+        let note_open_origin = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx,
+            frame.host,
+            (panel_identity, frame.draft_checkpoint.note.slug.clone(), frame.draft_checkpoint.note.path.clone()),
+            frame.root_pass,
+            frame.owner_pass.unwrap_or(frame.root_pass),
+        );
         self.accepted_host_effect_receipt = Some((frame.host, frame.owner_pass));
         self.accepted_host_modal_layer = Some((frame.host, frame.owner_modal_layer));
         self.host_state.complete_bootstrap(
@@ -2976,12 +3145,15 @@ impl NotePanel {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         self.pending_host_actions = NotePanelPendingHostActions::default();
+        let deferred_show_root = self.complete_deferred_root_open(ctx);
         NotePanelHostCompletion {
             panel_identity,
             effect,
             closed: !self.open,
-            show_root: show_root || self.take_show_root_after_host_change(),
+            show_root: (show_root || self.take_show_root_after_host_change() || deferred_show_root)
+                && self.host_state.presentation() == UtilityPresentation::Docked,
             open_note_slugs: frame.actions.open_note_slugs,
+            note_open_origin,
             open_image_paths: frame.actions.open_image_paths,
             links: frame.actions.links,
         }
@@ -6939,6 +7111,8 @@ impl NotePanel {
                 match l {
                     LinkKind::Wiki(s) => {
                         let (response, actions) = show_wiki_link_actions(ui, s);
+                        #[cfg(test)]
+                        { self.test_wiki_open = Some((response.rect, ui.clip_rect(), response.enabled())); }
                         let _ = response;
                         for action in actions {
                             match action {
@@ -9964,6 +10138,48 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn note_open_receipt_rejects_changed_source_and_close_decision() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(crate::plugins::note::Note {
+            title: "Source".into(),
+            path: PathBuf::from("source.md"),
+            content: "# Source".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "source".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        });
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            panel.host_state.identity(),
+            (
+                panel.prompt_identity,
+                panel.note.slug.clone(),
+                panel.note.path.clone(),
+            ),
+            pass,
+            pass,
+        )
+        .unwrap();
+        assert!(panel.accepts_note_open(&receipt));
+        panel.discard_unsaved_prompt = true;
+        assert!(!panel.accepts_note_open(&receipt));
+        panel.discard_unsaved_prompt = false;
+        panel.note.path = PathBuf::from("replacement.md");
+        assert!(!panel.accepts_note_open(&receipt));
+        panel.note.path = PathBuf::from("source.md");
+        panel.host_state.transition(UtilityPresentation::Popout);
+        assert!(!panel.accepts_note_open(&receipt));
+        panel.open = false;
+        assert!(!panel.accepts_note_open(&receipt));
+        output.drop_without_applying_deltas();
+    }
 
     fn derived_workload_signature(panel: &NotePanel) -> u64 {
         let mut signature = crate::performance::workloads::StableSignature::new(

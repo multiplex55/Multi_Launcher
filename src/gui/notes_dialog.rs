@@ -855,6 +855,7 @@ pub struct NotesDialog {
     pub open: bool,
     host_state: UtilityHostState,
     presentation_prepared: bool,
+    open_epoch: u64,
     show_root_after_host_change: bool,
     native_jump_mode: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -883,6 +884,10 @@ pub struct NotesDialog {
     last_rendered_indices: Vec<usize>,
     #[cfg(test)]
     last_rendered_row_rects: Vec<(usize, RenderedNoteRowRects)>,
+    #[cfg(test)]
+    test_open_row: Vec<(String, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_menu_open: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     last_rendered_header_ids: Vec<(String, egui::Id)>,
     #[cfg(test)]
@@ -964,6 +969,7 @@ enum PendingNoteSave {
 }
 
 struct NotesFrameEffects {
+    open_epoch: u64,
     root_pass: ViewportPassProvenance,
     host: HostIdentity,
     owner_pass: Option<ViewportPassProvenance>,
@@ -1014,6 +1020,7 @@ pub(crate) struct NotesFrameCompletion {
     pub(crate) closed: bool,
     pub(crate) show_root: bool,
     pub(crate) open_note_panels: Vec<String>,
+    pub(super) note_open_origin: Option<super::utility_host::AcceptedParentOpen<u64>>,
     pub(crate) open_unused_assets: bool,
     pub(crate) activations: Vec<Action>,
     pub(crate) external_open_paths: Vec<std::path::PathBuf>,
@@ -1304,6 +1311,15 @@ impl NotesDialog {
         }
     }
 
+    pub(super) fn accepts_note_open(
+        &self,
+        receipt: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        self.open
+            && !self.template_manager.open
+            && receipt.is_current(self.host_state.identity(), &self.open_epoch)
+    }
+
     pub(super) fn close_from_app(&mut self, ctx: &egui::Context) {
         if self.open {
             let key = crate::settings::UtilityToolKey::parse("quick-notes")
@@ -1362,6 +1378,31 @@ impl NotesDialog {
 
     pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
         std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_open_receipt(
+        &self,
+        ctx: &egui::Context,
+        pass: ViewportPassProvenance,
+    ) -> Option<super::utility_host::AcceptedParentOpen<u64>> {
+        super::utility_host::AcceptedParentOpen::from_retained(
+            ctx,
+            self.host_state.identity(),
+            self.open_epoch,
+            pass,
+            pass,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_note_open_controls(
+        &self,
+    ) -> (
+        Vec<(String, egui::Rect, egui::Rect, bool)>,
+        Option<(egui::Rect, egui::Rect, bool)>,
+    ) {
+        (self.test_open_row.clone(), self.test_menu_open)
     }
 
     #[cfg(test)]
@@ -1846,10 +1887,20 @@ impl NotesDialog {
         }
     }
 
-    pub fn open(&mut self) {
+    fn begin_open_session(&mut self) {
         if !self.open {
             self.presentation_prepared = false;
+            self.open_epoch = self.open_epoch.wrapping_add(1);
         }
+    }
+
+    pub(super) fn ensure_open(&mut self) {
+        self.begin_open_session();
+        self.open = true;
+    }
+
+    pub fn open(&mut self) {
+        self.begin_open_session();
         if self.host_state.presentation() == UtilityPresentation::Popout {
             if self.open {
                 self.host_state.request_focus();
@@ -1977,6 +2028,8 @@ impl NotesDialog {
         #[cfg(test)]
         self.last_rendered_row_rects.clear();
         #[cfg(test)]
+        { self.test_open_row.clear(); self.test_menu_open = None; }
+        #[cfg(test)]
         self.last_rendered_header_ids.clear();
         #[cfg(test)]
         {
@@ -2030,6 +2083,7 @@ impl NotesDialog {
                 );
                 if callback_observed {
                     self.pending_effects = Some(NotesFrameEffects {
+                        open_epoch: self.open_epoch,
                         root_pass,
                         host,
                         owner_pass,
@@ -2535,6 +2589,10 @@ impl NotesDialog {
                                                     &mut jump_visual_order,
                                                 );
                                             }
+                                            #[cfg(test)]
+                                            {
+                                                this.test_open_row.push((entry.slug.clone(), header_response.rect, ui.clip_rect(), header_response.enabled()));
+                                            }
                                             let activate_note = jump_scope.is_some()
                                                 && !entry.slug.is_empty()
                                                 && header_response.has_focus()
@@ -2576,7 +2634,10 @@ impl NotesDialog {
                                             let idx_copy = idx;
                                             response.clone().context_menu(|ui| {
                                                 ui.add_enabled_ui(popup_input_allowed, |ui| {
-                                                    if ui.button("Open").clicked() {
+                                                    let open = ui.button("Open");
+                                                    #[cfg(test)]
+                                                    { this.test_menu_open = Some((open.rect, ui.clip_rect(), open.enabled())); }
+                                                    if open.clicked() {
                                                         open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
@@ -3149,6 +3210,7 @@ impl NotesDialog {
         if defer_effects {
             if callback_observed {
                 self.pending_effects = Some(NotesFrameEffects {
+                    open_epoch: self.open_epoch,
                     root_pass,
                     host,
                     owner_pass,
@@ -3265,6 +3327,7 @@ impl NotesDialog {
                 closed: false,
                 show_root: self.take_show_root_after_host_change(),
                 open_note_panels: Vec::new(),
+                note_open_origin: None,
                 open_unused_assets: false,
                 activations: Vec::new(),
                 external_open_paths: Vec::new(),
@@ -3284,6 +3347,7 @@ impl NotesDialog {
             };
         if !effects.root_pass.was_retained(ctx)
             || effects.host != self.host_state.identity()
+            || effects.open_epoch != self.open_epoch
             || !owner_pass_retained
         {
             if let Some(checkpoint) = effects.draft_checkpoint {
@@ -3304,6 +3368,7 @@ impl NotesDialog {
                 closed: false,
                 show_root: false,
                 open_note_panels: Vec::new(),
+                note_open_origin: None,
                 open_unused_assets: false,
                 activations: Vec::new(),
                 external_open_paths: Vec::new(),
@@ -3393,6 +3458,13 @@ impl NotesDialog {
         if let Some(slug) = effects.wrap_links_slug {
             activations.push(wrap_links_note_action(&slug));
         }
+        let note_open_origin = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx,
+            effects.host,
+            effects.open_epoch,
+            effects.root_pass,
+            effects.owner_pass.unwrap_or(effects.root_pass),
+        );
         let closed = effects.close_requested || effects.os_close_requested;
         if closed {
             super::utility_host::remember_presentation(
@@ -3446,10 +3518,9 @@ impl NotesDialog {
         }
         NotesFrameCompletion {
             closed,
-            show_root: self.take_show_root_after_host_change()
-                || !effects.open_note_panels.is_empty()
-                || effects.open_unused_assets,
+            show_root: self.take_show_root_after_host_change() || effects.open_unused_assets,
             open_note_panels: effects.open_note_panels,
+            note_open_origin,
             open_unused_assets: effects.open_unused_assets,
             activations,
             external_open_paths: effects.external_open_paths,
@@ -3507,6 +3578,36 @@ mod tests {
     use eframe::egui;
     use once_cell::sync::Lazy;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+    #[test]
+    fn note_open_receipt_rejects_closed_reopened_and_docked_list() {
+        let ctx = egui::Context::default();
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        let pass =
+            crate::gui::utility_host::ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = crate::gui::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            dialog.host_state.identity(),
+            dialog.open_epoch,
+            pass,
+            pass,
+        )
+        .unwrap();
+        assert!(dialog.accepts_note_open(&receipt));
+        dialog.template_manager.open = true;
+        assert!(!dialog.accepts_note_open(&receipt));
+        dialog.template_manager.open = false;
+        dialog
+            .host_state
+            .transition(crate::gui::utility_host::UtilityPresentation::Popout);
+        assert!(!dialog.accepts_note_open(&receipt));
+        dialog.open = false;
+        dialog.open();
+        assert!(!dialog.accepts_note_open(&receipt));
+        output.drop_without_applying_deltas();
+    }
 
     #[derive(Debug)]
     struct EagerNoteRowRects {
