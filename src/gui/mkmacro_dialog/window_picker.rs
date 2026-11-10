@@ -50,6 +50,7 @@ pub enum PickerMode {
 
 #[derive(Clone, Debug)]
 pub struct WindowPickerState {
+    pub(super) epoch: u64,
     pub open: bool,
     pub mode: PickerMode,
     pub search: String,
@@ -68,6 +69,8 @@ pub struct WindowPickerState {
     pub message: Option<String>,
     pub request: Option<MatcherEditRequest>,
     pub confirm_ready: bool,
+    #[cfg(test)]
+    pub(super) test_candidates: Option<Vec<WindowCandidate>>,
     #[cfg(windows)]
     native: NativeScreenPicker,
 }
@@ -90,6 +93,7 @@ impl WindowEnumerationBackend for NativeWindowEnumerationBackend {
 impl Default for WindowPickerState {
     fn default() -> Self {
         Self {
+            epoch: 0,
             open: false,
             mode: PickerMode::WindowList,
             search: String::new(),
@@ -108,6 +112,8 @@ impl Default for WindowPickerState {
             message: None,
             request: None,
             confirm_ready: false,
+            #[cfg(test)]
+            test_candidates: None,
             #[cfg(windows)]
             native: Default::default(),
         }
@@ -161,9 +167,19 @@ pub fn matcher_from_preview(s: &WindowPickerState) -> Result<MkWindowMatcher, St
 
 impl WindowPickerState {
     pub fn open(&mut self, request: MatcherEditRequest) {
+        let epoch = self.epoch.wrapping_add(1).max(1);
+        #[cfg(test)]
+        let candidates = self.test_candidates.clone();
         *self = Self::default();
+        self.epoch = epoch;
         self.open = true;
         self.request = Some(request);
+        #[cfg(test)]
+        if let Some(candidates) = candidates {
+            self.candidates = candidates.clone();
+            self.test_candidates = Some(candidates);
+        } else { self.refresh(); }
+        #[cfg(not(test))]
         self.refresh();
     }
     pub fn cancel(&mut self, message: impl Into<String>) {
@@ -312,11 +328,8 @@ fn poll_screen<B: ScreenPickBackend>(state: &mut WindowPickerState, backend: &mu
     }
 }
 
-pub fn show(ctx: &egui::Context, state: &mut WindowPickerState) {
-    if !state.open {
-        return;
-    }
-    if state.mode == PickerMode::ScreenPick {
+pub(super) fn prepare(state: &mut WindowPickerState, ctx: &egui::Context) {
+    if state.open && state.mode == PickerMode::ScreenPick {
         ctx.request_repaint();
         #[cfg(windows)]
         {
@@ -325,203 +338,367 @@ pub fn show(ctx: &egui::Context, state: &mut WindowPickerState) {
             state.native = native;
         }
     }
-    let mut open = state.open;
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::gui) enum WindowPickerIntent {
+    Refresh,
+    Confirm,
+    Close,
+    Retired,
+}
+#[derive(Default)]
+pub(in crate::gui) struct WindowPickerActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    intent: Option<WindowPickerIntent>,
+}
+
+fn render_contents(
+    ui: &mut egui::Ui,
+    state: &mut WindowPickerState,
+    result: &mut WindowPickerActions,
+) {
     let (body_salt, footer_labels): (&str, &[&str]) = match state.mode {
         PickerMode::WindowList => ("window_list", &["Choose Selected Window", "Cancel"]),
         PickerMode::ScreenPick => ("screen_pick", &["Back"]),
         PickerMode::Preview => ("preview", &["Back / Retry", "Cancel", "Use Target"]),
     };
-    egui::Window::new("Window Picker")
-        .collapsible(false)
-        .default_width(720.0)
-        .show_utility(
-            ctx,
-            "mkmacro-window-picker",
-            egui::Id::new("Window Picker"),
-            Some(&mut open),
-            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(720.0),
-                egui::Vec2::ZERO,
-                [None, None],
-            ),
-            |ui| {
-                let footer_height = window_picker_footer_reserved_height(ui, footer_labels);
-                let body_max_height = (ui.available_height() - footer_height).max(0.0);
-                egui::ScrollArea::vertical()
-                    .id_salt(("mkmacro_window_picker_body", body_salt))
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .max_height(body_max_height)
-                    .show(ui, |ui| match state.mode {
-                        PickerMode::WindowList => {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Search");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.search)
-                                        .desired_width(ui.available_width().max(1.0)),
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                if ui.button("Refresh").clicked() {
-                                    state.refresh()
-                                }
-                                if ui.button("Pick From Screen").clicked() {
-                                    #[cfg(windows)]
-                                    {
-                                        state.mode = PickerMode::ScreenPick;
-                                        state.error = None;
-                                    }
-                                    #[cfg(not(windows))]
-                                    {
-                                        state.error = Some(
-                                            "Direct screen picking is available only on Windows"
-                                                .into(),
-                                        );
-                                    }
-                                }
-                            });
-                            if let Some(error) = &state.error {
-                                semantic_status(ui, StatusTone::Error, error, None);
-                            }
-                            ui.columns(3, |columns| {
-                                columns[0].strong("Application");
-                                columns[1].strong("Title");
-                                columns[2].strong("Class");
-                            });
-                            if state.error.is_none() {
-                                if state.candidates.is_empty() {
-                                    ui.label("No windows found.");
-                                } else if filtered_candidates(&state.candidates, &state.search)
-                                    .is_empty()
-                                {
-                                    ui.label("No windows match this search.");
-                                }
-                            }
-                            for (index, candidate) in state.candidates.iter().enumerate() {
-                                if filtered_candidates(
-                                    std::slice::from_ref(candidate),
-                                    &state.search,
-                                )
-                                .is_empty()
-                                {
-                                    continue;
-                                }
-                                if ui
-                                    .selectable_label(
-                                        state.selected == Some(index),
-                                        format!(
-                                            "{}    |    {}    |    {}",
-                                            candidate.executable,
-                                            candidate.title,
-                                            candidate.class_name
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    state.selected = Some(index);
-                                }
-                            }
-                        }
-                        PickerMode::ScreenPick => {
-                            ui.heading("Pick From Screen");
-                            ui.label(
-                                "Move the pointer over a window. Click to select it. Esc cancels.",
-                            );
-                            if let Some(error) = &state.error {
-                                semantic_status(ui, StatusTone::Error, error, None);
-                            }
-                        }
-                        PickerMode::Preview => {
-                            ui.heading("Window Target");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut state.executable_enabled, "Executable");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.executable)
-                                        .desired_width(ui.available_width().max(1.0)),
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut state.title_enabled, "Title contains");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.title)
-                                        .desired_width(ui.available_width().max(1.0)),
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .checkbox(
-                                        &mut state.regex_enabled,
-                                        "Regex (takes precedence over title contains)",
-                                    )
-                                    .clicked()
-                                    && state.regex_enabled
-                                {
-                                    state.title_enabled = false;
-                                }
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.regex)
-                                        .desired_width(ui.available_width().max(1.0)),
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut state.class_enabled, "Class");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.class_name)
-                                        .desired_width(ui.available_width().max(1.0)),
-                                );
-                            });
-                            ui.label(format!("Process path: {}", state.process_path));
-                            if let Some(error) = &state.error {
-                                semantic_status(ui, StatusTone::Error, error, None);
-                            }
-                            if let Some(error) = matcher_from_preview(state).err() {
-                                semantic_status(ui, StatusTone::Error, &error, None);
-                            }
-                        }
-                    });
-                ui.separator();
-                ui.horizontal_wrapped(|ui| match state.mode {
-                    PickerMode::WindowList => {
-                        if ui
-                            .add_enabled(
-                                state.selected.is_some(),
-                                egui::Button::new("Choose Selected Window"),
-                            )
-                            .clicked()
-                        {
-                            state.choose_index(state.selected.unwrap())
-                        }
-                        if ui.button("Cancel").clicked() {
-                            state.cancel("Window picking cancelled")
-                        }
+
+    let footer_height = window_picker_footer_reserved_height(ui, footer_labels);
+    let body_max_height = (ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .height()
+        - footer_height)
+        .max(0.0);
+    egui::ScrollArea::vertical()
+        .id_salt(("mkmacro_window_picker_body", body_salt))
+        .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .max_height(body_max_height)
+        .show(ui, |ui| match state.mode {
+            PickerMode::WindowList => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Search");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.search)
+                            .desired_width(ui.available_width().max(1.0)),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        result.intent = Some(WindowPickerIntent::Refresh)
                     }
-                    PickerMode::ScreenPick => {
-                        if ui.button("Back").clicked() {
-                            state.mode = PickerMode::WindowList;
-                        }
-                    }
-                    PickerMode::Preview => {
-                        let validation = matcher_from_preview(state);
-                        if ui.button("Back / Retry").clicked() {
-                            state.mode = PickerMode::WindowList
-                        }
-                        if ui.button("Cancel").clicked() {
-                            state.cancel("Window picking cancelled")
-                        }
-                        if ui
-                            .add_enabled(validation.is_ok(), egui::Button::new("Use Target"))
-                            .clicked()
+                    if ui.button("Pick From Screen").clicked() {
+                        #[cfg(windows)]
                         {
-                            state.confirm_ready = true;
+                            state.mode = PickerMode::ScreenPick;
+                            state.error = None;
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            state.error =
+                                Some("Direct screen picking is available only on Windows".into());
                         }
                     }
                 });
-            },
-        );
+                if let Some(error) = &state.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
+                ui.columns(3, |columns| {
+                    columns[0].strong("Application");
+                    columns[1].strong("Title");
+                    columns[2].strong("Class");
+                });
+                if state.error.is_none() {
+                    if state.candidates.is_empty() {
+                        ui.label("No windows found.");
+                    } else if filtered_candidates(&state.candidates, &state.search).is_empty() {
+                        ui.label("No windows match this search.");
+                    }
+                }
+                for (index, candidate) in state.candidates.iter().enumerate() {
+                    if filtered_candidates(std::slice::from_ref(candidate), &state.search)
+                        .is_empty()
+                    {
+                        continue;
+                    }
+                    if ui
+                        .selectable_label(
+                            state.selected == Some(index),
+                            format!(
+                                "{}    |    {}    |    {}",
+                                candidate.executable, candidate.title, candidate.class_name
+                            ),
+                        )
+                        .clicked()
+                    {
+                        state.selected = Some(index);
+                    }
+                }
+            }
+            PickerMode::ScreenPick => {
+                ui.heading("Pick From Screen");
+                ui.label("Move the pointer over a window. Click to select it. Esc cancels.");
+                if let Some(error) = &state.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
+            }
+            PickerMode::Preview => {
+                ui.heading("Window Target");
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut state.executable_enabled, "Executable");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.executable)
+                            .desired_width(ui.available_width().max(1.0)),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut state.title_enabled, "Title contains");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.title)
+                            .desired_width(ui.available_width().max(1.0)),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut state.regex_enabled,
+                            "Regex (takes precedence over title contains)",
+                        )
+                        .clicked()
+                        && state.regex_enabled
+                    {
+                        state.title_enabled = false;
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.regex)
+                            .desired_width(ui.available_width().max(1.0)),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut state.class_enabled, "Class");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.class_name)
+                            .desired_width(ui.available_width().max(1.0)),
+                    );
+                });
+                ui.label(format!("Process path: {}", state.process_path));
+                if let Some(error) = &state.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
+                if let Some(error) = matcher_from_preview(state).err() {
+                    semantic_status(ui, StatusTone::Error, &error, None);
+                }
+            }
+        });
+    ui.separator();
+    ui.horizontal_wrapped(|ui| match state.mode {
+        PickerMode::WindowList => {
+            if ui
+                .add_enabled(
+                    state.selected.is_some(),
+                    egui::Button::new("Choose Selected Window"),
+                )
+                .clicked()
+            {
+                state.choose_index(state.selected.unwrap())
+            }
+            if ui.button("Cancel").clicked() {
+                result.intent = Some(WindowPickerIntent::Close)
+            }
+        }
+        PickerMode::ScreenPick => {
+            if ui.button("Back").clicked() {
+                state.mode = PickerMode::WindowList;
+            }
+        }
+        PickerMode::Preview => {
+            let validation = matcher_from_preview(state);
+            if ui.button("Back / Retry").clicked() {
+                state.mode = PickerMode::WindowList
+            }
+            if ui.button("Cancel").clicked() {
+                result.intent = Some(WindowPickerIntent::Close)
+            }
+            if ui
+                .add_enabled(validation.is_ok(), egui::Button::new("Use Target"))
+                .clicked()
+            {
+                result.intent = Some(WindowPickerIntent::Confirm);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn show(ctx: &egui::Context, state: &mut WindowPickerState) {
+    if !state.open {
+        return;
+    }
+    prepare(state, ctx);
+    let mut open = true;
+    let mut actions = WindowPickerActions::default();
+    let id = egui::Id::new("Window Picker");
+    egui::Window::new("Window Picker").id(id).show_utility(
+        ctx,
+        "mkmacro-window-picker",
+        id,
+        Some(&mut open),
+        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(720.0, 600.0)),
+        |ui| render_contents(ui, state, &mut actions),
+    );
+    match actions.intent {
+        Some(WindowPickerIntent::Refresh) => state.refresh(),
+        Some(WindowPickerIntent::Confirm) => state.confirm_ready = true,
+        Some(WindowPickerIntent::Close) => state.cancel("Window picking cancelled"),
+        _ => {}
+    }
     if !open {
-        state.cancel("Window picking cancelled")
+        state.cancel("Window picking cancelled");
     }
 }
+
+impl super::super::utility_window_host::HostedUtilityDialog for WindowPickerState {
+    const KEY: &'static str = "mkmacro-window-picker";
+    const TITLE: &'static str = "Window Picker";
+    const SIZE: egui::Vec2 = egui::vec2(720.0, 600.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = WindowPickerActions;
+    type Checkpoint = Self;
+    type Command = WindowPickerIntent;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Self::KEY))
+    }
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        #[cfg(windows)]
+        let native = std::mem::take(&mut self.native);
+        *self = checkpoint;
+        #[cfg(windows)]
+        {
+            self.native = native;
+        }
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> WindowPickerActions {
+        let mut result = WindowPickerActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            ui.add_enabled_ui(allowed, |ui| render_contents(ui, self, &mut result));
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new(Self::KEY);
+            egui::Window::new(Self::TITLE).id(id).show_utility(
+                ctx,
+                Self::KEY,
+                id,
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                body,
+            );
+        }
+        if !open {
+            result.intent = Some(WindowPickerIntent::Close);
+        }
+        if !first || ctx.will_discard() {
+            result.intent = None;
+            result.presentation = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &WindowPickerActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> WindowPickerIntent {
+        WindowPickerIntent::Retired
+    }
+    fn command_closes(_: &WindowPickerIntent) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: WindowPickerActions,
+        _: Option<usize>,
+    ) -> Vec<WindowPickerIntent> {
+        actions.intent.into_iter().collect()
+    }
+    #[cfg(test)]
+    fn test_button(_: &WindowPickerActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 
 fn window_picker_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
     let spacing = ui.spacing().clone();

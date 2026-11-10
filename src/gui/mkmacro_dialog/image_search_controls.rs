@@ -212,7 +212,7 @@ pub fn show_search_region_fields(
     let mut out = None;
     let area_label = ui.label("Area");
     let area_width = ui.available_width().max(1.0);
-    egui::ComboBox::from_id_salt("Area")
+    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt("Area")
         .width(area_width)
         .wrap()
         .selected_text(match state.kind {
@@ -232,7 +232,7 @@ pub fn show_search_region_fields(
             ] {
                 ui.selectable_value(&mut state.kind, k, l);
             }
-        })
+        }))
         .response
         .labelled_by(area_label.id);
     match state.kind {
@@ -253,7 +253,7 @@ pub fn show_search_region_fields(
                         });
                     let monitor_label = ui.label("Monitor");
                     let monitor_width = ui.available_width().max(1.0);
-                    egui::ComboBox::from_id_salt("Monitor")
+                    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt("Monitor")
                         .width(monitor_width)
                         .wrap()
                         .selected_text(selected)
@@ -261,7 +261,7 @@ pub fn show_search_region_fields(
                             for m in ms {
                                 ui.selectable_value(&mut state.monitor_index, m.index, m.label());
                             }
-                        })
+                        }))
                         .response
                         .labelled_by(monitor_label.id);
                 }
@@ -446,14 +446,14 @@ pub fn show_shared_fields(
 pub(super) fn alpha_policy_ui(ui: &mut egui::Ui, alpha: &mut AlphaPolicy) {
     let label = ui.label("Alpha handling");
     let available_width = ui.available_width().max(1.0);
-    egui::ComboBox::from_id_salt("Alpha handling")
+    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt("Alpha handling")
         .width(available_width)
         .wrap()
         .selected_text(format!("{alpha:?}"))
         .show_ui(ui, |ui| {
             ui.selectable_value(alpha, AlphaPolicy::Compare, "Compare alpha");
             ui.selectable_value(alpha, AlphaPolicy::Ignore, "Ignore alpha");
-        })
+        }))
         .response
         .labelled_by(label.id);
 }

@@ -39,11 +39,12 @@ pub struct ImageCropCompletion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CropUiAction {
+pub(in crate::gui) enum CropUiAction {
     SaveAs,
     RequestOverwrite,
     ConfirmOverwrite,
     Cancel,
+    Retired,
 }
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ struct OverwriteChromeObservation {
 }
 
 pub struct ImageCropEditorState {
+    pub(super) epoch: u64,
     open: bool,
     destination: ImageCropDestination,
     loading: bool,
@@ -71,11 +73,16 @@ pub struct ImageCropEditorState {
     completion: Option<ImageCropCompletion>,
     #[cfg(test)]
     overwrite_chrome: Option<OverwriteChromeObservation>,
+    #[cfg(test)]
+    test_clip: Option<egui::Rect>,
+    #[cfg(test)]
+    pub(super) test_status: Option<(&'static str, egui::Rect, egui::Rect)>,
 }
 
 impl Default for ImageCropEditorState {
     fn default() -> Self {
         Self {
+            epoch: 0,
             open: false,
             destination: ImageCropDestination::ImageActionReference {
                 macro_id: 0,
@@ -94,11 +101,41 @@ impl Default for ImageCropEditorState {
             completion: None,
             #[cfg(test)]
             overwrite_chrome: None,
+            #[cfg(test)]
+            test_clip: None,
+            #[cfg(test)]
+            test_status: None,
         }
     }
 }
 
 impl ImageCropEditorState {
+    pub(super) fn destination(&self) -> &ImageCropDestination { &self.destination }
+    #[cfg(test)]
+    pub(super) fn test_seed_loading(&mut self, destination: ImageCropDestination) {
+        self.cancel();
+        self.epoch = self.epoch.wrapping_add(1).max(1);
+        self.open = true;
+        self.loading = true;
+        self.destination = destination;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_error(&mut self) {
+        self.loading = false;
+        self.validation_message = Some("Fixture load failed".into());
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_ready(&mut self) {
+        self.loading = false;
+        self.validation_message = None;
+        self.save_as_filename = "should-not-write.png".into();
+        self.canvas = Some(CropCanvas::from_image(RgbaImage::new(4, 4)).unwrap());
+    }
+    #[cfg(test)]
+    pub(super) fn test_save_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        let (rect, enabled) = self.canvas.as_ref()?.test_save_button()?;
+        Some((rect, self.test_clip?, enabled))
+    }
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -112,6 +149,7 @@ impl ImageCropEditorState {
             return Err("An image crop is already in progress");
         }
         self.cancel();
+        self.epoch = self.epoch.wrapping_add(1).max(1);
         let source = destination.source().clone();
         self.open = true;
         self.destination = destination;
@@ -165,7 +203,7 @@ impl ImageCropEditorState {
         }
     }
 
-    fn poll_load(&mut self, ctx: &egui::Context) {
+    pub(super) fn poll_load(&mut self, ctx: &egui::Context) {
         let Some(worker) = &self.worker else {
             return;
         };
@@ -198,71 +236,6 @@ impl ImageCropEditorState {
                 self.validation_message =
                     Some(format!("Reference image validation failed: {error}"));
             }
-        }
-    }
-
-    fn render(&mut self, ctx: &egui::Context) -> Option<CropUiAction> {
-        self.poll_load(ctx);
-        if !self.open {
-            return None;
-        }
-        let Some(canvas) = self.canvas.as_mut() else {
-            if self.loading {
-                egui::Window::new("Crop Reference Image")
-                    .id(egui::Id::new("mkmacro_crop_reference_image"))
-                    .collapsible(false)
-                    .show_utility(
-                        ctx,
-                        "mkmacro-reference-crop",
-                        egui::Id::new("mkmacro_crop_reference_image"),
-                        None,
-                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
-                            egui::Vec2::ZERO,
-                            [None, None],
-                        ),
-                        |ui| {
-                            ui.label("Loading reference image…");
-                        },
-                    );
-            } else if let Some(error) = &self.validation_message {
-                let mut open = true;
-                egui::Window::new("Crop Reference Image")
-                    .id(egui::Id::new("mkmacro_crop_reference_image"))
-                    .collapsible(false)
-                    .show_utility(
-                        ctx,
-                        "mkmacro-reference-crop",
-                        egui::Id::new("mkmacro_crop_reference_image"),
-                        Some(&mut open),
-                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::intrinsic(),
-                        |ui| {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
-                            if ui.button("Cancel").clicked() {
-                                self.open = false;
-                            }
-                        },
-                    );
-                if !open {
-                    self.open = false;
-                }
-            }
-            return None;
-        };
-        let mut options =
-            CropEditorUiOptions::new("Crop Reference Image", "mkmacro_crop_reference_image");
-        options.source_label = Some(format!(
-            "Source: mkmacro_assets/{}",
-            self.destination.source().filename()
-        ));
-        options.collision_message = self.collision_message.clone();
-        options.persistence_message = self.persistence_message.clone();
-        options.allow_overwrite = true;
-        match canvas.show_with_save_as_filename(ctx, &options, Some(&mut self.save_as_filename)) {
-            Some(CropEditorAction::SaveAs) => Some(CropUiAction::SaveAs),
-            Some(CropEditorAction::RequestOverwrite) => Some(CropUiAction::RequestOverwrite),
-            Some(CropEditorAction::Cancel) => Some(CropUiAction::Cancel),
-            None => None,
         }
     }
 
@@ -422,105 +395,301 @@ fn overwrite_confirmation_footer_height(ui: &egui::Ui) -> f32 {
     (height * pixels_per_point).ceil() / pixels_per_point
 }
 
+#[derive(Clone)]
+pub(in crate::gui) struct CropCheckpoint {
+    canvas: Option<crate::gui::image_crop_editor::CropCanvasCheckpoint>,
+    save_as_filename: String,
+    overwrite_confirmation: bool,
+    collision_message: Option<String>,
+    validation_message: Option<String>,
+    persistence_message: Option<String>,
+}
+#[derive(Default)]
+pub(in crate::gui) struct CropActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    intent: Option<CropUiAction>,
+}
+
+fn confirmation_id(epoch: u64) -> egui::Id {
+    egui::Id::new(("mkmacro-crop-overwrite-confirmation", epoch))
+}
+fn render_contents(
+    ui: &mut egui::Ui,
+    editor: &mut ImageCropEditorState,
+    confirmation_allowed: bool,
+    result: &mut CropActions,
+) {
+    #[cfg(test)]
+    {
+        editor.test_clip = Some(ui.clip_rect());
+    }
+    if let Some(canvas) = editor.canvas.as_mut() {
+        let mut options =
+            CropEditorUiOptions::new("Crop Reference Image", "mkmacro_crop_reference_image");
+        options.source_label = Some(format!(
+            "Source: mkmacro_assets/{}",
+            editor.destination.source().filename()
+        ));
+        options.collision_message = editor.collision_message.clone();
+        options.persistence_message = editor.persistence_message.clone();
+        options.allow_overwrite = true;
+        result.intent = match canvas.show_contents(ui, &options, Some(&mut editor.save_as_filename))
+        {
+            Some(CropEditorAction::SaveAs) => Some(CropUiAction::SaveAs),
+            Some(CropEditorAction::RequestOverwrite) => Some(CropUiAction::RequestOverwrite),
+            Some(CropEditorAction::Cancel) => Some(CropUiAction::Cancel),
+            None => None,
+        };
+    } else {
+        if editor.loading {
+            let response = ui.label("Loading reference image…");
+            #[cfg(test)] { editor.test_status = Some(("loading", response.rect, ui.clip_rect())); }
+            #[cfg(not(test))] let _ = response;
+        }
+        if let Some(error) = &editor.validation_message {
+            let response = ui.colored_label(ui.visuals().error_fg_color, error);
+            #[cfg(test)] { editor.test_status = Some(("error", response.rect, ui.clip_rect())); }
+            #[cfg(not(test))] let _ = response;
+        }
+        if ui.button("Cancel").clicked() {
+            result.intent = Some(CropUiAction::Cancel);
+        }
+    }
+    if editor.overwrite_confirmation {
+        let mut open = true;
+        egui::Window::new("Confirm overwrite").id(confirmation_id(editor.epoch)).collapsible(false).resizable(false).open(&mut open).show(ui.ctx(), |ui| {
+            ui.add_enabled_ui(confirmation_allowed, |ui| {
+                let footer = overwrite_confirmation_footer_height(ui);
+                let height = (ui.available_rect_before_wrap().intersect(ui.clip_rect()).height() - footer).max(0.0);
+                let body = egui::ScrollArea::vertical().id_salt("mkmacro_crop_overwrite_confirmation_body").max_height(height).min_scrolled_height(0.0).show(ui, |ui| {
+                    let copy = ui.add(egui::Label::new(format!("Overwrite {} with the selected crop?", editor.destination.source().filename())).wrap_mode(egui::TextWrapMode::Wrap));
+                    let warning = semantic_status(ui, StatusTone::Warning, "All macros and actions referencing this file will see the cropped pixels.", None);
+                    (copy, warning)
+                });
+                let (confirm, cancel) = ui.horizontal_wrapped(|ui| {
+                    let confirm = ui.add(egui::Button::new("Confirm Overwrite").wrap());
+                    let cancel = ui.add(egui::Button::new("Cancel").wrap());
+                    if confirm.clicked() { result.intent = Some(CropUiAction::ConfirmOverwrite); }
+                    if cancel.clicked() { editor.overwrite_confirmation = false; }
+                    (confirm, cancel)
+                }).inner;
+                #[cfg(test)]
+                { editor.overwrite_chrome = Some(OverwriteChromeObservation { body: (body.id, body.inner_rect, body.content_size, body.state.offset), copy: (body.inner.0.id, body.inner.0.rect), warning: (body.inner.1.id, body.inner.1.rect), confirm_button: (confirm.id, confirm.rect), cancel_button: (cancel.id, cancel.rect), footer_reserved_height: footer }); }
+                #[cfg(not(test))]
+                let _ = (body, confirm, cancel);
+            });
+        });
+        if !open && confirmation_allowed {
+            editor.overwrite_confirmation = false;
+        }
+    }
+}
+
+impl super::super::utility_window_host::HostedUtilityDialog for ImageCropEditorState {
+    const KEY: &'static str = "mkmacro-reference-crop";
+    const TITLE: &'static str = "Crop Reference Image";
+    const SIZE: egui::Vec2 = egui::vec2(860.0, 680.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = CropActions;
+    type Checkpoint = CropCheckpoint;
+    type Command = CropUiAction;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Self::KEY))
+    }
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        self.overwrite_confirmation.then_some(
+            super::super::jump_mode::ui::NavigationViewportBinding {
+                viewport,
+                base_layer: egui::LayerId::new(egui::Order::Middle, confirmation_id(instance)),
+                owner: super::super::jump_mode::ui::NavigationOwner::MkMacro { instance },
+            },
+        )
+    }
+    fn capture(&self) -> CropCheckpoint {
+        CropCheckpoint {
+            canvas: self.canvas.as_ref().map(|canvas| canvas.capture_ui()),
+            save_as_filename: self.save_as_filename.clone(),
+            overwrite_confirmation: self.overwrite_confirmation,
+            collision_message: self.collision_message.clone(),
+            validation_message: self.validation_message.clone(),
+            persistence_message: self.persistence_message.clone(),
+        }
+    }
+    fn restore(&mut self, checkpoint: CropCheckpoint) {
+        if let (Some(canvas), Some(saved)) = (&mut self.canvas, checkpoint.canvas) {
+            canvas.restore_ui(saved);
+        }
+        self.save_as_filename = checkpoint.save_as_filename;
+        self.overwrite_confirmation = checkpoint.overwrite_confirmation;
+        self.collision_message = checkpoint.collision_message;
+        self.validation_message = checkpoint.validation_message;
+        self.persistence_message = checkpoint.persistence_message;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        child_owner: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> CropActions {
+        let mut result = CropActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            let confirm_allowed =
+                allowed || child_owner != super::super::jump_mode::ui::NavigationOwner::Blocked;
+            ui.add_enabled_ui(allowed, |ui| {
+                render_contents(ui, self, confirm_allowed, &mut result)
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new(Self::KEY);
+            egui::Window::new(Self::TITLE)
+                .id(id)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    Self::KEY,
+                    id,
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                    body,
+                );
+        }
+        if !open {
+            result.intent = Some(CropUiAction::Cancel);
+        }
+        if !first || ctx.will_discard() {
+            result.presentation = None;
+            result.intent = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &CropActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> CropUiAction {
+        CropUiAction::Retired
+    }
+    fn command_closes(_: &CropUiAction) -> bool {
+        false
+    }
+    fn complete_actions(&mut self, actions: CropActions, _: Option<usize>) -> Vec<CropUiAction> {
+        actions.intent.into_iter().collect()
+    }
+    #[cfg(test)]
+    fn test_button(_: &CropActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+#[cfg(test)]
 pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     let mut editor = std::mem::take(&mut dialog.image_crop_editor);
     if !editor.open {
         dialog.image_crop_editor = editor;
         return;
     }
-    let action = editor.render(ctx);
+    editor.poll_load(ctx);
+    let mut result = CropActions::default();
+    let mut open = true;
+    let id = egui::Id::new("mkmacro-reference-crop");
+    egui::Window::new("Crop Reference Image")
+        .id(id)
+        .show_utility(
+            ctx,
+            "mkmacro-reference-crop",
+            id,
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(
+                860.0, 680.0,
+            )),
+            |ui| render_contents(ui, &mut editor, true, &mut result),
+        );
+    if !open {
+        result.intent = Some(CropUiAction::Cancel);
+    }
+    if let Some(intent) = result.intent {
+        apply_action(ctx, dialog, &mut editor, intent);
+    }
+    dialog.image_crop_editor = editor;
+}
+
+pub(super) fn apply_action(
+    ctx: &egui::Context,
+    dialog: &mut MkMacroDialog,
+    editor: &mut ImageCropEditorState,
+    action: CropUiAction,
+) {
     match action {
-        Some(CropUiAction::SaveAs) => editor.save_as(dialog),
-        Some(CropUiAction::ConfirmOverwrite) => editor.overwrite_current(dialog),
-        Some(CropUiAction::RequestOverwrite) => editor.overwrite_confirmation = true,
-        Some(CropUiAction::Cancel) => editor.complete(ImageCropResult::Cancelled, true),
-        None => {}
-    }
-    let mut confirm_overwrite = false;
-    if editor.overwrite_confirmation {
-        let mut open = true;
-        egui::Window::new("Confirm overwrite")
-            .id(egui::Id::new("mkmacro_crop_overwrite_confirmation"))
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                let footer_reserved_height = overwrite_confirmation_footer_height(ui);
-                let body_max_height =
-                    (ui.available_height() - footer_reserved_height).max(0.0);
-                let copy_text = format!(
-                    "Overwrite {} with the selected crop?",
-                    editor.destination.source().filename()
-                );
-                let mut copy_response = None;
-                let mut warning_response = None;
-                let body = egui::ScrollArea::vertical()
-                    .id_salt("mkmacro_crop_overwrite_confirmation_body")
-                    .max_height(body_max_height)
-                    .min_scrolled_height(0.0)
-                    .show(ui, |ui| {
-                        copy_response = Some(
-                            ui.add(
-                                egui::Label::new(&copy_text)
-                                    .wrap_mode(egui::TextWrapMode::Wrap),
-                            ),
-                        );
-                        warning_response = Some(semantic_status(
-                            ui,
-                            StatusTone::Warning,
-                            "All macros and actions referencing this file will see the cropped pixels.",
-                            None,
-                        ));
-                    });
-                let (confirm_response, cancel_response) = ui
-                    .horizontal_wrapped(|ui| {
-                        let confirm = ui.add(egui::Button::new("Confirm Overwrite").wrap());
-                        let cancel = ui.add(egui::Button::new("Cancel").wrap());
-                        if confirm.clicked() {
-                            editor.overwrite_confirmation = false;
-                            confirm_overwrite = true;
-                        }
-                        if cancel.clicked() {
-                            editor.overwrite_confirmation = false;
-                        }
-                        (confirm, cancel)
-                    })
-                    .inner;
-                #[cfg(test)]
-                {
-                    editor.overwrite_chrome = Some(OverwriteChromeObservation {
-                        body: (
-                            body.id,
-                            body.inner_rect,
-                            body.content_size,
-                            body.state.offset,
-                        ),
-                        copy: copy_response
-                            .map(|response| (response.id, response.rect))
-                            .unwrap_or((egui::Id::NULL, egui::Rect::NOTHING)),
-                        warning: warning_response
-                            .map(|response| (response.id, response.rect))
-                            .unwrap_or((egui::Id::NULL, egui::Rect::NOTHING)),
-                        confirm_button: (confirm_response.id, confirm_response.rect),
-                        cancel_button: (cancel_response.id, cancel_response.rect),
-                        footer_reserved_height,
-                    });
-                }
-                #[cfg(not(test))]
-                let _ = (
-                    body,
-                    copy_response,
-                    warning_response,
-                    confirm_response,
-                    cancel_response,
-                );
-            });
-        if !open {
+        CropUiAction::SaveAs => editor.save_as(dialog),
+        CropUiAction::ConfirmOverwrite => {
             editor.overwrite_confirmation = false;
+            editor.overwrite_current(dialog);
         }
-    }
-    if confirm_overwrite {
-        editor.overwrite_current(dialog);
+        CropUiAction::RequestOverwrite => editor.overwrite_confirmation = true,
+        CropUiAction::Cancel | CropUiAction::Retired => {
+            editor.complete(ImageCropResult::Cancelled, true)
+        }
     }
     if let Some(completion) = editor.take_completion() {
         match &completion.result {
@@ -548,15 +717,13 @@ pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                 editor.collision_message = Some(format!(
                     "Reference image filename already exists: {}",
                     image.filename()
-                ));
+                ))
             }
-            ImageCropResult::Error(error) => {
-                editor.persistence_message = Some(error.clone());
-            }
+            ImageCropResult::Error(error) => editor.persistence_message = Some(error.clone()),
         }
     }
-    dialog.image_crop_editor = editor;
 }
+
 
 #[cfg(test)]
 mod tests {

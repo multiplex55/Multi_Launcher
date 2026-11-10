@@ -5162,8 +5162,7 @@ impl LauncherApp {
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root().is_some(),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.owner_layer_if_root().is_some(),
             Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some()
-                || self.mkmacro_dialog.search_root_layer().is_some()
-                || self.mkmacro_dialog.package_has_root_layer(),
+                || self.mkmacro_dialog.ordinary_child_root_layer().is_some(),
             Panel::NotePanel => self
                 .note_panels
                 .iter()

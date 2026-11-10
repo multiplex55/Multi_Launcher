@@ -17,7 +17,7 @@ pub enum OcrLanguageCapability<'a> {
 pub fn search_match_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
     ui.label("Text or template");
     ui.text_edit_singleline(&mut search.text);
-    egui::ComboBox::from_label("Match")
+    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Match")
         .selected_text(format!("{:?}", search.match_mode))
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut search.match_mode, MkOcrMatchMode::Contains, "Contains");
@@ -31,7 +31,7 @@ pub fn search_match_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
                 MkOcrMatchMode::Regex,
                 "Regular expression",
             );
-        });
+        }));
     ui.checkbox(&mut search.case_sensitive, "Case sensitive");
     let mut nth = match search.occurrence {
         MkOcrOccurrence::First => 1,
@@ -74,7 +74,7 @@ pub fn installed_language_ui(
             .map(|candidate| format!("{} ({})", candidate.display_name, candidate.tag))
             .unwrap_or_else(|| tag.clone()),
     };
-    egui::ComboBox::from_label("Installed OCR language")
+    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Installed OCR language")
         .selected_text(selected)
         .show_ui(ui, |ui| {
             ui.selectable_value(language, MkOcrLanguage::Auto, "Auto (Windows profile)");
@@ -85,7 +85,7 @@ pub fn installed_language_ui(
                     format!("{} ({})", candidate.display_name, candidate.tag),
                 );
             }
-        });
+        }));
     match capability {
         OcrLanguageCapability::Loading => {
             ui.label("Loading installed OCR languages…");

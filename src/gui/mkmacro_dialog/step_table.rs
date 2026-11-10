@@ -314,12 +314,12 @@ pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
         || d.marker_record_hotkey_capture
         || d.recording_annotation_open
         || d.recording_review.is_some()
-        || d.action_catalog_visible
+        || (d.catalog.open && !d.catalog_host.is_popped_out())
         || d.structural_insertion.is_some()
         || d.uia_editor.editor_hidden()
-        || d.image_crop_editor.is_open()
-        || d.window_picker.open
-        || d.launcher_action_picker.open
+        || (d.image_crop_editor.is_open() && !d.crop_host.is_popped_out())
+        || (d.window_picker.open && !d.window_picker_host.is_popped_out())
+        || (d.launcher_action_picker.open && !d.launcher_picker_host.is_popped_out())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1496,8 +1496,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
             .and_then(|m| m.steps.iter().find(|s| s.id == id))
             .cloned()
         {
-            d.action_editor
-                .begin_edit_in_macro(d.selected_macro_id, &step);
+            d.open_action_editor_from_main(step);
         }
         return;
     }
@@ -1561,7 +1560,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
                         .into(),
                 );
             } else {
-                d.action_editor.begin_edit_in_macro(d.selected_macro_id, &s);
+                d.open_action_editor_from_main(s);
             }
         }
         return;

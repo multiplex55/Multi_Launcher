@@ -307,6 +307,8 @@ pub(super) fn show_with_jump_mode(
             dialog.selected_macro().is_some(),
             eframe::egui::Button::new("+ Action"),
         );
+        #[cfg(test)]
+        { dialog.test_add_action = Some((add_action.rect, ui.clip_rect(), add_action.enabled())); }
         super::jump_mode::register_target(
             ui,
             jump_mode_scope,
@@ -317,7 +319,11 @@ pub(super) fn show_with_jump_mode(
             visual_order,
         );
         if add_action.clicked() {
-            dialog.action_catalog_visible = true;
+            if dialog.defer_host_effects {
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::OpenCatalog);
+            } else {
+                dialog.catalog.open = true;
+            }
         }
         if !state.command_enabled(ToolbarCommand::Run) {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))

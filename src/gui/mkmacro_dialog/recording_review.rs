@@ -80,6 +80,7 @@ impl std::error::Error for RecordingReviewError {}
 /// deliberately small local history, so review operations cannot dirty the
 /// document draft.
 pub struct RecordingReviewSession {
+    pub(super) epoch: u64,
     pub target: RecordingTarget,
     recovery_target: Option<RecordingTarget>,
     pub literal_steps: Vec<RecordedStep>,
@@ -109,6 +110,8 @@ pub struct RecordingReviewSession {
     pub preview_diagnostic: Option<crate::mkmacro::ExecutionDiagnostic>,
     #[cfg(test)]
     test_chrome: Option<ReviewChromeObservation>,
+    #[cfg(test)]
+    pub(super) test_edit: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
 }
 
 #[cfg(test)]
@@ -160,6 +163,7 @@ impl RecordingReviewSession {
             generated_plan.steps.len(),
         );
         Self {
+            epoch: 0,
             target,
             recovery_target: None,
             literal_steps,
@@ -187,6 +191,8 @@ impl RecordingReviewSession {
             preview_diagnostic: None,
             #[cfg(test)]
             test_chrome: None,
+            #[cfg(test)]
+            test_edit: None,
         }
     }
 
@@ -958,13 +964,14 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 }
                 let one =
                     (review.selection.len() == 1).then(|| *review.selection.iter().next().unwrap());
-                if ui
+                let edit_response = ui
                     .add_enabled(
                         one.is_some() && !review_editor_open,
                         eframe::egui::Button::new("Edit action"),
-                    )
-                    .clicked()
-                {
+                    );
+                #[cfg(test)]
+                { review.test_edit = Some((edit_response.rect, ui.clip_rect(), edit_response.enabled())); }
+                if edit_response.clicked() {
                     edit = one;
                 }
                 if ui
@@ -1171,7 +1178,12 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             .unwrap()
             .effective_target()
             .macro_id;
-        dialog.action_editor.begin_review_edit(macro_id, id, &step);
+        if dialog.defer_host_effects {
+            let epoch = dialog.recording_review.as_ref().unwrap().epoch;
+            dialog.stage_review_editor(epoch, id, step);
+        } else {
+            dialog.action_editor.begin_review_edit(macro_id, id, &step);
+        }
     }
     if append_recovery {
         dialog

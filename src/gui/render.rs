@@ -7584,6 +7584,26 @@ impl LauncherApp {
             ctx, first_ui_pass, root_visible, root_input_allowed,
             application_input_allowed, self.jump_mode_ui.active_session().is_some(),
         );
+        self.mkmacro_dialog.show_catalog_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_editor_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_window_picker_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_launcher_picker_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_crop_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
     }
 
     fn show_note_panels(
@@ -14264,7 +14284,12 @@ impl LauncherApp {
         let completion = self.mkmacro_dialog.on_host_frame_complete(ctx);
         let search_show_root = self.mkmacro_dialog.complete_search_child(ctx);
         let package_show_root = self.mkmacro_dialog.complete_package_children(ctx);
-        if search_show_root || package_show_root {
+        let catalog_show_root = self.mkmacro_dialog.complete_catalog_child(ctx);
+        let editor_show_root = self.mkmacro_dialog.complete_editor_child(ctx);
+        let window_picker_show_root = self.mkmacro_dialog.complete_window_picker_child(ctx);
+        let launcher_picker_show_root = self.mkmacro_dialog.complete_launcher_picker_child(ctx);
+        let crop_show_root = self.mkmacro_dialog.complete_crop_child(ctx);
+        if search_show_root || package_show_root || catalog_show_root || editor_show_root || window_picker_show_root || launcher_picker_show_root || crop_show_root {
             self.request_launcher_visibility(true);
         }
         if completion.closed {
@@ -56908,7 +56933,7 @@ mod tests {
         let add_action_hint = dialog_hint_for_label(&app, "Add Action");
         press_dialog_hint_with_enter(&ctx, &mut app, &add_action_hint);
         assert!(
-            !app.mkmacro_dialog.action_catalog_visible,
+            !app.mkmacro_dialog.catalog_is_open(),
             "hint completion only focuses the safe toolbar button"
         );
         assert_eq!(app.mkmacro_dialog.draft, original_draft);
@@ -56924,7 +56949,7 @@ mod tests {
         )
         .0
         .drop_without_applying_deltas();
-        assert!(app.mkmacro_dialog.action_catalog_visible);
+        assert!(app.mkmacro_dialog.catalog_is_open());
         assert_eq!(app.mkmacro_dialog.draft, original_draft);
         assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
         run_dialog_frame(&ctx, &mut app);

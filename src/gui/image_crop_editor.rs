@@ -243,7 +243,7 @@ impl CropEditorUiOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ActiveInteraction {
     Create {
         start: CropPoint,
@@ -273,6 +273,17 @@ pub struct ImageCropEditorState {
     test_chrome: Option<CropChromeObservation>,
 }
 
+#[derive(Clone)]
+pub(crate) struct CropCanvasCheckpoint {
+    open: bool,
+    selection: Option<ImageCropRect>,
+    zoom: f32,
+    pan: CropPoint,
+    fit_initialized: bool,
+    interaction: Option<ActiveInteraction>,
+    validation_message: Option<String>,
+}
+
 impl Default for ImageCropEditorState {
     fn default() -> Self {
         Self {
@@ -292,6 +303,22 @@ impl Default for ImageCropEditorState {
 }
 
 impl ImageCropEditorState {
+    pub(crate) fn capture_ui(&self) -> CropCanvasCheckpoint {
+        CropCanvasCheckpoint { open: self.open, selection: self.selection, zoom: self.zoom, pan: self.pan, fit_initialized: self.fit_initialized, interaction: self.interaction.clone(), validation_message: self.validation_message.clone() }
+    }
+    pub(crate) fn restore_ui(&mut self, checkpoint: CropCanvasCheckpoint) {
+        self.open = checkpoint.open;
+        self.selection = checkpoint.selection;
+        self.zoom = checkpoint.zoom;
+        self.pan = checkpoint.pan;
+        self.fit_initialized = checkpoint.fit_initialized;
+        self.interaction = checkpoint.interaction;
+        self.validation_message = checkpoint.validation_message;
+    }
+    #[cfg(test)]
+    pub(crate) fn test_save_button(&self) -> Option<(egui::Rect, bool)> {
+        self.test_chrome.as_ref().map(|chrome| (chrome.save_as_button.1, chrome.save_as_button.2))
+    }
     pub fn from_image(source: RgbaImage) -> Result<Self, CropValidationError> {
         let mut state = Self::default();
         state.set_source(source)?;
@@ -603,62 +630,104 @@ impl ImageCropEditorState {
         if !self.open {
             return None;
         }
-        self.ensure_texture(ctx, &options.window_id);
         let mut open = true;
-        let mut action = None;
-        #[cfg(test)]
-        let mut test_chrome = None;
         let available_rect = ctx.content_rect();
         let max_window_width = available_rect.width().max(1.0);
         let max_window_height = available_rect.height().max(1.0);
-        let window_output = egui::Window::new(&options.title)
+        let output = egui::Window::new(&options.title)
             .id(egui::Id::new(&options.window_id))
-
             .collapsible(false)
             .resizable(true)
             .max_width(max_window_width)
             .max_height(max_window_height)
-            .default_size([860.0_f32.min(max_window_width), 680.0_f32.min(max_window_height)])
-            .min_size([560.0_f32.min(max_window_width), 480.0_f32.min(max_window_height)])
-            .show_utility(ctx, "image-crop-editor", egui::Id::new(&options.window_id), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from([860.0_f32.min(max_window_width), 680.0_f32.min(max_window_height)])), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from([560.0_f32.min(max_window_width), 480.0_f32.min(max_window_height)])).with_max_width(max_window_width).with_max_height(max_window_height), |ui| {
-                #[cfg(test)]
-                let mut filename_label_response = None;
-                #[cfg(test)]
-                let mut filename_edit_response = None;
-                if let Some(filename) = save_as_filename {
-                    let label = ui.label("Save As filename");
-                    #[cfg(test)]
-                    {
-                        filename_label_response = Some(label);
-                    }
-                    #[cfg(not(test))]
-                    let _ = label;
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(filename).desired_width(ui.available_width()),
-                    );
-                    #[cfg(test)]
-                    {
-                        filename_edit_response = Some(edit);
-                    }
-                    #[cfg(not(test))]
-                    let _ = edit;
-                }
-                let footer_reserved_height = crop_editor_footer_reserved_height(
-                    ui,
-                    options.allow_overwrite,
-                );
-                let metadata_height = crop_metadata_height_budget(
-                    ui,
-                    ui.available_height(),
-                    footer_reserved_height,
-                );
-                #[cfg(test)]
-                let mut source_label_response = None;
-                #[cfg(test)]
-                let mut collision_label_response = None;
-                #[cfg(test)]
-                let mut persistence_label_response = None;
-                let metadata = egui::ScrollArea::vertical()
+            .default_size([
+                860.0_f32.min(max_window_width),
+                680.0_f32.min(max_window_height),
+            ])
+            .min_size([
+                560.0_f32.min(max_window_width),
+                480.0_f32.min(max_window_height),
+            ])
+            .show_utility(
+                ctx,
+                "image-crop-editor",
+                egui::Id::new(&options.window_id),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from([
+                            860.0_f32.min(max_window_width),
+                            680.0_f32.min(max_window_height),
+                        ]),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::Vec2::from([
+                    560.0_f32.min(max_window_width),
+                    480.0_f32.min(max_window_height),
+                ]))
+                .with_max_width(max_window_width)
+                .with_max_height(max_window_height),
+                |ui| self.show_contents(ui, options, save_as_filename),
+            );
+        #[cfg(test)]
+        if let (Some(chrome), Some(output)) = (&mut self.test_chrome, &output) {
+            chrome.window_rect = Some(output.response.rect);
+        }
+        if !open {
+            self.open = false;
+            return Some(CropEditorAction::Cancel);
+        }
+        output.and_then(|output| output.inner).flatten()
+    }
+
+    pub(crate) fn show_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        options: &CropEditorUiOptions,
+        save_as_filename: Option<&mut String>,
+    ) -> Option<CropEditorAction> {
+        if !self.open {
+            return None;
+        }
+        self.ensure_texture(ui.ctx(), &options.window_id);
+        let mut action = None;
+        #[cfg(test)]
+        let test_chrome;
+
+        #[cfg(test)]
+        let mut filename_label_response = None;
+        #[cfg(test)]
+        let mut filename_edit_response = None;
+        if let Some(filename) = save_as_filename {
+            let label = ui.label("Save As filename");
+            #[cfg(test)]
+            {
+                filename_label_response = Some(label);
+            }
+            #[cfg(not(test))]
+            let _ = label;
+            let edit =
+                ui.add(egui::TextEdit::singleline(filename).desired_width(ui.available_width()));
+            #[cfg(test)]
+            {
+                filename_edit_response = Some(edit);
+            }
+            #[cfg(not(test))]
+            let _ = edit;
+        }
+        let footer_reserved_height =
+            crop_editor_footer_reserved_height(ui, options.allow_overwrite);
+        let metadata_height =
+            crop_metadata_height_budget(ui, ui.available_height(), footer_reserved_height);
+        #[cfg(test)]
+        let mut source_label_response = None;
+        #[cfg(test)]
+        let mut collision_label_response = None;
+        #[cfg(test)]
+        let mut persistence_label_response = None;
+        let metadata = egui::ScrollArea::vertical()
                     .id_salt("crop_editor_metadata")
                     .auto_shrink([false, true])
                     .min_scrolled_height(0.0)
@@ -735,221 +804,206 @@ impl ImageCropEditorState {
                             let _ = response;
                         }
                     });
-                let Some((image_width, image_height)) = self
-                    .source
-                    .as_ref()
-                    .map(|image| (image.width(), image.height()))
-                else {
-                    ui.add_enabled(false, egui::Button::new("Save As"));
-                    return;
-                };
-                let available = ui.available_size();
-                let viewport_size = egui::vec2(
-                    available.x.max(1.0),
-                    (available.y - footer_reserved_height).max(1.0),
-                );
-                let (viewport, response) =
-                    ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
-                let _ = self.viewport_transform(viewport).unwrap();
-                if response.hovered() {
-                    let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-                    if scroll != 0.0
-                        && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
-                    {
-                        self.change_zoom(viewport, pointer, scroll);
-                    }
+        let Some((image_width, image_height)) = self
+            .source
+            .as_ref()
+            .map(|image| (image.width(), image.height()))
+        else {
+            ui.add_enabled(false, egui::Button::new("Save As"));
+            return None;
+        };
+        let available = ui.available_size();
+        let viewport_size = egui::vec2(
+            available.x.max(1.0),
+            (available.y - footer_reserved_height).max(1.0),
+        );
+        let (viewport, response) =
+            ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
+        let _ = self.viewport_transform(viewport).unwrap();
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll != 0.0
+                && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+            {
+                self.change_zoom(viewport, pointer, scroll);
+            }
+        }
+        if response.hovered() && ui.input(|input| input.pointer.middle_down()) {
+            let delta = ui.input(|input| input.pointer.delta());
+            self.pan.x += delta.x;
+            self.pan.y += delta.y;
+            self.clamp_pan(viewport);
+        }
+        let transform = self.viewport_transform(viewport).unwrap();
+        let selection = self.selection.unwrap();
+        let selection_min = source_to_display(
+            CropPoint {
+                x: selection.x as f32,
+                y: selection.y as f32,
+            },
+            transform,
+        );
+        let selection_screen = egui::Rect::from_min_size(
+            egui::pos2(selection_min.x, selection_min.y),
+            egui::vec2(
+                selection.width as f32 * transform.zoom,
+                selection.height as f32 * transform.zoom,
+            ),
+        );
+        let image_screen = egui::Rect::from_min_size(
+            egui::pos2(transform.origin.x, transform.origin.y),
+            egui::vec2(
+                image_width as f32 * transform.zoom,
+                image_height as f32 * transform.zoom,
+            ),
+        );
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let source_pointer = display_to_source(
+                CropPoint {
+                    x: pointer.x,
+                    y: pointer.y,
+                },
+                transform,
+            );
+            self.interaction = if let Some(handle) = Self::hit_handle(selection_screen, pointer) {
+                Some(ActiveInteraction::Resize {
+                    handle,
+                    original: selection,
+                })
+            } else if image_screen.contains(pointer) && selection_screen.contains(pointer) {
+                Some(ActiveInteraction::Move {
+                    start: source_pointer,
+                    original: selection,
+                })
+            } else if image_screen.contains(pointer) {
+                Some(ActiveInteraction::Create {
+                    start: source_pointer,
+                })
+            } else {
+                None
+            };
+        }
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some(interaction) = self.interaction.as_ref()
+        {
+            let source_pointer = display_to_source(
+                CropPoint {
+                    x: pointer.x,
+                    y: pointer.y,
+                },
+                transform,
+            );
+            self.selection = Some(match interaction {
+                ActiveInteraction::Create { start } => {
+                    selection_from_drag(*start, source_pointer, image_width, image_height)
                 }
-                if response.hovered() && ui.input(|input| input.pointer.middle_down()) {
-                    let delta = ui.input(|input| input.pointer.delta());
-                    self.pan.x += delta.x;
-                    self.pan.y += delta.y;
-                    self.clamp_pan(viewport);
-                }
-                let transform = self.viewport_transform(viewport).unwrap();
-                let selection = self.selection.unwrap();
-                let selection_min = source_to_display(
-                    CropPoint {
-                        x: selection.x as f32,
-                        y: selection.y as f32,
-                    },
-                    transform,
-                );
-                let selection_screen = egui::Rect::from_min_size(
-                    egui::pos2(selection_min.x, selection_min.y),
-                    egui::vec2(
-                        selection.width as f32 * transform.zoom,
-                        selection.height as f32 * transform.zoom,
-                    ),
-                );
-                let image_screen = egui::Rect::from_min_size(
-                    egui::pos2(transform.origin.x, transform.origin.y),
-                    egui::vec2(
-                        image_width as f32 * transform.zoom,
-                        image_height as f32 * transform.zoom,
-                    ),
-                );
-                if response.drag_started_by(egui::PointerButton::Primary)
-                    && let Some(pointer) = response.interact_pointer_pos()
-                {
-                    let source_pointer = display_to_source(
-                        CropPoint {
-                            x: pointer.x,
-                            y: pointer.y,
-                        },
-                        transform,
-                    );
-                    self.interaction = if let Some(handle) =
-                        Self::hit_handle(selection_screen, pointer)
-                    {
-                        Some(ActiveInteraction::Resize {
-                            handle,
-                            original: selection,
-                        })
-                    } else if image_screen.contains(pointer) && selection_screen.contains(pointer) {
-                        Some(ActiveInteraction::Move {
-                            start: source_pointer,
-                            original: selection,
-                        })
-                    } else if image_screen.contains(pointer) {
-                        Some(ActiveInteraction::Create {
-                            start: source_pointer,
-                        })
-                    } else {
-                        None
-                    };
-                }
-                if response.dragged_by(egui::PointerButton::Primary)
-                    && let Some(pointer) = response.interact_pointer_pos()
-                    && let Some(interaction) = self.interaction.as_ref()
-                {
-                    let source_pointer = display_to_source(
-                        CropPoint {
-                            x: pointer.x,
-                            y: pointer.y,
-                        },
-                        transform,
-                    );
-                    self.selection = Some(match interaction {
-                        ActiveInteraction::Create { start } => {
-                            selection_from_drag(*start, source_pointer, image_width, image_height)
-                        }
-                        ActiveInteraction::Move { start, original } => move_rect(
-                            *original,
-                            (source_pointer.x - start.x).round() as i64,
-                            (source_pointer.y - start.y).round() as i64,
-                            image_width,
-                            image_height,
-                        ),
-                        ActiveInteraction::Resize { handle, original } => resize_rect(
-                            *original,
-                            *handle,
-                            source_pointer,
-                            image_width,
-                            image_height,
-                        ),
-                    });
-                }
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    self.interaction = None;
-                }
-                self.render_viewport(ui, viewport, transform);
-                ui.separator();
-                let (reset_button, full_image_button) = ui
-                    .horizontal_wrapped(|ui| {
-                        let reset = ui.button("Reset");
-                        let full_image = ui.button("Select Full Image");
-                        let reset_clicked = reset.clicked();
-                        let full_image_clicked = full_image.clicked();
-                        if reset_clicked || full_image_clicked {
-                            self.reset_selection();
-                        }
-                        (reset, full_image)
-                    })
-                    .inner;
-                let (save_as_button, overwrite_button, cancel_button) = ui
-                    .horizontal_wrapped(|ui| {
-                        let save_as = ui.add_enabled(self.can_save(), egui::Button::new("Save As"));
-                        let save_as = with_button_emphasis(ui, save_as, ButtonEmphasis::Primary);
-                        if save_as.clicked() {
-                            action = Some(CropEditorAction::SaveAs);
-                        }
-                        let overwrite = options.allow_overwrite.then(|| {
-                            let button = ui.add_enabled(
-                                self.can_save(),
-                                egui::Button::new("Overwrite Current"),
-                            );
-                            with_button_emphasis(ui, button, ButtonEmphasis::Destructive)
-                        });
-                        if overwrite.as_ref().is_some_and(egui::Response::clicked) {
-                            action = Some(CropEditorAction::RequestOverwrite);
-                        }
-                        let cancel = ui.button("Cancel");
-                        if cancel.clicked() {
-                            action = Some(CropEditorAction::Cancel);
-                        }
-                        (save_as, overwrite, cancel)
-                    })
-                    .inner;
-                #[cfg(test)]
-                {
-                    test_chrome = Some(CropChromeObservation {
-                        window_rect: None,
-                        metadata: Some((
-                            metadata.id,
-                            metadata.inner_rect,
-                            metadata.content_size,
-                            metadata.state.offset,
-                        )),
-                        source_label: source_label_response
-                            .map(|response| (response.id, response.rect)),
-                        collision_label: collision_label_response
-                            .map(|response| (response.id, response.rect)),
-                        persistence_label: persistence_label_response
-                            .map(|response| (response.id, response.rect)),
-                        filename_label: filename_label_response
-                            .map(|response| (response.id, response.rect)),
-                        filename_edit: filename_edit_response
-                            .map(|response| (response.id, response.rect)),
-                        viewport,
-                        reset_button: (reset_button.id, reset_button.rect),
-                        full_image_button: (full_image_button.id, full_image_button.rect),
-                        save_as_button: (
-                            save_as_button.id,
-                            save_as_button.rect,
-                            save_as_button.enabled(),
-                        ),
-                        overwrite_button: overwrite_button.map(|response| {
-                            (response.id, response.rect, response.enabled())
-                        }),
-                        cancel_button: (cancel_button.id, cancel_button.rect),
-                        footer_reserved_height,
-                    });
-                }
-                #[cfg(not(test))]
-                let _ = (
-                    metadata,
-                    reset_button,
-                    full_image_button,
-                    save_as_button,
-                    overwrite_button,
-                    cancel_button,
-                );
+                ActiveInteraction::Move { start, original } => move_rect(
+                    *original,
+                    (source_pointer.x - start.x).round() as i64,
+                    (source_pointer.y - start.y).round() as i64,
+                    image_width,
+                    image_height,
+                ),
+                ActiveInteraction::Resize { handle, original } => resize_rect(
+                    *original,
+                    *handle,
+                    source_pointer,
+                    image_width,
+                    image_height,
+                ),
             });
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.interaction = None;
+        }
+        self.render_viewport(ui, viewport, transform);
+        ui.separator();
+        let (reset_button, full_image_button) = ui
+            .horizontal_wrapped(|ui| {
+                let reset = ui.button("Reset");
+                let full_image = ui.button("Select Full Image");
+                let reset_clicked = reset.clicked();
+                let full_image_clicked = full_image.clicked();
+                if reset_clicked || full_image_clicked {
+                    self.reset_selection();
+                }
+                (reset, full_image)
+            })
+            .inner;
+        let (save_as_button, overwrite_button, cancel_button) = ui
+            .horizontal_wrapped(|ui| {
+                let save_as = ui.add_enabled(self.can_save(), egui::Button::new("Save As"));
+                let save_as = with_button_emphasis(ui, save_as, ButtonEmphasis::Primary);
+                if save_as.clicked() {
+                    action = Some(CropEditorAction::SaveAs);
+                }
+                let overwrite = options.allow_overwrite.then(|| {
+                    let button =
+                        ui.add_enabled(self.can_save(), egui::Button::new("Overwrite Current"));
+                    with_button_emphasis(ui, button, ButtonEmphasis::Destructive)
+                });
+                if overwrite.as_ref().is_some_and(egui::Response::clicked) {
+                    action = Some(CropEditorAction::RequestOverwrite);
+                }
+                let cancel = ui.button("Cancel");
+                if cancel.clicked() {
+                    action = Some(CropEditorAction::Cancel);
+                }
+                (save_as, overwrite, cancel)
+            })
+            .inner;
         #[cfg(test)]
         {
-            self.test_chrome = test_chrome.map(|mut observation| {
-                observation.window_rect = window_output.map(|output| output.response.rect);
-                observation
+            test_chrome = Some(CropChromeObservation {
+                window_rect: None,
+                metadata: Some((
+                    metadata.id,
+                    metadata.inner_rect,
+                    metadata.content_size,
+                    metadata.state.offset,
+                )),
+                source_label: source_label_response.map(|response| (response.id, response.rect)),
+                collision_label: collision_label_response
+                    .map(|response| (response.id, response.rect)),
+                persistence_label: persistence_label_response
+                    .map(|response| (response.id, response.rect)),
+                filename_label: filename_label_response
+                    .map(|response| (response.id, response.rect)),
+                filename_edit: filename_edit_response.map(|response| (response.id, response.rect)),
+                viewport,
+                reset_button: (reset_button.id, reset_button.rect),
+                full_image_button: (full_image_button.id, full_image_button.rect),
+                save_as_button: (
+                    save_as_button.id,
+                    save_as_button.rect,
+                    save_as_button.enabled(),
+                ),
+                overwrite_button: overwrite_button
+                    .map(|response| (response.id, response.rect, response.enabled())),
+                cancel_button: (cancel_button.id, cancel_button.rect),
+                footer_reserved_height,
             });
         }
         #[cfg(not(test))]
-        let _ = window_output;
-        if !open {
-            self.open = false;
-            action = Some(CropEditorAction::Cancel);
+        let _ = (
+            metadata,
+            reset_button,
+            full_image_button,
+            save_as_button,
+            overwrite_button,
+            cancel_button,
+        );
+        #[cfg(test)]
+        {
+            self.test_chrome = test_chrome;
         }
         action
     }
+
+
 }
 
 fn crop_metadata_height_budget(
