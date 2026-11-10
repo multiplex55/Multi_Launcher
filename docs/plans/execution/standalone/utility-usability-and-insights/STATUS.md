@@ -25,7 +25,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M2-A | FS1 cancellation-safe Clear results | complete; automated verified, native pending |
 | M2-B | FS2 literal leaf-name matching | complete; automated verified, native pending |
 | M3-A | H2 owned presentation preference / generic host | complete foundation; automated verified, custom coverage pending M3-B |
-| M3-B | H1/H2 custom hosts / accepted child origins | existing B1 hosts integrated; B2a0 foundation verified; B2a1 edges pending |
+| M3-B | H1/H2 custom hosts / accepted child origins | existing B1 hosts integrated; B2a0/Pad edges verified; Notes/other B2 pending |
 | M4-A | D1/D2 Mermaid Colors / menu strips | pending |
 | M4-B | D4 toolbar / pinned inspector | pending |
 | M4-C | D3 owned-text endpoint captions | pending |
@@ -266,3 +266,21 @@ B2a current-source finding: Pad dispatch occurs while Inspector may still own a 
 `AcceptedParentOpen<S>` has private fields and can be constructed only after retained root/owner passes. Its current-host/session check is separate from the one-time retention proof, allowing valid delayed dispatch while rejecting changed authority. `ChildOpenOrigin<S>` and `resolve_child_presentation` encode popped-parent override, remembered/default fallback, live Docked promotion and live Popout non-demotion. Generic fresh-host preparation consumes the resolver. Actual live promotion and Pad/Notes edges remain pending, so H1 is not complete.
 
 Separate fast-dev lib no-run compile passed. Owned `m3-b2a1-policy` (receipt name predates the foundation split), 100-second `--no-fail-fast`, passed 3/3: policy/receipt, host-generation and real generic Inspector regression. Run `eab71aaa-8a57-44bb-9dda-1c947ef07eed`, runner 3.423s. Exact selectors/output/cleanup receipt: `target/utility-usability-and-insights/evidence/m3-b2a1-policy/result.json`; cleanup/drain verified, no timeout. Parent inspected final two-source-file diff and whitespace; lanes returned. No actual child-open path is claimed migrated by this foundation.
+
+M3-B2a0 checkpoint `96f7d27b38a596d5e67aeee947a2fe0a2b93504f` pushed successfully; clean tree before actual B2a1 Pad/Notes migration. Implementer owns safe generic promotion after normal pending-target completion and real accepted Pad/Notes origin routing. Parent-session/host/modal/source guards must be revalidated at dispatch; root visibility follows resolved child presentation. No additional adapters/edges until later B2 slices. Parent ledger/Git; one source/Cargo lane.
+
+## M3-B2a1a acceptance: Pad → Inspector/reference
+
+Pad emits `PadOpenReceipt` binding retained source host to document incarnation/ID. Dispatch revalidates current open/host/document and refuses pending close, chooser, Save As or dirty transition. Inspector opens/promotes only after its normal pending frame completes; reference promotion similarly follows retained reference completion. Existing session/private bits survive. Root visibility uses the final resolved host. Generic deferred opens are explicit and re-resolve after pending actions, preserving an accepted Popout/edit rather than applying an earlier Docked result. Root restore/focus is read-only; inherited Popout records accepted intent, while internal retirement remains separate.
+
+Separate final fast-dev lib no-run compile passed. Focused runs exposed/fixed a premature default-preference write and deferred visibility/choice ordering. New fixtures were corrected for actual created viewport ownership, private draft setup after source publication, relative bit value and fresh source focus/clip observation; substantive value/epoch/input/hidden-root assertions retained. Required missing fresh/stale-owner cases were completed before acceptance.
+
+Final owned 100-second `--no-fail-fast` evidence:
+
+- `m3-b2a1-pad-owned-reference`: rendered existing-child promotion/reference inheritance 1/1, run `2ec901df-b6a6-4061-8fe1-9968b2356903`, runner 2.710s. Private value/epoch retained, promoted native control enabled, Reference popped out, root hidden.
+- `m3-b2a1-pad-final-regressions`: 6/6, run `c7cbe5ab-9d1e-4468-b7bd-8ce1242490ea`, runner 3.573s: pending Popout+bit edit, accepted host/ShowRoot behavior, retained-origin invalidation, existing reference independence, real Pad selection/insert and generic discarded-preference guard.
+- `m3-b2a1-pad-finish`: 3/3, run `d6643321-7067-4fdf-bf46-ff5d54892e54`, runner 2.633s: fresh native Inspector over explicit saved Docked preference, actual parent close/document replacement/modal-state rejection and retained native Reference origin.
+
+Receipts/output/selectors under `target/utility-usability-and-insights/evidence/m3-b2a1-pad-*`; final three receipts exit 0/no timeout/cleanup and drain verified. Parent inspected final source diff and whitespace; lanes returned. These are automated viewport tests, not physical native observation.
+
+Goal test-anchor wording clarified from actual source: `calculation_reference_is_ordinary_root_context_when_pad_is_native` opens Reference **before** moving Pad native. Its Docked Reference expectation legitimately protects already-open child independence and remains intact; new rendered tests cover the requested open-from-already-popped-parent contract. No retroactive child movement is introduced. Notes and all other B2 edges/adapters remain pending; global H1/H2 are not complete.

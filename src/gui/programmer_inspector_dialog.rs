@@ -349,6 +349,31 @@ impl ProgrammerInspectorDialog {
         }
         self.published = Some(context);
     }
+    #[cfg(test)]
+    pub(super) fn test_pending_popout_with_bit_edit(
+        &self,
+        ctx: &egui::Context,
+        context: Arc<InspectorPadContext>,
+    ) -> InspectorActions {
+        let mut draft = self.draft.clone();
+        draft.model.toggle_bit(0).unwrap();
+        InspectorActions {
+            host_request: Some(UtilityPresentation::Popout),
+            close: false,
+            context,
+            draft: Some(draft),
+            expected_generation: self.draft.generation,
+            copy: None,
+            insert: false,
+            compare: false,
+            preferences: None,
+            copies: Vec::new(),
+            ctx: ctx.clone(),
+            receipt: None,
+            host_button: None,
+        }
+    }
+
     pub(super) fn commit(
         &mut self,
         mut actions: InspectorActions,

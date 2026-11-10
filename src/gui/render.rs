@@ -12858,6 +12858,7 @@ impl LauncherApp {
                 self.report_error_message("dashboard.editor.presentation", error);
             }
         }
+        let mut inspector_open = None;
         for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
             match pad_effect {
                 super::CalculationPadDialogEffect::ShowRoot => {
@@ -12869,9 +12870,8 @@ impl LauncherApp {
                         text,
                     });
                 }
-                super::CalculationPadDialogEffect::OpenInspector => {
-                    self.focus_panel(super::Panel::ProgrammerInspectorDialog);
-                    effects.push(RootDialogEffect::ShowRoot);
+                super::CalculationPadDialogEffect::OpenInspector(origin) => {
+                    inspector_open = Some(origin);
                 }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
@@ -12879,6 +12879,7 @@ impl LauncherApp {
             }
         }
         let current_inspector_context = self.calculation_pad_dialog.inspector_context();
+        let mut inspector_show_root = false;
         if let Some(completion) = self.programmer_inspector_host.complete(ctx, &mut self.programmer_inspector_dialog) {
             use super::utility_window_host::ProgrammerInspectorHostCommand;
             for command in completion.commands {
@@ -12891,7 +12892,8 @@ impl LauncherApp {
                             });
                         }
                         self.programmer_inspector_dialog.finish_close();
-                        self.panel_stack.retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
                     }
                     ProgrammerInspectorHostCommand::Apply(actions) => {
                         let source_context = std::sync::Arc::clone(&actions.context);
@@ -12902,7 +12904,30 @@ impl LauncherApp {
                     }
                 }
             }
-            if completion.show_root { effects.push(RootDialogEffect::ShowRoot); }
+            inspector_show_root = completion.show_root;
+        }
+        if let Some(origin) = inspector_open
+            && self.calculation_pad_dialog.accepts_inspector_origin(&origin)
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+        {
+            let was_open = self.programmer_inspector_dialog.open;
+            self.programmer_inspector_dialog.open();
+            let desired = self.programmer_inspector_host.open_from_origin(
+                ctx,
+                &self.programmer_inspector_dialog,
+                was_open,
+                &super::utility_host::ChildOpenOrigin::Parent(origin),
+            );
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
+            self.panel_stack.push(super::Panel::ProgrammerInspectorDialog);
+            if desired == Some(super::utility_host::UtilityPresentation::Docked) {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if inspector_show_root && !self.programmer_inspector_host.is_popped_out() {
+            effects.push(RootDialogEffect::ShowRoot);
         }
         self.programmer_inspector_dialog.publish(self.calculation_pad_dialog.inspector_context());
         let mut explorer_tabs_closed = false;
@@ -18646,6 +18671,112 @@ mod tests {
         let help = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
         let ordinary = app.query_focus_ordinary_context().expect("docked help owns ROOT input even with native Pad");
         assert!(ordinary.ordinary_panel_layers.contains(&help));
+    }
+
+    #[test]
+    fn native_pad_inspector_open_promotes_existing_session() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("u8(3)");
+        app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+        assert!(!app.programmer_inspector_host.is_popped_out());
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let before = app.programmer_inspector_dialog.test_value().bit_pattern();
+        let context = app.calculation_pad_dialog.inspector_context();
+        let edit = app.programmer_inspector_dialog.test_pending_popout_with_bit_edit(
+            &ctx, std::sync::Arc::clone(&context),
+        );
+        app.programmer_inspector_dialog.commit(edit, &context);
+        let value = app.programmer_inspector_dialog.test_value();
+        assert_eq!(value.bit_pattern(), before ^ 1);
+        let epoch = app.programmer_inspector_dialog.epoch();
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        app.request_launcher_visibility(false);
+        let native = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx, &mut app, native, tool_dialog_pointer_events(inspect, pressed), false, false,
+            );
+        }
+        assert!(app.programmer_inspector_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        assert_eq!(app.programmer_inspector_dialog.test_value(), value);
+        assert_eq!(app.programmer_inspector_dialog.epoch(), epoch);
+        run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        let inspector_native = app.programmer_inspector_host.owner_viewport();
+        assert_ne!(inspector_native, egui::ViewportId::ROOT);
+        let _bit = inspector_visible_control(&ctx, &mut app, inspector_native, "bit-7");
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let reference = app.calculation_pad_dialog.test_examples_button_rect().unwrap();
+        let (clip, enabled) = app.calculation_pad_dialog.test_examples_button_ownership().unwrap();
+        assert!(enabled && clip.contains_rect(reference), "Pad owns an enabled reference control");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx, &mut app, native, tool_dialog_pointer_events(reference, pressed), false, false,
+            );
+        }
+        assert!(app.calculation_pad_dialog.test_reference_is_popout());
+        assert!(!app.visible_flag_state());
+        assert!(app.calculation_pad_dialog.examples_layer_if_root().is_none());
+    }
+
+    #[test]
+    fn native_pad_opens_fresh_inspector_over_saved_docked_preference() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json").to_string_lossy().into_owned();
+        let key = crate::settings::UtilityToolKey::parse("programmer-inspector").unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.utility_presentations.set(key, crate::settings::RememberedPresentation::Docked).unwrap();
+        settings.save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path, workers.clone(), settings.utility_presentations,
+        );
+        manager.install_in_context(&ctx);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("u8(3)");
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        app.request_launcher_visibility(false);
+        assert!(!app.programmer_inspector_dialog.open);
+        let pad = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
+        }
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx, &mut app, pad, tool_dialog_pointer_events(button, pressed), false, false,
+            );
+        }
+        assert!(app.programmer_inspector_dialog.open);
+        assert!(app.programmer_inspector_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        assert_eq!(manager.preference(key), Some(crate::settings::RememberedPresentation::Popout));
+        run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
+        let native = app.programmer_inspector_host.owner_viewport();
+        assert_ne!(native, egui::ViewportId::ROOT);
+        let _bit = inspector_visible_control(&ctx, &mut app, native, "bit-7");
+        workers.join_all();
     }
 
     #[test]

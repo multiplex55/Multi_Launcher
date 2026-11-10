@@ -158,7 +158,8 @@ pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
-pub(crate) use calculation_pad_dialog::{CalculationPadDialog, CalculationPadDialogEffect};
+pub(crate) use calculation_pad_dialog::CalculationPadDialog;
+use calculation_pad_dialog::CalculationPadDialogEffect;
 pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
@@ -6213,9 +6214,19 @@ impl LauncherApp {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::ProgrammerInspectorDialog {
+            let was_open = self.programmer_inspector_dialog.open;
             self.programmer_inspector_dialog.open();
-            self.programmer_inspector_host.prepare_open(&self.egui_ctx, &self.programmer_inspector_dialog);
-            if let Some(pad_layer) = self.calculation_pad_dialog.host_layer_if_root()
+            let desired = self.programmer_inspector_host.open_from_origin(
+                &self.egui_ctx,
+                &self.programmer_inspector_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
+            if desired == Some(utility_host::UtilityPresentation::Docked)
+                && let Some(pad_layer) = self.calculation_pad_dialog.host_layer_if_root()
                 && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
                     == Some(pad_layer)
                 && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())

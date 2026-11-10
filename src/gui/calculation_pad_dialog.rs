@@ -104,6 +104,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_examples_button_rect: Option<egui::Rect>,
     #[cfg(test)]
+    test_examples_button_ownership: Option<(egui::Rect, bool)>,
+    #[cfg(test)]
     test_examples_window_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_examples_copy_rect: Option<egui::Rect>,
@@ -126,12 +128,14 @@ pub(crate) struct CalculationPadDialog {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CalculationPadDialogEffect {
+pub(super) enum CalculationPadDialogEffect {
     CopyText(String),
-    OpenInspector,
+    OpenInspector(PadOpenReceipt),
     ShowRoot,
     SaveRecoveryPreference(bool),
 }
+
+pub(super) type PadOpenReceipt = super::utility_host::AcceptedParentOpen<(DocumentIncarnation, DocumentId)>;
 
 struct RootEffects {
     pass: ViewportPassProvenance,
@@ -404,6 +408,8 @@ impl CalculationPadDialog {
             test_keep_editing_rect: None,
             #[cfg(test)]
             test_examples_button_rect: None,
+            #[cfg(test)]
+            test_examples_button_ownership: None,
             #[cfg(test)]
             test_examples_window_rect: None,
             #[cfg(test)]
@@ -751,6 +757,7 @@ impl CalculationPadDialog {
             self.test_editor_id = None;
             self.test_editor_rect = None;
             self.test_examples_button_rect = None;
+            self.test_examples_button_ownership = None;
             self.test_examples_window_rect = None;
             self.test_examples_copy_rect = None;
             self.test_examples_copy_state = None;
@@ -1224,7 +1231,7 @@ impl CalculationPadDialog {
 
     /// Apply host state only after ROOT and the originating host pass are retained.
     /// Source edits precede document intents and result-copy resolution.
-    pub(crate) fn on_ui_frame_complete(
+    pub(super) fn on_ui_frame_complete(
         &mut self,
         ctx: &egui::Context,
     ) -> Vec<CalculationPadDialogEffect> {
@@ -1256,9 +1263,10 @@ impl CalculationPadDialog {
         }
 
         let help = effects.help;
-        let mut delivered = effects
-            .host
-            .map_or_else(Vec::new, |host| self.complete_pad_host(ctx, host));
+        let mut reference_open = None;
+        let mut delivered = effects.host.map_or_else(Vec::new, |host| {
+            self.complete_pad_host(ctx, effects.pass, host, &mut reference_open)
+        });
         if (self.examples_open
             || self.examples_owner.is_some()
             || self.examples_host.presentation() == PadHost::Popout)
@@ -1272,7 +1280,39 @@ impl CalculationPadDialog {
         if let Some(help) = help {
             self.complete_examples(ctx, help, &mut delivered);
         }
+        if let Some((receipt, was_open)) = reference_open
+            && self.accepts_inspector_origin(&receipt)
+            && self.examples_open
+        {
+            let key = reference_tool_key();
+            let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                .and_then(|manager| manager.preference(key))
+                .map(Into::into);
+            let desired = super::utility_host::resolve_child_presentation(
+                was_open.then(|| self.examples_host.presentation()), remembered,
+                self.examples_host.presentation(), &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            );
+            if self.examples_host.transition(desired) {
+                self.examples_host.request_focus();
+            }
+            if desired == PadHost::Popout {
+                super::utility_host::remember_presentation(ctx, key, desired);
+            }
+            if desired == PadHost::Docked {
+                delivered.push(CalculationPadDialogEffect::ShowRoot);
+            }
+        }
         delivered
+    }
+
+    pub(super) fn accepts_inspector_origin(&self, origin: &PadOpenReceipt) -> bool {
+        self.open
+            && !self.host_close_requested
+            && !self.open_chooser
+            && !self.save_as_open
+            && self.session.pending_transition().is_none()
+            && self.session.document_incarnation().zip(self.session.current_id())
+                .is_some_and(|session| origin.is_current(self.host_identity(), &session))
     }
 
     fn retire_examples(&mut self, ctx: &egui::Context) {
@@ -1406,7 +1446,9 @@ impl CalculationPadDialog {
     fn complete_pad_host(
         &mut self,
         ctx: &egui::Context,
+        root: ViewportPassProvenance,
         mut host: HostEffects,
+        reference_open: &mut Option<(PadOpenReceipt, bool)>,
     ) -> Vec<CalculationPadDialogEffect> {
         let mut delivered = Vec::new();
         let host_pass_retained = host.pass_accepted
@@ -1516,17 +1558,22 @@ impl CalculationPadDialog {
                 pending_decision = Some(TransitionDecision::Save);
             }
             let show_root = matches!(&intent, DialogIntent::OpenExamples);
+            let reference_was_open = self.examples_open;
             let requested_recovery_preference = match &intent {
                 DialogIntent::SetRememberSource(enabled) => Some(*enabled),
                 _ => None,
             };
             self.apply_intent(intent);
             self.prepare_open_presentation(ctx);
-            if show_root
-                && self.examples_open
-                && self.examples_host.presentation() == PadHost::Docked
+            if show_root && self.examples_open
+                && let (Some(incarnation), Some(document), Some(owner)) = (
+                    self.session.document_incarnation(), self.session.current_id(), host.pass,
+                )
+                && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, host.identity, (incarnation, document), root, owner,
+                )
             {
-                delivered.push(CalculationPadDialogEffect::ShowRoot);
+                *reference_open = Some((receipt, reference_was_open));
             }
             if let Some(enabled) = requested_recovery_preference
                 && enabled != self.remember_source
@@ -1610,8 +1657,17 @@ impl CalculationPadDialog {
             }
         }
         self.sync_inspector_context();
-        if host.open_inspector && !host.close_requested && host.host_request.is_none() {
-            delivered.push(CalculationPadDialogEffect::OpenInspector);
+        if host.open_inspector && !host.close_requested && host.host_request.is_none()
+            && host.document_basis.map(|(incarnation, document, _)| (incarnation, document))
+                == self.session.document_incarnation().zip(self.session.current_id())
+            && let (Some(incarnation), Some(document), Some(owner)) = (
+                self.session.document_incarnation(), self.session.current_id(), host.pass,
+            )
+            && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, host.identity, (incarnation, document), root, owner,
+            )
+        {
+            delivered.push(CalculationPadDialogEffect::OpenInspector(receipt));
         }
         if host.close_requested {
             self.host_close_requested = false;
@@ -1973,6 +2029,7 @@ impl CalculationPadDialog {
             #[cfg(test)]
             if ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_examples_button_rect = Some(examples.rect);
+                self.test_examples_button_ownership = Some((ui.clip_rect(), examples.enabled()));
             }
             if examples.clicked() {
                 *intent = Some(DialogIntent::OpenExamples);
@@ -2779,6 +2836,16 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_popout_pad(&mut self, ctx: &egui::Context) {
         self.apply_host_request(ctx, PadHost::Popout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_examples_button_ownership(&self) -> Option<(egui::Rect, bool)> {
+        self.test_examples_button_ownership
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reference_is_popout(&self) -> bool {
+        self.examples_open && self.examples_host.presentation() == PadHost::Popout
     }
 
     #[cfg(test)]
@@ -4153,6 +4220,74 @@ mod tests {
         stale_examples.intent = Some(DialogIntent::OpenExamples);
         assert!(complete_host_effects(&mut dialog, &ctx, stale_examples).is_empty());
         assert!(!dialog.examples_open);
+    }
+
+    #[test]
+    fn retained_native_pad_opens_reference_and_invalidates_old_inspector_origin() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.apply_host_request(&ctx, super::PadHost::Popout);
+
+        let mut inspector = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        inspector.pass_accepted = true;
+        inspector.open_inspector = true;
+        let effects = complete_host_effects(&mut dialog, &ctx, inspector);
+        let receipt = match effects.into_iter().next().unwrap() {
+            CalculationPadDialogEffect::OpenInspector(receipt) => receipt,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        assert!(dialog.accepts_inspector_origin(&receipt));
+
+        let mut examples = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        examples.pass_accepted = true;
+        examples.intent = Some(DialogIntent::OpenExamples);
+        assert!(complete_host_effects(&mut dialog, &ctx, examples).is_empty());
+        assert_eq!(dialog.examples_host.presentation(), super::PadHost::Popout);
+        assert!(dialog.examples_layer_if_root().is_none());
+
+        dialog.apply_host_request(&ctx, super::PadHost::Docked);
+        assert!(!dialog.accepts_inspector_origin(&receipt));
+    }
+
+    #[test]
+    fn inspector_origin_rejects_closed_replaced_and_modal_parent() {
+        fn accepted(dialog: &mut CalculationPadDialog, ctx: &egui::Context) -> super::PadOpenReceipt {
+            let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+            host.pass_accepted = true;
+            host.open_inspector = true;
+            match complete_host_effects(dialog, ctx, host).into_iter().next().unwrap() {
+                CalculationPadDialogEffect::OpenInspector(receipt) => receipt,
+                other => panic!("unexpected effect: {other:?}"),
+            }
+        }
+
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let old_document = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::New);
+        assert!(!dialog.accepts_inspector_origin(&old_document));
+
+        let before_close = accepted(&mut dialog, &ctx);
+        dialog.apply_close_request();
+        assert!(!dialog.open);
+        assert!(!dialog.accepts_inspector_origin(&before_close));
+
+        dialog.open();
+        let before_chooser = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::OpenChooser);
+        assert!(!dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::HideChooser);
+        assert!(dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::OpenSaveAs);
+        assert!(!dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::CancelSaveAs);
+        dialog.test_replace_source("unsaved");
+        let before_decision = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::New);
+        assert!(dialog.session.pending_transition().is_some());
+        assert!(!dialog.accepts_inspector_origin(&before_decision));
     }
 
     #[test]

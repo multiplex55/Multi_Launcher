@@ -179,6 +179,7 @@ pub(super) struct UtilityWindowHost<D: HostedUtilityDialog> {
     presentation_session: Option<u64>,
     native_session: Option<u64>,
     pending: Option<HostFrame<D>>,
+    deferred_open: Option<(u64, UtilityPresentation, bool)>,
     deferred_close: Option<(u64, HostIdentity)>,
     docked_focus_pending: bool,
     native_jump: JumpModeUi,
@@ -194,6 +195,7 @@ impl<D: HostedUtilityDialog> Default for UtilityWindowHost<D> {
             presentation_session: None,
             native_session: None,
             pending: None,
+            deferred_open: None,
             deferred_close: None,
             docked_focus_pending: false,
             native_jump: JumpModeUi::default(),
@@ -350,6 +352,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.pending = None;
+        self.deferred_open = None;
         self.deferred_close = None;
         self.docked_focus_pending = false;
         self.presentation_session = None;
@@ -360,6 +363,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     pub(super) fn suspend(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.pending = None;
+        self.deferred_open = None;
         self.deferred_close = None;
         self.docked_focus_pending = false;
         let identity = self.state.identity();
@@ -414,6 +418,84 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             );
             self.state.transition(presentation);
         }
+    }
+
+    /// Apply an accepted open without replacing the dialog or losing a frame
+    /// that was already staged for its current host.
+    pub(super) fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        dialog: &D,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        self.prepare_open(ctx, dialog);
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| {
+                crate::settings::UtilityToolKey::parse(D::KEY)
+                    .ok()
+                    .and_then(|key| manager.preference(key))
+            })
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.state.presentation()),
+            remembered,
+            self.state.presentation(),
+            origin,
+        );
+        let remember = matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout;
+        if self.pending.is_some() {
+            self.deferred_open = Some((dialog.session(), desired, remember));
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            None
+        } else {
+            self.apply_open_presentation(ctx, desired, remember);
+            Some(desired)
+        }
+    }
+
+    fn apply_open_presentation(
+        &mut self,
+        ctx: &egui::Context,
+        desired: UtilityPresentation,
+        remember: bool,
+    ) {
+        if self.state.presentation() != desired {
+            self.close_viewport(ctx);
+            self.state.transition(desired);
+            if desired == UtilityPresentation::Popout {
+                self.docked_focus_pending = false;
+            }
+            self.deferred_close = None;
+            self.cancel_jump();
+        }
+        if remember {
+            self.remember_presentation(ctx, desired);
+        }
+        self.request_focus();
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn apply_deferred_open(
+        &mut self,
+        ctx: &egui::Context,
+        dialog: &D,
+    ) -> Option<UtilityPresentation> {
+        if let Some((session, desired, remember)) = self.deferred_open.take()
+            && dialog.is_open()
+            && dialog.session() == session
+        {
+            let desired = super::utility_host::resolve_child_presentation(
+                Some(self.state.presentation()),
+                Some(desired),
+                desired,
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            self.apply_open_presentation(ctx, desired, remember);
+            return Some(desired);
+        }
+        None
     }
 
     pub(super) fn show_with_companion(
@@ -771,6 +853,15 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 ctx.request_repaint_of(frame.owner.viewport_id);
             }
             self.cancel_jump();
+            if self.deferred_close.is_none()
+                && let Some(presentation) = self.apply_deferred_open(ctx, dialog)
+            {
+                return Some(HostCompletion {
+                    commands: Vec::new(),
+                    show_root: presentation == UtilityPresentation::Docked,
+                    owner_viewport: frame.owner.viewport_id,
+                });
+            }
             return None;
         }
         if frame.close || frame.os_close {
@@ -812,7 +903,15 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             }
             self.state.complete_focus(frame.host);
         }
-        let actions = frame.actions.take()?;
+        let Some(actions) = frame.actions.take() else {
+            return self
+                .apply_deferred_open(ctx, dialog)
+                .map(|presentation| HostCompletion {
+                    commands: Vec::new(),
+                    show_root: presentation == UtilityPresentation::Docked,
+                    owner_viewport: frame.owner.viewport_id,
+                });
+        };
         let presentation = D::host_request(&actions);
         #[cfg(windows)]
         let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, native);
@@ -836,9 +935,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             }
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+        let deferred = self.apply_deferred_open(ctx, dialog);
         Some(HostCompletion {
             commands,
-            show_root,
+            show_root: (show_root || deferred == Some(UtilityPresentation::Docked))
+                && self.state.presentation() == UtilityPresentation::Docked,
             owner_viewport: frame.owner.viewport_id,
         })
     }
@@ -1927,5 +2028,61 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     #[cfg(test)]
     fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
         actions.host_button
+    }
+}
+
+#[cfg(test)]
+mod deferred_open_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn pending_popout_and_edit_win_over_deferred_root_open() {
+        let ctx = egui::Context::default();
+        let mut dialog = super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        dialog.open();
+        let context = Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
+        dialog.publish(Arc::clone(&context));
+        let before = dialog.test_value().bit_pattern();
+        let epoch = dialog.epoch();
+        let mut host = ProgrammerInspectorWindowHost::default();
+        host.prepare_open(&ctx, &dialog);
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        host.pending = Some(HostFrame {
+            root: pass,
+            owner: pass,
+            host: host.state.identity(),
+            session: epoch,
+            first: true,
+            os_close: false,
+            close: false,
+            actions: Some(dialog.test_pending_popout_with_bit_edit(&ctx, Arc::clone(&context))),
+            checkpoint: None,
+            native_info: None,
+            embedded_layer: None,
+            embedded_focus: None,
+            focus: false,
+        });
+        assert_eq!(
+            host.open_from_origin(
+                &ctx,
+                &dialog,
+                true,
+                &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+            ),
+            None
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let completion = host.complete(&ctx, &mut dialog).unwrap();
+        assert!(!completion.show_root);
+        assert!(host.is_popped_out());
+        assert_eq!(dialog.epoch(), epoch);
+        for command in completion.commands {
+            if let ProgrammerInspectorHostCommand::Apply(actions) = command {
+                dialog.commit(actions, &context);
+            }
+        }
+        assert_eq!(dialog.test_value().bit_pattern(), before ^ 1);
+        output.drop_without_applying_deltas();
     }
 }
