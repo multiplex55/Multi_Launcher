@@ -2147,7 +2147,6 @@ impl LauncherApp {
             .chain(
                 self.note_panels
                     .iter()
-                    .filter(|panel| panel.host_layer_if_root().is_some())
                     .flat_map(|panel| panel.query_focus_ordinary_layers()),
             )
             .chain(
@@ -7350,9 +7349,12 @@ impl LauncherApp {
                 root_input_allowed,
                 observe.then_some(&mut discard),
             );
+            panel.show_child_forms(ctx, first_ui_pass, root_visible, root_input_allowed,
+                application_input_allowed, self.jump_mode_ui.active_session().is_some());
             if let Some(observed) = note_close_frame.as_deref_mut().filter(|_| observe) {
                 observed.observe_panel(&panel, discard);
             }
+            if !panel.open { panel.close_child_forms(ctx); }
             if panel.open {
                 self.note_panels
                     .insert(index.min(self.note_panels.len()), panel);
@@ -12731,6 +12733,8 @@ impl LauncherApp {
             .collect();
         let mut note_open_effects = Vec::new();
         let mut note_open_requests = Vec::new();
+        let mut form_open_requests = Vec::new();
+        let mut form_root_requests = Vec::new();
         let mut image_open_requests = Vec::new();
         let mut note_links = Vec::new();
         let mut docked_host_requests = Vec::new();
@@ -12762,7 +12766,9 @@ impl LauncherApp {
                         .map(|link| (origin.clone(), link)),
                 );
                 image_open_requests.extend(completion.open_image_paths.into_iter().map(|path| (origin.clone(), path)));
+                form_open_requests.extend(completion.open_forms.into_iter().map(|request| (origin.clone(), request)));
             }
+            if completion.closed || !panel.open { panel.close_child_forms(ctx); }
             if !completion.closed && panel.open {
                 self.note_panels
                     .insert(index.min(self.note_panels.len()), panel);
@@ -12771,6 +12777,22 @@ impl LauncherApp {
                 }
             }
         }
+        let identities: Vec<_> = self.note_panels.iter().map(|panel| panel.prompt_identity()).collect();
+        for identity in identities {
+            let Some(index) = self.note_panels.iter().position(|panel| panel.prompt_identity() == identity) else { continue; };
+            let mut panel = self.note_panels.remove(index);
+            if panel.complete_child_forms(ctx) { form_root_requests.push(identity); }
+            self.note_panels.insert(index.min(self.note_panels.len()), panel);
+        }
+        for (origin, request) in form_open_requests {
+            let Some(panel) = self.note_panels.iter_mut().find(|panel| panel.accepts_note_open(&origin)) else { continue; };
+            self.next_note_form_session = self.next_note_form_session.wrapping_add(1);
+            if panel.open_child_form(ctx, &origin, request, self.next_note_form_session) == Some(super::utility_host::UtilityPresentation::Docked) {
+                show_root = true;
+            }
+        }
+        show_root |= form_root_requests.into_iter().any(|identity| self.note_panels.iter().any(|panel|
+            panel.prompt_identity() == identity && (panel.host_layer_if_root().is_some() || panel.child_form_has_root())));
         self.panel_states.note_panel = !self.note_panels.is_empty();
         if self.note_panels.is_empty() {
             self.panel_stack
@@ -12825,16 +12847,6 @@ impl LauncherApp {
                 continue;
             };
             match note_effect {
-                super::note_panel::NotePanelEffect::InsertCustomTable(request) => {
-                    let result = self
-                        .note_panels
-                        .get_mut(panel_index)
-                        .map(|panel| panel.complete_custom_table_insertion(ctx, request))
-                        .unwrap_or_else(|| Err("The originating Note is no longer open.".into()));
-                    if let Err(error) = result {
-                        self.report_error("notes.markdown", error);
-                    }
-                }
                 super::note_panel::NotePanelEffect::Export(request) => {
                     self.complete_note_markdown_export(ctx, panel_index, &request);
                 }
@@ -18592,6 +18604,273 @@ mod tests {
             ("draft", "content", Some("pending"))
         );
         output.drop_without_applying_deltas();
+        workers.join_all();
+    }
+
+    #[test]
+    fn native_note_form_preserves_draft_and_applies_captured_selection() {
+        use super::super::note_form_dialog::{FormHost, FormKind, Link};
+        use crate::settings::NoteViewMode;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        struct NotesDir(Option<std::ffi::OsString>);
+        impl Drop for NotesDir {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let _notes_dir = NotesDir(std::env::var_os("ML_NOTES_DIR"));
+        unsafe { std::env::set_var("ML_NOTES_DIR", workspace.root()) };
+        std::fs::write(workspace.root().join("source.md"), "αβ world").unwrap();
+        std::fs::write(workspace.root().join("other.md"), "other source").unwrap();
+        let ctx = egui::Context::default();
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let mut app = boxed_app(&ctx, workspace.root());
+        let settings_path = workspace
+            .root()
+            .join("form-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .utility_presentations
+            .set(
+                crate::settings::UtilityToolKey::parse("note-insert-link").unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            )
+            .unwrap();
+        settings.save(&settings_path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            settings.utility_presentations,
+        )
+        .install_in_context(&ctx);
+        unsafe { std::env::set_var("ML_NOTES_DIR", workspace.root()) };
+        crate::plugins::note::refresh_cache().unwrap();
+        app.open_note_panel("source", None);
+        app.note_panels[0].test_set_view_mode(NoteViewMode::Edit);
+        app.note_panels[0].test_pop_out();
+        app.request_launcher_visibility(false);
+        let source_id = app.note_panels[0].prompt_identity();
+        let source = egui::ViewportId::from_hash_of(("note-panel-editor", source_id));
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, source, Vec::new(), false, false);
+        }
+        app.note_panels[0].test_form_selection(&ctx, 0, 2);
+        let (_, menu, clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("Markdown menu");
+        assert!(clip.contains_rect(menu));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                source,
+                tool_dialog_pointer_events(menu, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, source, Vec::new(), false, false);
+        }
+        let (_, link, clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Insert Link...")
+            .expect("link menu action");
+        assert!(clip.contains_rect(link));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                source,
+                tool_dialog_pointer_events(link, pressed),
+                false,
+                false,
+            );
+        }
+        let session = app.note_panels[0]
+            .test_form_session(FormKind::Link)
+            .expect("accepted child open");
+        assert!(app.note_panels[0].test_form_is_popped(FormKind::Link));
+        assert_eq!(app.note_panels[0].test_link_form_label(), Some("αβ"));
+        for kind in [FormKind::Table, FormKind::NewNote] {
+            app.note_panels[0].test_stage_form_open(&ctx, kind);
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            app.complete_markdown_diagram_handoff(&ctx);
+            output.drop_without_applying_deltas();
+            assert!(app.note_panels[0].test_form_session(kind).is_some());
+            assert!(app.note_panels[0].test_form_is_popped(kind));
+        }
+        app.open_note_panel("other", None);
+        app.note_panels[1].test_set_view_mode(NoteViewMode::Edit);
+        app.note_panels[1].test_pop_out();
+        let other = egui::ViewportId::from_hash_of((
+            "note-panel-editor",
+            app.note_panels[1].prompt_identity(),
+        ));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, other, Vec::new(), false, false);
+        }
+        app.note_panels[1].test_stage_form_open(&ctx, FormKind::Link);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        output.drop_without_applying_deltas();
+        assert_ne!(
+            app.note_panels[1].test_form_session(FormKind::Link),
+            Some(session)
+        );
+        assert!(app.note_panels[1].test_form_is_popped(FormKind::Link));
+        app.request_launcher_visibility(false);
+        assert!(!app.visible_flag_state());
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        app.request_launcher_visibility(false);
+        let child = FormHost::<Link>::test_viewport(session);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let control = |app: &LauncherApp, name: &str| {
+            let (rect, clip, enabled) = app.note_panels[0]
+                .test_form_control(FormKind::Link, name)
+                .unwrap();
+            let visible = rect.intersect(clip);
+            assert!(
+                enabled && visible.is_positive(),
+                "{name}: {rect:?} {clip:?} {enabled}"
+            );
+            visible
+        };
+        let url = control(&app, "url");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(url, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            true,
+        );
+        assert_eq!(app.note_panels[0].test_form_text(FormKind::Link), Some(""));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            child,
+            vec![egui::Event::Text("https://example.invalid".into())],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.note_panels[0].test_form_text(FormKind::Link),
+            Some("https://example.invalid")
+        );
+        let before_revision = app.note_panels[0].test_content_revision();
+        let before_source = app.note_panels[0].note_content().to_owned();
+        app.note_panels[0].test_stage_retained_note_frame(
+            &ctx,
+            None,
+            Some("discarded parent edit"),
+            None,
+        );
+        let mut requested = false;
+        let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            if !requested {
+                requested = true;
+                ctx.request_discard("discard parent edit");
+            }
+        });
+        app.complete_markdown_diagram_handoff(&ctx);
+        output.drop_without_applying_deltas();
+        assert_eq!(app.note_panels[0].note_content(), before_source);
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_form_text(FormKind::Link),
+            Some("https://example.invalid")
+        );
+        app.note_panels[0].test_stage_form_open(&ctx, FormKind::Link);
+        let out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        out.drop_without_applying_deltas();
+        assert_eq!(
+            app.note_panels[0].test_form_session(FormKind::Link),
+            Some(session)
+        );
+        assert_eq!(
+            app.note_panels[0].test_form_text(FormKind::Link),
+            Some("https://example.invalid")
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        let host = control(&app, "host");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                child,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.note_panels[0].test_form_is_popped(FormKind::Link));
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let submit = control(&app, "submit");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                tool_dialog_pointer_events(submit, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.note_panels[0].note_content().starts_with("[αβ](https://example.invalid)"),
+            "source={:?}, {}", app.note_panels[0].note_content(), app.note_panels[0].test_link_form_diagnostic(&ctx)
+        );
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (1, 0));
+        assert!(
+            app.note_panels[0]
+                .test_form_session(FormKind::Link)
+                .is_none()
+        );
         workers.join_all();
     }
 
@@ -62066,7 +62345,7 @@ mod tests {
         let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
             app.render_root_ui(ui);
             if !modal_after_draw && app.note_panels[0].test_has_pending_markdown_export() {
-                app.note_panels[0].test_set_link_dialog_open(true);
+                app.note_panels[0].test_set_overwrite_prompt(true);
                 modal_after_draw = true;
             }
         });
@@ -62311,7 +62590,7 @@ mod tests {
                     staged_action = app.note_panels[0].test_mermaid_open_rect(0);
                 }
             }
-            app.note_panels[0].test_set_link_dialog_open(true);
+            app.note_panels[0].test_set_overwrite_prompt(true);
         });
         output.drop_without_applying_deltas();
         let staged_origin = staged_origin.expect("Enter on the card stages its exact origin");

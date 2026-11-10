@@ -169,6 +169,13 @@ impl NoteFindState {
         self.invalidate_index();
     }
 
+    /// Restore the source revision of a rejected NotePanel render pass while
+    /// invalidating any index computed from that discarded draft.
+    pub(crate) fn restore_content_revision(&mut self, revision: u64) {
+        self.content_revision = revision;
+        self.invalidate_index();
+    }
+
     pub(crate) fn reset_for_new_note(&mut self) {
         self.note_generation = self.note_generation.wrapping_add(1);
         self.query.clear();

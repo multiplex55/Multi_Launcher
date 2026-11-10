@@ -76,6 +76,7 @@ mod note_find_preview;
 mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
+mod note_form_dialog;
 mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
@@ -1307,6 +1308,7 @@ pub struct LauncherApp {
     pub(crate) note_mutation_search_count: usize,
     image_panels: Vec<ImagePanel>,
     next_image_session: u64,
+    next_note_form_session: u64,
     screenshot_editors: Vec<ScreenshotEditor>,
     pub(crate) screenshot_capture: screenshot_capture::ScreenshotCaptureOwner,
     pub(crate) screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation,
@@ -4126,6 +4128,7 @@ impl LauncherApp {
             note_mutation_search_count: 0,
             image_panels: Vec::new(),
             next_image_session: 0,
+            next_note_form_session: 0,
             screenshot_editors: Vec::new(),
             screenshot_capture: screenshot_capture::ScreenshotCaptureOwner::new(),
             screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation::default(),
@@ -5116,7 +5119,7 @@ impl LauncherApp {
             Panel::NotePanel => self
                 .note_panels
                 .iter()
-                .any(|note| note.host_layer_if_root().is_some()),
+                .any(|note| note.host_layer_if_root().is_some() || note.child_form_has_root()),
             _ => true,
         }
     }

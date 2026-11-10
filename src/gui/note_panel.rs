@@ -18,7 +18,7 @@ use crate::gui::utility_host::{
 };
 use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use crate::notes_markdown::{
-    MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION, MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout,
+    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout,
     MarkdownEditError, MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading,
     MarkdownInlineFormat, MarkdownPreview, MarkdownPreviewStatus, MarkdownSection,
     MarkdownTaskItem, ParsedMarkdownTable, PlainLinkConversionReport, PreparedMarkdownEdit,
@@ -1144,7 +1144,12 @@ pub struct NotePanel {
     pending_mermaid_origin: Option<NoteMermaidOrigin>,
     active_mermaid_origin: Option<NoteMermaidOrigin>,
     pending_root_effect: Option<PendingNoteRootEffect>,
-    custom_table_builder: Option<CustomTableBuilder>,
+    table_form: Option<super::note_form_dialog::NoteForm<super::note_form_dialog::Table>>,
+    link_form: Option<super::note_form_dialog::NoteForm<super::note_form_dialog::Link>>,
+    new_note_form: Option<super::note_form_dialog::NoteForm<super::note_form_dialog::NewNote>>,
+    table_form_host: super::note_form_dialog::FormHost<super::note_form_dialog::Table>,
+    link_form_host: super::note_form_dialog::FormHost<super::note_form_dialog::Link>,
+    new_note_form_host: super::note_form_dialog::FormHost<super::note_form_dialog::NewNote>,
     markdown_export_feedback: Option<(bool, String)>,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
@@ -1184,11 +1189,6 @@ pub struct NotePanel {
     find_query_widget_id: Option<egui::Id>,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
-    link_dialog_open: bool,
-    link_text: String,
-    link_url: String,
-    link_new_dialog_open: bool,
-    link_new_name: String,
     pending_plain_link_conversion: Option<PendingPlainLinkConversion>,
     new_alias: String,
     alias_rename_inputs: HashMap<String, String>,
@@ -1246,12 +1246,6 @@ pub struct NotePanel {
     test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_custom_table_insert_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    test_custom_table_builder_insert_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    test_custom_table_builder_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    test_custom_table_builder_cancel_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_save_changes_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -1409,6 +1403,7 @@ struct NotePanelPendingHostActions {
     clipboard_image: Option<(egui::Id, RgbaImage)>,
     open_note_slugs: Vec<String>,
     open_image_paths: Vec<PathBuf>,
+    open_forms: Vec<super::note_form_dialog::FormOpenRequest>,
     links: Vec<egui::OpenUrl>,
 }
 
@@ -1433,6 +1428,7 @@ struct PendingNotePanelHostFrame {
 
 struct NotePanelDraftCheckpoint {
     note: Note,
+    content_revision: u64,
     saved_content_baseline: String,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
@@ -1446,6 +1442,7 @@ impl NotePanelDraftCheckpoint {
     fn capture(panel: &NotePanel) -> Self {
         Self {
             note: panel.note.clone(),
+            content_revision: panel.note_find.content_revision(),
             saved_content_baseline: panel.saved_content_baseline.clone(),
             pending_selection: panel.pending_selection,
             pending_cursor_position: panel.pending_cursor_position,
@@ -1465,7 +1462,7 @@ impl NotePanelDraftCheckpoint {
         panel.replacement_undo_boundaries = self.replacement_undo_boundaries;
         panel.replacement_redo_boundaries = self.replacement_redo_boundaries;
         panel.replacement_history_mutation = self.replacement_history_mutation;
-        panel.note_find.content_changed();
+        panel.note_find.restore_content_revision(self.content_revision);
         panel.note_find_preview = None;
         panel.pending_find_navigation = None;
         panel.fast_derived_dirty = true;
@@ -1488,31 +1485,7 @@ struct PendingNoteToolbarFocusRestore {
     editor_id: egui::Id,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NoteTableBuilderOrigin {
-    note_slug: String,
-    note_path: PathBuf,
-    source_snapshot: String,
-    editor_id: egui::Id,
-    insert_at: usize,
-}
-
-struct CustomTableBuilder {
-    origin: NoteTableBuilderOrigin,
-    columns: usize,
-    data_rows: usize,
-    header_cells: Vec<String>,
-    pending_insert: bool,
-    error: Option<String>,
-}
-
-pub(crate) struct PendingCustomTableInsertion {
-    origin: NoteTableBuilderOrigin,
-    prepared: PreparedMarkdownEdit,
-}
-
 pub(crate) enum NotePanelEffect {
-    InsertCustomTable(PendingCustomTableInsertion),
     OpenDiagram {
         source: DiagramSourceCopy,
         origin: NoteMermaidOrigin,
@@ -1531,6 +1504,7 @@ pub(crate) struct NotePanelHostCompletion {
     pub(crate) open_note_slugs: Vec<String>,
     pub(super) note_open_origin: Option<NoteOpenReceipt>,
     pub(crate) open_image_paths: Vec<PathBuf>,
+    pub(super) open_forms: Vec<super::note_form_dialog::FormOpenRequest>,
     pub(crate) links: Vec<egui::OpenUrl>,
 }
 
@@ -1857,7 +1831,12 @@ impl NotePanel {
             pending_mermaid_origin: None,
             active_mermaid_origin: None,
             pending_root_effect: None,
-            custom_table_builder: None,
+            table_form: None,
+            link_form: None,
+            new_note_form: None,
+            table_form_host: Default::default(),
+            link_form_host: Default::default(),
+            new_note_form_host: Default::default(),
             markdown_export_feedback: None,
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
@@ -1897,11 +1876,6 @@ impl NotePanel {
             find_query_widget_id: None,
             pending_selection: None,
             pending_cursor_position: None,
-            link_dialog_open: false,
-            link_text: String::new(),
-            link_url: String::new(),
-            link_new_dialog_open: false,
-            link_new_name: String::new(),
             pending_plain_link_conversion: None,
             new_alias: String::new(),
             alias_rename_inputs: HashMap::new(),
@@ -1955,12 +1929,6 @@ impl NotePanel {
             test_markdown_toolbar_menu: None,
             #[cfg(test)]
             test_custom_table_insert_rect: None,
-            #[cfg(test)]
-            test_custom_table_builder_insert_rect: None,
-            #[cfg(test)]
-            test_custom_table_builder_rect: None,
-            #[cfg(test)]
-            test_custom_table_builder_cancel_rect: None,
             #[cfg(test)]
             test_save_changes_rect: None,
             #[cfg(test)]
@@ -2742,6 +2710,9 @@ impl NotePanel {
             || self.host_state.bootstrap_pending()
             || self.pending_host_frame.is_some()
             || self.pending_root_effect.is_some()
+            || self.table_form_host.needs_root_ui_when_hidden(self.table_form.is_some())
+            || self.link_form_host.needs_root_ui_when_hidden(self.link_form.is_some())
+            || self.new_note_form_host.needs_root_ui_when_hidden(self.new_note_form.is_some())
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
@@ -2765,13 +2736,10 @@ impl NotePanel {
         self.host_state.request_focus();
     }
 
-    fn note_prompt_layers(&self) -> [egui::LayerId; 6] {
+    fn note_prompt_layers(&self) -> [egui::LayerId; 3] {
         [
             egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("close")),
             egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("save-conflict")),
-            self.custom_table_builder_layer(),
-            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("link")),
-            egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("link-new")),
             egui::LayerId::new(egui::Order::Middle, self.note_prompt_id("plain-link-conversion")),
         ]
     }
@@ -2896,9 +2864,6 @@ impl NotePanel {
                     && self.note.content == origin.source_snapshot
             }
             NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
-            NotePanelEffect::InsertCustomTable(request) => {
-                self.custom_table_origin_is_current(&request.origin)
-            }
         };
         if retained && still_matches {
             let mut effect = staged.effect;
@@ -2911,17 +2876,6 @@ impl NotePanel {
             }
             Some(effect)
         } else {
-            if let NotePanelEffect::InsertCustomTable(request) = &staged.effect
-                && let Some(builder) = self.custom_table_builder.as_mut()
-                && builder.origin == request.origin
-            {
-                builder.pending_insert = false;
-                if retained {
-                    builder.error = Some(
-                        "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
-                    );
-                }
-            }
             if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect
                 && self
                     .pending_mermaid_origin
@@ -2949,6 +2903,7 @@ impl NotePanel {
                 open_note_slugs: Vec::new(),
                 note_open_origin: None,
                 open_image_paths: Vec::new(),
+                open_forms: Vec::new(),
                 links: Vec::new(),
             };
         };
@@ -2994,6 +2949,7 @@ impl NotePanel {
                 open_note_slugs: Vec::new(),
                 note_open_origin: None,
                 open_image_paths: Vec::new(),
+                open_forms: Vec::new(),
                 links: Vec::new(),
             };
         }
@@ -3177,6 +3133,7 @@ impl NotePanel {
             open_note_slugs: frame.actions.open_note_slugs,
             note_open_origin,
             open_image_paths: frame.actions.open_image_paths,
+            open_forms: frame.actions.open_forms,
             links: frame.actions.links,
         }
     }
@@ -3840,10 +3797,6 @@ impl NotePanel {
             .is_some_and(|modal| modal != layer)
     }
 
-    fn custom_table_builder_layer(&self) -> egui::LayerId {
-        egui::LayerId::new(egui::Order::Middle, self.custom_table_builder_id())
-    }
-
     pub(crate) fn query_focus_protected_state_blocks(&self) -> bool {
         if !self.open {
             return false;
@@ -3851,8 +3804,7 @@ impl NotePanel {
         self.activation_handoff_pending
             || self.discard_unsaved_prompt
             || self.overwrite_prompt
-            || self.link_dialog_open
-            || self.link_new_dialog_open
+
             || self.pending_plain_link_conversion.is_some()
     }
 
@@ -3905,8 +3857,7 @@ impl NotePanel {
         if !self.open
             || self.discard_unsaved_prompt
             || self.overwrite_prompt
-            || self.link_dialog_open
-            || self.link_new_dialog_open
+
             || self.pending_plain_link_conversion.is_some()
         {
             return false;
@@ -4112,37 +4063,60 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_begin_custom_table_builder(&mut self, ctx: &egui::Context) {
         if let Some(editor_id) = self.last_textedit_id {
-            self.begin_custom_table_builder(ctx, editor_id);
+            let basis = super::note_form_dialog::FormBasis {
+                panel: self.prompt_identity,
+                host: self.host_state.identity(),
+                slug: self.note.slug.clone(),
+                path: self.note.path.clone(),
+                revision: self.note_find.content_revision(),
+                editor: editor_id,
+                range: self.current_editor_byte_range(ctx, editor_id),
+                source: std::sync::Arc::from(self.note.content.as_str()),
+            };
+            self.table_form = Some(super::note_form_dialog::NoteForm::new(
+                self.prompt_identity,
+                basis,
+            ));
+            self.table_form_host.open_from_origin(
+                ctx,
+                self.table_form.as_ref().unwrap(),
+                false,
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
         }
     }
 
     #[cfg(test)]
     pub(crate) fn test_custom_table_builder_insert_rect(&self) -> Option<egui::Rect> {
-        self.test_custom_table_builder_insert_rect
+        self.table_form
+            .as_ref()
+            .and_then(|form| form.test_control("submit").map(|control| control.0))
     }
 
     #[cfg(test)]
     pub(crate) fn test_custom_table_builder_rect(&self) -> Option<egui::Rect> {
-        self.test_custom_table_builder_rect
+        self.table_form
+            .as_ref()
+            .and_then(|form| form.test_window_rect())
     }
 
     #[cfg(test)]
     pub(crate) fn test_custom_table_builder_cancel_rect(&self) -> Option<egui::Rect> {
-        self.test_custom_table_builder_cancel_rect
+        self.table_form
+            .as_ref()
+            .and_then(|form| form.test_control("cancel").map(|control| control.0))
     }
 
     #[cfg(test)]
     pub(crate) fn test_custom_table_origin_insert_at(&self) -> Option<usize> {
-        self.custom_table_builder
-            .as_ref()
-            .map(|builder| builder.origin.insert_at)
+        self.table_form.as_ref().map(|form| form.basis.range.start)
     }
 
     #[cfg(test)]
     pub(crate) fn test_custom_table_builder_layer(&self) -> Option<egui::LayerId> {
-        self.custom_table_builder
+        self.table_form
             .as_ref()
-            .map(|_| self.custom_table_builder_layer())
+            .and_then(|_| self.table_form_host.root_layer())
     }
 
     #[cfg(test)]
@@ -4180,6 +4154,115 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_custom_table_redo(&mut self, ctx: &egui::Context) -> Option<String> {
         self.test_custom_table_history_step(ctx, ReplacementUndoDirection::Redo)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_link_form_diagnostic(&self, ctx: &egui::Context) -> String {
+        let Some(form) = self.link_form.as_ref() else {
+            return "form closed".into();
+        };
+        format!(
+            "error={:?} basis_rev={} current_rev={} basis_range={:?} current_range={:?} basis_host={:?} current_host={:?} editor={:?} current_editor={:?} source_equal={} pending_close={} discard={} overwrite={}",
+            form.draft.error,
+            form.basis.revision,
+            self.note_find.content_revision(),
+            form.basis.range,
+            self.current_editor_byte_range(ctx, form.basis.editor),
+            form.basis.host,
+            self.host_state.identity(),
+            form.basis.editor,
+            self.last_textedit_id,
+            self.note.content == form.basis.source.as_ref(),
+            self.pending_close_after_save,
+            self.discard_unsaved_prompt,
+            self.overwrite_prompt
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_form_selection(&mut self, ctx: &egui::Context, start: usize, end: usize) {
+        self.pending_selection = Some((start, end));
+        if let Some(editor) = self.last_textedit_id {
+            let mut state =
+                egui::widgets::text_edit::TextEditState::load(ctx, editor).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(start),
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(ctx, editor);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_link_form_label(&self) -> Option<&str> {
+        self.link_form.as_ref().map(|form| form.draft.text.as_str())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_form_control(
+        &self,
+        kind: super::note_form_dialog::FormKind,
+        name: &str,
+    ) -> Option<(egui::Rect, egui::Rect, bool)> {
+        use super::note_form_dialog::FormKind;
+        match kind {
+            FormKind::Table => self.table_form.as_ref()?.test_control(name),
+            FormKind::Link => self.link_form.as_ref()?.test_control(name),
+            FormKind::NewNote => self.new_note_form.as_ref()?.test_control(name),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_form_session(&self, kind: super::note_form_dialog::FormKind) -> Option<u64> {
+        use super::note_form_dialog::FormKind;
+        match kind {
+            FormKind::Table => self.table_form.as_ref().map(|f| f.session),
+            FormKind::Link => self.link_form.as_ref().map(|f| f.session),
+            FormKind::NewNote => self.new_note_form.as_ref().map(|f| f.session),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_form_text(&self, kind: super::note_form_dialog::FormKind) -> Option<&str> {
+        use super::note_form_dialog::FormKind;
+        match kind {
+            FormKind::Table => self
+                .table_form
+                .as_ref()
+                .map(|f| f.draft.headers[0].as_str()),
+            FormKind::Link => self.link_form.as_ref().map(|f| f.draft.url.as_str()),
+            FormKind::NewNote => self.new_note_form.as_ref().map(|f| f.draft.text.as_str()),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_form_is_popped(&self, kind: super::note_form_dialog::FormKind) -> bool {
+        use super::note_form_dialog::FormKind;
+        match kind {
+            FormKind::Table => self.table_form_host.is_popped_out(),
+            FormKind::Link => self.link_form_host.is_popped_out(),
+            FormKind::NewNote => self.new_note_form_host.is_popped_out(),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_stage_form_open(
+        &mut self,
+        ctx: &egui::Context,
+        kind: super::note_form_dialog::FormKind,
+    ) {
+        let editor = self.last_textedit_id.expect("editor is rendered");
+        let request = super::note_form_dialog::FormOpenRequest {
+            kind,
+            editor,
+            revision: self.note_find.content_revision(),
+            range: self.current_editor_byte_range(ctx, editor),
+        };
+        self.test_stage_retained_note_frame(ctx, None, None, None);
+        self.pending_host_frame
+            .as_mut()
+            .expect("pending frame")
+            .actions
+            .open_forms
+            .push(request);
     }
 
     #[cfg(test)]
@@ -4240,8 +4323,8 @@ impl NotePanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_set_link_dialog_open(&mut self, open: bool) {
-        self.link_dialog_open = open;
+    pub(crate) fn test_set_overwrite_prompt(&mut self, open: bool) {
+        self.overwrite_prompt = open;
     }
 
     #[cfg(test)]
@@ -4851,278 +4934,363 @@ impl NotePanel {
         }
     }
 
-    fn begin_custom_table_builder(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
-        if !self.open
-            || self.last_textedit_id != Some(editor_id)
-            || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
-        {
-            return;
-        }
-        let range = self.current_editor_byte_range(ctx, editor_id);
-        self.custom_table_builder = Some(CustomTableBuilder {
-            origin: NoteTableBuilderOrigin {
-                note_slug: self.note.slug.clone(),
-                note_path: self.note.path.clone(),
-                source_snapshot: self.note.content.clone(),
-                editor_id,
-                insert_at: range.start,
-            },
-            columns: 2,
-            data_rows: 1,
-            header_cells: vec!["Column 1".into(), "Column 2".into()],
-            pending_insert: false,
-            error: None,
-        });
+    pub(super) fn show_child_forms(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        jump_active: bool,
+    ) {
+        use super::note_form_dialog::show_form;
+        show_form(
+            ctx,
+            &mut self.table_form_host,
+            &mut self.table_form,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            jump_active,
+        );
+        show_form(
+            ctx,
+            &mut self.link_form_host,
+            &mut self.link_form,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            jump_active,
+        );
+        show_form(
+            ctx,
+            &mut self.new_note_form_host,
+            &mut self.new_note_form,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            jump_active,
+        );
     }
 
-    fn custom_table_builder_id(&self) -> egui::Id {
-        egui::Id::new((
-            "note-custom-table-builder",
-            self.note.slug.clone(),
-            self.note.path.clone(),
-        ))
+    pub(super) fn child_form_has_root(&self) -> bool {
+        (self.table_form.is_some() && self.table_form_host.root_layer().is_some())
+            || (self.link_form.is_some() && self.link_form_host.root_layer().is_some())
+            || (self.new_note_form.is_some() && self.new_note_form_host.root_layer().is_some())
+    }
+
+    pub(super) fn close_child_forms(&mut self, ctx: &egui::Context) {
+        if self.table_form.take().is_some() {
+            self.table_form_host.close_from_app(ctx);
+        }
+        if self.link_form.take().is_some() {
+            self.link_form_host.close_from_app(ctx);
+        }
+        if self.new_note_form.take().is_some() {
+            self.new_note_form_host.close_from_app(ctx);
+        }
+    }
+
+    fn finish_one_form<K: super::note_form_dialog::FormSpec>(
+        &mut self,
+        ctx: &egui::Context,
+        mut form: Option<super::note_form_dialog::NoteForm<K>>,
+        host: &mut super::note_form_dialog::FormHost<K>,
+    ) -> (Option<super::note_form_dialog::NoteForm<K>>, bool) {
+        use super::note_form_dialog::FormCommand;
+        let Some(mut current) = form.take() else {
+            return (None, false);
+        };
+        let Some(completion) = host.complete(ctx, &mut current) else {
+            return (Some(current), false);
+        };
+        let mut show_root = completion.show_root;
+        for command in completion.commands {
+            match command {
+                FormCommand::Close => {
+                    current.open = false;
+                }
+                FormCommand::Apply(actions) if actions.session == current.session => {
+                    current.draft = actions.draft;
+                    if actions.submit {
+                        match self.submit_child_form(ctx, K::KIND, &current.basis, &current.draft) {
+                            Ok(()) => {
+                                current.open = false;
+                                host.close_from_app(ctx);
+                                self.focus_textedit_next_frame = true;
+                                self.request_host_focus();
+                                if self.host_state.presentation() == UtilityPresentation::Docked {
+                                    ctx.move_to_top(self.show_query_focus_layer());
+                                    show_root = true;
+                                }
+                            }
+                            Err(error) => current.draft.error = Some(error),
+                        }
+                    }
+                }
+                FormCommand::Apply(_) => {}
+            }
+        }
+        (current.open.then_some(current), show_root)
+    }
+
+    pub(super) fn complete_child_forms(&mut self, ctx: &egui::Context) -> bool {
+        let mut table_host = std::mem::take(&mut self.table_form_host);
+        let table = self.table_form.take();
+        let (table, a) = self.finish_one_form(ctx, table, &mut table_host);
+        self.table_form = table;
+        self.table_form_host = table_host;
+        let mut link_host = std::mem::take(&mut self.link_form_host);
+        let link = self.link_form.take();
+        let (link, b) = self.finish_one_form(ctx, link, &mut link_host);
+        self.link_form = link;
+        self.link_form_host = link_host;
+        let mut new_host = std::mem::take(&mut self.new_note_form_host);
+        let new = self.new_note_form.take();
+        let (new, c) = self.finish_one_form(ctx, new, &mut new_host);
+        self.new_note_form = new;
+        self.new_note_form_host = new_host;
+        a || b || c
+    }
+
+    fn stage_form_open(
+        &mut self,
+        ctx: &egui::Context,
+        editor: egui::Id,
+        kind: super::note_form_dialog::FormKind,
+    ) {
+        if self.open
+            && self.last_textedit_id == Some(editor)
+            && matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+        {
+            self.pending_host_actions
+                .open_forms
+                .push(super::note_form_dialog::FormOpenRequest {
+                    kind,
+                    editor,
+                    revision: self.note_find.content_revision(),
+                    range: self.current_editor_byte_range(ctx, editor),
+                });
+        }
+    }
+
+    pub(super) fn open_child_form(
+        &mut self,
+        ctx: &egui::Context,
+        receipt: &NoteOpenReceipt,
+        request: super::note_form_dialog::FormOpenRequest,
+        session: u64,
+    ) -> Option<UtilityPresentation> {
+        use super::note_form_dialog::{FormBasis, FormKind, NoteForm};
+        if !self.accepts_note_open(receipt)
+            || self.last_textedit_id != Some(request.editor)
+            || self.note_find.content_revision() != request.revision
+            || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            || self.note.content.get(request.range.clone()).is_none()
+            || self.current_editor_byte_range(ctx, request.editor) != request.range
+        {
+            return None;
+        }
+        let origin = super::utility_host::ChildOpenOrigin::Parent(receipt.clone());
+        match request.kind {
+            FormKind::Table if self.table_form.as_ref().is_some_and(|form| form.open) => {
+                return self.table_form_host.open_from_origin(
+                    ctx,
+                    self.table_form.as_ref()?,
+                    true,
+                    &origin,
+                );
+            }
+            FormKind::Link if self.link_form.as_ref().is_some_and(|form| form.open) => {
+                return self.link_form_host.open_from_origin(
+                    ctx,
+                    self.link_form.as_ref()?,
+                    true,
+                    &origin,
+                );
+            }
+            FormKind::NewNote if self.new_note_form.as_ref().is_some_and(|form| form.open) => {
+                return self.new_note_form_host.open_from_origin(
+                    ctx,
+                    self.new_note_form.as_ref()?,
+                    true,
+                    &origin,
+                );
+            }
+            _ => {}
+        }
+        if !request.range.is_empty() {
+            self.pending_selection = Some((
+                byte_to_char_index(&self.note.content, request.range.start),
+                byte_to_char_index(&self.note.content, request.range.end),
+            ));
+        }
+        let basis = FormBasis {
+            panel: self.prompt_identity,
+            host: self.host_state.identity(),
+            slug: self.note.slug.clone(),
+            path: self.note.path.clone(),
+            revision: request.revision,
+            editor: request.editor,
+            range: request.range,
+            source: std::sync::Arc::from(self.note.content.as_str()),
+        };
+        match request.kind {
+            FormKind::Table => {
+                let was_open = self.table_form.as_ref().is_some_and(|form| form.open);
+                if !was_open {
+                    self.table_form = Some(NoteForm::new(session, basis));
+                }
+                self.table_form_host.open_from_origin(
+                    ctx,
+                    self.table_form.as_ref()?,
+                    was_open,
+                    &origin,
+                )
+            }
+            FormKind::Link => {
+                let was_open = self.link_form.as_ref().is_some_and(|form| form.open);
+                if !was_open {
+                    self.link_form = Some(NoteForm::new(session, basis));
+                }
+                self.link_form_host.open_from_origin(
+                    ctx,
+                    self.link_form.as_ref()?,
+                    was_open,
+                    &origin,
+                )
+            }
+            FormKind::NewNote => {
+                let was_open = self.new_note_form.as_ref().is_some_and(|form| form.open);
+                if !was_open {
+                    self.new_note_form = Some(NoteForm::new(session, basis));
+                }
+                self.new_note_form_host.open_from_origin(
+                    ctx,
+                    self.new_note_form.as_ref()?,
+                    was_open,
+                    &origin,
+                )
+            }
+        }
+    }
+
+    fn form_basis_is_current(
+        &self,
+        ctx: &egui::Context,
+        basis: &super::note_form_dialog::FormBasis,
+    ) -> bool {
+        self.open
+            && !self.pending_close_after_save
+            && !self.discard_unsaved_prompt
+            && !self.overwrite_prompt
+            && self.prompt_identity == basis.panel
+            && self.host_state.identity() == basis.host
+            && self.note.slug == basis.slug
+            && self.note.path == basis.path
+            && self.note_find.content_revision() == basis.revision
+            && self.note.content == basis.source.as_ref()
+            && self.last_textedit_id == Some(basis.editor)
+            && matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            && self.note.content.get(basis.range.clone()).is_some()
+            && self.current_editor_byte_range(ctx, basis.editor) == basis.range
+    }
+
+    fn submit_child_form(
+        &mut self,
+        ctx: &egui::Context,
+        kind: super::note_form_dialog::FormKind,
+        basis: &super::note_form_dialog::FormBasis,
+        draft: &super::note_form_dialog::FormDraft,
+    ) -> Result<(), String> {
+        use super::note_form_dialog::FormKind;
+        if !self.form_basis_is_current(ctx, basis) {
+            return Err(
+                "The note, editor, or selection changed. Close and reopen this form.".into(),
+            );
+        }
+        let mut create_note = None;
+        let prepared = match kind {
+            FormKind::Table => prepare_insert_table_with_rows(
+                &basis.source,
+                basis.range.start,
+                &draft.headers,
+                draft.rows,
+            )
+            .map_err(|error| error.to_string())?,
+            FormKind::Link => {
+                let text = if draft.text.is_empty() {
+                    &basis.source[basis.range.clone()]
+                } else {
+                    &draft.text
+                };
+                PreparedMarkdownEdit::prepare(
+                    &basis.source,
+                    basis.range.clone(),
+                    format!("[{text}]({})", draft.url),
+                )
+                .map_err(|error| error.to_string())?
+            }
+            FormKind::NewNote => {
+                let name = draft.text.trim();
+                if name.is_empty() {
+                    return Err("Name is required.".into());
+                }
+                let (slug, target) = match resolve_note_query(name) {
+                    NoteTarget::Resolved(slug) => {
+                        let title = load_notes()
+                            .ok()
+                            .and_then(|notes| notes.into_iter().find(|note| note.slug == slug))
+                            .map(|note| note.title)
+                            .unwrap_or_else(|| slug.clone());
+                        (slug, title)
+                    }
+                    NoteTarget::Ambiguous(slugs) => {
+                        let slug = slugs.into_iter().next().ok_or("No matching note.")?;
+                        (slug.clone(), slug)
+                    }
+                    NoteTarget::Broken => {
+                        let slug = slugify(name);
+                        create_note = Some(name.to_owned());
+                        (slug.clone(), slug)
+                    }
+                };
+                if slug == self.note.slug {
+                    return Ok(());
+                }
+                PreparedMarkdownEdit::prepare(
+                    &basis.source,
+                    basis.range.clone(),
+                    format!("[[{target}]]"),
+                )
+                .map_err(|error| error.to_string())?
+            }
+        };
+        if let Some(name) = create_note {
+            append_note(&name, "")
+                .map_err(|error| format!("Failed to create note while linking: {error}"))?;
+            self.link_menu_targets_version = None;
+            self.invalidate_link_menu_results();
+        }
+        match self.apply_prepared_markdown_edit_with_selection(ctx, basis.editor, prepared, None) {
+            Ok(true) => {
+                self.defer_toolbar_editor_focus();
+                Ok(())
+            }
+            Ok(false) => Err("The insertion did not change the note.".into()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     pub(crate) fn query_focus_ordinary_layers(&self) -> impl Iterator<Item = egui::LayerId> {
-        std::iter::once(self.show_query_focus_layer()).chain(
-            self.custom_table_builder
-                .as_ref()
-                .map(|_| self.custom_table_builder_layer()),
-        )
-    }
-
-    fn custom_table_origin_is_current(&self, origin: &NoteTableBuilderOrigin) -> bool {
-        self.open
-            && self.note.slug == origin.note_slug
-            && self.note.path == origin.note_path
-            && self.note.content == origin.source_snapshot
-            && self.last_textedit_id == Some(origin.editor_id)
-            && matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
-            && self
-                .custom_table_builder
-                .as_ref()
-                .is_some_and(|builder| builder.origin == *origin)
-    }
-
-    fn stage_custom_table_insertion(&mut self, ctx: &egui::Context) {
-        if ctx.will_discard() || self.pending_root_effect.is_some() {
-            return;
-        }
-        let Some(builder) = self.custom_table_builder.as_ref() else {
-            return;
-        };
-        if builder.pending_insert {
-            return;
-        }
-        if !self.custom_table_origin_is_current(&builder.origin) {
-            if let Some(builder) = self.custom_table_builder.as_mut() {
-                builder.error = Some(
-                    "The note or editor changed. Cancel and reopen the builder to insert at the current caret.".into(),
-                );
-            }
-            return;
-        }
-        let origin = builder.origin.clone();
-        let prepared = match prepare_insert_table_with_rows(
-            &origin.source_snapshot,
-            origin.insert_at,
-            &builder.header_cells,
-            builder.data_rows,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                if let Some(builder) = self.custom_table_builder.as_mut() {
-                    builder.error = Some(error.to_string());
-                }
-                return;
-            }
-        };
-        if let Some(builder) = self.custom_table_builder.as_mut() {
-            builder.pending_insert = true;
-            builder.error = None;
-        }
-        self.pending_root_effect = Some(PendingNoteRootEffect {
-            root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
-            host: self.active_host_pass.map(|(host, _)| host),
-            owner_pass: self.active_host_pass.map(|(_, pass)| pass),
-            effect: NotePanelEffect::InsertCustomTable(PendingCustomTableInsertion {
-                origin,
-                prepared,
-            }),
-        });
-    }
-
-    pub(crate) fn complete_custom_table_insertion(
-        &mut self,
-        ctx: &egui::Context,
-        request: PendingCustomTableInsertion,
-    ) -> Result<(), String> {
-        if !self.custom_table_origin_is_current(&request.origin) {
-            if let Some(builder) = self.custom_table_builder.as_mut() {
-                builder.pending_insert = false;
-                builder.error = Some(
-                    "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
-                );
-            }
-            return Err("The originating note or editor changed before insertion.".into());
-        }
-        match self.apply_prepared_markdown_edit_with_selection(
-            ctx,
-            request.origin.editor_id,
-            request.prepared,
-            None,
-        ) {
-            Ok(true) => {
-                self.custom_table_builder = None;
-                Ok(())
-            }
-            Ok(false) => {
-                if let Some(builder) = self.custom_table_builder.as_mut() {
-                    builder.pending_insert = false;
-                    builder.error = Some("The table did not change the note.".into());
-                }
-                Err("The table did not change the note.".into())
-            }
-            Err(error) => {
-                if let Some(builder) = self.custom_table_builder.as_mut() {
-                    builder.pending_insert = false;
-                    builder.error = Some(error.to_string());
-                }
-                Err(error.to_string())
-            }
-        }
-    }
-
-    fn show_custom_table_builder(&mut self, ctx: &egui::Context) {
-        self.show_custom_table_builder_with_input(ctx, true);
-    }
-
-    fn show_custom_table_builder_with_input(
-        &mut self,
-        ctx: &egui::Context,
-        input_allowed: bool,
-    ) {
-        if !self.open || self.custom_table_builder.is_none() {
-            return;
-        }
-        #[cfg(test)]
-        {
-            self.test_custom_table_builder_insert_rect = None;
-            self.test_custom_table_builder_rect = None;
-            self.test_custom_table_builder_cancel_rect = None;
-        }
-        let id = self.custom_table_builder_id();
-        let screen_rect = ctx.content_rect();
-        let available_size =
-            (screen_rect.size() - egui::vec2(40.0, 40.0)).max(egui::vec2(320.0, 280.0));
-        let default_size = egui::vec2(460.0, 460.0).min(available_size);
-        let default_pos = egui::pos2(
-            screen_rect.left() + 20.0,
-            (screen_rect.bottom() - default_size.y - 20.0).max(screen_rect.top() + 20.0),
-        );
-        let mut window_open = true;
-        let mut submit = false;
-        let mut cancel = false;
-        let mut authorized = false;
-        #[cfg(test)]
-        let mut insert_rect: Option<egui::Rect> = None;
-        #[cfg(test)]
-        let mut cancel_rect: Option<egui::Rect> = None;
-        let _output = egui::Window::new("Insert custom Markdown table")
-            .id(id)
-            .order(egui::Order::Middle)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(default_size)
-            .default_pos(default_pos)
-            .min_size(egui::vec2(320.0, 280.0))
-            .enabled(input_allowed)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                authorized = input_allowed
-                    && !ctx.will_discard()
-                    && ui.is_visible()
-                    && !ui.is_sizing_pass();
-                let builder = self
-                    .custom_table_builder
-                    .as_mut()
-                    .expect("the builder remains present while its window is shown");
-                let mut changed = false;
-                let pending_insert = builder.pending_insert;
-                ui.add_enabled_ui(authorized && !builder.pending_insert, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Columns");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut builder.columns)
-                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
-                            )
-                            .changed();
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Data rows (excluding header)");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut builder.data_rows)
-                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
-                            )
-                            .changed();
-                    });
-                    builder
-                        .header_cells
-                        .resize_with(builder.columns, String::new);
-                    ui.separator();
-                    let rows_max_height = (ui.available_height() - 48.0).max(64.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt(("custom-table-columns", id))
-                        .max_height(rows_max_height)
-                        .show(ui, |ui| {
-                            for (index, name) in builder.header_cells.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("Column {}", index + 1));
-                                    changed |= ui.text_edit_singleline(name).changed();
-                                });
-                            }
-                        });
-                    if changed {
-                        builder.error = None;
-                    }
-                    ui.separator();
-                    if let Some(error) = &builder.error {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                    }
-                    ui.horizontal(|ui| {
-                        let insert = ui.button("Insert");
-                        #[cfg(test)]
-                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
-                            insert_rect = Some(insert.rect);
-                        }
-                        submit = insert.clicked();
-                        let cancel_response = ui.button("Cancel");
-                        #[cfg(test)]
-                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
-                            cancel_rect = Some(cancel_response.rect);
-                        }
-                        cancel = cancel_response.clicked();
-                    });
-                });
-                if pending_insert {
-                    ui.label("Inserting table…");
-                }
-            });
-        #[cfg(test)]
-        {
-            self.test_custom_table_builder_insert_rect = insert_rect;
-            self.test_custom_table_builder_rect =
-                _output.as_ref().map(|output| output.response.rect);
-            self.test_custom_table_builder_cancel_rect = cancel_rect;
-        }
-        if authorized && submit {
-            self.stage_custom_table_insertion(ctx);
-        }
-        if authorized && (cancel || !window_open) {
-            self.custom_table_builder = None;
-        }
+        self.host_layer_if_root().into_iter().chain([
+            self.table_form.as_ref().and_then(|_| self.table_form_host.root_layer()),
+            self.link_form.as_ref().and_then(|_| self.link_form_host.root_layer()),
+            self.new_note_form.as_ref().and_then(|_| self.new_note_form_host.root_layer()),
+        ].into_iter().flatten())
     }
 
     #[cfg(test)]
@@ -5186,10 +5354,10 @@ impl NotePanel {
     fn close_panel_and_release_focus(&mut self, app: &mut LauncherApp) {
         self.remember_current_presentation(&app.egui_ctx);
         self.open = false;
+        self.close_child_forms(&app.egui_ctx);
         self.pending_close_after_save = false;
         self.discard_unsaved_prompt = false;
         self.overwrite_prompt = false;
-        self.custom_table_builder = None;
         self.surrender_find_focus(&app.egui_ctx);
         if let Some(id) = self.last_textedit_id {
             app.egui_ctx.memory_mut(|memory| memory.surrender_focus(id));
@@ -5234,7 +5402,6 @@ impl NotePanel {
         self.discard_unsaved_prompt = false;
         self.pending_close_after_save = false;
         self.open = false;
-        self.custom_table_builder = None;
     }
 
     pub(crate) fn replace_content_after_saved_external_mutation(
@@ -5331,8 +5498,7 @@ impl NotePanel {
             self.active_mermaid_origin = None;
             self.pending_mermaid_origin = None;
             self.pending_root_effect = None;
-            self.custom_table_builder = None;
-            self.markdown_toolbar_popup_was_open = false;
+                self.markdown_toolbar_popup_was_open = false;
             self.markdown_toolbar_owns_selection = false;
             self.applying_toolbar_markdown_action = false;
             self.focus_textedit_after_toolbar_action = false;
@@ -5768,77 +5934,12 @@ impl NotePanel {
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
         }
 
-        self.show_custom_table_builder_with_input(ctx, input_allowed);
+
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
         // about focused nodes missing from the accessibility tree.
 
-        if self.link_dialog_open {
-            let mut open_link = true;
-            egui::Window::new("Insert Link")
-                .id(self.note_prompt_id("link"))
-                .collapsible(false)
-                .resizable(false)
-                .enabled(input_allowed)
-                .open(&mut open_link)
-                .show(ctx, |ui| {
-                    ui.label("Text:");
-                    ui.text_edit_singleline(&mut self.link_text);
-                    ui.label("URL:");
-                    ui.text_edit_singleline(&mut self.link_url);
-                    ui.horizontal(|ui| {
-                        if ui.button("Insert").clicked()
-                            && let Some(id) = self.last_textedit_id
-                        {
-                            self.insert_link(ctx, id);
-                            // Return focus to the editor after insertion.
-                            self.focus_textedit_next_frame = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.link_text.clear();
-                            self.link_url.clear();
-                            self.link_dialog_open = false;
-                        }
-                    });
-                });
-            self.link_dialog_open &= open_link;
-        }
-        if self.link_new_dialog_open {
-            let mut open_link_new = true;
-            egui::Window::new("Link new note")
-                .id(self.note_prompt_id("link-new"))
-                .collapsible(false)
-                .resizable(false)
-                .enabled(input_allowed)
-                .open(&mut open_link_new)
-                .show(ctx, |ui| {
-                    widgets::compact_section_heading(ui, "New note name", None);
-                    ui.text_edit_singleline(&mut self.link_new_name);
-                    let is_empty = self.link_new_name.trim().is_empty();
-                    if is_empty {
-                        widgets::semantic_status(ui, StatusTone::Warning, "Name is required", None);
-                    }
-                    ui.horizontal(|ui| {
-                        let confirm = ui.add_enabled(
-                            !is_empty && self.last_textedit_id.is_some(),
-                            egui::Button::new("Link"),
-                        );
-                        if widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Primary)
-                            .clicked()
-                            && let Some(id) = self.last_textedit_id
-                        {
-                            self.insert_or_create_note_link(ctx, id, app);
-                            self.focus_textedit_next_frame = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.link_new_name.clear();
-                            self.link_new_dialog_open = false;
-                        }
-                    });
-                });
-            self.link_new_dialog_open &= open_link_new;
-        }
         if self.pending_plain_link_conversion.is_some() {
             let mut dialog_open = true;
             let mut convert = false;
@@ -8226,7 +8327,10 @@ impl NotePanel {
         }
         let mut state =
             egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
-        if self.markdown_toolbar_owns_selection && !resp.has_focus() {
+        let form_owns_selection = self.table_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
+            || self.link_form.as_ref().is_some_and(|form| form.basis.editor == resp.id)
+            || self.new_note_form.as_ref().is_some_and(|form| form.basis.editor == resp.id);
+        if (self.markdown_toolbar_owns_selection || form_owns_selection) && !resp.has_focus() {
             if let Some(cached) = self
                 .pending_selection
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
@@ -9038,14 +9142,13 @@ impl NotePanel {
                 self.insert_text_at_cursor_or_selection(ctx, id, &timestamp);
                 ui.close();
             }
-            if ui.button("Insert Link...").clicked() {
-                if let Some((start, end)) = self.resolve_selection(ctx, id) {
-                    let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
-                    self.link_text = self.note.content[start..end].to_string();
-                } else {
-                    self.link_text.clear();
-                }
-                self.link_dialog_open = true;
+            let insert_link = ui.button("Insert Link...");
+            #[cfg(test)]
+            if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_markdown_tool_rects.push(("Insert Link...".into(), insert_link.id, insert_link.rect, ui.clip_rect()));
+            }
+            if insert_link.clicked() {
+                self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::Link);
                 ui.close();
             }
             if ui.button("Convert plain links").clicked() {
@@ -9167,7 +9270,7 @@ impl NotePanel {
                     self.test_custom_table_insert_rect = Some(custom_table.rect);
                 }
                 if custom_table.clicked() {
-                    self.begin_custom_table_builder(ctx, id);
+                    self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::Table);
                     ui.close();
                 }
                 let table_context = self.current_table_context(ctx, id);
@@ -9281,8 +9384,7 @@ impl NotePanel {
             ui.horizontal(|ui| {
                 ui.label("Insert link:");
                 if ui.button("Link new").clicked() {
-                    self.link_new_dialog_open = true;
-                    self.link_new_name.clear();
+                    self.stage_form_open(ctx, id, super::note_form_dialog::FormKind::NewNote);
                     ui.close();
                 }
             });
@@ -9477,24 +9579,6 @@ impl NotePanel {
         }
     }
 
-    pub fn insert_link(&mut self, ctx: &egui::Context, id: egui::Id) {
-        let text = if self.link_text.is_empty() {
-            if let Some((start, end)) = self.resolve_selection(ctx, id) {
-                let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
-                self.note.content[start..end].to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            self.link_text.clone()
-        };
-        let insert = format!("[{text}]({})", self.link_url);
-        self.insert_text_at_cursor_or_selection(ctx, id, &insert);
-        self.link_dialog_open = false;
-        self.link_text.clear();
-        self.link_url.clear();
-    }
-
     fn insert_text_at_cursor_or_selection(
         &mut self,
         ctx: &egui::Context,
@@ -9537,69 +9621,6 @@ impl NotePanel {
             kind: TextInsertionKind::InsertedAtCaret,
             resulting_char_index: cursor,
         }
-    }
-
-    pub fn set_link_new_name(&mut self, name: impl Into<String>) {
-        self.link_new_name = name.into();
-    }
-
-    pub fn insert_or_create_note_link(
-        &mut self,
-        ctx: &egui::Context,
-        id: egui::Id,
-        app: &mut LauncherApp,
-    ) {
-        let normalized_name = self.link_new_name.trim().to_string();
-        if normalized_name.is_empty() {
-            return;
-        }
-
-        let mut target_slug = slugify(&normalized_name);
-        let mut link_target = normalized_name.to_string();
-
-        match resolve_note_query(&normalized_name) {
-            NoteTarget::Resolved(slug) => {
-                target_slug = slug.clone();
-                if let Some(note) = load_notes()
-                    .ok()
-                    .and_then(|notes| notes.into_iter().find(|n| n.slug == slug))
-                {
-                    link_target = note.title;
-                } else {
-                    link_target = slug;
-                }
-            }
-            NoteTarget::Ambiguous(slugs) => {
-                if let Some(slug) = slugs.into_iter().next() {
-                    target_slug = slug.clone();
-                    link_target = slug;
-                }
-            }
-            NoteTarget::Broken => {
-                if let Err(err) = append_note(&normalized_name, "") {
-                    app.report_error(
-                        "ui operation",
-                        format!("Failed to create note while linking: {err}"),
-                    );
-                    return;
-                }
-                self.link_menu_targets_version = None;
-                self.invalidate_link_menu_results();
-                target_slug = slugify(&normalized_name);
-                link_target = target_slug.clone();
-            }
-        }
-
-        if target_slug == self.note.slug {
-            self.link_new_dialog_open = false;
-            self.link_new_name.clear();
-            return;
-        }
-
-        let insert = format!("[[{link_target}]]");
-        self.insert_text_at_cursor_or_selection(ctx, id, &insert);
-        self.link_new_dialog_open = false;
-        self.link_new_name.clear();
     }
 
     fn open_external(&self, app: &mut LauncherApp, choice: NoteExternalOpen) {
@@ -14858,6 +14879,8 @@ mod tests {
     #[test]
     fn studio_usability_note_close_failed_autosave_keeps_draft_and_table_builder_for_retry() {
         let temp = TempNotesDir::new();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.dir.path()).unwrap();
         temp.write_note("alpha.md", "# Alpha\n\noriginal");
         temp.refresh_cache();
         let ctx = egui::Context::default();
@@ -14875,7 +14898,7 @@ mod tests {
         panel.replace_content_from_mutation("# Alpha\n\ndraft\r\nwith exact bytes".into(), 1.0);
         rendered_note(&ctx, &mut panel, &mut app);
         panel.test_begin_custom_table_builder(&ctx);
-        assert!(panel.custom_table_builder.is_some());
+        assert!(panel.table_form.is_some());
 
         let invalid_notes_dir = temp.dir.path().join("not-a-directory.md");
         fs::write(&invalid_notes_dir, "not a directory").unwrap();
@@ -14889,7 +14912,7 @@ mod tests {
         assert_eq!(panel.note.slug, old_slug);
         assert_eq!(panel.note.path, old_path);
         assert_eq!(panel.test_saved_content_baseline(), "# Alpha\n\noriginal");
-        assert!(panel.custom_table_builder.is_some());
+        assert!(panel.table_form.is_some());
 
         unsafe { std::env::set_var("ML_NOTES_DIR", temp.dir.path()) };
         rendered_note(&ctx, &mut panel, &mut app);
@@ -14901,13 +14924,16 @@ mod tests {
         assert!(!panel.open);
         assert!(!panel.pending_close_after_save);
         assert!(!panel.has_unsaved_changes());
-        assert!(panel.custom_table_builder.is_none());
+        assert!(panel.table_form.is_none());
         let disk_note = crate::plugins::note::load_notes()
             .unwrap()
             .into_iter()
             .find(|note| note.slug == old_slug)
             .unwrap();
         assert_eq!(disk_note.content, "# Alpha\n\ndraft\r\nwith exact bytes");
+        app.settings_save_workers.join_all();
+        drop(app);
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
@@ -18383,13 +18409,190 @@ More text.
     }
 
     #[test]
+    fn child_form_uses_captured_unicode_selection_and_rejects_stale_source() {
+        use super::super::note_form_dialog::{FormBasis, FormDraft, FormKind};
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("αβ world"));
+        panel.view_mode = NoteViewMode::Edit;
+        let editor = egui::Id::new("form-captured-editor");
+        panel.last_textedit_id = Some(editor);
+        panel.pending_selection = Some((0, 2));
+        let basis = FormBasis {
+            panel: panel.prompt_identity,
+            host: panel.host_state.identity(),
+            slug: panel.note.slug.clone(),
+            path: panel.note.path.clone(),
+            revision: panel.note_find.content_revision(),
+            editor,
+            range: 0.."αβ".len(),
+            source: std::sync::Arc::from(panel.note.content.as_str()),
+        };
+        let mut draft = FormDraft {
+            columns: 2,
+            rows: 1,
+            headers: vec!["A".into(), "B".into()],
+            text: String::new(),
+            url: "https://example.invalid".into(),
+            error: None,
+        };
+        panel.pending_selection = Some((3, 8));
+        assert!(
+            panel
+                .submit_child_form(&ctx, FormKind::Link, &basis, &draft)
+                .is_err()
+        );
+        assert_eq!(panel.note.content, "αβ world");
+        panel.pending_selection = Some((0, 2));
+        panel.host_state.transition(UtilityPresentation::Popout);
+        assert!(
+            panel
+                .submit_child_form(&ctx, FormKind::Link, &basis, &draft)
+                .is_err()
+        );
+        let mut basis = basis;
+        basis.host = panel.host_state.identity();
+        panel
+            .submit_child_form(&ctx, FormKind::Link, &basis, &draft)
+            .unwrap();
+        assert_eq!(panel.note.content, "[αβ](https://example.invalid) world");
+        assert_eq!(panel.test_replacement_history_counts(), (1, 0));
+        draft.text = "created-from-stale".into();
+        assert!(
+            panel
+                .submit_child_form(&ctx, FormKind::NewNote, &basis, &draft)
+                .is_err()
+        );
+        assert_eq!(panel.test_replacement_history_counts(), (1, 0));
+        let mut reopened = NotePanel::from_note(empty_note("αβ world"));
+        reopened.view_mode = NoteViewMode::Edit;
+        reopened.last_textedit_id = Some(editor);
+        reopened.pending_selection = Some((0, 2));
+        assert!(
+            reopened
+                .submit_child_form(&ctx, FormKind::Link, &basis, &draft)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn child_new_note_never_appends_for_stale_basis() {
+        use super::super::note_form_dialog::{FormBasis, FormDraft, FormKind};
+        let temp = TempNotesDir::new();
+        temp.write_note("source.md", "hello");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut note = empty_note("hello");
+        note.slug = "source".into();
+        note.path = temp.dir.path().join("source.md");
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Edit;
+        let editor = egui::Id::new("new-note-form-editor");
+        panel.last_textedit_id = Some(editor);
+        panel.pending_selection = Some((5, 5));
+        let basis = FormBasis {
+            panel: panel.prompt_identity,
+            host: panel.host_state.identity(),
+            slug: panel.note.slug.clone(),
+            path: panel.note.path.clone(),
+            revision: panel.note_find.content_revision(),
+            editor,
+            range: 5..5,
+            source: std::sync::Arc::from(panel.note.content.as_str()),
+        };
+        let draft = FormDraft {
+            columns: 2,
+            rows: 1,
+            headers: vec![],
+            text: "New Target".into(),
+            url: String::new(),
+            error: None,
+        };
+        panel.replace_content_from_mutation("changed".into(), 0.0);
+        assert!(
+            panel
+                .submit_child_form(&ctx, FormKind::NewNote, &basis, &draft)
+                .is_err()
+        );
+        assert!(!temp.dir.path().join("new-target.md").exists());
+        assert_eq!(panel.note.content, "changed");
+        panel.replace_content_from_mutation("hello".into(), 0.0);
+        panel.pending_selection = Some((5, 5));
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(&ctx, FormKind::NewNote, &basis, &draft)
+            .unwrap();
+        assert!(temp.dir.path().join("new-target.md").exists());
+        assert_eq!(panel.note.content, "hello[[new-target]]");
+        assert_eq!(panel.test_replacement_history_counts(), (1, 0));
+    }
+
+    fn captured_form_fixture(
+        panel: &mut NotePanel,
+        ctx: &egui::Context,
+        editor: egui::Id,
+    ) -> super::super::note_form_dialog::FormBasis {
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(editor);
+        super::super::note_form_dialog::FormBasis {
+            panel: panel.prompt_identity,
+            host: panel.host_state.identity(),
+            slug: panel.note.slug.clone(),
+            path: panel.note.path.clone(),
+            revision: panel.note_find.content_revision(),
+            editor,
+            range: panel.current_editor_byte_range(ctx, editor),
+            source: std::sync::Arc::from(panel.note.content.as_str()),
+        }
+    }
+    fn form_test_draft(text: &str, url: &str) -> super::super::note_form_dialog::FormDraft {
+        super::super::note_form_dialog::FormDraft {
+            columns: 2,
+            rows: 1,
+            headers: vec!["A".into(), "B".into()],
+            text: text.into(),
+            url: url.into(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn child_new_note_self_link_is_a_noop() {
+        let temp = TempNotesDir::new();
+        temp.write_note("source.md", "# Source\n\nhello");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut note = empty_note("hello");
+        note.slug = "source".into();
+        note.path = temp.dir.path().join("source.md");
+        let mut panel = NotePanel::from_note(note);
+        let basis = captured_form_fixture(&mut panel, &ctx, egui::Id::new("self-link-editor"));
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Source", ""),
+            )
+            .unwrap();
+        assert_eq!(panel.note.content, "hello");
+        assert_eq!(panel.test_replacement_history_counts(), (0, 0));
+    }
+
+    #[test]
     fn insert_link_replaces_selection() {
         let ctx = egui::Context::default();
         let mut panel = NotePanel::from_note(empty_note("hello world"));
-        let id = egui::Id::new("note_content");
+        let editor = egui::Id::new("note_content");
         panel.pending_selection = Some((6, 11));
-        panel.link_url = "http://example.com".to_string();
-        panel.insert_link(&ctx, id);
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::Link,
+                &basis,
+                &form_test_draft("", "http://example.com"),
+            )
+            .unwrap();
         assert_eq!(panel.note.content, "hello [world](http://example.com)");
         assert!(panel.pending_selection.is_none());
     }
@@ -18450,115 +18653,101 @@ More text.
 
     #[test]
     fn insert_or_create_note_link_creates_and_inserts_at_cursor() {
-        use tempfile::tempdir;
-
+        let temp = TempNotesDir::new();
+        temp.refresh_cache();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
         let mut panel = NotePanel::from_note(empty_note("hello "));
         panel.note.slug = "current-note".into();
-        panel.link_new_name = "Brand New Note".into();
-        let id = egui::Id::new("note_content");
-        let dir = tempdir().unwrap();
-        let prev = std::env::var("ML_NOTES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
-        let _ = crate::plugins::note::refresh_cache();
-
-        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(6),
-            )));
-        state.store(&ctx, id);
-
-        panel.insert_or_create_note_link(&ctx, id, &mut app);
-
+        let editor = egui::Id::new("note_content");
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Brand New Note", ""),
+            )
+            .unwrap();
         assert_eq!(panel.note.content, "hello [[brand-new-note]]");
-        let notes = crate::plugins::note::load_notes().unwrap();
-        assert!(notes.iter().any(|n| n.slug == "brand-new-note"));
-
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
-        } else {
-            unsafe { std::env::remove_var("ML_NOTES_DIR") };
-        }
-        let _ = crate::plugins::note::refresh_cache();
+        assert!(
+            crate::plugins::note::load_notes()
+                .unwrap()
+                .iter()
+                .any(|n| n.slug == "brand-new-note")
+        );
     }
 
     #[test]
     fn insert_or_create_note_link_reuses_existing_note() {
-        use tempfile::tempdir;
-
+        let temp = TempNotesDir::new();
+        crate::plugins::note::append_note("Existing Note", "body").unwrap();
+        temp.refresh_cache();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
         let mut panel = NotePanel::from_note(empty_note("hello "));
         panel.note.slug = "current-note".into();
-        panel.link_new_name = "existing note".into();
-        let id = egui::Id::new("note_content");
-        let dir = tempdir().unwrap();
-        let prev = std::env::var("ML_NOTES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
-        crate::plugins::note::append_note("Existing Note", "body").unwrap();
-        let _ = crate::plugins::note::refresh_cache();
-
-        panel.insert_or_create_note_link(&ctx, id, &mut app);
-
+        let editor = egui::Id::new("note_content");
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("existing note", ""),
+            )
+            .unwrap();
         assert_eq!(panel.note.content, "hello [[Existing Note]]");
-        let notes = crate::plugins::note::load_notes().unwrap();
         assert_eq!(
-            notes.iter().filter(|n| n.slug == "existing-note").count(),
+            crate::plugins::note::load_notes()
+                .unwrap()
+                .iter()
+                .filter(|n| n.slug == "existing-note")
+                .count(),
             1
         );
-
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
-        } else {
-            unsafe { std::env::remove_var("ML_NOTES_DIR") };
-        }
-        let _ = crate::plugins::note::refresh_cache();
     }
 
     #[test]
     fn insert_or_create_note_link_replaces_selection_and_sets_cursor() {
-        use tempfile::tempdir;
-
+        let temp = TempNotesDir::new();
+        temp.refresh_cache();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
         let mut panel = NotePanel::from_note(empty_note("hello world"));
         panel.note.slug = "current-note".into();
         panel.pending_selection = Some((6, 11));
-        panel.link_new_name = "Linked Note".into();
-        let id = egui::Id::new("note_content");
-        let dir = tempdir().unwrap();
-        let prev = std::env::var("ML_NOTES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
-        let _ = crate::plugins::note::refresh_cache();
-
-        panel.insert_or_create_note_link(&ctx, id, &mut app);
-
+        let editor = egui::Id::new("note_content");
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Linked Note", ""),
+            )
+            .unwrap();
         assert_eq!(panel.note.content, "hello [[linked-note]]");
-        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
-        let idx = state.cursor.char_range().unwrap().primary.index.0;
-        assert_eq!(idx, "hello [[linked-note]]".chars().count());
-
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
-        } else {
-            unsafe { std::env::remove_var("ML_NOTES_DIR") };
-        }
-        let _ = crate::plugins::note::refresh_cache();
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        assert_eq!(
+            state.cursor.char_range().unwrap().primary.index.0,
+            "hello [[linked-note]]".chars().count()
+        );
     }
 
     #[test]
     fn insert_or_create_note_link_empty_name_does_not_mutate_content() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
         let mut panel = NotePanel::from_note(empty_note("hello world"));
-        panel.link_new_name = "   ".into();
-        let id = egui::Id::new("note_content");
-
-        panel.insert_or_create_note_link(&ctx, id, &mut app);
-
+        let editor = egui::Id::new("note_content");
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        assert!(
+            panel
+                .submit_child_form(
+                    &ctx,
+                    super::super::note_form_dialog::FormKind::NewNote,
+                    &basis,
+                    &form_test_draft("   ", "")
+                )
+                .is_err()
+        );
         assert_eq!(panel.note.content, "hello world");
     }
 
@@ -18768,7 +18957,7 @@ More text.
             fence_index: 0,
             host_origin: None,
         });
-        protected_panel.link_dialog_open = true;
+        protected_panel.overwrite_prompt = true;
         app.show_inline_errors = true;
         assert!(
             protected_panel
@@ -18944,95 +19133,100 @@ More text.
     #[test]
     fn custom_table_builder_refuses_a_changed_origin_source() {
         let ctx = egui::Context::default();
-        ctx.begin_pass(Default::default());
-        let id = egui::Id::new("custom_table_stale_source");
-        let original = "Before selected text After";
-        let mut panel = NotePanel::from_note(empty_note(original));
-        panel.view_mode = NoteViewMode::Edit;
-        panel.last_textedit_id = Some(id);
-        let selection_start = original.find("selected").unwrap();
-        let selection_end = selection_start + "selected text".len();
-        let mut state = egui::widgets::text_edit::TextEditState::default();
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(
-                egui::text::CCursor::new(original[..selection_start].chars().count()),
-                egui::text::CCursor::new(original[..selection_end].chars().count()),
-            )));
-        state.store(&ctx, id);
-        panel.begin_custom_table_builder(&ctx, id);
-        assert_eq!(
-            panel.test_custom_table_origin_insert_at(),
-            Some(selection_start)
-        );
-
+        let mut panel = NotePanel::from_note(empty_note("Before selected text After"));
+        let editor = egui::Id::new("custom_table_stale_source");
+        panel.pending_selection = Some((7, 20));
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        let draft = form_test_draft("", "");
         panel.replace_content_after_external_mutation("Changed by another editor".into());
-        panel.stage_custom_table_insertion(&ctx);
-
-        assert_eq!(panel.note_content(), "Changed by another editor");
-        assert!(panel.pending_root_effect.is_none());
-        assert_eq!(panel.replacement_undo_boundaries.len(), 0);
         assert!(
             panel
-                .custom_table_builder
-                .as_ref()
-                .and_then(|builder| builder.error.as_ref())
-                .is_some_and(|error| error.contains("changed"))
+                .submit_child_form(
+                    &ctx,
+                    super::super::note_form_dialog::FormKind::Table,
+                    &basis,
+                    &draft
+                )
+                .is_err()
         );
-        ctx.end_pass().drop_without_applying_deltas();
+        assert_eq!(panel.note_content(), "Changed by another editor");
+        assert_eq!(panel.test_replacement_history_counts(), (0, 0));
     }
 
     #[test]
     fn discarded_custom_table_insert_leaves_builder_retryable() {
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("discarded_custom_table_editor");
-        let source = "Before table After";
-        let mut panel = NotePanel::from_note(empty_note(source));
+        let mut panel = NotePanel::from_note(empty_note("Before table After"));
         panel.view_mode = NoteViewMode::Edit;
-        panel.last_textedit_id = Some(editor_id);
+        let editor = egui::Id::new("discarded_custom_table_editor");
+        panel.last_textedit_id = Some(editor);
         let mut state = egui::widgets::text_edit::TextEditState::default();
         state
             .cursor
             .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new("Before ".chars().count()),
+                egui::text::CCursor::new(7),
             )));
-        state.store(&ctx, editor_id);
-        panel.begin_custom_table_builder(&ctx, editor_id);
-
-        let mut discard_requested = false;
-        ctx.run_ui(Default::default(), |ctx| {
-            panel.stage_custom_table_insertion(ctx);
-            if !discard_requested {
-                ctx.request_discard("discard the pending custom table insertion");
-                discard_requested = true;
-            }
-        })
-        .drop_without_applying_deltas();
-
-        assert!(panel.on_ui_frame_complete(&ctx).is_none());
-        assert!(panel.pending_root_effect.is_none());
-        assert!(
-            panel
-                .custom_table_builder
-                .as_ref()
-                .is_some_and(|builder| !builder.pending_insert && builder.error.is_none())
-        );
-        assert_eq!(panel.note_content(), source);
-
-        ctx.run_ui(Default::default(), |ctx| {
-            panel.stage_custom_table_insertion(ctx)
-        })
-        .drop_without_applying_deltas();
-        let effect = panel
-            .on_ui_frame_complete(&ctx)
-            .expect("the retry is retained by its root frame");
-        let NotePanelEffect::InsertCustomTable(request) = effect else {
-            panic!("retry produces a custom table insertion effect");
+        state.store(&ctx, editor);
+        panel.test_begin_custom_table_builder(&ctx);
+        fn frame(
+            ctx: &egui::Context,
+            panel: &mut NotePanel,
+            events: Vec<egui::Event>,
+            discard: bool,
+        ) {
+            let mut discarded = false;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    panel.show_child_forms(
+                        ctx,
+                        ctx.current_pass_index() == 0,
+                        true,
+                        true,
+                        true,
+                        false,
+                    );
+                    if discard && !discarded {
+                        discarded = true;
+                        ctx.request_discard("discard table submit");
+                    }
+                },
+            )
+            .drop_without_applying_deltas();
+            panel.complete_child_forms(ctx);
+        }
+        for _ in 0..3 {
+            frame(&ctx, &mut panel, Vec::new(), false);
+        }
+        let button = panel.test_custom_table_builder_insert_rect().unwrap();
+        let click = |pressed| {
+            vec![
+                egui::Event::PointerMoved(button.center()),
+                egui::Event::PointerButton {
+                    pos: button.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
         };
-        panel
-            .complete_custom_table_insertion(&ctx, request)
-            .expect("the retry applies to the captured source");
-
+        frame(&ctx, &mut panel, click(true), false);
+        frame(&ctx, &mut panel, click(false), true);
+        assert_eq!(panel.note_content(), "Before table After");
+        assert!(panel.table_form.is_some());
+        for _ in 0..2 {
+            frame(&ctx, &mut panel, Vec::new(), false);
+        }
+        frame(&ctx, &mut panel, click(true), false);
+        frame(&ctx, &mut panel, click(false), false);
         assert!(
             panel
                 .note_content()
@@ -19040,7 +19234,7 @@ More text.
         );
         assert!(panel.note_content().ends_with("\n\ntable After"));
         assert_eq!(panel.test_replacement_history_counts(), (1, 0));
-        assert!(panel.custom_table_builder.is_none());
+        assert!(panel.table_form.is_none());
     }
 
     #[test]
@@ -19048,24 +19242,13 @@ More text.
         let ctx = egui::Context::default();
         let mut panel = NotePanel::from_note(empty_note("Small screen draft"));
         panel.view_mode = NoteViewMode::Edit;
-        let editor_id = egui::Id::new("small_screen_custom_table_editor");
-        panel.last_textedit_id = Some(editor_id);
-        let mut editor_state = egui::widgets::text_edit::TextEditState::default();
-        editor_state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(0),
-            )));
-        editor_state.store(&ctx, editor_id);
-        panel.begin_custom_table_builder(&ctx, editor_id);
-        let builder = panel
-            .custom_table_builder
-            .as_mut()
-            .expect("the builder opens from the active editor");
-        builder.columns = 24;
-        builder.header_cells = (1..=24).map(|column| format!("Column {column}")).collect();
-        builder.data_rows = 12;
-
+        let editor = egui::Id::new("small_screen_custom_table_editor");
+        panel.last_textedit_id = Some(editor);
+        panel.test_begin_custom_table_builder(&ctx);
+        let form = panel.table_form.as_mut().unwrap();
+        form.draft.columns = 24;
+        form.draft.headers = (1..=24).map(|column| format!("Column {column}")).collect();
+        form.draft.rows = 12;
         for _ in 0..3 {
             ctx.run_ui(
                 egui::RawInput {
@@ -19076,20 +19259,16 @@ More text.
                     focused: true,
                     ..Default::default()
                 },
-                |ctx| panel.show_custom_table_builder(ctx),
+                |ctx| {
+                    panel.show_child_forms(ctx, true, true, true, true, false);
+                },
             )
             .drop_without_applying_deltas();
+            panel.complete_child_forms(&ctx);
         }
-
-        let window = panel
-            .test_custom_table_builder_rect()
-            .expect("the resizable builder fits the constrained screen");
-        let insert = panel
-            .test_custom_table_builder_insert_rect()
-            .expect("Insert remains reachable below the scrolling names");
-        let cancel = panel
-            .test_custom_table_builder_cancel_rect()
-            .expect("Cancel remains reachable below the scrolling names");
+        let window = panel.test_custom_table_builder_rect().unwrap();
+        let insert = panel.test_custom_table_builder_insert_rect().unwrap();
+        let cancel = panel.test_custom_table_builder_cancel_rect().unwrap();
         assert!(window.contains_rect(insert));
         assert!(window.contains_rect(cancel));
     }
