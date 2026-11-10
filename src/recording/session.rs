@@ -723,8 +723,8 @@ impl RecordingSession {
             {
                 return Err(RecordingSessionError::ClockMovedBackwards);
             }
-            let elapsed = raw_elapsed.min(limit);
-            let reason = if elapsed >= limit {
+            let elapsed = limit.clamp(raw_elapsed);
+            let reason = if limit.reached(elapsed) {
                 RecordingEndReason::DurationLimit
             } else {
                 RecordingEndReason::UserStopped
@@ -1415,7 +1415,7 @@ fn run_capture_worker(
             }
             Err(error) => return WorkerOutcome::Failed(RecordingFailure::InvalidFrame(error)),
         };
-        if elapsed >= options.duration_limit() {
+        if options.duration_limit().reached(elapsed) {
             match claim_terminal(
                 shared,
                 generation,
@@ -1537,7 +1537,7 @@ fn run_capture_worker(
                             return WorkerOutcome::Failed(RecordingFailure::InvalidFrame(error));
                         }
                     };
-                if elapsed >= options.duration_limit() {
+                if options.duration_limit().reached(elapsed) {
                     match claim_terminal(
                         shared,
                         generation,
@@ -1572,7 +1572,7 @@ fn run_capture_worker(
                             return WorkerOutcome::Failed(RecordingFailure::InvalidFrame(error));
                         }
                     };
-                if elapsed >= options.duration_limit() {
+                if options.duration_limit().reached(elapsed) {
                     match claim_terminal(
                         shared,
                         generation,
@@ -1606,7 +1606,7 @@ fn observe_elapsed(
     shared: &SessionShared,
     generation: u64,
     now: Duration,
-    duration_limit: Duration,
+    duration_limit: super::RecordingDurationLimit,
 ) -> Result<Option<Duration>, FrameError> {
     let mut inner = shared.inner.lock().unwrap();
     if inner.closed
@@ -1624,7 +1624,7 @@ fn observe_elapsed(
         return Err(FrameError::ClockMovedBackwards);
     }
     inner.last_clock = Some(now);
-    let elapsed = (now - started_at).min(duration_limit);
+    let elapsed = duration_limit.clamp(now - started_at);
     if let RecorderState::Recording {
         accepted_frames, ..
     } = &inner.state
@@ -1646,7 +1646,7 @@ fn claim_terminal(
     generation: u64,
     reason: RecordingEndReason,
     now: Duration,
-    duration_limit: Duration,
+    duration_limit: super::RecordingDurationLimit,
 ) -> Result<CaptureTerminal, WorkerOutcome> {
     let mut inner = shared.inner.lock().unwrap();
     if inner.closed || inner.generation != generation {
@@ -1672,8 +1672,8 @@ fn claim_terminal(
             FrameError::ClockMovedBackwards,
         )));
     }
-    let elapsed = (now - started_at).min(duration_limit);
-    let reason = if elapsed >= duration_limit {
+    let elapsed = duration_limit.clamp(now - started_at);
+    let reason = if duration_limit.reached(elapsed) {
         RecordingEndReason::DurationLimit
     } else {
         reason
@@ -2016,7 +2016,7 @@ mod tests {
         RecordingOptions::new(
             RecordingFormat::Gif,
             FrameRate::new(10).unwrap(),
-            duration,
+            crate::recording::RecordingDurationLimit::Timed(duration),
             false,
         )
         .unwrap()
@@ -2438,6 +2438,156 @@ mod tests {
 
         drop_release_tx.send(()).unwrap();
         wait_for(&session, |view| !view.worker_busy());
+    }
+
+    #[test]
+    fn recording_session_unlimited_pending_stays_live_past_old_limits_until_stop() {
+        struct PendingSource;
+        impl CaptureSource for PendingSource {
+            fn poll(&mut self, max_wait: Duration, _stop: &CaptureStopToken) -> CapturePoll {
+                std::thread::park_timeout(max_wait);
+                CapturePoll::Pending
+            }
+        }
+        let clock = Arc::new(FakeClock::default());
+        let backend = backend(|_, _| Box::new(PendingSource));
+        let session = session(Arc::clone(&clock), backend);
+        let bounds = ScreenRect::new(0, 0, 2, 2);
+        let target = CaptureTarget::window(1, 1, 1, bounds).unwrap();
+        let options = RecordingOptions::new(
+            RecordingFormat::Gif,
+            FrameRate::new(10).unwrap(),
+            crate::recording::RecordingDurationLimit::Unlimited,
+            false,
+        )
+        .unwrap();
+        session
+            .select(RecordingRequest::new(target, bounds, options).unwrap())
+            .unwrap();
+        session.start().unwrap();
+        wait_for(&session, |view| {
+            matches!(view.state(), RecorderState::Recording { .. })
+        });
+        for elapsed in [
+            Duration::from_secs(121),
+            Duration::from_millis(655_350),
+            Duration::from_secs(1_001),
+        ] {
+            clock.set(elapsed);
+            let view = wait_for(
+                &session,
+                |view| matches!(view.state(), RecorderState::Recording { elapsed: actual, .. } if *actual == elapsed),
+            );
+            assert!(view.terminal().is_none());
+        }
+        assert!(session.stop().unwrap());
+        let view = wait_for(&session, |view| {
+            matches!(
+                view.state(),
+                RecorderState::Failed(RecordingFailure::NoFrames)
+            )
+        });
+        let terminal = view.terminal().unwrap();
+        assert_eq!(terminal.reason(), RecordingEndReason::UserStopped);
+        assert_eq!(terminal.elapsed(), Duration::from_secs(1_001));
+    }
+
+    #[test]
+    fn recording_session_unlimited_stop_freezes_frame_time_before_source_returns() {
+        let clock = Arc::new(FakeClock::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let slot = Arc::new(Mutex::new(Some(release_rx)));
+        let backend = backend(move |size, generation| {
+            Box::new(GatedFrameSource {
+                generation,
+                size,
+                poll_count: 0,
+                entered: entered_tx.clone(),
+                release: slot.lock().unwrap().take().unwrap(),
+            })
+        });
+        let session = session(Arc::clone(&clock), backend);
+        let bounds = ScreenRect::new(0, 0, 2, 2);
+        let target = CaptureTarget::window(1, 1, 1, bounds).unwrap();
+        let options = RecordingOptions::new(
+            RecordingFormat::Gif,
+            FrameRate::new(10).unwrap(),
+            crate::recording::RecordingDurationLimit::Unlimited,
+            false,
+        )
+        .unwrap();
+        session
+            .select(RecordingRequest::new(target, bounds, options).unwrap())
+            .unwrap();
+        session.start().unwrap();
+        wait_for(&session, |view| view.accepted_frames() == 1);
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        clock.set(Duration::from_secs(1001));
+        assert!(session.stop().unwrap());
+        clock.set(Duration::from_secs(1100));
+        release_tx.send(()).unwrap();
+        let view = wait_finalizing_and_retired(&session);
+        let terminal = view.terminal().unwrap();
+        assert_eq!(terminal.reason(), RecordingEndReason::UserStopped);
+        assert_eq!(terminal.elapsed(), Duration::from_secs(1001));
+        assert_eq!(terminal.accepted_frames(), 1);
+    }
+
+    #[test]
+    fn recording_session_unlimited_frame_target_loss_keeps_real_terminal_time() {
+        let clock = Arc::new(FakeClock::default());
+        let source_clock = Arc::clone(&clock);
+        let backend = backend(move |size, generation| {
+            Box::new(ScriptSource::new(
+                Arc::clone(&source_clock),
+                generation,
+                size,
+                [
+                    ScriptStep::Frame(Duration::ZERO),
+                    ScriptStep::Ended(Duration::from_secs(1001), RecordingEndReason::TargetLost),
+                ],
+            ))
+        });
+        let session = session(clock, backend);
+        let bounds = ScreenRect::new(0, 0, 2, 2);
+        let target = CaptureTarget::window(1, 1, 1, bounds).unwrap();
+        let options = RecordingOptions::new(
+            RecordingFormat::Gif,
+            FrameRate::new(10).unwrap(),
+            crate::recording::RecordingDurationLimit::Unlimited,
+            false,
+        )
+        .unwrap();
+        session
+            .select(RecordingRequest::new(target, bounds, options).unwrap())
+            .unwrap();
+        session.start().unwrap();
+        let view = wait_finalizing(&session);
+        let terminal = view.terminal().unwrap();
+        assert_eq!(terminal.reason(), RecordingEndReason::TargetLost);
+        assert_eq!(terminal.elapsed(), Duration::from_secs(1001));
+        assert_eq!(terminal.accepted_frames(), 1);
+    }
+
+    #[test]
+    fn recording_session_finite_pending_stops_at_exact_17_and_1000_seconds() {
+        for seconds in [17, 1_000] {
+            let (session, _) = scripted_session(
+                vec![ScriptStep::Pending(Duration::from_secs(seconds + 1))],
+                Duration::from_secs(seconds),
+            );
+            session.start().unwrap();
+            let view = wait_for(&session, |view| {
+                matches!(
+                    view.state(),
+                    RecorderState::Failed(RecordingFailure::NoFrames)
+                )
+            });
+            let terminal = view.terminal().unwrap();
+            assert_eq!(terminal.reason(), RecordingEndReason::DurationLimit);
+            assert_eq!(terminal.elapsed(), Duration::from_secs(seconds));
+        }
     }
 
     #[test]

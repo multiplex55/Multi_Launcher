@@ -4,7 +4,7 @@ use std::time::Duration;
 pub const MAX_CANVAS_WIDTH: u32 = 1_920;
 pub const MAX_CANVAS_HEIGHT: u32 = 1_080;
 pub const MAX_FRAME_BYTES: usize = MAX_CANVAS_WIDTH as usize * MAX_CANVAS_HEIGHT as usize * 4;
-pub const MAX_RECORDING_SECONDS: u64 = 120;
+pub const MAX_RECORDING_SECONDS: u64 = 1_000;
 pub const DEFAULT_RECORDING_SECONDS: u64 = 30;
 pub const MIN_FRAMES_PER_SECOND: u8 = 1;
 pub const MAX_FRAMES_PER_SECOND: u8 = 60;
@@ -63,11 +63,41 @@ impl FrameRate {
     }
 }
 
+/// An explicit capture deadline; unlimited recordings have no artificial cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingDurationLimit {
+    Unlimited,
+    Timed(Duration),
+}
+
+impl RecordingDurationLimit {
+    pub fn from_seconds(seconds: u64) -> Result<Self, RequestError> {
+        if seconds == 0 {
+            return Ok(Self::Unlimited);
+        }
+        if seconds > MAX_RECORDING_SECONDS {
+            return Err(RequestError::InvalidDuration);
+        }
+        Ok(Self::Timed(Duration::from_secs(seconds)))
+    }
+
+    pub fn clamp(self, elapsed: Duration) -> Duration {
+        match self {
+            Self::Unlimited => elapsed,
+            Self::Timed(limit) => elapsed.min(limit),
+        }
+    }
+
+    pub fn reached(self, elapsed: Duration) -> bool {
+        matches!(self, Self::Timed(limit) if elapsed >= limit)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordingOptions {
     format: RecordingFormat,
     frame_rate: FrameRate,
-    duration_limit: Duration,
+    duration_limit: RecordingDurationLimit,
     include_cursor: bool,
 }
 
@@ -75,11 +105,11 @@ impl RecordingOptions {
     pub fn new(
         format: RecordingFormat,
         frame_rate: FrameRate,
-        duration_limit: Duration,
+        duration_limit: RecordingDurationLimit,
         include_cursor: bool,
     ) -> Result<Self, RequestError> {
-        if duration_limit < Duration::from_secs(1)
-            || duration_limit > Duration::from_secs(MAX_RECORDING_SECONDS)
+        if matches!(duration_limit, RecordingDurationLimit::Timed(duration)
+            if duration < Duration::from_secs(1) || duration > Duration::from_secs(MAX_RECORDING_SECONDS))
         {
             return Err(RequestError::InvalidDuration);
         }
@@ -95,7 +125,9 @@ impl RecordingOptions {
         Self {
             format,
             frame_rate: FrameRate(format.default_frame_rate()),
-            duration_limit: Duration::from_secs(DEFAULT_RECORDING_SECONDS),
+            duration_limit: RecordingDurationLimit::Timed(Duration::from_secs(
+                DEFAULT_RECORDING_SECONDS,
+            )),
             include_cursor: false,
         }
     }
@@ -108,7 +140,7 @@ impl RecordingOptions {
         self.frame_rate
     }
 
-    pub const fn duration_limit(self) -> Duration {
+    pub const fn duration_limit(self) -> RecordingDurationLimit {
         self.duration_limit
     }
 
@@ -394,7 +426,9 @@ impl std::fmt::Display for RequestError {
             Self::CanvasOutOfBounds => "recording canvas exceeds the supported dimensions",
             Self::FrameBytesOverflow => "recording frame byte size overflows the supported limit",
             Self::InvalidFrameRate => "frame rate must be between 1 and 60 frames per second",
-            Self::InvalidDuration => "recording duration must be between 1 and 120 seconds",
+            Self::InvalidDuration => {
+                "recording duration must be unlimited or between 1 and 1000 seconds"
+            }
         };
         formatter.write_str(message)
     }
@@ -512,7 +546,7 @@ pub struct FrameTimeline {
     last_observed: Duration,
     last_accepted: Option<Duration>,
     interval: Duration,
-    duration_limit: Duration,
+    duration_limit: RecordingDurationLimit,
 }
 
 impl FrameTimeline {
@@ -528,8 +562,10 @@ impl FrameTimeline {
 
     pub fn stamp(&mut self, now: Duration) -> Result<FrameStamp, FrameError> {
         let elapsed = self.elapsed_at(now)?;
-        if elapsed >= self.duration_limit {
-            return Ok(FrameStamp::DurationLimit(self.duration_limit));
+        if let RecordingDurationLimit::Timed(limit) = self.duration_limit
+            && elapsed >= limit
+        {
+            return Ok(FrameStamp::DurationLimit(limit));
         }
         if let Some(last_accepted) = self.last_accepted
             && elapsed.saturating_sub(last_accepted) < self.interval
@@ -551,7 +587,7 @@ impl FrameTimeline {
             return Err(FrameError::ClockMovedBackwards);
         }
         self.last_observed = now;
-        Ok((now - self.started_at).min(self.duration_limit))
+        Ok(self.duration_limit.clamp(now - self.started_at))
     }
 }
 
@@ -637,7 +673,10 @@ mod tests {
     fn recording_model_accepts_negative_physical_origin_and_fits_canvas() {
         let options = RecordingOptions::defaults_for(RecordingFormat::Mp4);
         assert_eq!(options.frame_rate().frames_per_second(), 30);
-        assert_eq!(options.duration_limit(), Duration::from_secs(30));
+        assert_eq!(
+            options.duration_limit(),
+            RecordingDurationLimit::Timed(Duration::from_secs(30))
+        );
         assert!(!options.includes_cursor());
 
         let target = CaptureTarget::window(10, 20, 30, screen(-2560, -200, 2560, 1440)).unwrap();
@@ -686,7 +725,7 @@ mod tests {
             RecordingOptions::new(
                 RecordingFormat::Gif,
                 FrameRate::new(10).unwrap(),
-                Duration::ZERO,
+                RecordingDurationLimit::Timed(Duration::ZERO),
                 false,
             ),
             Err(RequestError::InvalidDuration)
@@ -695,7 +734,7 @@ mod tests {
             RecordingOptions::new(
                 RecordingFormat::Mp4,
                 FrameRate::new(30).unwrap(),
-                Duration::from_secs(MAX_RECORDING_SECONDS + 1),
+                RecordingDurationLimit::Timed(Duration::from_secs(MAX_RECORDING_SECONDS + 1)),
                 true,
             ),
             Err(RequestError::InvalidDuration)
@@ -724,11 +763,67 @@ mod tests {
     }
 
     #[test]
+    fn recording_timeline_unlimited_and_finite_boundaries_are_exact() {
+        assert_eq!(
+            RecordingDurationLimit::from_seconds(0),
+            Ok(RecordingDurationLimit::Unlimited)
+        );
+        assert_eq!(
+            RecordingDurationLimit::from_seconds(1001),
+            Err(RequestError::InvalidDuration)
+        );
+        let rate = FrameRate::new(10).unwrap();
+        let unlimited = RecordingOptions::new(
+            RecordingFormat::Gif,
+            rate,
+            RecordingDurationLimit::Unlimited,
+            false,
+        )
+        .unwrap();
+        let mut timeline = FrameTimeline::new(Duration::ZERO, unlimited);
+        for elapsed in [
+            Duration::from_secs(121),
+            Duration::from_millis(655_350),
+            Duration::from_secs(1001),
+        ] {
+            assert_eq!(timeline.stamp(elapsed), Ok(FrameStamp::Accepted(elapsed)));
+        }
+        assert_eq!(
+            timeline.elapsed_at(Duration::from_secs(1000)),
+            Err(FrameError::ClockMovedBackwards)
+        );
+        for seconds in [17, 1000] {
+            let options = RecordingOptions::new(
+                RecordingFormat::Gif,
+                rate,
+                RecordingDurationLimit::Timed(Duration::from_secs(seconds)),
+                false,
+            )
+            .unwrap();
+            let mut timeline = FrameTimeline::new(Duration::ZERO, options);
+            assert_eq!(
+                timeline.stamp(Duration::from_secs(seconds) - Duration::from_millis(100)),
+                Ok(FrameStamp::Accepted(
+                    Duration::from_secs(seconds) - Duration::from_millis(100)
+                ))
+            );
+            assert_eq!(
+                timeline.stamp(Duration::from_secs(seconds)),
+                Ok(FrameStamp::DurationLimit(Duration::from_secs(seconds)))
+            );
+            assert_eq!(
+                timeline.elapsed_at(Duration::from_secs(seconds + 1)),
+                Ok(Duration::from_secs(seconds))
+            );
+        }
+    }
+
+    #[test]
     fn recording_timeline_throttles_without_rewriting_elapsed_gaps() {
         let options = RecordingOptions::new(
             RecordingFormat::Gif,
             FrameRate::new(10).unwrap(),
-            Duration::from_secs(1),
+            RecordingDurationLimit::Timed(Duration::from_secs(1)),
             false,
         )
         .unwrap();

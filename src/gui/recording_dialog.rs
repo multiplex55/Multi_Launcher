@@ -2229,7 +2229,8 @@ fn make_request(
     let options = RecordingOptions::new(
         selection.format,
         frame_rate,
-        Duration::from_secs(u64::from(selection.duration_seconds)),
+        crate::recording::RecordingDurationLimit::from_seconds(u64::from(selection.duration_seconds))
+            .map_err(|error| error.to_string())?,
         selection.include_cursor,
     )
     .map_err(|error| error.to_string())?;
@@ -2634,7 +2635,10 @@ mod tests {
         assert_eq!(frozen.scale(), OutputScale::Quarter);
         assert_eq!(frozen.options().format(), RecordingFormat::Mp4);
         assert_eq!(frozen.options().frame_rate().frames_per_second(), 24);
-        assert_eq!(frozen.options().duration_limit(), Duration::from_secs(17));
+        assert_eq!(
+            frozen.options().duration_limit(),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(17))
+        );
         assert!(frozen.options().includes_cursor());
         assert_eq!(frozen.encoded_dimensions(), (82, 62));
 
@@ -2663,7 +2667,10 @@ mod tests {
         assert_eq!(frozen.options().format(), RecordingFormat::Mp4);
         assert_eq!(frozen.scale(), OutputScale::Quarter);
         assert_eq!(frozen.options().frame_rate().frames_per_second(), 24);
-        assert_eq!(frozen.options().duration_limit(), Duration::from_secs(17));
+        assert_eq!(
+            frozen.options().duration_limit(),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(17))
+        );
         assert!(frozen.options().includes_cursor());
 
         let ctx = egui::Context::default();
@@ -2734,7 +2741,7 @@ mod tests {
         let options = crate::recording::RecordingOptions::new(
             RecordingFormat::Gif,
             FrameRate::new(10).unwrap(),
-            Duration::from_secs(120),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(120)),
             false,
         )
         .unwrap();

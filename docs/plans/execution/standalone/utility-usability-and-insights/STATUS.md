@@ -31,7 +31,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M4-C | D3 owned-text endpoint captions | complete; automated verified, native pending |
 | M4-D | D5 actual connector creation / reconnection | complete; automated verified, native pending |
 | M5-A | I1 bounded label-file exchange | complete; automated verified, native pending |
-| M6-A | R1/R2 explicit duration / encoder timeline | pending |
+| M6-A | R1/R2 explicit duration / encoder timeline | complete foundation; UI pending M6-B |
 | M6-B | R1/R2 exact typing / 25-second steps | pending |
 | M7-A | F1 retained-tree treemap model | pending |
 | M7-B | F1/F2 linked navigation / visibility | pending |
@@ -394,3 +394,19 @@ The initial compiled binary stalled in test discovery before any test ran. Owned
 Final separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` successful batches under `target/utility-usability-and-insights/evidence/`: `m5-a-codec-fixed` 4/4 (bounds/roundtrip/atomic domain plus existing exact Inspector behavior); `m5-a-inspector` 7/7 (accepted controls/file flow, stale host/session/draft, same-frame ordering, confirmation, narrow/native body/private draft regressions); pending-close guards 3/3; actual export replacement I/O failure/sentinel 1/1; final `m5-a-pad-invariants` 1/1 uses real Pad source/binding and nonempty comparison result. Exact selectors remain in each receipt. All final receipts exit 0/no timeout/cleanup and drain verified.
 
 Parent inspected scoped diff/whitespace/status; only label domain/codec, Inspector/generic-host/app dispatch and ledger changed. New codec is intentional; no loader workarounds, diagnostics or task processes remain. Source/Cargo returned. Physical native file-picker/import/export observation pending M9; M6–M8 and remaining global ordinary adapters continue.
+
+M5-A checkpoint `dfadbdb04fa858ae2727282cebd8746754b25052` pushed successfully; clean tree before M6-A. Implementer owns typed timed/Unlimited recording semantics through all model/session/idle/terminal paths and wide GIF/true MP4 timestamps, preserving bounded streaming/cancellation/output. Injected clocks/tiny encoder fixtures; visible exact duration controls remain M6-B. Parent ledger/Git; one source/Cargo lane.
+
+## M6-A acceptance: Explicit recording limits and encoder timing
+
+`RecordingDurationLimit` explicitly models Unlimited or validated Timed 1–1,000 seconds; default remains Timed 30. Shared reached/clamp semantics cover timeline admission, idle/no-frame observation, manual stop and terminal claims. Unlimited retains real elapsed time and no DurationLimit termination; existing target/error/empty-clip/cancel/resource safeguards remain. Immediate controller/Windows/GUI request callers migrate to the type. The visible 1–120 control is intentionally still M6-B work, so R1/R2 UI outcomes are not yet complete.
+
+GIF uses checked u64 absolute centisecond positions and streams long holds in ≤u16 per-frame delay chunks from one quantized pending image, checking session/generation between chunks and before finalization. Counts and representational overflow are explicit; cadence/zero-tail/rounding and staged output lifecycle preserved. MP4 removes product-duration guards and validates signed 100-nanosecond timestamp/sample-end bounds, positive sample durations and checked counters before native submission. No sentinel Unlimited duration or whole-clip buffering.
+
+Separate final fast-dev lib no-run compile passed without introduced warnings. Owned 100-second `--no-fail-fast` successful receipts under `target/utility-usability-and-insights/evidence/`:
+
+- `m6-a-session`: 10/10; fake-clock idle Unlimited remains Recording beyond 121/655.35/1,001 seconds before explicit Stop, held-frame Stop/target loss, finite 17/1,000 boundaries, default/options/timeline, empty-source/clock/error and mailbox/stop invariants.
+- `m6-a-encoders`: 8/8; decoded long GIF delay chunks sum exactly beyond 65,535cs/1,000s with cancellation/write/trailer/true overflow coverage, original cadence/zero-tail/error behavior, MP4 real signed timestamp and sample-end boundaries/backwards validation.
+- `m6-a-terminal`: 1/1 slow-source terminal claim freezes time before cleanup.
+
+Final receipts exit 0/no timeout/cleanup and drain verified; selectors/output recorded there. Parent inspected scoped diff/whitespace/stale-cap search: no product 120-second cap remains in recording domain/encoders; remaining 120-second fixtures are legitimate, visible control remains explicitly deferred. Test-only GIF wrapper is retained for its existing trailer-error caller. Source/Cargo returned. No real long recording or physical native smoke claimed; M6-B exact input/steps/frozen status follows.

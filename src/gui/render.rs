@@ -14853,7 +14853,7 @@ mod tests {
         let options = crate::recording::RecordingOptions::new(
             crate::recording::RecordingFormat::Gif,
             crate::recording::FrameRate::new(12).unwrap(),
-            Duration::from_secs(120),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(120)),
             false,
         )
         .unwrap();
