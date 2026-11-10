@@ -2212,6 +2212,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
+            Panel::CalculationDependencyDialog => self.calculation_dependency_host.root_layer(),
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer(),
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
@@ -4869,6 +4870,7 @@ impl LauncherApp {
         self.batch_rename_host.prepare_open(ctx, &self.batch_rename_dialog);
         self.search_replace_host.prepare_open(ctx, &self.search_replace_dialog);
         self.programmer_inspector_host.prepare_open(ctx, &self.programmer_inspector_dialog);
+        self.calculation_dependency_host.prepare_open(ctx, &self.calculation_dependency_dialog);
         self.explorer_tabs_host.prepare_open(ctx, &self.explorer_tabs_dialog);
         let (visibility_request, visibility_invocation_id, should_be_visible, _) =
             self.reconcile_root_visibility(ctx);
@@ -4953,6 +4955,7 @@ impl LauncherApp {
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden()
                 || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
+                || self.calculation_dependency_host.needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.explorer_tabs_host.needs_root_ui_when_hidden(self.explorer_tabs_dialog.open)
                 || self.explorer_tabs_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -5470,6 +5473,63 @@ impl LauncherApp {
                 close_shortcut: !pinned && !decision_pending, allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
             }
+        );
+    }
+
+    fn show_calculation_dependencies(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+    ) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        if !self.calculation_dependency_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.calculation_dependency_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::CalculationDependencyDialog);
+        let runtime = super::calculation_dependency_dialog::DependencyRuntime {
+            snapshot: self.calculation_pad_dialog.dependency_context(),
+            pad_host: self.calculation_pad_dialog.dependency_host(),
+            pinned,
+        };
+        self.calculation_dependency_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_dependency_host.show(
+            ctx,
+            &mut self.calculation_dependency_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
         );
     }
 
@@ -9593,6 +9653,7 @@ impl LauncherApp {
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -11450,6 +11511,7 @@ impl LauncherApp {
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -11945,6 +12007,7 @@ impl LauncherApp {
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_calculation_dependencies(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
@@ -12939,6 +13002,7 @@ impl LauncherApp {
             }
         }
         let mut inspector_open = None;
+        let mut dependency_open = None;
         for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
             match pad_effect {
                 super::CalculationPadDialogEffect::ShowRoot => {
@@ -12953,10 +13017,83 @@ impl LauncherApp {
                 super::CalculationPadDialogEffect::OpenInspector(origin) => {
                     inspector_open = Some(origin);
                 }
+                super::CalculationPadDialogEffect::OpenDependencies(origin) => { dependency_open = Some(origin); }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
             }
+        }
+        let current_dependency_context = if self.calculation_dependency_dialog.open {
+            self.calculation_pad_dialog.dependency_context()
+        } else {
+            None
+        };
+        let mut dependency_show_root = false;
+        if let Some(completion) = self
+            .calculation_dependency_host
+            .complete(ctx, &mut self.calculation_dependency_dialog)
+        {
+            use super::utility_window_host::CalculationDependencyHostCommand;
+            for command in completion.commands {
+                match command {
+                    CalculationDependencyHostCommand::Closed => {
+                        self.calculation_dependency_dialog.close();
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::CalculationDependencyDialog);
+                    }
+                    CalculationDependencyHostCommand::Apply(actions) => {
+                        let pad_host = actions.pad_host;
+                        if let Some(nav) = self
+                            .calculation_dependency_dialog
+                            .commit(actions, current_dependency_context.as_deref())
+                            && let Some(pad_host) = pad_host
+                            && !self.confirm_modal.is_open()
+                            && !self.action_sheet.is_open()
+                        {
+                            if self
+                                .calculation_pad_dialog
+                                .navigate_dependency(nav, pad_host, ctx)
+                                && self.calculation_pad_dialog.host_layer_if_root().is_some()
+                            {
+                                effects.push(RootDialogEffect::ShowRoot);
+                            }
+                        }
+                    }
+                }
+            }
+            dependency_show_root = completion.show_root;
+        }
+        if let Some(origin) = dependency_open
+            && self
+                .calculation_pad_dialog
+                .accepts_inspector_origin(&origin)
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+        {
+            let was_open = self.calculation_dependency_dialog.open;
+            let snapshot = self.calculation_pad_dialog.dependency_context();
+            let seed = snapshot.as_ref().and_then(|s| {
+                self.calculation_pad_dialog
+                    .dependency_seed()
+                    .map(|id| (s.document_id, s.incarnation, id))
+            });
+            self.calculation_dependency_dialog.open(seed);
+            let desired = self.calculation_dependency_host.open_from_origin(
+                ctx,
+                &self.calculation_dependency_dialog,
+                was_open,
+                &super::utility_host::ChildOpenOrigin::Parent(origin),
+            );
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::CalculationDependencyDialog);
+            self.panel_stack
+                .push(super::Panel::CalculationDependencyDialog);
+            if desired == Some(super::utility_host::UtilityPresentation::Docked) {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if dependency_show_root && !self.calculation_dependency_host.is_popped_out() {
+            effects.push(RootDialogEffect::ShowRoot);
         }
         let current_inspector_context = self.calculation_pad_dialog.inspector_context();
         let mut inspector_show_root = false;
@@ -19097,6 +19234,290 @@ mod tests {
         panic!(
             "Tab focus did not produce a fully contained action on a settled scroll frame: {observations:#?}"
         );
+    }
+
+    #[test]
+    fn native_pad_dependency_explorer_inherits_and_reuses_session() {
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let key = crate::settings::UtilityToolKey::parse("calculation-pad-dependencies").unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .utility_presentations
+            .set(key, crate::settings::RememberedPresentation::Docked)
+            .unwrap();
+        settings.save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = boxed_app(&ctx);
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            settings.utility_presentations,
+        );
+        manager.install_in_context(&ctx);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog
+            .test_replace_source("α = 2\nα + 1");
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        app.request_launcher_visibility(false);
+        let pad = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
+        }
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                pad,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.calculation_dependency_dialog.open);
+        assert!(app.calculation_dependency_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        let epoch = app.calculation_dependency_dialog.epoch();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
+        }
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                pad,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.calculation_dependency_dialog.epoch(), epoch);
+        assert!(!app.visible_flag_state());
+        let child = app.calculation_dependency_host.owner_viewport();
+        app.calculation_dependency_dialog.request_close();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+        }
+        assert!(!app.calculation_dependency_dialog.open);
+        assert!(app.calculation_pad_dialog.open);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
+        }
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                pad,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.calculation_dependency_dialog.open
+                && app.calculation_dependency_host.is_popped_out()
+        );
+        assert_ne!(app.calculation_dependency_dialog.epoch(), epoch);
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        assert!(app.calculation_pad_dialog.open && app.calculation_dependency_dialog.open);
+        workers.join_all();
+    }
+
+    #[test]
+    fn dependency_explorer_opens_browses_and_navigates_current_pad() {
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = boxed_app(&ctx);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog
+            .test_replace_source("α = 2\nα + 1");
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (open, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
+        assert!(enabled && clip.contains_rect(open));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(open, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(app.calculation_dependency_dialog.open);
+        assert!(!app.programmer_inspector_dialog.open);
+        let (row, clip) = app
+            .calculation_dependency_dialog
+            .test_control("row/2")
+            .expect("source chooser");
+        assert!(clip.contains_rect(row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(row, pressed),
+                false,
+                false,
+            );
+        }
+        let selected = app
+            .calculation_dependency_dialog
+            .test_selected()
+            .expect("selected line");
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .selected_line
+                .is_none()
+        );
+        app.calculation_pad_dialog
+            .test_replace_source("# inserted\nα = 2\nα + 1");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.calculation_dependency_dialog.test_selected(),
+            Some(selected)
+        );
+        let (go, clip) = app
+            .calculation_dependency_dialog
+            .test_control("go")
+            .expect("navigation action");
+        assert!(clip.contains_rect(go));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(go, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(go, false),
+            true,
+            false,
+        );
+        assert!(
+            !app.calculation_pad_dialog
+                .test_dependency_navigation_pending()
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (go, clip) = app
+            .calculation_dependency_dialog
+            .test_control("go")
+            .unwrap();
+        assert!(clip.contains_rect(go));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(go, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("# inserted\nα = 2\nα + 1")
+        );
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .selected_line
+                .is_none()
+        );
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+        let state = egui::widgets::text_edit::TextEditState::load(
+            &ctx,
+            egui::Id::new("calculation-pad-source"),
+        )
+        .unwrap();
+        let range = state.cursor.char_range().unwrap().as_sorted_char_range();
+        let source = app.calculation_pad_dialog.test_source().unwrap();
+        let start = source.find("α + 1").unwrap();
+        assert_eq!(
+            (usize::from(range.start), usize::from(range.end)),
+            (source[..start].chars().count(), source.chars().count())
+        );
+
+        app.calculation_dependency_dialog.request_close();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(!app.calculation_dependency_dialog.open);
+        assert!(app.calculation_pad_dialog.open);
     }
 
     #[test]
@@ -62540,7 +62961,7 @@ mod tests {
         let stateful_hosts = [
             Panel::Settings, Panel::FileSearchDialog, Panel::ClipboardDialog,
             Panel::ClipboardModifyDialog, Panel::JsonUtilityDialog,
-            Panel::ProgrammerInspectorDialog, Panel::ExplorerTabsDialog,
+            Panel::ProgrammerInspectorDialog, Panel::CalculationDependencyDialog, Panel::ExplorerTabsDialog,
             Panel::TableUtilityDialog, Panel::TimerDialog, Panel::DateTimeStudioDialog,
             Panel::ImageCompareDialog, Panel::DuplicateFinderDialog, Panel::FolderSizeDialog,
             Panel::FileLockDialog, Panel::RecordingDialog, Panel::ZipExtractorDialog,

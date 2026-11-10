@@ -61,6 +61,7 @@ pub(crate) struct CalculationPadDialog {
     host_state: UtilityHostState,
     presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
+    dependency_navigation: Option<(PadHostIdentity, super::calculation_dependency_dialog::DependencyNavigation)>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
@@ -80,6 +81,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_editor_id: Option<egui::Id>,
     #[cfg(test)]
+    test_editor_scroll_id: Option<egui::Id>,
+    #[cfg(test)]
     test_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_copy_all_rect: Option<egui::Rect>,
@@ -93,6 +96,8 @@ pub(crate) struct CalculationPadDialog {
     test_result_rows: Vec<(usize, egui::Rect)>,
     #[cfg(test)]
     test_select_comparison: Option<egui::Rect>,
+    #[cfg(test)]
+    test_dependency_open: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
@@ -131,6 +136,7 @@ pub(crate) struct CalculationPadDialog {
 pub(super) enum CalculationPadDialogEffect {
     CopyText(String),
     OpenInspector(PadOpenReceipt),
+    OpenDependencies(PadOpenReceipt),
     ShowRoot,
     SaveRecoveryPreference(bool),
 }
@@ -163,6 +169,15 @@ struct HelpEffects {
     embedded_focus: Option<egui::Id>,
 }
 
+struct DependencyEditorUpdate {
+    navigation: super::calculation_dependency_dialog::DependencyNavigation,
+    revision: u64,
+    editor_id: egui::Id,
+    editor_state: egui::widgets::text_edit::TextEditState,
+    scroll_id: egui::Id,
+    scroll_state: egui::scroll_area::State,
+}
+
 struct HostEffects {
     identity: PadHostIdentity,
     viewport_id: egui::ViewportId,
@@ -175,6 +190,8 @@ struct HostEffects {
     inspector_selection: Option<LineId>,
     inspector_caret: Option<std::ops::Range<usize>>,
     open_inspector: bool,
+    open_dependencies: bool,
+    dependency_applied: Option<DependencyEditorUpdate>,
     save_as_name: Option<String>,
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
@@ -276,6 +293,8 @@ impl CalculationPadDialog {
             inspector_selection: None,
             inspector_caret: None,
             open_inspector: false,
+            open_dependencies: false,
+            dependency_applied: None,
             save_as_name: None,
             source_focus_requested: false,
             source_editor_id: None,
@@ -366,6 +385,7 @@ impl CalculationPadDialog {
             host_state: UtilityHostState::docked(),
             presentation_prepared: false,
             deferred_source_focus: None,
+            dependency_navigation: None,
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
@@ -385,6 +405,8 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_editor_id: None,
             #[cfg(test)]
+            test_editor_scroll_id: None,
+            #[cfg(test)]
             test_editor_rect: None,
             #[cfg(test)]
             test_copy_all_rect: None,
@@ -398,6 +420,8 @@ impl CalculationPadDialog {
             test_result_rows: Vec::new(),
             #[cfg(test)]
             test_select_comparison: None,
+            #[cfg(test)]
+            test_dependency_open: None,
             #[cfg(test)]
             test_inspector_reopen: None,
             #[cfg(test)]
@@ -1185,6 +1209,18 @@ impl CalculationPadDialog {
         source_focus_allowed: bool,
         effects: &mut HostEffects,
     ) {
+        if self.dependency_navigation.is_some_and(|(host, nav)| {
+            host != self.host_identity()
+                || self.session.current_id() != Some(nav.document)
+                || self.session.document_incarnation() != Some(nav.incarnation)
+                || !self.open
+                || !self
+                    .session
+                    .line_ids()
+                    .is_some_and(|ids| ids.contains(&nav.line))
+        }) {
+            self.dependency_navigation = None;
+        }
         let content_rect = ui.clip_rect();
         let editor_id = egui::Id::new("calculation-pad-source");
         effects.source_editor_id = Some(editor_id);
@@ -1219,6 +1255,8 @@ impl CalculationPadDialog {
                         &mut effects.inspector_selection,
                         &mut effects.inspector_caret,
                         &mut effects.open_inspector,
+                        &mut effects.open_dependencies,
+                        &mut effects.dependency_applied,
                         identity,
                         viewport_id,
                     );
@@ -1476,6 +1514,8 @@ impl CalculationPadDialog {
             host.inspector_selection = None;
             host.inspector_caret = None;
             host.open_inspector = false;
+            host.open_dependencies = false;
+            host.dependency_applied = None;
         }
 
         let needs_repaint = host.edited_source.is_some()
@@ -1668,6 +1708,44 @@ impl CalculationPadDialog {
             )
         {
             delivered.push(CalculationPadDialogEffect::OpenInspector(receipt));
+        }
+        if host.open_dependencies
+            && !host.close_requested
+            && host.host_request.is_none()
+            && host
+                .document_basis
+                .map(|(incarnation, document, _)| (incarnation, document))
+                == self
+                    .session
+                    .document_incarnation()
+                    .zip(self.session.current_id())
+            && let (Some(incarnation), Some(document), Some(owner)) = (
+                self.session.document_incarnation(),
+                self.session.current_id(),
+                host.pass,
+            )
+            && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx,
+                host.identity,
+                (incarnation, document),
+                root,
+                owner,
+            )
+        {
+            delivered.push(CalculationPadDialogEffect::OpenDependencies(receipt));
+        }
+        if let Some(update) = host.dependency_applied
+            && self.dependency_navigation == Some((host.identity, update.navigation))
+            && self.session.revision() == Some(update.revision)
+            && self.host_identity() == host.identity
+            && self.open
+        {
+            update.editor_state.store(ctx, update.editor_id);
+            update.scroll_state.store(ctx, update.scroll_id);
+            self.host_state.request_focus();
+            ctx.request_repaint_of(host.viewport_id);
+            host.source_focus_requested = true;
+            self.dependency_navigation = None;
         }
         if host.close_requested {
             self.host_close_requested = false;
@@ -1902,6 +1980,75 @@ impl CalculationPadDialog {
         }
     }
 
+    pub(super) fn dependency_context(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::calculation_pad::DependencySnapshot>> {
+        if !self.open
+            || self.host_close_requested
+            || self.open_chooser
+            || self.save_as_open
+            || self.session.pending_transition().is_some()
+        {
+            return None;
+        }
+        self.session.dependency_snapshot()
+    }
+
+    pub(super) fn dependency_host(&self) -> Option<super::utility_host::HostIdentity> {
+        (self.open
+            && !self.host_close_requested
+            && !self.open_chooser
+            && !self.save_as_open
+            && self.session.pending_transition().is_none())
+        .then(|| self.host_identity())
+    }
+
+    pub(super) fn dependency_seed(&self) -> Option<LineId> {
+        let caret = self.inspector_caret.as_ref()?;
+        if self.session.document_incarnation() != Some(caret.incarnation)
+            || self.session.current_id() != Some(caret.document)
+            || self.session.revision() != Some(caret.revision)
+        {
+            return None;
+        }
+        let source = self.session.source()?;
+        let index = source
+            .get(..caret.range.start)?
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        self.session.line_id(index)
+    }
+
+    pub(super) fn navigate_dependency(
+        &mut self,
+        nav: super::calculation_dependency_dialog::DependencyNavigation,
+        source_host: super::utility_host::HostIdentity,
+        ctx: &egui::Context,
+    ) -> bool {
+        if self.host_identity() != source_host
+            || !self.open
+            || self.host_close_requested
+            || self.open_chooser
+            || self.save_as_open
+            || self.session.pending_transition().is_some()
+            || self
+                .session
+                .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
+                .is_none()
+        {
+            return false;
+        }
+        self.dependency_navigation = Some((self.host_identity(), nav));
+        let viewport = if source_host.host == PadHost::Popout {
+            pad_viewport_id()
+        } else {
+            egui::ViewportId::ROOT
+        };
+        ctx.request_repaint_of(viewport);
+        true
+    }
+
     pub(super) fn inspector_context(&self) -> std::sync::Arc<InspectorPadContext> {
         std::sync::Arc::clone(&self.inspector_context)
     }
@@ -2001,6 +2148,8 @@ impl CalculationPadDialog {
         inspector_selection: &mut Option<LineId>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         open_inspector: &mut bool,
+        open_dependencies: &mut bool,
+        dependency_applied: &mut Option<DependencyEditorUpdate>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
@@ -2034,6 +2183,9 @@ impl CalculationPadDialog {
             if examples.clicked() {
                 *intent = Some(DialogIntent::OpenExamples);
             }
+            let dependencies = ui.button("Dependencies…");
+            #[cfg(test)] { self.test_dependency_open = Some((dependencies.rect, ui.clip_rect(), dependencies.enabled())); }
+            if dependencies.clicked() { *open_dependencies = true; }
             let inspector = ui.button("Programmer Inspector…");
             #[cfg(test)]
             {
@@ -2109,6 +2261,7 @@ impl CalculationPadDialog {
                     source_focus_requested,
                     edited_source,
                     inspector_caret,
+                    dependency_applied,
                 );
                 self.results_ui(
                     &mut columns[1],
@@ -2132,6 +2285,7 @@ impl CalculationPadDialog {
                 source_focus_requested,
                 edited_source,
                 inspector_caret,
+                dependency_applied,
             );
             self.results_ui(
                 ui,
@@ -2263,9 +2417,24 @@ impl CalculationPadDialog {
         source_focus_requested: &mut bool,
         edited_source: &mut Option<String>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
+        dependency_applied: &mut Option<DependencyEditorUpdate>,
     ) {
         ui.heading("Source");
-        let response = ui
+        let navigation = self.dependency_navigation.and_then(|(host, nav)| {
+            (authorized_pass
+                && host == self.host_identity()
+                && self.open
+                && !self.open_chooser
+                && !self.save_as_open
+                && self.session.pending_transition().is_none())
+            .then(|| {
+                self.session
+                    .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
+                    .map(|location| (nav, location))
+            })
+            .flatten()
+        });
+        let scroll = ui
             .add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
                 egui::ScrollArea::both()
                     .id_salt("calculation-pad-editor-scroll")
@@ -2279,11 +2448,44 @@ impl CalculationPadDialog {
                             .hint_text("total = 2 + 3\nr1 * 4")
                             .show(ui)
                     })
-                    .inner
             })
             .inner;
-
-        let response = &response.response;
+        if let Some((nav, location)) = navigation
+            && let Some(revision) = self.session.revision()
+        {
+            let start = source[..location.source_range.start].chars().count();
+            let end = source[..location.source_range.end].chars().count();
+            let mut state = scroll.inner.state.clone();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(start),
+                    egui::text::CCursor::new(end),
+                )));
+            let target = scroll
+                .inner
+                .galley
+                .pos_from_cursor(egui::text::CCursor::new(start))
+                .translate(scroll.inner.galley_pos.to_vec2());
+            let mut scroll_state = scroll.state;
+            scroll_state.offset.y =
+                (scroll_state.offset.y + target.center().y - scroll.inner_rect.center().y).max(0.0);
+            scroll_state.offset.x =
+                (scroll_state.offset.x + target.left() - scroll.inner_rect.left()).max(0.0);
+            *dependency_applied = Some(DependencyEditorUpdate {
+                navigation: nav,
+                revision,
+                editor_id,
+                editor_state: state,
+                scroll_id: scroll.id,
+                scroll_state,
+            });
+        }
+        #[cfg(test)]
+        {
+            self.test_editor_scroll_id = Some(scroll.id);
+        }
+        let response = &scroll.inner.response;
         let cursor_interaction = response.clicked()
             || response.dragged()
             || response.changed()
@@ -2689,6 +2891,7 @@ impl CalculationPadDialog {
     }
 
     fn reset_transient_ui(&mut self) {
+        self.dependency_navigation = None;
         self.open_chooser = false;
         self.examples_open = false;
         self.saved_documents.clear();
@@ -2793,6 +2996,12 @@ impl CalculationPadDialog {
             .find(|(line, _, _, _)| *line == index)
             .map(|(_, rect, clip, enabled)| (*rect, *clip, *enabled))
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_dependency_navigation_pending(&self) -> bool { self.dependency_navigation.is_some() }
+
+    #[cfg(test)]
+    pub(crate) fn test_dependency_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_dependency_open }
 
     #[cfg(test)]
     pub(crate) fn test_inspector_reopen(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
@@ -3052,6 +3261,107 @@ mod tests {
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+    #[test]
+    fn dependency_navigation_applies_current_utf8_caret_and_scroll_only_after_retention() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let mut lines = (0..50).map(|n| format!("v{n} = {n}")).collect::<Vec<_>>();
+        lines.push("{顧客 名} = 42".into());
+        dialog.test_replace_source(&lines.join("\n"));
+        let size = egui::vec2(900.0, 700.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let snapshot = dialog.dependency_context().unwrap();
+        let target = snapshot.rows.last().unwrap();
+        let nav = super::super::calculation_dependency_dialog::DependencyNavigation {
+            document: snapshot.document_id,
+            incarnation: snapshot.incarnation,
+            line: target.id,
+        };
+        let host = dialog.host_identity();
+        let editor_id = dialog.test_editor_id.unwrap();
+        let scroll_id = dialog.test_editor_scroll_id.unwrap();
+        let before_cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .and_then(|state| state.cursor.char_range());
+        let before_scroll = egui::scroll_area::State::load(&ctx, scroll_id)
+            .unwrap()
+            .offset;
+        let before = (
+            dialog.session.source().unwrap().to_owned(),
+            dialog.session.revision(),
+            dialog.session.is_dirty(),
+            dialog.session.can_undo(),
+            dialog.session.can_redo(),
+            dialog.session.evaluation_count(),
+        );
+        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(
+            !dialog.focus_source,
+            "queued navigation does not force focus before retention"
+        );
+        frame_requesting_late_discard(&mut dialog, &ctx, size, Vec::new());
+        assert_eq!(
+            egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+                .and_then(|state| state.cursor.char_range()),
+            before_cursor
+        );
+        assert_eq!(
+            egui::scroll_area::State::load(&ctx, scroll_id)
+                .unwrap()
+                .offset,
+            before_scroll
+        );
+        frame(&mut dialog, &ctx, size, Vec::new());
+        let cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
+        let expected_start = dialog.session.source().unwrap()[..target.source_range.start]
+            .chars()
+            .count();
+        let expected_end = dialog.session.source().unwrap()[..target.source_range.end]
+            .chars()
+            .count();
+        assert_eq!(
+            (
+                usize::from(cursor.primary.index),
+                usize::from(cursor.secondary.index)
+            ),
+            (expected_end, expected_start)
+        );
+        assert!(
+            egui::scroll_area::State::load(&ctx, scroll_id)
+                .unwrap()
+                .offset
+                .y
+                > before_scroll.y
+        );
+        assert_eq!(
+            (
+                dialog.session.source().unwrap().to_owned(),
+                dialog.session.revision(),
+                dialog.session.is_dirty(),
+                dialog.session.can_undo(),
+                dialog.session.can_redo(),
+                dialog.session.evaluation_count()
+            ),
+            before
+        );
+        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(!dialog.focus_source);
+        dialog.host_state.transition(super::PadHost::Popout);
+        assert!(
+            !dialog.focus_source,
+            "a queued request cannot focus a retired host"
+        );
+        assert!(!dialog.navigate_dependency(nav, host, &ctx));
+        dialog.host_state.transition(super::PadHost::Docked);
+        assert!(!dialog.navigate_dependency(nav, host, &ctx));
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
 mod programmer_inspector_dialog;
+mod calculation_dependency_dialog;
 mod explorer_tabs_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
@@ -772,6 +773,7 @@ pub enum Panel {
     RegexTesterDialog,
     CalculationPadDialog,
     ProgrammerInspectorDialog,
+    CalculationDependencyDialog,
     ExplorerTabsDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
@@ -846,6 +848,7 @@ impl Panel {
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
             Self::ProgrammerInspectorDialog => "Programmer Inspector",
+            Self::CalculationDependencyDialog => "Dependency Explorer",
             Self::ExplorerTabsDialog => "Explorer Tabs",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
@@ -921,6 +924,7 @@ struct PanelStates {
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
     programmer_inspector_dialog: bool,
+    calculation_dependency_dialog: bool,
     explorer_tabs_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
@@ -1327,6 +1331,8 @@ pub struct LauncherApp {
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub(crate) programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
     programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
+    calculation_dependency_dialog: calculation_dependency_dialog::CalculationDependencyDialog,
+    calculation_dependency_host: utility_window_host::CalculationDependencyWindowHost,
     explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog,
     explorer_tabs_host: explorer_tabs_dialog::ExplorerTabsWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
@@ -4137,6 +4143,8 @@ impl LauncherApp {
             calculation_pad_dialog,
             programmer_inspector_dialog,
             programmer_inspector_host: Default::default(),
+            calculation_dependency_dialog: Default::default(),
+            calculation_dependency_host: Default::default(),
             explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog::new(data_root.clone()),
             explorer_tabs_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
@@ -4877,7 +4885,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 69] = [
+    const TRACKED_PANELS: [Panel; 70] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4917,6 +4925,7 @@ impl LauncherApp {
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
         Panel::ProgrammerInspectorDialog,
+        Panel::CalculationDependencyDialog,
         Panel::ExplorerTabsDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
@@ -4990,6 +4999,7 @@ impl LauncherApp {
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open,
+            Panel::CalculationDependencyDialog => self.calculation_dependency_dialog.open,
             Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
@@ -5044,6 +5054,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer().is_some(),
+            Panel::CalculationDependencyDialog => self.calculation_dependency_host.root_layer().is_some(),
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
@@ -5189,7 +5200,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5521,6 +5532,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::CalculationDependencyDialog => { self.calculation_dependency_dialog.request_close(); }
             Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
@@ -5845,6 +5857,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::CalculationDependencyDialog => { self.calculation_dependency_dialog.request_close(); }
             Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
@@ -6012,6 +6025,7 @@ impl LauncherApp {
             }
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open(),
+            Panel::CalculationDependencyDialog => self.calculation_dependency_dialog.open(None),
             Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
@@ -6324,6 +6338,11 @@ impl LauncherApp {
                     .memory_mut(|memory| memory.surrender_focus(focused));
             }
             self.programmer_inspector_host.request_focus();
+        } else if panel == Panel::CalculationDependencyDialog {
+            let was_open = self.calculation_dependency_dialog.open;
+            self.calculation_dependency_dialog.open(None);
+            let desired = self.calculation_dependency_host.open_from_origin(&self.egui_ctx, &self.calculation_dependency_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
+            if desired == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
         } else if panel == Panel::ExplorerTabsDialog {
             self.explorer_tabs_dialog.open();
             self.explorer_tabs_host.prepare_open(&self.egui_ctx, &self.explorer_tabs_dialog);
@@ -6482,6 +6501,7 @@ impl LauncherApp {
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
         check!(programmer_inspector_dialog, Panel::ProgrammerInspectorDialog);
+        check!(calculation_dependency_dialog, Panel::CalculationDependencyDialog);
         check!(explorer_tabs_dialog, Panel::ExplorerTabsDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);

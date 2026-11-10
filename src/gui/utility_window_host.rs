@@ -2031,6 +2031,107 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     }
 }
 
+pub(super) type CalculationDependencyWindowHost =
+    UtilityWindowHost<super::calculation_dependency_dialog::CalculationDependencyDialog>;
+pub(super) enum CalculationDependencyHostCommand {
+    Closed,
+    Apply(super::calculation_dependency_dialog::DependencyActions),
+}
+impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDependencyDialog {
+    const KEY: &'static str = "calculation-pad-dependencies";
+    const TITLE: &'static str = "Dependency Explorer";
+    const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = super::calculation_dependency_dialog::DependencyRuntime;
+    type Actions = super::calculation_dependency_dialog::DependencyActions;
+    type Checkpoint = ();
+    type Command = CalculationDependencyHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("calculation-dependencies-window"),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        _: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, parent, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        CalculationDependencyHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, CalculationDependencyHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![CalculationDependencyHostCommand::Closed]
+        } else {
+            vec![CalculationDependencyHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod deferred_open_tests {
     use super::*;

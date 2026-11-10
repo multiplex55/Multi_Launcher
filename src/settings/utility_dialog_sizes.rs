@@ -30,6 +30,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "calendar-event-details",
     "calendar-event-editor",
     "calculation-pad",
+    "calculation-pad-dependencies",
     "calculation-pad-reference",
     "clipboard-history",
     "clipboard-modify",
@@ -794,6 +795,7 @@ mod tests {
         let mut sizes = UtilityDialogSizes::default();
         for stable_key in [
             "calculation-pad",
+            "calculation-pad-dependencies",
             "markdown-studio",
             "diagram-studio",
             "diagram-viewer",
