@@ -298,7 +298,7 @@ fn table_move_command(
 }
 
 pub(super) fn table_modal_open(d: &MkMacroDialog) -> bool {
-    other_modal_open(d) || d.navigation.search.mode.is_some()
+    other_modal_open(d) || (d.navigation.search.mode.is_some() && !d.search_host.is_popped_out())
 }
 
 pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {

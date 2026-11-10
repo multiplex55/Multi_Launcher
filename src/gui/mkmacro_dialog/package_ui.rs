@@ -11,56 +11,43 @@ use eframe::egui;
 use std::{collections::BTreeSet, fs};
 
 #[derive(Clone)]
+pub(super) enum PackageOpen {
+    ExportLibrary { selected: Option<u64> },
+    SaveTemplate { macro_id: u64 },
+    Templates,
+    Help,
+}
+
+#[derive(Clone)]
 pub(super) enum PackageHostAction {
+    Open(PackageOpen),
     ExportSelected {
         root: u64,
         default_name: String,
     },
     Import,
-    ExportLibrary {
-        roots: Vec<u64>,
-    },
     ApplyPlan(PackageImportPlan),
-    SaveTemplate {
-        macro_id: u64,
-        name: String,
-        description: String,
-    },
 }
 
 #[derive(Clone, Default)]
 pub(super) struct PackageUiState {
     modal: Option<PackageModal>,
-    #[cfg(test)]
-    test_body_scroll: Option<(egui::Id, egui::Rect, egui::Vec2, egui::Vec2)>,
-    #[cfg(test)]
-    test_footer_clip: Option<egui::Rect>,
-    #[cfg(test)]
-    test_close_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)] test_reuse: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)] test_help: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)] test_items: Vec<(&'static str, egui::Rect, egui::Rect, bool)>,
 }
 
 #[derive(Clone)]
 enum PackageModal {
-    ExportLibrary {
-        roots: BTreeSet<u64>,
-    },
-    ImportPreview {
-        source: String,
-        plan: PackageImportPlan,
-    },
-    SaveTemplate {
-        name: String,
-        description: String,
-    },
-    Templates {
-        catalog: MkMacroTemplateCatalog,
-        selected: Option<u64>,
-        preview: Option<PackageImportPlan>,
-    },
-    Help,
+    ImportPreview { source: String, plan: PackageImportPlan },
 }
 
 impl PackageUiState {
+    #[cfg(test)] pub(super) fn test_reuse(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_reuse }
+    #[cfg(test)] pub(super) fn test_help(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_help }
+    #[cfg(test)] pub(super) fn test_item(&self, key: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_items.iter().find(|item| item.0 == key).map(|item| (item.1, item.2, item.3))
+    }
     pub(super) fn is_open(&self) -> bool {
         self.modal.is_some()
     }
@@ -72,7 +59,8 @@ impl PackageUiState {
 
 pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
     let selected = dialog.selected_macro_id;
-    ui.menu_button("Reuse", |ui| {
+    #[cfg(test)] dialog.package_ui.test_items.clear();
+    let menu = ui.menu_button("Reuse", |ui| {
         if !dialog.host_child_input_allowed() {
             ui.disable();
         }
@@ -83,144 +71,71 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
             )
             .clicked()
         {
-            if dialog.defer_host_effects {
-                if let Some(root) = selected {
-                    let default_name = dialog
-                        .selected_macro()
-                        .map(|macro_| package_filename(&macro_.name))
-                        .unwrap_or_else(|| "macro.mkmacro".into());
-                    dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                        PackageHostAction::ExportSelected { root, default_name },
-                    ));
-                }
-            } else {
-                export_selected(dialog);
+            if let Some(root) = selected {
+                let default_name = dialog
+                    .selected_macro()
+                    .map(|macro_| package_filename(&macro_.name))
+                    .unwrap_or_else(|| "macro.mkmacro".into());
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                    PackageHostAction::ExportSelected { root, default_name },
+                ));
             }
             ui.close();
         }
-        if ui
-            .add_enabled(
-                !dialog.draft.macros.is_empty(),
-                egui::Button::new("Export Library…"),
-            )
-            .clicked()
-        {
-            dialog.package_ui.modal = Some(PackageModal::ExportLibrary {
-                roots: selected.into_iter().collect(),
-            });
+        let export = ui.add_enabled(!dialog.draft.macros.is_empty(), egui::Button::new("Export Library…"));
+        #[cfg(test)] dialog.package_ui.test_items.push(("export", export.rect, ui.clip_rect(), export.enabled()));
+        if export.clicked() {
+            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                PackageHostAction::Open(PackageOpen::ExportLibrary { selected }),
+            ));
             ui.close();
         }
         if ui.button("Import Library…").clicked() {
-            if dialog.defer_host_effects {
+            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                PackageHostAction::Import,
+            ));
+            ui.close();
+        }
+        ui.separator();
+        let save = ui.add_enabled(selected.is_some(), egui::Button::new("Save as Template…"));
+        #[cfg(test)] dialog.package_ui.test_items.push(("save", save.rect, ui.clip_rect(), save.enabled()));
+        if save.clicked() {
+            if let Some(macro_id) = selected {
                 dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                    PackageHostAction::Import,
+                    PackageHostAction::Open(PackageOpen::SaveTemplate { macro_id }),
                 ));
-            } else {
-                begin_import(dialog);
             }
             ui.close();
         }
+        let templates = ui.button("New from Template…");
+        #[cfg(test)] dialog.package_ui.test_items.push(("templates", templates.rect, ui.clip_rect(), templates.enabled()));
+        if templates.clicked() {
+            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                PackageHostAction::Open(PackageOpen::Templates),
+            ));
+            ui.close();
+        }
         ui.separator();
-        if ui
-            .add_enabled(selected.is_some(), egui::Button::new("Save as Template…"))
-            .clicked()
+        let help = ui.button("MkMacro Help");
+        #[cfg(test)]
         {
-            if let Some(macro_) = dialog.selected_macro() {
-                dialog.package_ui.modal = Some(PackageModal::SaveTemplate {
-                    name: macro_.name.clone(),
-                    description: macro_.description.clone(),
-                });
-            }
-            ui.close();
+            dialog.package_ui.test_help = Some((help.rect, ui.clip_rect(), help.enabled()));
+            dialog.package_ui.test_items.push(("help", help.rect, ui.clip_rect(), help.enabled()));
         }
-        if ui.button("New from Template…").clicked() {
-            open_templates(dialog);
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("MkMacro Help").clicked() {
-            dialog.package_ui.modal = Some(PackageModal::Help);
+        if help.clicked() {
+            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                PackageHostAction::Open(PackageOpen::Help),
+            ));
             ui.close();
         }
     });
-}
-
-fn export_selected(dialog: &mut MkMacroDialog) {
-    let Some(root) = dialog.selected_macro_id else {
-        return;
-    };
-    let default_name = dialog
-        .selected_macro()
-        .map(|macro_| package_filename(&macro_.name))
-        .unwrap_or_else(|| "macro.mkmacro".into());
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("MkMacro package", &["mkmacro"])
-        .set_file_name(&default_name)
-        .save_file()
-    else {
-        return;
-    };
-    let result = export_package(&dialog.store, &dialog.draft, &[root])
-        .and_then(|bytes| save_atomic(&path, &bytes));
-    report(dialog, result.map(|_| ()), "export macro");
-}
-
-fn begin_import(dialog: &mut MkMacroDialog) {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("MkMacro package", &["mkmacro", "json"])
-        .pick_file()
-    else {
-        return;
-    };
-    let result = fs::read(&path).and_then(|bytes| {
-        plan_package_import(
-            &dialog.store,
-            &bytes,
-            &dialog.draft,
-            dialog.draft_revision,
-            &dialog.baseline,
-        )
-        .map_err(std::io::Error::other)
-    });
-    match result {
-        Ok(plan) => {
-            dialog.package_ui.modal = Some(PackageModal::ImportPreview {
-                source: path.display().to_string(),
-                plan,
-            });
-            dialog.command_error = None;
-        }
-        Err(error) => dialog.command_error = Some(format!("Could not preview import: {error}")),
+    #[cfg(test)]
+    {
+        dialog.package_ui.test_reuse =
+            Some((menu.response.rect, ui.clip_rect(), menu.response.enabled()));
     }
-}
-
-fn open_templates(dialog: &mut MkMacroDialog) {
-    match dialog.store.load_template_catalog() {
-        Ok(catalog) => {
-            dialog.package_ui.modal = Some(PackageModal::Templates {
-                catalog,
-                selected: None,
-                preview: None,
-            });
-            dialog.command_error = None;
-        }
-        Err(error) => {
-            dialog.command_error = Some(format!("Could not load macro templates: {error}"))
-        }
-    }
-}
-
-fn footer_labels(modal: &PackageModal) -> &'static [&'static str] {
-    match modal {
-        PackageModal::ExportLibrary { .. } => &["Export…", "Cancel"],
-        PackageModal::ImportPreview { .. } => &["Apply Import", "Cancel"],
-        PackageModal::SaveTemplate { .. } => &["Save Template", "Cancel"],
-        PackageModal::Templates { preview, .. } if preview.is_some() => {
-            &["Create Independent Copy", "Cancel"]
-        }
-        PackageModal::Templates { .. } => &["Preview Copy", "Cancel"],
-        PackageModal::Help => &["Close"],
-    }
+    #[cfg(not(test))]
+    let _ = menu;
 }
 
 fn package_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
@@ -287,231 +202,85 @@ fn package_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
 }
 
 pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
-    let Some(mut modal) = dialog.package_ui.modal.take() else {
+    let Some(PackageModal::ImportPreview { source, plan }) = dialog.package_ui.modal.take() else {
         return;
     };
     let mut open = true;
     let mut keep = true;
-    let labels = footer_labels(&modal);
-    let size_key = match &modal {
-        PackageModal::ExportLibrary { .. } => "mkmacro-package-export",
-        PackageModal::ImportPreview { .. } => "mkmacro-package-import",
-        PackageModal::SaveTemplate { .. } => "mkmacro-template-save",
-        PackageModal::Templates { .. } => "mkmacro-templates",
-        PackageModal::Help => "mkmacro-help",
-    };
-    egui::Window::new(modal.title())
-        .id(egui::Id::new("mkmacro_package_modal"))
+    let id = egui::Id::new("mkmacro_package_modal");
+    egui::Window::new("Import Macro Library")
+        .id(id)
         .enabled(dialog.host_child_input_allowed())
         .collapsible(false)
         .resizable(true)
-        .default_width(520.0)
-        .show_utility(ctx, size_key, egui::Id::new("mkmacro_package_modal"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::width(520.0), |ui| {
-            let footer_height = package_footer_reserved_height(ui, labels);
-            let body_max_height = (ui.available_height() - footer_height).max(0.0);
-            let body_output = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .min_scrolled_height(0.0)
-                .max_height(body_max_height)
-                .show(ui, |ui| match &mut modal {
-                    PackageModal::ExportLibrary { roots } => {
-                        ui.label("Choose explicit library roots. Every authored Call dependency, including disabled steps, is packaged automatically.");
-                        ui.separator();
-                        for macro_ in &dialog.draft.macros {
-                            let mut included = roots.contains(&macro_.id);
-                            if ui.checkbox(&mut included, &macro_.name).changed() {
-                                if included {
-                                    roots.insert(macro_.id);
-                                } else {
-                                    roots.remove(&macro_.id);
-                                }
-                            }
-                        }
-                    }
-                    PackageModal::ImportPreview { source, plan } => {
+        .show_utility(
+            ctx,
+            "mkmacro-package-import",
+            id,
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::width(520.0),
+            |ui| {
+                let footer = package_footer_reserved_height(ui, &["Apply Import", "Cancel"]);
+                let available = ui
+                    .available_rect_before_wrap()
+                    .intersect(ui.clip_rect())
+                    .height()
+                    .max(0.0);
+                egui::ScrollArea::vertical()
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .max_height((available - footer).max(0.0))
+                    .show(ui, |ui| {
                         ui.label(format!("Source: {source}"));
-                        import_policy(ui, plan, false);
-                    }
-                    PackageModal::SaveTemplate { name, description } => {
-                        ui.label("The selected macro and its complete authored dependency closure are captured from the current draft. Later edits do not change the template.");
-                        ui.label("Template name");
-                        ui.text_edit_singleline(name);
-                        ui.label("Description");
-                        ui.text_edit_multiline(description);
-                    }
-                    PackageModal::Templates { catalog, selected, preview } => {
-                        if catalog.templates.is_empty() {
-                            ui.label("No saved macro templates.");
-                        }
-                        for template in &catalog.templates {
-                            let response = ui.selectable_label(
-                                *selected == Some(template.id),
-                                &template.name,
-                            );
-                            if response.clicked() {
-                                *selected = Some(template.id);
-                                *preview = None;
-                            }
-                            if *selected == Some(template.id) && !template.description.is_empty() {
-                                ui.small(&template.description);
-                            }
-                        }
-                        if let Some(plan) = preview {
-                            ui.separator();
-                            import_policy(ui, plan, true);
-                        }
-                    }
-                    PackageModal::Help => help(ui),
-                });
-            #[cfg(test)]
-            {
-                dialog.package_ui.test_body_scroll = Some((
-                    body_output.id,
-                    body_output.inner_rect,
-                    body_output.content_size,
-                    body_output.state.offset,
-                ));
-            }
-            #[cfg(not(test))]
-            let _ = body_output;
-            ui.separator();
-            #[cfg(test)]
-            {
-                dialog.package_ui.test_footer_clip = Some(ui.clip_rect());
-            }
-            let mut close_response = None;
-            ui.horizontal_wrapped(|ui| match &mut modal {
-                PackageModal::ExportLibrary { roots } => {
-                    if ui.add_enabled(!roots.is_empty(), egui::Button::new("Export…")).clicked() {
-                        let root_ids = roots.iter().copied().collect::<Vec<_>>();
-                        if dialog.defer_host_effects {
-                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                                PackageHostAction::ExportLibrary { roots: root_ids },
-                            ));
-                        } else if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("MkMacro package", &["mkmacro"])
-                            .set_file_name("macro-library.mkmacro")
-                            .save_file()
-                        {
-                            let result = export_package(&dialog.store, &dialog.draft, &root_ids)
-                                .and_then(|bytes| save_atomic(&path, &bytes));
-                            if result.is_ok() { keep = false; }
-                            report(dialog, result.map(|_| ()), "export library");
-                        }
-                    }
-                    if ui.button("Cancel").clicked() { keep = false; }
-                }
-                PackageModal::ImportPreview { plan, .. } => {
+                        import_policy(ui, &plan, false);
+                    });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Apply Import").clicked() {
                         if dialog.defer_host_effects {
-                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                                PackageHostAction::ApplyPlan(plan.clone()),
-                            ));
-                        } else if apply_plan(dialog, plan).is_ok() {
-                            keep = false;
-                        }
-                    }
-                    if ui.button("Cancel").clicked() { keep = false; }
-                }
-                PackageModal::SaveTemplate { name, description } => {
-                    let enabled = !name.trim().is_empty() && dialog.selected_macro_id.is_some();
-                    if ui.add_enabled(enabled, egui::Button::new("Save Template")).clicked() {
-                        let macro_id = dialog.selected_macro_id.unwrap();
-                        if dialog.defer_host_effects {
-                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                                PackageHostAction::SaveTemplate {
-                                    macro_id,
-                                    name: name.clone(),
-                                    description: description.clone(),
-                                },
-                            ));
-                        } else {
-                            let result = dialog.store.save_macro_template(
-                                &dialog.draft,
-                                macro_id,
-                                name,
-                                description,
+                            dialog.stage_host_toolbar_action(
+                                super::MkMacroHostActionKind::Package(
+                                    PackageHostAction::ApplyPlan(plan.clone()),
+                                ),
                             );
-                            if result.is_ok() { keep = false; }
-                            report(dialog, result.map(|_| ()), "save template");
-                        }
-                    }
-                    if ui.button("Cancel").clicked() { keep = false; }
-                }
-                PackageModal::Templates { catalog, selected, preview } => {
-                    if preview.is_none() {
-                        if ui.add_enabled(selected.is_some(), egui::Button::new("Preview Copy")).clicked()
-                            && let Some(template) = selected.and_then(|id| catalog.templates.iter().find(|t| t.id == id))
-                        {
-                            match plan_template_instantiation(
-                                &dialog.store,
-                                template,
-                                &dialog.draft,
-                                dialog.draft_revision,
-                                &dialog.baseline,
-                            ) {
-                                Ok(plan) => *preview = Some(plan),
-                                Err(error) => dialog.command_error = Some(format!("Could not preview template: {error}")),
-                            }
-                        }
-                    } else if ui.button("Create Independent Copy").clicked() {
-                        let plan = preview.as_ref().unwrap();
-                        if dialog.defer_host_effects {
-                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
-                                PackageHostAction::ApplyPlan(plan.clone()),
-                            ));
-                        } else if apply_plan(dialog, plan).is_ok() {
+                        } else if apply_plan(dialog, &plan).is_ok() {
                             keep = false;
                         }
                     }
-                    if ui.button("Cancel").clicked() { keep = false; }
-                }
-                PackageModal::Help => {
-                    let response = ui.button("Close");
-                    close_response = Some((response.id, response.rect));
-                    if response.clicked() { keep = false; }
-                }
-            });
-            #[cfg(test)]
-            {
-                dialog.package_ui.test_close_response = close_response;
-            }
-            #[cfg(not(test))]
-            let _ = close_response;
-        });
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            },
+        );
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         keep = false;
     }
     if open && keep {
-        dialog.package_ui.modal = Some(modal);
+        dialog.package_ui.modal = Some(PackageModal::ImportPreview { source, plan });
     }
 }
 
 pub(super) fn host_action_is_current(dialog: &MkMacroDialog, action: &PackageHostAction) -> bool {
     match action {
+        PackageHostAction::Open(PackageOpen::ExportLibrary { selected }) => {
+            *selected == dialog.selected_macro_id && !dialog.draft.macros.is_empty()
+        }
+        PackageHostAction::Open(PackageOpen::SaveTemplate { macro_id }) => {
+            dialog.selected_macro_id == Some(*macro_id)
+                && dialog.draft.macros.iter().any(|macro_| macro_.id == *macro_id)
+        }
+        PackageHostAction::Open(PackageOpen::Templates | PackageOpen::Help) => true,
         PackageHostAction::ExportSelected { root, .. } => {
             dialog.selected_macro_id == Some(*root)
                 && dialog.draft.macros.iter().any(|macro_| macro_.id == *root)
         }
         PackageHostAction::Import => true,
-        PackageHostAction::ExportLibrary { roots } => {
-            !roots.is_empty()
-                && roots
-                    .iter()
-                    .all(|root| dialog.draft.macros.iter().any(|macro_| macro_.id == *root))
-        }
         PackageHostAction::ApplyPlan(_) => matches!(
             &dialog.package_ui.modal,
-            Some(PackageModal::ImportPreview { .. } | PackageModal::Templates { .. })
+            Some(PackageModal::ImportPreview { .. })
         ),
-        PackageHostAction::SaveTemplate { macro_id, .. } => {
-            dialog.selected_macro_id == Some(*macro_id)
-                && dialog
-                    .draft
-                    .macros
-                    .iter()
-                    .any(|macro_| macro_.id == *macro_id)
-        }
+
     }
 }
 
@@ -520,6 +289,7 @@ pub(super) fn complete_host_action(
     action: PackageHostAction,
 ) -> anyhow::Result<()> {
     match action {
+        PackageHostAction::Open(_) => anyhow::bail!("Package opens require an accepted host receipt"),
         PackageHostAction::ExportSelected { root, default_name } => {
             let Some(picker) = owned_file_dialog(dialog)? else {
                 return Ok(());
@@ -560,38 +330,12 @@ pub(super) fn complete_host_action(
             dialog.command_error = None;
             Ok(())
         }
-        PackageHostAction::ExportLibrary { roots } => {
-            let Some(picker) = owned_file_dialog(dialog)? else {
-                return Ok(());
-            };
-            let Some(path) = picker
-                .add_filter("MkMacro package", &["mkmacro"])
-                .set_file_name("macro-library.mkmacro")
-                .save_file()
-            else {
-                return Ok(());
-            };
-            export_package(&dialog.store, &dialog.draft, &roots)
-                .and_then(|bytes| save_atomic(&path, &bytes))?;
-            dialog.package_ui.close();
-            Ok(())
-        }
         PackageHostAction::ApplyPlan(plan) => {
             apply_plan(dialog, &plan)?;
             dialog.package_ui.close();
             Ok(())
         }
-        PackageHostAction::SaveTemplate {
-            macro_id,
-            name,
-            description,
-        } => {
-            dialog
-                .store
-                .save_macro_template(&dialog.draft, macro_id, &name, &description)?;
-            dialog.package_ui.close();
-            Ok(())
-        }
+
     }
 }
 
@@ -621,17 +365,6 @@ fn owned_file_dialog(dialog: &MkMacroDialog) -> anyhow::Result<Option<rfd::FileD
     }
 }
 
-impl PackageModal {
-    fn title(&self) -> &'static str {
-        match self {
-            Self::ExportLibrary { .. } => "Export Macro Library",
-            Self::ImportPreview { .. } => "Import Macro Library",
-            Self::SaveTemplate { .. } => "Save Macro Template",
-            Self::Templates { .. } => "New Macro from Template",
-            Self::Help => "MkMacro Help",
-        }
-    }
-}
 
 fn apply_plan(dialog: &mut MkMacroDialog, plan: &PackageImportPlan) -> anyhow::Result<()> {
     match plan.apply(&dialog.store, &dialog.draft, dialog.draft_revision) {
@@ -733,13 +466,813 @@ fn package_filename(name: &str) -> String {
     format!("{}.mkmacro", if stem.is_empty() { "macro" } else { &stem })
 }
 
-fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>, operation: &str) {
-    match result {
-        Ok(()) => dialog.command_error = None,
-        Err(error) => dialog.command_error = Some(format!("Could not {operation}: {error}")),
+// Ordinary package children own private state; Main owns the macro document.
+#[derive(Clone)]
+enum ChildContent {
+    ExportLibrary {
+        roots: BTreeSet<u64>,
+    },
+    SaveTemplate {
+        name: String,
+        description: String,
+    },
+    Templates {
+        catalog: std::sync::Arc<MkMacroTemplateCatalog>,
+        selected: Option<u64>,
+        preview: Option<std::sync::Arc<PackageImportPlan>>,
+    },
+    Help,
+}
+trait PackageKind: Clone {
+    const KEY: &'static str;
+    const TITLE: &'static str;
+}
+macro_rules! package_kind {
+    ($name:ident, $key:literal, $title:literal) => {
+        #[derive(Clone)]
+        struct $name;
+        impl PackageKind for $name {
+            const KEY: &'static str = $key;
+            const TITLE: &'static str = $title;
+        }
+    };
+}
+package_kind!(ExportKind, "mkmacro-package-export", "Export Macro Library");
+package_kind!(SaveKind, "mkmacro-template-save", "Save Macro Template");
+package_kind!(TemplatesKind, "mkmacro-templates", "Macro Templates");
+package_kind!(HelpKind, "mkmacro-help", "MkMacro Help");
+#[derive(Clone)]
+struct PackageChild<K: PackageKind> {
+    content: Option<ChildContent>,
+    epoch: u64,
+    owner: u64,
+    revision: u64,
+    macro_id: Option<u64>,
+    error: Option<String>,
+    #[cfg(test)]
+    test_body_scroll: Option<(egui::Id, egui::Rect, egui::Vec2, egui::Vec2)>,
+    #[cfg(test)]
+    test_footer_clip: Option<egui::Rect>,
+    #[cfg(test)]
+    test_close_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    test_save_response: Option<(egui::Rect, egui::Rect, bool)>,
+    _kind: std::marker::PhantomData<K>,
+}
+impl<K: PackageKind> Default for PackageChild<K> {
+    fn default() -> Self {
+        Self {
+            content: None,
+            epoch: 0,
+            owner: 0,
+            revision: 0,
+            macro_id: None,
+            error: None,
+            #[cfg(test)]
+            test_body_scroll: None,
+            #[cfg(test)]
+            test_footer_clip: None,
+            #[cfg(test)]
+            test_close_response: None,
+            #[cfg(test)]
+            test_save_response: None,
+            _kind: std::marker::PhantomData,
+        }
+    }
+}
+#[derive(Clone)]
+enum ChildIntent {
+    Close,
+    Retired,
+    Export(Vec<u64>),
+    Save {
+        macro_id: u64,
+        name: String,
+        description: String,
+    },
+    Preview(u64),
+    Apply(std::sync::Arc<PackageImportPlan>),
+}
+#[derive(Default)]
+struct ChildActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    intent: Option<ChildIntent>,
+}
+struct ChildCommand {
+    intent: ChildIntent,
+    hwnd: Option<usize>,
+}
+impl<K: PackageKind> super::super::utility_window_host::HostedUtilityDialog for PackageChild<K> {
+    const KEY: &'static str = K::KEY;
+    const TITLE: &'static str = K::TITLE;
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 520.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = MkMacroDialog;
+    type Actions = ChildActions;
+    type Checkpoint = Self;
+    type Command = ChildCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(K::KEY))
+    }
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.content.is_some()
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        parent: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> ChildActions {
+        let mut result = ChildActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            ui.add_enabled_ui(allowed, |ui| {
+                render_child_contents(ui, self, parent, &mut result)
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new(K::KEY);
+            egui::Window::new(K::TITLE)
+                .id(id)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    K::KEY,
+                    id,
+                    Some(&mut open),
+                    super::super::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                    body,
+                );
+        }
+        if !open {
+            result.intent = Some(ChildIntent::Close);
+        }
+        if !first || ctx.will_discard() {
+            result.intent = None;
+            result.presentation = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &ChildActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> ChildCommand {
+        ChildCommand {
+            intent: ChildIntent::Retired,
+            hwnd: None,
+        }
+    }
+    fn command_closes(_: &ChildCommand) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: ChildActions,
+        hwnd: Option<usize>,
+    ) -> Vec<ChildCommand> {
+        actions
+            .intent
+            .map(|intent| ChildCommand { intent, hwnd })
+            .into_iter()
+            .collect()
+    }
+    #[cfg(test)]
+    fn test_button(_: &ChildActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
     }
 }
 
+fn render_child_contents<K: PackageKind>(
+    ui: &mut egui::Ui,
+    child: &mut PackageChild<K>,
+    parent: &MkMacroDialog,
+    result: &mut ChildActions,
+) {
+    if let Some(error) = &child.error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    let macro_id = child.macro_id;
+    let Some(content) = child.content.as_mut() else {
+        return;
+    };
+    let labels: &[&str] = match content {
+        ChildContent::ExportLibrary { .. } => &["Export…", "Cancel"],
+        ChildContent::SaveTemplate { .. } => &["Save Template", "Cancel"],
+        ChildContent::Templates {
+            preview: Some(_), ..
+        } => &["Create Independent Copy", "Cancel"],
+        ChildContent::Templates { .. } => &["Preview Copy", "Cancel"],
+        ChildContent::Help => &["Close"],
+    };
+    let footer = package_footer_reserved_height(ui, labels);
+    let available = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .height()
+        .max(0.0);
+    let body_output = egui::ScrollArea::vertical().min_scrolled_height(0.0).auto_shrink([false, false])
+        .max_height((available - footer).max(0.0)).show(ui, |ui| match content {
+            ChildContent::ExportLibrary { roots } => {
+                ui.label("Choose explicit library roots. Authored Call dependencies are included automatically.");
+                for macro_ in &parent.draft.macros {
+                    let mut included = roots.contains(&macro_.id);
+                    if ui.checkbox(&mut included, &macro_.name).changed() {
+                        if included { roots.insert(macro_.id); } else { roots.remove(&macro_.id); }
+                    }
+                }
+            }
+            ChildContent::SaveTemplate { name, description } => {
+                ui.label("The selected macro and its authored dependencies are captured from the current draft.");
+                ui.label("Template name"); ui.text_edit_singleline(name);
+                ui.label("Description"); ui.text_edit_multiline(description);
+            }
+            ChildContent::Templates { catalog, selected, preview } => {
+                if catalog.templates.is_empty() { ui.label("No saved macro templates."); }
+                for template in &catalog.templates {
+                    if ui.selectable_label(*selected == Some(template.id), &template.name).clicked() {
+                        *selected = Some(template.id); *preview = None;
+                    }
+                    if *selected == Some(template.id) && !template.description.is_empty() { ui.small(&template.description); }
+                }
+                if let Some(plan) = preview { ui.separator(); import_policy(ui, plan, true); }
+            }
+            ChildContent::Help => help(ui),
+        });
+    #[cfg(test)]
+    {
+        child.test_body_scroll = Some((
+            body_output.id,
+            body_output.inner_rect,
+            body_output.content_size,
+            body_output.state.offset,
+        ));
+        child.test_footer_clip = Some(ui.clip_rect());
+    }
+    #[cfg(not(test))]
+    let _ = body_output;
+    ui.separator();
+    ui.horizontal_wrapped(|ui| match content {
+        ChildContent::ExportLibrary { roots } => {
+            if ui
+                .add_enabled(!roots.is_empty(), egui::Button::new("Export…"))
+                .clicked()
+            {
+                result.intent = Some(ChildIntent::Export(roots.iter().copied().collect()));
+            }
+            if ui.button("Cancel").clicked() {
+                result.intent = Some(ChildIntent::Close);
+            }
+        }
+        ChildContent::SaveTemplate { name, description } => {
+            let response = ui.add_enabled(
+                !name.trim().is_empty() && macro_id.is_some(),
+                egui::Button::new("Save Template"),
+            );
+            #[cfg(test)]
+            {
+                child.test_save_response =
+                    Some((response.rect, ui.clip_rect(), response.enabled()));
+            }
+            if response.clicked()
+                && let Some(macro_id) = macro_id
+            {
+                result.intent = Some(ChildIntent::Save {
+                    macro_id,
+                    name: name.clone(),
+                    description: description.clone(),
+                });
+            }
+            if ui.button("Cancel").clicked() {
+                result.intent = Some(ChildIntent::Close);
+            }
+        }
+        ChildContent::Templates {
+            selected, preview, ..
+        } => {
+            if let Some(plan) = preview {
+                if ui.button("Create Independent Copy").clicked() {
+                    result.intent = Some(ChildIntent::Apply(plan.clone()));
+                }
+            } else if ui
+                .add_enabled(selected.is_some(), egui::Button::new("Preview Copy"))
+                .clicked()
+                && let Some(id) = *selected
+            {
+                result.intent = Some(ChildIntent::Preview(id));
+            }
+            if ui.button("Cancel").clicked() {
+                result.intent = Some(ChildIntent::Close);
+            }
+        }
+        ChildContent::Help => {
+            let response = ui.button("Close");
+            #[cfg(test)]
+            {
+                child.test_close_response = Some((response.id, response.rect));
+            }
+            if response.clicked() {
+                result.intent = Some(ChildIntent::Close);
+            }
+        }
+    });
+}
+#[derive(Default)]
+pub(super) struct PackageHosts {
+    export: PackageChild<ExportKind>,
+    export_host: super::super::utility_window_host::UtilityWindowHost<PackageChild<ExportKind>>,
+    save: PackageChild<SaveKind>,
+    save_host: super::super::utility_window_host::UtilityWindowHost<PackageChild<SaveKind>>,
+    templates: PackageChild<TemplatesKind>,
+    templates_host:
+        super::super::utility_window_host::UtilityWindowHost<PackageChild<TemplatesKind>>,
+    help: PackageChild<HelpKind>,
+    help_host: super::super::utility_window_host::UtilityWindowHost<PackageChild<HelpKind>>,
+}
+impl PackageHosts {
+    #[cfg(test)]
+    pub(super) fn test_save_viewport(&self) -> egui::ViewportId {
+        super::super::utility_window_host::UtilityWindowHost::<PackageChild<SaveKind>>::test_viewport(self.save.epoch)
+    }
+    #[cfg(test)]
+    pub(super) fn test_save_response(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.save.test_save_response
+    }
+    #[cfg(test)]
+    pub(super) fn test_help_popped(&self) -> bool {
+        self.help.content.is_some() && self.help_host.is_popped_out()
+    }
+    #[cfg(test)]
+    pub(super) fn test_help_epoch(&self) -> u64 {
+        self.help.epoch
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_save_name(&mut self, name: &str) {
+        if let Some(ChildContent::SaveTemplate { name: value, .. }) = self.save.content.as_mut() {
+            *value = name.into();
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_save_name(&self) -> Option<&str> {
+        match self.save.content.as_ref() {
+            Some(ChildContent::SaveTemplate { name, .. }) => Some(name),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_popped(&self, key: &str) -> bool {
+        match key {
+            "export" => self.export.content.is_some() && self.export_host.is_popped_out(),
+            "save" => self.save.content.is_some() && self.save_host.is_popped_out(),
+            "templates" => self.templates.content.is_some() && self.templates_host.is_popped_out(),
+            "help" => self.help.content.is_some() && self.help_host.is_popped_out(),
+            _ => false,
+        }
+    }
+    fn any_open(&self) -> bool {
+        self.export.content.is_some()
+            || self.save.content.is_some()
+            || self.templates.content.is_some()
+            || self.help.content.is_some()
+    }
+    pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
+        if self.export.content.is_some() {
+            return self.export_host.root_layer();
+        }
+        if self.save.content.is_some() {
+            return self.save_host.root_layer();
+        }
+        if self.templates.content.is_some() {
+            return self.templates_host.root_layer();
+        }
+        if self.help.content.is_some() {
+            return self.help_host.root_layer();
+        }
+        None
+    }
+    pub(super) fn has_root_layer(&self) -> bool {
+        self.root_layer().is_some()
+    }
+    pub(super) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.export_host
+            .needs_root_ui_when_hidden(self.export.content.is_some())
+            || self
+                .save_host
+                .needs_root_ui_when_hidden(self.save.content.is_some())
+            || self
+                .templates_host
+                .needs_root_ui_when_hidden(self.templates.content.is_some())
+            || self
+                .help_host
+                .needs_root_ui_when_hidden(self.help.content.is_some())
+    }
+    pub(super) fn close_all(&mut self, ctx: &egui::Context) {
+        if self.export.content.take().is_some() {
+            self.export_host.close_from_app(ctx);
+        }
+        if self.save.content.take().is_some() {
+            self.save_host.close_from_app(ctx);
+        }
+        if self.templates.content.take().is_some() {
+            self.templates_host.close_from_app(ctx);
+        }
+        if self.help.content.take().is_some() {
+            self.help_host.close_from_app(ctx);
+        }
+    }
+    pub(super) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        parent: &MkMacroDialog,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        show_child(
+            ctx,
+            parent,
+            &mut self.export_host,
+            &mut self.export,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_jump_active,
+        );
+        show_child(
+            ctx,
+            parent,
+            &mut self.save_host,
+            &mut self.save,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_jump_active,
+        );
+        show_child(
+            ctx,
+            parent,
+            &mut self.templates_host,
+            &mut self.templates,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_jump_active,
+        );
+        show_child(
+            ctx,
+            parent,
+            &mut self.help_host,
+            &mut self.help,
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_jump_active,
+        );
+    }
+    pub(super) fn complete(&mut self, ctx: &egui::Context, parent: &mut MkMacroDialog) -> bool {
+        complete_child(ctx, parent, &mut self.export_host, &mut self.export)
+            | complete_child(ctx, parent, &mut self.save_host, &mut self.save)
+            | complete_child(ctx, parent, &mut self.templates_host, &mut self.templates)
+            | complete_child(ctx, parent, &mut self.help_host, &mut self.help)
+    }
+    pub(super) fn open(
+        &mut self,
+        ctx: &egui::Context,
+        parent: &mut MkMacroDialog,
+        request: PackageOpen,
+        origin: super::super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        use super::super::utility_host::ChildOpenOrigin;
+        if parent.package_ui.is_open() {
+            return false;
+        }
+        let active = self.any_open();
+        let origin = ChildOpenOrigin::Parent(origin);
+        match request {
+            PackageOpen::ExportLibrary { selected } => {
+                if active && self.export.content.is_none() {
+                    return false;
+                }
+                if self.export.content.is_none() {
+                    self.export.begin(
+                        parent,
+                        ChildContent::ExportLibrary {
+                            roots: selected.into_iter().collect(),
+                        },
+                    );
+                }
+                self.export_host
+                    .open_from_origin(ctx, &self.export, active, &origin)
+                    == Some(super::super::utility_host::UtilityPresentation::Docked)
+            }
+            PackageOpen::SaveTemplate { macro_id } => {
+                if active && self.save.content.is_none() {
+                    return false;
+                }
+                if self.save.content.is_none() {
+                    let Some(macro_) = parent.draft.macros.iter().find(|item| item.id == macro_id)
+                    else {
+                        return false;
+                    };
+                    self.save.begin(
+                        parent,
+                        ChildContent::SaveTemplate {
+                            name: macro_.name.clone(),
+                            description: macro_.description.clone(),
+                        },
+                    );
+                }
+                self.save_host
+                    .open_from_origin(ctx, &self.save, active, &origin)
+                    == Some(super::super::utility_host::UtilityPresentation::Docked)
+            }
+            PackageOpen::Templates => {
+                if active && self.templates.content.is_none() {
+                    return false;
+                }
+                if self.templates.content.is_none() {
+                    match parent.store.load_template_catalog() {
+                        Ok(catalog) => self.templates.begin(
+                            parent,
+                            ChildContent::Templates {
+                                catalog: std::sync::Arc::new(catalog),
+                                selected: None,
+                                preview: None,
+                            },
+                        ),
+                        Err(error) => {
+                            parent.command_error =
+                                Some(format!("Could not load macro templates: {error}"));
+                            return false;
+                        }
+                    }
+                }
+                self.templates_host
+                    .open_from_origin(ctx, &self.templates, active, &origin)
+                    == Some(super::super::utility_host::UtilityPresentation::Docked)
+            }
+            PackageOpen::Help => {
+                if active && self.help.content.is_none() {
+                    return false;
+                }
+                if self.help.content.is_none() {
+                    self.help.begin(parent, ChildContent::Help);
+                }
+                self.help_host
+                    .open_from_origin(ctx, &self.help, active, &origin)
+                    == Some(super::super::utility_host::UtilityPresentation::Docked)
+            }
+        }
+    }
+}
+impl<K: PackageKind> PackageChild<K> {
+    fn begin(&mut self, parent: &MkMacroDialog, content: ChildContent) {
+        self.epoch = self.epoch.wrapping_add(1).max(1);
+        self.owner = parent.owner_instance;
+        self.revision = parent.draft_revision();
+        self.macro_id = parent.selected_macro_id;
+        self.error = None;
+        self.content = Some(content);
+    }
+    fn source_current(&self, parent: &MkMacroDialog) -> bool {
+        parent.open
+            && !parent.close_prompt_open
+            && self.owner == parent.owner_instance
+            && self.revision == parent.draft_revision()
+            && self.macro_id == parent.selected_macro_id
+    }
+}
+fn show_child<K: PackageKind>(
+    ctx: &egui::Context,
+    parent: &MkMacroDialog,
+    host: &mut super::super::utility_window_host::UtilityWindowHost<PackageChild<K>>,
+    child: &mut PackageChild<K>,
+    first: bool,
+    root_visible: bool,
+    root_input: bool,
+    native_input: bool,
+    root_jump_active: bool,
+) {
+    use super::super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+    use super::super::utility_window_host::HostInput;
+    let owner = root_input
+        && host
+            .root_layer()
+            .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+        && !egui::Popup::is_any_open(ctx);
+    host.show(
+        ctx,
+        child,
+        parent,
+        HostInput {
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_owner: NavigationOwner::Blocked,
+            parent_owner: owner,
+            root_jump_active,
+            close_shortcut: true,
+            allow_os_close: true,
+            confirmation_owner: NavigationOwner::Blocked,
+            parent_instance: 0,
+            root_scopes: (None, None),
+        },
+    );
+}
+fn child_file_dialog(hwnd: Option<usize>) -> anyhow::Result<rfd::FileDialog> {
+    #[cfg(windows)]
+    {
+        let hwnd = hwnd
+            .and_then(|value| std::num::NonZeroIsize::new(value as isize))
+            .ok_or_else(|| {
+                anyhow::anyhow!("The package window is not ready to own a file dialog.")
+            })?;
+        Ok(rfd::FileDialog::new()
+            .set_parent(&crate::gui::add_action_dialog::NativeDialogParent(hwnd)))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        Ok(rfd::FileDialog::new())
+    }
+}
+fn complete_child<K: PackageKind>(
+    ctx: &egui::Context,
+    parent: &mut MkMacroDialog,
+    host: &mut super::super::utility_window_host::UtilityWindowHost<PackageChild<K>>,
+    child: &mut PackageChild<K>,
+) -> bool {
+    let Some(completion) = host.complete(ctx, child) else {
+        return false;
+    };
+    let mut show_root = completion.show_root;
+    for command in completion.commands {
+        let close = match command.intent {
+            ChildIntent::Retired => {
+                child.content = None;
+                false
+            }
+            ChildIntent::Close => true,
+            intent => {
+                if !child.source_current(parent) {
+                    child.error = Some(
+                        "The macro or draft changed. Reopen this tool before applying.".into(),
+                    );
+                    continue;
+                }
+                let result: anyhow::Result<bool> = (|| match intent {
+                    ChildIntent::Export(roots) => {
+                        let picker = child_file_dialog(command.hwnd)?;
+                        let Some(path) = picker
+                            .add_filter("MkMacro package", &["mkmacro"])
+                            .set_file_name("macro-library.mkmacro")
+                            .save_file()
+                        else {
+                            return Ok(false);
+                        };
+                        if !child.source_current(parent) {
+                            anyhow::bail!("The macro or draft changed while choosing a file.");
+                        }
+                        let bytes = export_package(&parent.store, &parent.draft, &roots)?;
+                        save_atomic(&path, &bytes)?;
+                        Ok(true)
+                    }
+                    ChildIntent::Save {
+                        macro_id,
+                        name,
+                        description,
+                    } => {
+                        parent.store.save_macro_template(
+                            &parent.draft,
+                            macro_id,
+                            &name,
+                            &description,
+                        )?;
+                        Ok(true)
+                    }
+                    ChildIntent::Preview(id) => {
+                        let Some(ChildContent::Templates { catalog, .. }) = child.content.as_ref()
+                        else {
+                            return Ok(false);
+                        };
+                        let Some(template) =
+                            catalog.templates.iter().find(|template| template.id == id)
+                        else {
+                            anyhow::bail!("The selected template no longer exists.");
+                        };
+                        let plan = plan_template_instantiation(
+                            &parent.store,
+                            template,
+                            &parent.draft,
+                            parent.draft_revision,
+                            &parent.baseline,
+                        )?;
+                        if let Some(ChildContent::Templates { preview, .. }) =
+                            child.content.as_mut()
+                        {
+                            *preview = Some(std::sync::Arc::new(plan));
+                        }
+                        Ok(false)
+                    }
+                    ChildIntent::Apply(plan) => {
+                        apply_plan(parent, &plan)?;
+                        Ok(true)
+                    }
+                    ChildIntent::Close | ChildIntent::Retired => Ok(false),
+                })();
+                match result {
+                    Ok(close) => {
+                        child.error = None;
+                        close
+                    }
+                    Err(error) => {
+                        child.error = Some(error.to_string());
+                        false
+                    }
+                }
+            }
+        };
+        if close {
+            host.close_from_app(ctx);
+            child.content = None;
+        }
+    }
+    show_root &= child.content.is_some() && !host.is_popped_out();
+    show_root
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +1294,52 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn package_children_keep_distinct_presentation_and_live_drafts() {
+        use crate::gui::utility_host::{AcceptedParentOpen, UtilityPresentation, ViewportPassProvenance};
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(std::sync::Arc::new(store));
+        dialog.open = true;
+        dialog.create_macro();
+        dialog.host_state.transition(UtilityPresentation::Popout);
+        let ctx = egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = crate::gui::utility_presentation::UtilityPresentationManager::new(
+            directory.path().join("settings.json").to_string_lossy().into_owned(), workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        for key in ["mkmacro-help", "mkmacro-templates", "mkmacro-template-save", "mkmacro-package-export"] {
+            manager.remember(&ctx, crate::settings::UtilityToolKey::parse(key).unwrap(), crate::settings::RememberedPresentation::Docked);
+        }
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let origin = AcceptedParentOpen::from_retained(&ctx, dialog.host_state.identity(), dialog.owner_instance, pass, pass).unwrap();
+        output.drop_without_applying_deltas();
+        let mut hosts = PackageHosts::default();
+        let selected = dialog.selected_macro_id.unwrap();
+        assert!(!hosts.open(&ctx, &mut dialog, PackageOpen::SaveTemplate { macro_id: selected }, origin.clone()));
+        assert!(hosts.save_host.is_popped_out());
+        let epoch = hosts.save.epoch;
+        if let Some(ChildContent::SaveTemplate { name, .. }) = hosts.save.content.as_mut() { *name = "unsaved draft".into(); } else { panic!("save draft"); }
+        assert!(!hosts.open(&ctx, &mut dialog, PackageOpen::SaveTemplate { macro_id: selected }, origin.clone()));
+        assert_eq!(hosts.save.epoch, epoch);
+        assert!(matches!(hosts.save.content.as_ref(), Some(ChildContent::SaveTemplate { name, .. }) if name == "unsaved draft"));
+        hosts.close_all(&ctx);
+        for request in [PackageOpen::ExportLibrary { selected: Some(selected) }, PackageOpen::Templates, PackageOpen::Help] {
+            assert!(!hosts.open(&ctx, &mut dialog, request, origin.clone()));
+            assert!(!hosts.has_root_layer());
+            assert!(hosts.any_open());
+            hosts.close_all(&ctx);
+        }
+        dialog.pending_package_open = Some((PackageOpen::Help, dialog.draft_revision, dialog.selected_macro_id, origin));
+        dialog.host_state.transition(UtilityPresentation::Docked);
+        assert!(!dialog.complete_package_children(&ctx));
+        assert!(!dialog.package_hosts.any_open(), "a retired Main host cannot authorize a delayed open");
+        workers.join_all();
     }
 
     #[test]
@@ -880,7 +1459,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
         let mut dialog = MkMacroDialog::new(std::sync::Arc::new(store));
-        dialog.package_ui.modal = Some(PackageModal::Help);
+        let mut help = PackageChild::<HelpKind>::default();
+        help.begin(&dialog, ChildContent::Help);
+        let mut host = super::super::super::utility_window_host::UtilityWindowHost::default();
         let draft_before = dialog.draft.clone();
         let baseline_before = dialog.baseline.clone();
         let persisted_before = dialog.store.snapshot();
@@ -905,8 +1486,9 @@ mod tests {
         let mut last_close_node: Option<(egui::Id, egui::Rect)> = None;
         let mut last_heading_node: Option<egui::Rect> = None;
         for _ in 0..6 {
-            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
-            let close_response = dialog.package_ui.test_close_response;
+            let output = context.run_ui(input(), |ctx| show_child(ctx, &dialog, &mut host, &mut help, true, true, true, true, false));
+            let _ = complete_child(&context, &mut dialog, &mut host, &mut help);
+            let close_response = help.test_close_response;
             if let Some(response) = close_response
                 && let Some(bounds) = response_node_bounds(&output, Some(response), "Close")
             {
@@ -916,8 +1498,8 @@ mod tests {
                 last_heading_node = Some(bounds);
             }
             let layout = match (
-                dialog.package_ui.test_body_scroll,
-                dialog.package_ui.test_footer_clip,
+                help.test_body_scroll,
+                help.test_footer_clip,
                 close_response,
                 last_close_node,
                 last_heading_node,
@@ -966,8 +1548,9 @@ mod tests {
                 scroll_state.offset.y = max_scroll;
                 scroll_state.store(&context, scroll_id);
                 for _ in 0..5 {
-                    let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
-                    let close_response = dialog.package_ui.test_close_response;
+                    let output = context.run_ui(input(), |ctx| show_child(ctx, &dialog, &mut host, &mut help, true, true, true, true, false));
+            let _ = complete_child(&context, &mut dialog, &mut host, &mut help);
+                    let close_response = help.test_close_response;
                     if let Some(response) = close_response
                         && let Some(bounds) = response_node_bounds(&output, Some(response), "Close")
                     {
@@ -977,8 +1560,8 @@ mod tests {
                         last_heading_node = Some(bounds);
                     }
                     let layout = match (
-                        dialog.package_ui.test_body_scroll,
-                        dialog.package_ui.test_footer_clip,
+                        help.test_body_scroll,
+                        help.test_footer_clip,
                         close_response,
                         last_close_node,
                         last_heading_node,
@@ -1039,11 +1622,7 @@ mod tests {
             && dialog.dirty == dirty_before
             && dialog.conflict == conflict_before
             && dialog.selected_macro_id == selected_before
-            && dialog
-                .package_ui
-                .modal
-                .as_ref()
-                .is_some_and(|modal| matches!(modal, PackageModal::Help));
+            && matches!(help.content, Some(ChildContent::Help));
         let layout = initial_layout;
         assert!(
             unchanged,

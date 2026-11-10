@@ -2197,7 +2197,8 @@ impl LauncherApp {
             }
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
-            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root(),
+            Panel::MkMacroDialog => self.mkmacro_dialog.ordinary_child_root_layer()
+                .or_else(|| self.mkmacro_dialog.host_layer_if_root()),
             Panel::MouseGesturesDialog => self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
@@ -7574,6 +7575,14 @@ impl LauncherApp {
             close_shortcut_allowed,
             self.jump_mode_ui.mkmacro_instance(),
             jump_mode_enabled,
+        );
+        self.mkmacro_dialog.show_search_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_package_children(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
         );
     }
 
@@ -14253,6 +14262,11 @@ impl LauncherApp {
 
     fn complete_mkmacro_dialog(&mut self, ctx: &egui::Context) {
         let completion = self.mkmacro_dialog.on_host_frame_complete(ctx);
+        let search_show_root = self.mkmacro_dialog.complete_search_child(ctx);
+        let package_show_root = self.mkmacro_dialog.complete_package_children(ctx);
+        if search_show_root || package_show_root {
+            self.request_launcher_visibility(true);
+        }
         if completion.closed {
             self.panel_states.mkmacro_dialog = false;
             self.panel_stack
@@ -66017,6 +66031,44 @@ mod tests {
             }
         }
         assert_eq!(classified, LauncherApp::TRACKED_PANELS.len());
+    }
+
+    #[test]
+    fn mkmacro_native_search_keeps_launcher_query_usable() {
+        #[inline(never)]
+        fn app_at(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at_with_initialization(
+                ctx,
+                two_results(),
+                root,
+                RootListAppInitialization::IsolatedOracle,
+            ))
+        }
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = app_at(&ctx, workspace.root());
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        app.focus_panel(Panel::MkMacroDialog);
+        app.mkmacro_dialog.test_pop_out();
+        app.mkmacro_dialog.test_open_native_search(&ctx);
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        assert!(!app.panel_has_root_presentation(Panel::MkMacroDialog));
+        let query_id = egui::Id::new("query_input");
+        let query_rect = ctx.read_response(query_id).unwrap().rect;
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::PointerMoved(query_rect.center())],
+        );
+        assert!(ctx.interactive_rects_last_pass().contains(&query_rect));
+        notes_query_mouse_click(&mut app, &ctx, screen, query_rect);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ🙂");
+        assert!(app.query.contains("λ🙂"));
+        assert!(app.mkmacro_dialog.needs_root_ui_when_hidden());
+        app.settings_save_workers.join_all();
     }
 
     #[test]

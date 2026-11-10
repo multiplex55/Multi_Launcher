@@ -5161,7 +5161,9 @@ impl LauncherApp {
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root().is_some(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root().is_some(),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.owner_layer_if_root().is_some(),
-            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some(),
+            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some()
+                || self.mkmacro_dialog.search_root_layer().is_some()
+                || self.mkmacro_dialog.package_has_root_layer(),
             Panel::NotePanel => self
                 .note_panels
                 .iter()
@@ -5272,7 +5274,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog | Panel::ThemeSettingsDialog | Panel::Plugins | Panel::HotkeyDirectoryDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog | Panel::MkMacroDialog | Panel::ThemeSettingsDialog | Panel::Plugins | Panel::HotkeyDirectoryDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;

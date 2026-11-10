@@ -395,6 +395,10 @@ pub struct MkMacroDialog {
     show_root_after_host_change: bool,
     pending_host_frame: Option<MkMacroHostFrame>,
     retained_host_checkpoint: Option<(u64, u64, MkMacroDraftCheckpoint)>,
+    package_hosts: package_ui::PackageHosts,
+    pending_package_open: Option<(package_ui::PackageOpen, u64, Option<u64>, super::utility_host::AcceptedParentOpen<u64>)>,
+    search_host: super::utility_window_host::UtilityWindowHost<search::SearchState>,
+    pending_search_open: Option<(search::SearchMode, u64, Option<u64>, super::utility_host::AcceptedParentOpen<u64>)>,
     active_host: Option<HostIdentity>,
     native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -667,6 +671,7 @@ enum MkMacroHostActionKind {
         action: action_editor::ActionEditorFinish,
     },
     Package(package_ui::PackageHostAction),
+    OpenSearch(search::SearchMode),
     CloseDecision(MkMacroCloseChoice),
 }
 
@@ -5078,8 +5083,20 @@ mod tests {
         events: Vec<eframe::egui::Event>,
         discard: bool,
     ) {
+        render_host_frame_for(ctx, dialog, screen, root_visible, events, discard, None);
+    }
+
+    fn render_host_frame_for(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen: eframe::egui::Rect,
+        root_visible: bool,
+        events: Vec<eframe::egui::Event>,
+        discard: bool,
+        target: Option<eframe::egui::ViewportId>,
+    ) {
         let mut input = layout_input(screen, 1.0);
-        let child = dialog.is_popped_out().then(|| dialog.test_viewport_id());
+        let child = target.or_else(|| dialog.is_popped_out().then(|| dialog.test_viewport_id()));
         let child_events = if child.is_some() {
             events
         } else {
@@ -5102,6 +5119,22 @@ mod tests {
                     77,
                     false,
                 );
+                dialog.show_search_child(
+                    ui.ctx(),
+                    first_pass,
+                    root_visible,
+                    root_visible,
+                    true,
+                    false,
+                );
+                dialog.show_package_children(
+                    ui.ctx(),
+                    first_pass,
+                    root_visible,
+                    root_visible,
+                    true,
+                    false,
+                );
                 if discard && first_pass {
                     ui.ctx().request_discard("discard the MkMacro click");
                 }
@@ -5119,6 +5152,8 @@ mod tests {
             }
         });
         dialog.on_host_frame_complete(ctx);
+        dialog.complete_search_child(ctx);
+        dialog.complete_package_children(ctx);
         output.drop_without_applying_deltas();
     }
 
@@ -5256,6 +5291,297 @@ mod tests {
         assert_eq!(dialog.selected_macro_id, Some(1));
         assert!(dialog.selection.ids.contains(&11));
         assert_eq!(runtime.snapshot().run_id, started.run_id);
+    }
+
+    #[test]
+    fn mkmacro_native_parent_opens_ordinary_children_with_retained_origin() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let draft = dialog.draft.clone();
+        let revision = dialog.draft_revision;
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        for key in [
+            "mkmacro-step-search",
+            "mkmacro-help",
+            "mkmacro-templates",
+            "mkmacro-template-save",
+            "mkmacro-package-export",
+        ] {
+            manager.remember(
+                &ctx,
+                crate::settings::UtilityToolKey::parse(key).unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            );
+        }
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        assert!(dialog.is_popped_out());
+        let ctrl_f = egui::Event::Key {
+            key: egui::Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_f.clone()], true);
+        assert!(dialog.navigation.search.mode.is_none());
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_f], false);
+        assert!(dialog.navigation.search.mode.is_some());
+        assert!(dialog.search_host.is_popped_out());
+        let original_text_styles = ctx.style_of(ctx.theme()).text_styles.clone();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.2;
+            }
+        });
+        let search_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            search::SearchState,
+        >::test_viewport(dialog.navigation.search.test_epoch());
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(search_viewport),
+        );
+        // The new native window's first observation is its non-interactive sizing pass.
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(search_viewport),
+        );
+        let (query, clip, enabled, focused) = dialog
+            .navigation
+            .search
+            .test_query_response
+            .expect("native search query");
+        assert!(
+            enabled && focused && clip.contains_rect(query),
+            "query={query:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(query.center()),
+                egui::Event::PointerButton {
+                    pos: query.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(search_viewport),
+            );
+        }
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("discarded".into())],
+            true,
+            Some(search_viewport),
+        );
+        assert_eq!(dialog.navigation.search.test_query(), "");
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("result".into())],
+            false,
+            Some(search_viewport),
+        );
+        assert_eq!(dialog.navigation.search.test_query(), "result");
+        let (next, next_clip, next_enabled) = dialog
+            .navigation
+            .search
+            .test_next_response
+            .expect("Next response");
+        let (close, close_clip, close_enabled) = dialog
+            .navigation
+            .search
+            .test_close_response
+            .expect("Close response");
+        assert!(
+            next_enabled && next_clip.contains_rect(next),
+            "next={next:?}, clip={next_clip:?}, enabled={next_enabled}"
+        );
+        assert!(
+            close_enabled && close_clip.contains_rect(close),
+            "close={close:?}, clip={close_clip:?}, enabled={close_enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(next.center()),
+                egui::Event::PointerButton {
+                    pos: next.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(search_viewport),
+            );
+        }
+        assert_eq!(dialog.selection.primary, Some(12));
+        assert_eq!(dialog.draft_revision, revision);
+        assert!(!dialog.dirty);
+        let epoch = dialog.navigation.search.test_epoch();
+        let ctrl_h = egui::Event::Key {
+            key: egui::Key::H,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_h], false);
+        assert_eq!(
+            dialog.navigation.search.mode,
+            Some(search::SearchMode::Replace)
+        );
+        assert_eq!(dialog.navigation.search.test_epoch(), epoch);
+        assert_eq!(dialog.navigation.search.test_query(), "result");
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.text_styles = original_text_styles
+        });
+        for item in ["help", "templates", "save", "export"] {
+            for _ in 0..3 {
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+            }
+            let (reuse, clip, enabled) =
+                dialog.package_ui.test_reuse().expect("Reuse menu response");
+            assert!(
+                enabled && clip.contains_rect(reuse),
+                "Reuse rect={reuse:?} clip={clip:?} enabled={enabled}"
+            );
+            click_host_position(&ctx, &mut dialog, screen, false, reuse.center(), false);
+            for _ in 0..2 {
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+            }
+            let (item_rect, clip, enabled) = dialog
+                .package_ui
+                .test_item(item)
+                .expect("package menu response");
+            assert!(
+                enabled && clip.contains_rect(item_rect),
+                "{item} rect={item_rect:?} clip={clip:?} enabled={enabled}"
+            );
+            click_host_position(&ctx, &mut dialog, screen, false, item_rect.center(), false);
+            assert!(
+                dialog.package_hosts.test_popped(item),
+                "{item} inherited native parent"
+            );
+            if item == "save" {
+                dialog.package_hosts.test_set_save_name("unsaved template");
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), true);
+                assert_eq!(
+                    dialog.package_hosts.test_save_name(),
+                    Some("unsaved template")
+                );
+                let viewport = dialog.package_hosts.test_save_viewport();
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    Vec::new(),
+                    false,
+                    Some(viewport),
+                );
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    Vec::new(),
+                    false,
+                    Some(viewport),
+                );
+                let (button, clip, enabled) = dialog
+                    .package_hosts
+                    .test_save_response()
+                    .expect("save template button");
+                assert!(
+                    enabled && clip.contains_rect(button),
+                    "save={button:?}, clip={clip:?}, enabled={enabled}"
+                );
+                let before = dialog
+                    .store
+                    .load_template_catalog()
+                    .unwrap()
+                    .templates
+                    .len();
+                for discard_release in [true, false] {
+                    for pressed in [true, false] {
+                        let events = vec![
+                            egui::Event::PointerMoved(button.center()),
+                            egui::Event::PointerButton {
+                                pos: button.center(),
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ];
+                        render_host_frame_for(
+                            &ctx,
+                            &mut dialog,
+                            screen,
+                            false,
+                            events,
+                            discard_release && !pressed,
+                            Some(viewport),
+                        );
+                    }
+                    let count = dialog
+                        .store
+                        .load_template_catalog()
+                        .unwrap()
+                        .templates
+                        .len();
+                    assert_eq!(count, before + usize::from(!discard_release));
+                }
+            }
+            dialog.package_hosts.close_all(&ctx);
+        }
+        assert_eq!(dialog.draft, draft);
+        assert_eq!(dialog.draft_revision, revision);
+        dialog.force_close(&ctx);
+        workers.join_all();
     }
 
     #[test]
@@ -6509,6 +6835,10 @@ impl MkMacroDialog {
             show_root_after_host_change: false,
             pending_host_frame: None,
             retained_host_checkpoint: None,
+            package_hosts: Default::default(),
+            pending_package_open: None,
+            search_host: Default::default(),
+            pending_search_open: None,
             active_host: None,
             native_jump_mode: Default::default(),
             native_jump_frame: None,
@@ -6654,6 +6984,99 @@ impl MkMacroDialog {
         (self.open && self.is_popped_out())
             || self.host_state.bootstrap_pending()
             || self.pending_host_frame.is_some()
+            || self.search_host.needs_root_ui_when_hidden(self.navigation.search.mode.is_some())
+            || self.package_hosts.needs_root_ui_when_hidden()
+    }
+
+    pub(crate) fn package_has_root_layer(&self) -> bool { self.package_hosts.has_root_layer() }
+    pub(crate) fn ordinary_child_root_layer(&self) -> Option<eframe::egui::LayerId> {
+        self.package_hosts.root_layer().or_else(|| self.search_root_layer())
+    }
+
+    pub(crate) fn show_package_children(&mut self, ctx: &eframe::egui::Context, first: bool, root_visible: bool, root_input: bool, native_input: bool, root_jump_active: bool) {
+        let mut hosts = std::mem::take(&mut self.package_hosts);
+        hosts.show(ctx, self, first, root_visible, root_input, native_input, root_jump_active);
+        self.package_hosts = hosts;
+    }
+
+    pub(crate) fn complete_package_children(&mut self, ctx: &eframe::egui::Context) -> bool {
+        let mut hosts = std::mem::take(&mut self.package_hosts);
+        let mut show_root = hosts.complete(ctx, self);
+        if let Some((request, revision, macro_id, origin)) = self.pending_package_open.take()
+            && self.open && !self.close_prompt_open
+            && revision == self.draft_revision && macro_id == self.selected_macro_id
+            && origin.is_current(self.host_state.identity(), &self.owner_instance)
+        {
+            show_root |= hosts.open(ctx, self, request, origin);
+        }
+        show_root &= hosts.has_root_layer();
+        self.package_hosts = hosts;
+        show_root
+    }
+
+    pub(crate) fn search_root_layer(&self) -> Option<eframe::egui::LayerId> {
+        self.navigation.search.mode.and_then(|_| self.search_host.root_layer())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_search(&mut self, ctx: &eframe::egui::Context) {
+        search::open_accepted(self, search::SearchMode::Find);
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-step-search").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.search_host.open_from_origin(ctx, &self.navigation.search, false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    pub(crate) fn show_search_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        let mut host = std::mem::take(&mut self.search_host);
+        let mut state = std::mem::take(&mut self.navigation.search);
+        let parent_owner = root_input && host.root_layer().is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        host.show(ctx, &mut state, self, HostInput {
+            first, root_visible, root_input, native_input,
+            root_owner: NavigationOwner::Blocked, parent_owner, root_jump_active,
+            close_shortcut: true, allow_os_close: true,
+            confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+        });
+        self.navigation.search = state;
+        self.search_host = host;
+    }
+
+    pub(crate) fn complete_search_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let mut host = std::mem::take(&mut self.search_host);
+        let mut state = std::mem::take(&mut self.navigation.search);
+        let mut show_root = false;
+        if let Some(completion) = host.complete(ctx, &mut state) {
+            show_root = completion.show_root;
+            for actions in completion.commands {
+                let (closed, retired) = search::apply_host_actions(self, &mut state, actions);
+                if closed && !retired { host.close_from_app(ctx); }
+            }
+        }
+        self.navigation.search = state;
+        if let Some((mode, revision, macro_id, origin)) = self.pending_search_open.take()
+            && self.open && !self.close_prompt_open
+            && self.draft_revision == revision && self.selected_macro_id == macro_id
+            && origin.is_current(self.host_state.identity(), &self.owner_instance)
+        {
+            let was_open = self.navigation.search.mode.is_some();
+            if self.navigation.search.mode != Some(mode) { search::open_accepted(self, mode); }
+            let desired = host.open_from_origin(ctx, &self.navigation.search, was_open, &ChildOpenOrigin::Parent(origin));
+            show_root |= desired == Some(UtilityPresentation::Docked);
+        }
+        show_root &= self.navigation.search.mode.is_some() && !host.is_popped_out();
+        self.search_host = host;
+        show_root
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &eframe::egui::Context) -> bool {
@@ -6698,6 +7121,10 @@ impl MkMacroDialog {
             let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
             super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
         }
+        if self.navigation.search.mode.is_some() { self.search_host.close_from_app(ctx); }
+        self.package_hosts.close_all(ctx);
+        self.pending_search_open = None;
+        self.pending_package_open = None;
         self.presentation_prepared = false;
         let identity = mkmacro_native_identity(self.host_state.identity(), self.owner_instance);
         self.defer_host_effects = false;
@@ -7197,8 +7624,25 @@ impl MkMacroDialog {
 
         let mut closed = !self.open;
         if self.open && !is_closing {
+            let child_origin = frame.owner_pass.and_then(|owner| {
+                super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, frame.host, frame.owner_instance, frame.root_pass, owner,
+                )
+            });
             for action in frame.effects.actions.drain(..) {
                 if !self.host_action_is_current(&action, frame.host, frame.owner_instance) {
+                    continue;
+                }
+                if let MkMacroHostActionKind::Package(package_ui::PackageHostAction::Open(open)) = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_package_open = Some((open.clone(), action.draft_revision, action.macro_id, origin.clone()));
+                    }
+                    continue;
+                }
+                if let MkMacroHostActionKind::OpenSearch(mode) = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_search_open = Some((*mode, action.draft_revision, action.macro_id, origin.clone()));
+                    }
                     continue;
                 }
                 if self.complete_host_action(ctx, action) {
@@ -7754,6 +8198,7 @@ impl MkMacroDialog {
             MkMacroHostActionKind::Package(package_action) => {
                 package_ui::complete_host_action(self, package_action).map(|_| false)
             }
+            MkMacroHostActionKind::OpenSearch(_) => Ok(false),
             MkMacroHostActionKind::CloseDecision(choice) => {
                 return self.complete_close_choice(ctx, choice);
             }
@@ -7829,6 +8274,12 @@ impl MkMacroDialog {
         super::utility_host::remember_presentation(ctx, key, host.host);
         self.presentation_prepared = false;
         let identity = mkmacro_native_identity(host, owner_instance);
+        if self.navigation.search.mode.is_some() {
+            self.search_host.close_from_app(ctx);
+        }
+        self.pending_search_open = None;
+        self.pending_package_open = None;
+        self.package_hosts.close_all(ctx);
         if self.open {
             if self.dirty {
                 let _ = self.close_with_decision(DirtyDecision::Discard);
@@ -9432,7 +9883,6 @@ impl MkMacroDialog {
             }
         }
         action_catalog::show_modal(ui.ctx(), self);
-        search::show(ui.ctx(), self);
         recording_review::show(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
         image_crop_editor::show(ui.ctx(), self);

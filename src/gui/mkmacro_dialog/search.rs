@@ -11,8 +11,9 @@ pub(super) enum SearchMode {
     Jump,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct SearchState {
+    epoch: u64,
     pub mode: Option<SearchMode>,
     query: String,
     replacement: String,
@@ -20,11 +21,24 @@ pub(super) struct SearchState {
     filter: navigation::RowFilter,
     preview: Option<PreviewState>,
     error: Option<String>,
+    #[cfg(test)]
+    pub(super) test_query_response: Option<(egui::Rect, egui::Rect, bool, bool)>,
+    #[cfg(test)]
+    pub(super) test_next_response: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_close_response: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
+#[cfg(test)]
+impl SearchState {
+    pub(super) fn test_epoch(&self) -> u64 { self.epoch }
+    pub(super) fn test_query(&self) -> &str { &self.query }
+}
+
+#[derive(Clone)]
 struct PreviewState {
     revision: u64,
-    plan: ReplacementPreview,
+    plan: std::sync::Arc<ReplacementPreview>,
     current: usize,
     all_error: Option<String>,
     macro_name: String,
@@ -46,6 +60,17 @@ fn owns_keyboard(ctx: &egui::Context, macro_id: Option<u64>, search_open: bool) 
 }
 
 pub(super) fn open(d: &mut MkMacroDialog, mode: SearchMode) {
+    if d.defer_host_effects {
+        d.stage_host_toolbar_action(super::MkMacroHostActionKind::OpenSearch(mode));
+        return;
+    }
+    open_accepted(d, mode);
+}
+
+pub(super) fn open_accepted(d: &mut MkMacroDialog, mode: SearchMode) {
+    if d.navigation.search.mode.is_none() {
+        d.navigation.search.epoch = d.navigation.search.epoch.wrapping_add(1).max(1);
+    }
     d.navigation.search.mode = Some(mode);
     d.navigation.search.focus_query = true;
     d.navigation.search.preview = None;
@@ -62,7 +87,9 @@ pub(super) fn close(d: &mut MkMacroDialog) {
 /// Run before table input routing, consuming these keys so Enter/F3 cannot
 /// accidentally edit or move the row that search just selected.
 pub(super) fn shortcuts(ctx: &egui::Context, d: &mut MkMacroDialog) {
-    if d.selected_macro().is_none()
+    if !ctx.input(|input| input.focused)
+        || (d.navigation.search.mode.is_some() && !d.search_host.is_popped_out())
+        || d.selected_macro().is_none()
         || d.action_editor.draft.is_some()
         || super::step_table::other_modal_open(d)
         || ctx.egui_is_using_pointer()
@@ -70,7 +97,7 @@ pub(super) fn shortcuts(ctx: &egui::Context, d: &mut MkMacroDialog) {
     {
         return;
     }
-    if !owns_keyboard(ctx, d.selected_macro_id, d.navigation.search.mode.is_some()) {
+    if !owns_keyboard(ctx, d.selected_macro_id, false) {
         return;
     }
     let mode = ctx.input_mut(|i| {
@@ -233,315 +260,546 @@ fn footer_reserved_height(ui: &egui::Ui, mode: SearchMode, has_preview: bool) ->
 }
 
 fn search_body_max_height(ui: &egui::Ui, mode: SearchMode, has_preview: bool) -> f32 {
-    (ui.available_height() - footer_reserved_height(ui, mode, has_preview))
+    (ui.available_rect_before_wrap().intersect(ui.clip_rect()).height()
+        - footer_reserved_height(ui, mode, has_preview))
         .max(0.0)
         .min(320.0)
 }
 
+#[cfg(test)]
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
-    let Some(mode) = d.navigation.search.mode else {
-        return;
-    };
-    if d.action_editor.draft.is_some() || super::step_table::other_modal_open(d) {
+    if d.navigation.search.mode.is_none() {
         return;
     }
-    let rows = navigation::rows(d);
     let mut state = std::mem::take(&mut d.navigation.search);
-    let mut window_open = true;
+    let mut open = true;
+    let mut actions = SearchHostActions::default();
+    let id = egui::Id::new("mkmacro_step_search");
+    egui::Window::new("Step Search")
+        .id(id)
+        .resizable(true)
+        .show_utility(
+            ctx,
+            "mkmacro-step-search",
+            id,
+            Some(&mut open),
+            super::super::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(
+                820.0, 540.0,
+            )),
+            |ui| actions = render_host_contents(ctx, ui, &mut state, d, true),
+        );
+    actions.close |= !open;
+    let _ = apply_host_actions(d, &mut state, actions);
+    d.navigation.search = state;
+}
+
+#[derive(Default)]
+pub(super) struct SearchHostActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    target: Option<(u64, u64)>,
+    apply: Option<bool>,
+    close: bool,
+    retired: bool,
+    focus_requested: bool,
+    revision: u64,
+    macro_id: Option<u64>,
+    owner_instance: u64,
+}
+
+fn render_host_contents(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    state: &mut SearchState,
+    d: &MkMacroDialog,
+    allow_focus: bool,
+) -> SearchHostActions {
+    let Some(mode) = state.mode else {
+        return SearchHostActions::default();
+    };
+    let rows = navigation::rows(d);
     let mut target = None;
     let mut apply = None;
     let mut close = false;
-    let title = match mode {
-        SearchMode::Find => "Find steps",
-        SearchMode::Replace => "Replace step fields",
-        SearchMode::Jump => "Jump to step",
-    };
-    egui::Window::new(title)
-        .id(egui::Id::new("mkmacro_step_search"))
-        .enabled(d.host_child_input_allowed())
-        .collapsible(false)
-        .default_width(if mode == SearchMode::Replace {
-            820.0
-        } else {
-            550.0
-        })
-        .show_utility(ctx, "mkmacro-step-search", egui::Id::new("mkmacro_step_search"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(if mode == SearchMode::Replace {
-            820.0
-        } else {
-            550.0
-        }), egui::Vec2::ZERO, [None, None]), |ui| {
-            let macro_name = d
-                .selected_macro()
-                .map_or("No macro selected", |m| m.name.as_str());
-            ui.strong(format!("Current macro: {macro_name}"));
-            ui.label(if mode == SearchMode::Replace {
-                "Find text"
-            } else {
-                "Search"
-            });
-            let query_width = ui.available_width().max(1.0);
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.query)
-                    .id(query_id())
-                    .desired_width(query_width),
-            );
-            if state.focus_query {
-                response.request_focus();
-                state.focus_query = false;
+    let mut focus_requested = false;
+
+    let macro_name = d
+        .selected_macro()
+        .map_or("No macro selected", |m| m.name.as_str());
+    ui.strong(format!("Current macro: {macro_name}"));
+    ui.label(if mode == SearchMode::Replace {
+        "Find text"
+    } else {
+        "Search"
+    });
+    let query_width = ui.available_width().max(1.0);
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut state.query)
+            .id(query_id())
+            .desired_width(query_width),
+    );
+    if state.focus_query
+        && allow_focus
+        && response.enabled()
+        && ui.is_visible()
+        && !ui.is_sizing_pass()
+        && ui.clip_rect().intersects(response.rect)
+    {
+        response.request_focus();
+        focus_requested = true;
+    }
+    #[cfg(test)]
+    {
+        state.test_query_response = Some((
+            response.rect,
+            ui.clip_rect(),
+            response.enabled(),
+            response.has_focus(),
+        ));
+    }
+    if response.changed() {
+        state.preview = None;
+        state.error = None;
+    }
+    if mode == SearchMode::Replace {
+        ui.label("Replace with");
+        let replacement_width = ui.available_width().max(1.0);
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut state.replacement)
+                    .id(replacement_id())
+                    .desired_width(replacement_width),
+            )
+            .changed()
+        {
+            state.preview = None;
+            state.error = None;
+        }
+        ui.weak("Exact, case-sensitive text. Only editable fields are replaced.");
+        if ui
+            .add(egui::Button::new("Preview replacements").wrap())
+            .clicked()
+        {
+            state.preview = None;
+            state.error = None;
+            match d
+                .selected_macro_id
+                .ok_or_else(|| "Select a macro".to_owned())
+                .and_then(|mid| {
+                    ReplacementPreview::prepare(&d.draft, mid, &state.query, &state.replacement)
+                }) {
+                Ok(plan) => {
+                    let all_error = plan.candidate(&d.draft, None).err();
+                    state.preview = Some(PreviewState {
+                        revision: d.draft_revision(),
+                        plan: std::sync::Arc::new(plan),
+                        current: 0,
+                        all_error,
+                        macro_name: macro_name.to_owned(),
+                        rows: rows.clone(),
+                    });
+                }
+                Err(error) => state.error = Some(error),
             }
-            if response.changed() {
-                state.preview = None;
-                state.error = None;
+        }
+        if let Some(error) = &state.error {
+            semantic_status(ui, StatusTone::Error, error, None);
+        }
+        if let Some(preview) = &mut state.preview {
+            let stale = preview.revision != d.draft_revision()
+                || d.selected_macro_id != Some(preview.plan.macro_id);
+            ui.label(format!("{} affected fields", preview.plan.edits.len()));
+            if stale {
+                semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    "The draft or selected macro changed. Preview again before applying.",
+                    None,
+                );
             }
-            if mode == SearchMode::Replace {
-                ui.label("Replace with");
-                let replacement_width = ui.available_width().max(1.0);
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut state.replacement)
-                            .id(replacement_id())
-                            .desired_width(replacement_width),
-                    )
-                    .changed()
-                {
-                    state.preview = None;
-                    state.error = None;
-                }
-                ui.weak("Exact, case-sensitive text. Only editable fields are replaced.");
-                if ui
-                    .add(egui::Button::new("Preview replacements").wrap())
-                    .clicked()
-                {
-                    state.preview = None;
-                    state.error = None;
-                    match d
-                        .selected_macro_id
-                        .ok_or_else(|| "Select a macro".to_owned())
-                        .and_then(|mid| {
-                            ReplacementPreview::prepare(
-                                &d.draft,
-                                mid,
-                                &state.query,
-                                &state.replacement,
-                            )
-                        }) {
-                        Ok(plan) => {
-                            let all_error = plan.candidate(&d.draft, None).err();
-                            state.preview = Some(PreviewState {
-                                revision: d.draft_revision(),
-                                plan,
-                                current: 0,
-                                all_error,
-                                macro_name: macro_name.to_owned(),
-                                rows: rows.clone(),
-                            });
-                        }
-                        Err(error) => state.error = Some(error),
-                    }
-                }
-                if let Some(error) = &state.error {
-                    semantic_status(ui, StatusTone::Error, error, None);
-                }
-                if let Some(preview) = &mut state.preview {
-                    let stale = preview.revision != d.draft_revision()
-                        || d.selected_macro_id != Some(preview.plan.macro_id);
-                    ui.label(format!("{} affected fields", preview.plan.edits.len()));
-                    if stale {
-                        semantic_status(
-                            ui,
-                            StatusTone::Warning,
-                            "The draft or selected macro changed. Preview again before applying.",
-                            None,
+            if let Some(error) = &preview.all_error {
+                semantic_status(ui, StatusTone::Error, error, None);
+            }
+            let max_height = search_body_max_height(ui, mode, true);
+            egui::ScrollArea::vertical()
+                .id_salt("mkmacro_replace_preview")
+                .max_height(max_height)
+                .min_scrolled_height(0.0)
+                .show(ui, |ui| {
+                    for (index, edit) in preview.plan.edits.iter().enumerate() {
+                        let row = preview
+                            .rows
+                            .get(edit.row - 1)
+                            .filter(|row| row.step_id == edit.step_id);
+                        let description = row.map_or_else(
+                            || format!("Step {}", edit.row),
+                            |row| format!("{} · {} · {}", row.row, row.action_type, row.label),
                         );
-                    }
-                    if let Some(error) = &preview.all_error {
-                        semantic_status(ui, StatusTone::Error, error, None);
-                    }
-                    let max_height = search_body_max_height(ui, mode, true);
-                    egui::ScrollArea::vertical()
-                        .id_salt("mkmacro_replace_preview")
-                        .max_height(max_height)
-                        .min_scrolled_height(0.0)
-                        .show(ui, |ui| {
-                            for (index, edit) in preview.plan.edits.iter().enumerate() {
-                                let row = preview
-                                    .rows
-                                    .get(edit.row - 1)
-                                    .filter(|row| row.step_id == edit.step_id);
-                                let description = row.map_or_else(
-                                    || format!("Step {}", edit.row),
-                                    |row| {
-                                        format!("{} · {} · {}", row.row, row.action_type, row.label)
-                                    },
-                                );
-                                ui.group(|ui| {
-                                    if ui
-                                        .selectable_label(
-                                            preview.current == index,
-                                            format!(
-                                                "{} · {description} · {}",
-                                                preview.macro_name, edit.field
-                                            ),
-                                        )
-                                        .clicked()
-                                    {
-                                        preview.current = index;
-                                    }
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.strong("Old:");
-                                        ui.label(&edit.old);
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.strong("New:");
-                                        ui.label(&edit.new);
-                                    });
-                                });
-                            }
-                        });
-                    ui.horizontal_wrapped(|ui| {
-                        let can_apply = !stale && !preview.plan.edits.is_empty();
-                        if ui
-                            .add_enabled(can_apply, egui::Button::new("Replace Current").wrap())
-                            .on_hover_text("Apply the selected field change from the preview")
-                            .clicked()
-                        {
-                            apply = Some(true);
-                        }
-                        if ui
-                            .add_enabled(
-                                can_apply && preview.all_error.is_none(),
-                                egui::Button::new("Replace All").wrap(),
-                            )
-                            .clicked()
-                        {
-                            apply = Some(false);
-                        }
-                    });
-                }
-            } else {
-                ui.weak("Search types, details, annotations, variables, text, and Call targets.");
-                if let Some(error) = &state.error {
-                    semantic_status(ui, StatusTone::Error, error, None);
-                }
-                let matches = state
-                    .filter
-                    .matches(&rows, &state.query, mode == SearchMode::Jump);
-                let position = matches
-                    .iter()
-                    .position(|&index| Some(rows[index].step_id) == d.selection.primary);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(match position {
-                        Some(index) => format!("{} of {} results", index + 1, matches.len()),
-                        None => format!("{} results", matches.len()),
-                    });
-                    let mut direction = None;
-                    if ui
-                        .add_enabled(!matches.is_empty(), egui::Button::new("Previous").wrap())
-                        .clicked()
-                    {
-                        direction = Some(false);
-                    }
-                    if ui
-                        .add_enabled(!matches.is_empty(), egui::Button::new("Next").wrap())
-                        .clicked()
-                    {
-                        direction = Some(true);
-                    }
-                    let keyboard_owned = owns_keyboard(ctx, d.selected_macro_id, true);
-                    let key_direction = ui.input_mut(|i| {
-                        if !keyboard_owned {
-                            return None;
-                        }
-                        if i.consume_key(Modifiers::SHIFT, Key::F3)
-                            || i.consume_key(Modifiers::SHIFT, Key::Enter)
-                        {
-                            Some(false)
-                        } else if i.consume_key(Modifiers::NONE, Key::F3)
-                            || i.consume_key(Modifiers::NONE, Key::Enter)
-                        {
-                            Some(true)
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(forward) = direction.or(key_direction) {
-                        // Jump with Enter activates its highlighted row; Find
-                        // advances past the current source row with wraparound.
-                        let index = if mode == SearchMode::Jump && key_direction.is_some() {
-                            position
-                                .and_then(|index| matches.get(index).copied())
-                                .or_else(|| matches.first().copied())
-                        } else {
-                            next_match(&rows, &matches, d.selection.primary, forward)
-                        };
-                        if let Some(index) = index {
-                            target = Some((rows[index].macro_id, rows[index].step_id));
-                            close = mode == SearchMode::Jump;
-                        }
-                    }
-                });
-                if state.query.trim().is_empty() && mode == SearchMode::Find {
-                    ui.weak("Enter text to find matching steps.");
-                }
-                let max_height = search_body_max_height(ui, mode, false);
-                let row_height = navigation::selectable_row_height(ui);
-                egui::ScrollArea::vertical()
-                    .id_salt("mkmacro_search_results")
-                    .max_height(max_height)
-                    .min_scrolled_height(0.0)
-                    .show_rows(ui, row_height, matches.len(), |ui, range| {
-                        for index in range {
-                            let row = &rows[matches[index]];
+                        ui.group(|ui| {
                             if ui
-                                .add(row.selectable(ui, d.selection.primary == Some(row.step_id)))
-                                .on_hover_ui(|ui| row.hover(ui))
+                                .selectable_label(
+                                    preview.current == index,
+                                    format!(
+                                        "{} · {description} · {}",
+                                        preview.macro_name, edit.field
+                                    ),
+                                )
                                 .clicked()
                             {
-                                target = Some((row.macro_id, row.step_id));
-                                close = mode == SearchMode::Jump;
+                                preview.current = index;
                             }
-                        }
-                    });
-            }
-            let close_label = if mode == SearchMode::Replace {
-                "Cancel"
-            } else {
-                "Close"
-            };
-            if ui.add(egui::Button::new(close_label).wrap()).clicked()
-                || (owns_keyboard(ctx, d.selected_macro_id, true)
-                    && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)))
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong("Old:");
+                                ui.label(&edit.old);
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong("New:");
+                                ui.label(&edit.new);
+                            });
+                        });
+                    }
+                });
+            ui.horizontal_wrapped(|ui| {
+                let can_apply = !stale && !preview.plan.edits.is_empty();
+                if ui
+                    .add_enabled(can_apply, egui::Button::new("Replace Current").wrap())
+                    .on_hover_text("Apply the selected field change from the preview")
+                    .clicked()
+                {
+                    apply = Some(true);
+                }
+                if ui
+                    .add_enabled(
+                        can_apply && preview.all_error.is_none(),
+                        egui::Button::new("Replace All").wrap(),
+                    )
+                    .clicked()
+                {
+                    apply = Some(false);
+                }
+            });
+        }
+    } else {
+        ui.weak("Search types, details, annotations, variables, text, and Call targets.");
+        if let Some(error) = &state.error {
+            semantic_status(ui, StatusTone::Error, error, None);
+        }
+        let matches = state
+            .filter
+            .matches(&rows, &state.query, mode == SearchMode::Jump);
+        let position = matches
+            .iter()
+            .position(|&index| Some(rows[index].step_id) == d.selection.primary);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(match position {
+                Some(index) => format!("{} of {} results", index + 1, matches.len()),
+                None => format!("{} results", matches.len()),
+            });
+            let mut direction = None;
+            if ui
+                .add_enabled(!matches.is_empty(), egui::Button::new("Previous").wrap())
+                .clicked()
             {
-                close = true;
+                direction = Some(false);
+            }
+            let next = ui.add_enabled(!matches.is_empty(), egui::Button::new("Next").wrap());
+            #[cfg(test)]
+            {
+                state.test_next_response = Some((next.rect, ui.clip_rect(), next.enabled()));
+            }
+            if next.clicked() {
+                direction = Some(true);
+            }
+            let keyboard_owned = allow_focus && owns_keyboard(ctx, d.selected_macro_id, true);
+            let key_direction = ui.input_mut(|i| {
+                if !keyboard_owned {
+                    return None;
+                }
+                if i.consume_key(Modifiers::SHIFT, Key::F3)
+                    || i.consume_key(Modifiers::SHIFT, Key::Enter)
+                {
+                    Some(false)
+                } else if i.consume_key(Modifiers::NONE, Key::F3)
+                    || i.consume_key(Modifiers::NONE, Key::Enter)
+                {
+                    Some(true)
+                } else {
+                    None
+                }
+            });
+            if let Some(forward) = direction.or(key_direction) {
+                // Jump with Enter activates its highlighted row; Find
+                // advances past the current source row with wraparound.
+                let index = if mode == SearchMode::Jump && key_direction.is_some() {
+                    position
+                        .and_then(|index| matches.get(index).copied())
+                        .or_else(|| matches.first().copied())
+                } else {
+                    next_match(&rows, &matches, d.selection.primary, forward)
+                };
+                if let Some(index) = index {
+                    target = Some((rows[index].macro_id, rows[index].step_id));
+                    close = mode == SearchMode::Jump;
+                }
             }
         });
-    if let Some(current) = apply
-        && let Some(preview) = &state.preview
-    {
-        match apply_preview(d, preview, current) {
-            Ok(()) => {
-                if current {
-                    let edit = &preview.plan.edits[preview.current];
-                    target = Some((preview.plan.macro_id, edit.step_id));
+        if state.query.trim().is_empty() && mode == SearchMode::Find {
+            ui.weak("Enter text to find matching steps.");
+        }
+        let max_height = search_body_max_height(ui, mode, false);
+        let row_height = navigation::selectable_row_height(ui);
+        egui::ScrollArea::vertical()
+            .id_salt("mkmacro_search_results")
+            .max_height(max_height)
+            .min_scrolled_height(0.0)
+            .show_rows(ui, row_height, matches.len(), |ui, range| {
+                for index in range {
+                    let row = &rows[matches[index]];
+                    if ui
+                        .add(row.selectable(ui, d.selection.primary == Some(row.step_id)))
+                        .on_hover_ui(|ui| row.hover(ui))
+                        .clicked()
+                    {
+                        target = Some((row.macro_id, row.step_id));
+                        close = mode == SearchMode::Jump;
+                    }
                 }
-                state.preview = None;
-                state.error = None;
-                close = true;
+            });
+    }
+    let close_label = if mode == SearchMode::Replace {
+        "Cancel"
+    } else {
+        "Close"
+    };
+    let close_button = ui.add(egui::Button::new(close_label).wrap());
+    #[cfg(test)]
+    {
+        state.test_close_response =
+            Some((close_button.rect, ui.clip_rect(), close_button.enabled()));
+    }
+    if close_button.clicked()
+        || (allow_focus
+            && owns_keyboard(ctx, d.selected_macro_id, true)
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)))
+    {
+        close = true;
+    }
+    SearchHostActions {
+        target,
+        apply,
+        close,
+        focus_requested,
+        revision: d.draft_revision(),
+        macro_id: d.selected_macro_id,
+        owner_instance: d.owner_instance,
+        ..Default::default()
+    }
+}
+
+pub(super) fn apply_host_actions(
+    d: &mut MkMacroDialog,
+    state: &mut SearchState,
+    actions: SearchHostActions,
+) -> (bool, bool) {
+    let mut target = actions.target;
+    let mut close = actions.close;
+    let current = d.open
+        && !d.close_prompt_open
+        && actions.owner_instance == d.owner_instance
+        && actions.revision == d.draft_revision()
+        && actions.macro_id == d.selected_macro_id;
+    if actions.apply.is_some() || target.is_some() {
+        if !current {
+            state.error = Some("The macro or draft changed. Search again before applying.".into());
+            return (false, false);
+        }
+        if let Some(current_only) = actions.apply
+            && let Some(preview) = &state.preview
+        {
+            match apply_preview(d, preview, current_only) {
+                Ok(()) => {
+                    if current_only {
+                        let edit = &preview.plan.edits[preview.current];
+                        target = Some((preview.plan.macro_id, edit.step_id));
+                    }
+                    state.preview = None;
+                    state.error = None;
+                    close = true;
+                }
+                Err(error) => {
+                    state.error = Some(error);
+                    return (false, false);
+                }
             }
-            Err(error) => state.error = Some(error),
+        }
+        if let Some((macro_id, step_id)) = target {
+            navigation::navigate(d, macro_id, step_id);
         }
     }
-    if close || !window_open {
+    if close {
         state.mode = None;
         state.preview = None;
         d.navigation.focus_table = true;
     }
-    d.navigation.search = state;
-    if let Some((mid, id)) = target {
-        navigation::navigate(d, mid, id);
-        ctx.request_repaint();
+    (close, actions.retired)
+}
+
+impl super::super::utility_window_host::HostedUtilityDialog for SearchState {
+    const KEY: &'static str = "mkmacro-step-search";
+    const TITLE: &'static str = "Step Search";
+    const SIZE: egui::Vec2 = egui::vec2(820.0, 540.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = MkMacroDialog;
+    type Actions = SearchHostActions;
+    type Checkpoint = Self;
+    type Command = SearchHostActions;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("mkmacro_step_search"))
+    }
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.mode.is_some()
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        parent: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> SearchHostActions {
+        let mut result = SearchHostActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (host, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            let mut actions = ui
+                .add_enabled_ui(allowed, |ui| {
+                    render_host_contents(
+                        ctx,
+                        ui,
+                        self,
+                        parent,
+                        allowed && first && !ctx.will_discard(),
+                    )
+                })
+                .inner;
+            if first && !ctx.will_discard() && host.clicked() {
+                actions.presentation = Some(next);
+            }
+            result = actions;
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new("mkmacro_step_search");
+            egui::Window::new(Self::TITLE)
+                .id(id)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    Self::KEY,
+                    id,
+                    Some(&mut open),
+                    super::super::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                    body,
+                );
+        }
+        if !open {
+            result.close = true;
+        }
+        if !first || ctx.will_discard() {
+            result.target = None;
+            result.apply = None;
+            result.close = false;
+            result.presentation = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &SearchHostActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> SearchHostActions {
+        SearchHostActions {
+            close: true,
+            retired: true,
+            ..Default::default()
+        }
+    }
+    fn command_closes(_: &SearchHostActions) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: SearchHostActions,
+        _: Option<usize>,
+    ) -> Vec<SearchHostActions> {
+        if actions.focus_requested {
+            self.focus_query = false;
+        }
+        vec![actions]
+    }
+    #[cfg(test)]
+    fn test_button(_: &SearchHostActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -576,13 +834,34 @@ mod tests {
     fn preview(d: &MkMacroDialog) -> PreviewState {
         PreviewState {
             revision: d.draft_revision(),
-            plan: ReplacementPreview::prepare(&d.draft, d.selected_macro_id.unwrap(), "old", "new")
-                .unwrap(),
+            plan: std::sync::Arc::new(
+                ReplacementPreview::prepare(&d.draft, d.selected_macro_id.unwrap(), "old", "new")
+                    .unwrap(),
+            ),
             current: 1,
             all_error: None,
             macro_name: d.selected_macro().unwrap().name.clone(),
             rows: navigation::rows(d),
         }
+    }
+
+    #[test]
+    fn hosted_replace_rejects_stale_basis_and_applies_once() {
+        let (_directory, mut d) = dialog();
+        d.open = true;
+        let basis = d.draft_revision();
+        let selected = d.selected_macro_id;
+        let mut state = SearchState { mode: Some(SearchMode::Replace), preview: Some(preview(&d)), ..Default::default() };
+        let stale = SearchHostActions { apply: Some(false), revision: basis.wrapping_sub(1), macro_id: selected, owner_instance: d.owner_instance, ..Default::default() };
+        let before = d.draft.clone();
+        assert_eq!(apply_host_actions(&mut d, &mut state, stale), (false, false));
+        assert_eq!(d.draft, before);
+        assert_eq!(d.draft_revision(), basis);
+        assert!(state.error.is_some());
+        let accepted = SearchHostActions { apply: Some(false), revision: basis, macro_id: selected, owner_instance: d.owner_instance, ..Default::default() };
+        assert_eq!(apply_host_actions(&mut d, &mut state, accepted), (true, false));
+        assert_eq!(d.draft_revision(), basis + 1);
+        assert!(state.preview.is_none());
     }
 
     #[test]
