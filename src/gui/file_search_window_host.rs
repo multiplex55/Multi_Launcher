@@ -1,11 +1,10 @@
 use eframe::egui;
 
 use super::file_search_dialog::{FileSearchHostActions, FileSearchHostCheckpoint};
-use super::file_search_preview_dialog::FileSearchPreviewHostActions;
 use super::jump_mode::SurfaceId;
 use super::jump_mode::ui::{
     JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
-    focused_response_layer, visible_top_middle_layer,
+    focused_response_layer,
 };
 use super::utility_dialog_size::{
     UtilityDialogSizeWindowExt, UtilityWindowSizeDefault, UtilityWindowSizeRecipe,
@@ -64,10 +63,8 @@ struct HostFrame {
     identity: HostIdentity,
     instance: u64,
     first: bool,
-    preview_only: bool,
     actions: Option<FileSearchHostActions>,
     checkpoint: Option<FileSearchHostCheckpoint>,
-    preview: Option<FileSearchPreviewHostActions>,
     close: bool,
     os_close: bool,
     native_info: Option<egui::ViewportInfo>,
@@ -97,6 +94,9 @@ pub(super) struct HostCompletion {
 
 impl FileSearchWindowHost {
     #[cfg(test)]
+    pub(super) fn test_transition(&mut self, presentation: UtilityPresentation) { self.state.transition(presentation); }
+
+    #[cfg(test)]
     pub(super) fn test_stage_native_child_open(
         &mut self,
         ctx: &egui::Context,
@@ -110,10 +110,8 @@ impl FileSearchWindowHost {
             identity: self.state.identity(),
             instance: self.instance,
             first: true,
-            preview_only: false,
             actions: Some(FileSearchHostActions::test_command(command)),
             checkpoint: None,
-            preview: None,
             close: false,
             os_close: false,
             native_info: None,
@@ -246,9 +244,7 @@ impl FileSearchWindowHost {
         if !input.root_visible && !self.is_popped_out() {
             return;
         }
-        if !dialog.open && !dialog.preview_dialog.open {
-            return;
-        }
+        if !dialog.open { return; }
         self.instance = instance;
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let first = input.first && !ctx.will_discard();
@@ -258,10 +254,8 @@ impl FileSearchWindowHost {
             identity: self.state.identity(),
             instance,
             first,
-            preview_only: !dialog.open,
             actions: None,
             checkpoint: None,
-            preview: None,
             close: self.close_pending.take() == Some(root),
             os_close,
             native_info: None,
@@ -269,11 +263,6 @@ impl FileSearchWindowHost {
             embedded_focus: None,
             focus: false,
         };
-        if frame.preview_only {
-            frame.preview = draw_preview(ctx, dialog, first && input.root_input);
-            self.pending = Some(frame);
-            return;
-        }
         if !self.is_popped_out() {
             let mut open = true;
             let current = first && input.root_owner && !frame.close;
@@ -309,7 +298,6 @@ impl FileSearchWindowHost {
                     },
                 );
             frame.close |= current && !open;
-            frame.preview = draw_preview(ctx, dialog, first && input.root_input);
         } else {
             let viewport_id = viewport(instance);
             let builder = egui::ViewportBuilder::default()
@@ -424,11 +412,6 @@ impl FileSearchWindowHost {
                                 true,
                             ));
                         });
-                    frame.preview = draw_preview(
-                        &child_ctx,
-                        dialog,
-                        frame.first && input.native_input && !frame.os_close,
-                    );
                     self.native_jump.finish_ui_pass();
                     let owner = self.native_jump.update_navigation_owner_for_viewport(
                         &child_ctx,
@@ -471,11 +454,6 @@ impl FileSearchWindowHost {
                         current,
                         true,
                     ));
-                    frame.preview = draw_preview(
-                        &child_ctx,
-                        dialog,
-                        frame.first && input.root_input && visible,
-                    );
                 }
             });
         }
@@ -493,7 +471,7 @@ impl FileSearchWindowHost {
         coordinator: &mut SearchCoordinator,
     ) -> Option<HostCompletion> {
         let mut frame = self.pending.take()?;
-        let current = (dialog.open || (frame.preview_only && dialog.preview_dialog.open))
+        let current = dialog.open
             && frame.identity == self.state.identity()
             && frame.instance == self.instance;
         if frame.os_close {
@@ -511,12 +489,6 @@ impl FileSearchWindowHost {
                 ctx.request_repaint_of(frame.owner.viewport_id);
             }
             self.cancel_jump();
-            return None;
-        }
-        if frame.preview_only {
-            if let Some(preview) = frame.preview.take() {
-                dialog.preview_dialog.complete_host_actions(preview, None);
-            }
             return None;
         }
         self.state
@@ -587,9 +559,6 @@ impl FileSearchWindowHost {
                     ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
             }
-            if let Some(preview) = frame.preview.take() {
-                dialog.preview_dialog.complete_host_actions(preview, None);
-            }
         }
         let closed = !dialog.open;
         if closed {
@@ -634,27 +603,6 @@ fn surrender_search_focus(ctx: &egui::Context, layer: egui::LayerId) {
     {
         ctx.memory_mut(|memory| memory.surrender_focus(focused));
     }
-}
-
-fn draw_preview(
-    ctx: &egui::Context,
-    dialog: &mut FileSearchDialogState,
-    allowed: bool,
-) -> Option<FileSearchPreviewHostActions> {
-    let layer = egui::LayerId::new(
-        egui::Order::Middle,
-        egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
-    );
-    let allowed = allowed
-        && ctx.input(|input| input.focused)
-        && ctx.memory(|memory| memory.top_modal_layer().is_none())
-        && !egui::Popup::is_any_open(ctx)
-        && visible_top_middle_layer(ctx) == Some(layer)
-        && focused_response_layer(ctx)
-            .is_none_or(|focus| focus == layer || focus.order != egui::Order::Middle);
-    dialog
-        .preview_dialog
-        .ui_in_host(ctx, &dialog.settings, allowed)
 }
 
 fn capture(

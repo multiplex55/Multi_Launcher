@@ -2031,6 +2031,214 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     }
 }
 
+pub(super) type FilePreviewWindowHost =
+    UtilityWindowHost<super::file_search_preview_dialog::FileSearchPreviewDialogState>;
+pub(super) enum FilePreviewHostCommand {
+    Closed,
+    Apply(super::file_search_preview_dialog::FileSearchPreviewHostActions),
+}
+impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPreviewDialogState {
+    const KEY: &'static str = "file-preview";
+    const TITLE: &'static str = "File preview";
+    const SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = crate::file_search::settings::FileSearchSettings;
+    type Actions = super::file_search_preview_dialog::FileSearchPreviewHostActions;
+    type Checkpoint = ();
+    type Command = FilePreviewHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        FilePreviewHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, FilePreviewHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![FilePreviewHostCommand::Closed]
+        } else {
+            vec![FilePreviewHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+pub(super) type HashGeneratorWindowHost =
+    UtilityWindowHost<super::hash_generator_dialog::HashGeneratorDialogState>;
+pub(super) enum HashGeneratorHostCommand {
+    Closed,
+    Apply(super::hash_generator_dialog::HashHostActions, Option<usize>),
+}
+impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogState {
+    const KEY: &'static str = "hash-generator";
+    const TITLE: &'static str = "Hash Generator";
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 440.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(420.0, 320.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = super::hash_generator_dialog::HashRuntime;
+    type Actions = super::hash_generator_dialog::HashHostActions;
+    type Checkpoint = ();
+    type Command = HashGeneratorHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("hash_generator_dialog"))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self::Checkpoint {}
+    fn restore(&mut self, _: Self::Checkpoint) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        HashGeneratorHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, HashGeneratorHostCommand::Closed)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command> {
+        if actions.close {
+            vec![HashGeneratorHostCommand::Closed]
+        } else {
+            vec![HashGeneratorHostCommand::Apply(actions, hwnd)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 pub(super) type CalculationDependencyWindowHost =
     UtilityWindowHost<super::calculation_dependency_dialog::CalculationDependencyDialog>;
 pub(super) enum CalculationDependencyHostCommand {

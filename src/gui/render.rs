@@ -2192,7 +2192,7 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.paste_sequence_host.root_layer()
             }
-            Panel::HashGeneratorDialog => middle(egui::Id::new("hash_generator_dialog")),
+            Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host.root_layer(super::mouse_form_host::MOUSE_GESTURES),
@@ -2202,6 +2202,7 @@ impl LauncherApp {
             Panel::HotkeyDirectoryDialog => NavigationDialogKind::HotkeyDirectory.layer_id(),
             Panel::FavDialog => middle(egui::Id::new(Some("Favorites"))),
             Panel::FileSearchDialog => self.file_search_host.root_layer(),
+            Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer(),
             Panel::NotesDialog => self.notes_dialog.host_layer_if_root(),
             Panel::NoteGraphDialog => middle(egui::Id::new(Some("Note Graph"))),
             Panel::UnusedAssetsDialog => middle(egui::Id::new(Some("Unused Note Assets"))),
@@ -4869,6 +4870,8 @@ impl LauncherApp {
         self.json_utility_host.prepare_open(ctx, &self.json_utility_dialog);
         self.batch_rename_host.prepare_open(ctx, &self.batch_rename_dialog);
         self.search_replace_host.prepare_open(ctx, &self.search_replace_dialog);
+        self.hash_generator_host.prepare_open(ctx, &self.hash_generator_dialog);
+        self.file_preview_host.prepare_open(ctx, &self.file_search_dialog.preview_dialog);
         self.programmer_inspector_host.prepare_open(ctx, &self.programmer_inspector_dialog);
         self.calculation_dependency_host.prepare_open(ctx, &self.calculation_dependency_dialog);
         self.explorer_tabs_host.prepare_open(ctx, &self.explorer_tabs_dialog);
@@ -4956,6 +4959,9 @@ impl LauncherApp {
             self.calculation_pad_dialog.needs_root_ui_when_hidden()
                 || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
                 || self.calculation_dependency_host.needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
+                || self.file_preview_host.needs_root_ui_when_hidden(self.file_search_dialog.preview_dialog.open)
+                || self.hash_generator_host.needs_root_ui_when_hidden(self.hash_generator_dialog.open)
+                || self.hash_generator_dialog.has_job()
                 || self.explorer_tabs_host.needs_root_ui_when_hidden(self.explorer_tabs_dialog.open)
                 || self.explorer_tabs_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -5473,6 +5479,95 @@ impl LauncherApp {
                 close_shortcut: !pinned && !decision_pending, allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
             }
+        );
+    }
+
+    fn show_file_search_children(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        self.hash_generator_dialog.poll_host(ctx);
+        self.file_search_dialog.preview_dialog.poll_preview_result();
+        if self.file_search_dialog.preview_dialog.loading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let preview_layer = self.file_preview_host.root_layer();
+        let preview_owner = root_input
+            && preview_layer.is_some()
+            && visible_top_middle_layer(ctx) == preview_layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                Some(focus) == preview_layer || focus.order == egui::Order::Background
+            });
+        let preview_pinned = self
+            .pinned_panels
+            .contains(&super::Panel::FileSearchPreviewDialog);
+        self.file_preview_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.file_preview_host.show(
+            ctx,
+            &mut self.file_search_dialog.preview_dialog,
+            &self.file_search_dialog.settings,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: preview_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !preview_pinned,
+                allow_os_close: !preview_pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        let hash_layer = self.hash_generator_host.root_layer();
+        let hash_popup =
+            hash_layer.and_then(|layer| self.hash_generator_dialog.owned_popup_layer(ctx, layer));
+        let hash_owner = root_input
+            && hash_layer.is_some()
+            && visible_top_middle_layer(ctx) == hash_layer
+            && (!egui::Popup::is_any_open(ctx) || hash_popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                Some(focus) == hash_layer
+                    || Some(focus) == hash_popup
+                    || focus.order == egui::Order::Background
+            });
+        let hash_pinned = self
+            .pinned_panels
+            .contains(&super::Panel::HashGeneratorDialog);
+        self.hash_generator_host
+            .configure_jump(&self.jump_mode_ui, false);
+        let hash_runtime = super::hash_generator_dialog::HashRuntime {
+            host: self.hash_generator_host.identity(),
+        };
+        self.hash_generator_host.show(
+            ctx,
+            &mut self.hash_generator_dialog,
+            &hash_runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: hash_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !hash_pinned,
+                allow_os_close: !hash_pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
         );
     }
 
@@ -6625,26 +6720,22 @@ impl LauncherApp {
         ) else {
             return child_opens;
         };
-        let mut show_root = completion.show_root;
+        let show_root = completion.show_root;
         for command in completion.commands {
             match command {
                 command @ (super::FileSearchUiCommand::OpenFolderSize(_)
-                | super::FileSearchUiCommand::InspectFileUsers(_)) => {
+                | super::FileSearchUiCommand::InspectFileUsers(_)
+                | super::FileSearchUiCommand::OpenHash(_)
+                | super::FileSearchUiCommand::OpenPreview { .. }) => {
                     if let Some(origin) = completion.origin.clone() {
                         child_opens.push((origin, command));
                     }
-                }
-                super::FileSearchUiCommand::OpenHash(path) => {
-                    self.handle_file_search_ui_command(
-                        super::FileSearchUiCommand::OpenHash(path),
-                        ctx,
-                    );
-                    show_root = true;
                 }
                 command => self.handle_file_search_ui_command(command, ctx),
             }
         }
         if completion.closed {
+            self.file_search_dialog.preview_dialog.retire();
             self.panel_states.file_search_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::FileSearchDialog);
@@ -9652,6 +9743,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_file_search_children(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
@@ -11510,6 +11602,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_file_search_children(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
@@ -11890,7 +11983,7 @@ impl LauncherApp {
         self.show_clipboard_modify_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_json_utility_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_zip_host(&ctx, frame_logic.should_be_visible, first_ui_pass, jump_session_escape_preempted);
-        self.hash_generator_dialog.show(&ctx);
+        self.show_file_search_children(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_regex_tester(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_table_utility(
@@ -13320,6 +13413,61 @@ impl LauncherApp {
             self.settings_editor.pending_settings_navigation = None;
         }
 
+        let mut preview_show_root = false;
+        if let Some(completion) = self
+            .file_preview_host
+            .complete(ctx, &mut self.file_search_dialog.preview_dialog)
+        {
+            use super::utility_window_host::FilePreviewHostCommand;
+            for command in completion.commands {
+                match command {
+                    FilePreviewHostCommand::Closed => {
+                        self.file_search_dialog.preview_dialog.retire();
+                        self.file_preview_search = None;
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::FileSearchPreviewDialog);
+                    }
+                    FilePreviewHostCommand::Apply(actions) => {
+                        if self.file_search_dialog.open
+                            && self.file_preview_search.is_some()
+                            && self.file_preview_search == self.file_search_dialog.active_search_id
+                        {
+                            self.file_search_dialog
+                                .preview_dialog
+                                .complete_host_actions(actions, None);
+                        }
+                    }
+                }
+            }
+            preview_show_root = completion.show_root;
+        }
+        let mut hash_show_root = false;
+        if let Some(completion) = self
+            .hash_generator_host
+            .complete(ctx, &mut self.hash_generator_dialog)
+        {
+            use super::utility_window_host::HashGeneratorHostCommand;
+            for command in completion.commands {
+                match command {
+                    HashGeneratorHostCommand::Closed => {
+                        self.hash_generator_dialog.end_session();
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::HashGeneratorDialog);
+                    }
+                    HashGeneratorHostCommand::Apply(actions, hwnd) => self
+                        .hash_generator_dialog
+                        .commit_host_actions(actions, ctx, hwnd, completion.owner_viewport),
+                }
+            }
+            hash_show_root = completion.show_root;
+        }
+        if !self.file_search_dialog.preview_dialog.open {
+            self.file_preview_search = None;
+            self.file_preview_host.retire(ctx);
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FileSearchPreviewDialog);
+        }
+
         for (origin, command) in file_search_child_opens {
             if !self
                 .file_search_host
@@ -13328,6 +13476,43 @@ impl LauncherApp {
                 continue;
             }
             match command {
+                super::FileSearchUiCommand::OpenHash(path) => {
+                    let was_open = self.hash_generator_dialog.open;
+                    self.hash_generator_dialog.open_with_file(path);
+                    let desired = self.hash_generator_host.open_from_origin(
+                        ctx,
+                        &self.hash_generator_dialog,
+                        was_open,
+                        &super::utility_host::ChildOpenOrigin::Parent(origin),
+                    );
+                    self.panel_stack
+                        .retain(|panel| *panel != super::Panel::HashGeneratorDialog);
+                    self.panel_stack.push(super::Panel::HashGeneratorDialog);
+                    if desired == Some(super::utility_host::UtilityPresentation::Docked) {
+                        effects.push(RootDialogEffect::ShowRoot);
+                    }
+                }
+                super::FileSearchUiCommand::OpenPreview {
+                    path,
+                    content_match,
+                } => {
+                    let was_open = self.file_search_dialog.preview_dialog.open;
+                    self.file_search_dialog
+                        .request_preview(&path, content_match.as_ref());
+                    self.file_preview_search = self.file_search_dialog.active_search_id;
+                    let desired = self.file_preview_host.open_from_origin(
+                        ctx,
+                        &self.file_search_dialog.preview_dialog,
+                        was_open,
+                        &super::utility_host::ChildOpenOrigin::Parent(origin),
+                    );
+                    self.panel_stack
+                        .retain(|panel| *panel != super::Panel::FileSearchPreviewDialog);
+                    self.panel_stack.push(super::Panel::FileSearchPreviewDialog);
+                    if desired == Some(super::utility_host::UtilityPresentation::Docked) {
+                        effects.push(RootDialogEffect::ShowRoot);
+                    }
+                }
                 super::FileSearchUiCommand::OpenFolderSize(path) => {
                     self.folder_size_dialog
                         .open_from_file_search(ctx, path, origin);
@@ -13342,6 +13527,18 @@ impl LauncherApp {
             }
         }
 
+        if preview_show_root
+            && self.file_search_dialog.preview_dialog.open
+            && !self.file_preview_host.is_popped_out()
+        {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if hash_show_root
+            && self.hash_generator_dialog.open
+            && !self.hash_generator_host.is_popped_out()
+        {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         if folder_focus && self.folder_size_dialog.open {
             self.focus_panel(super::Panel::FolderSizeDialog);
         }
@@ -17953,6 +18150,274 @@ mod tests {
         app.file_lock_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn file_search_native_children_inherit_and_keep_live_workers() {
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = boxed_app(&ctx);
+        let path = workspace.root().join("preview-hash.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let settings_path = workspace
+            .root()
+            .join("host-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = crate::settings::Settings::default();
+        for key in ["file-preview", "hash-generator"] {
+            settings
+                .utility_presentations
+                .set(
+                    crate::settings::UtilityToolKey::parse(key).unwrap(),
+                    crate::settings::RememberedPresentation::Docked,
+                )
+                .unwrap();
+        }
+        settings.save(&settings_path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            settings.utility_presentations,
+        );
+        manager.install_in_context(&ctx);
+        app.file_search_dialog.open = true;
+        app.file_search_dialog.active_search_id = Some(crate::file_search::model::SearchId(41));
+        app.request_launcher_visibility(false);
+        let open_child = |app: &mut LauncherApp, command| {
+            app.file_search_host
+                .test_stage_native_child_open(&ctx, command);
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            let effects = app.complete_retained_tool_dialogs(&ctx);
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, RootDialogEffect::ShowRoot))
+            );
+            output.drop_without_applying_deltas();
+        };
+        open_child(
+            &mut app,
+            super::super::FileSearchUiCommand::OpenHash(path.clone()),
+        );
+        assert!(app.hash_generator_host.is_popped_out() && !app.visible_flag_state());
+        app.hash_generator_dialog
+            .set_algorithm(crate::hash_generator::HashAlgorithm::Sha512);
+        app.hash_generator_dialog.set_text("private draft".into());
+        app.hash_generator_dialog
+            .calculate(std::sync::Arc::new(|| {}))
+            .unwrap();
+        let request = app.hash_generator_dialog.current_request_id();
+        let epoch = app.hash_generator_dialog.epoch();
+        open_child(
+            &mut app,
+            super::super::FileSearchUiCommand::OpenHash(path.clone()),
+        );
+        assert_eq!(app.hash_generator_dialog.current_request_id(), request);
+        assert_eq!(app.hash_generator_dialog.epoch(), epoch);
+        assert_eq!(app.hash_generator_dialog.text(), "private draft");
+        assert_eq!(
+            app.hash_generator_dialog.algorithm(),
+            crate::hash_generator::HashAlgorithm::Sha512
+        );
+        let matched = crate::file_search::model::ContentMatch::new(1, "hello world".into(), 0, 5);
+        open_child(
+            &mut app,
+            super::super::FileSearchUiCommand::OpenPreview {
+                path: path.clone(),
+                content_match: Some(matched.clone()),
+            },
+        );
+        assert!(app.file_preview_host.is_popped_out());
+        let request = app
+            .file_search_dialog
+            .preview_dialog
+            .current_request
+            .clone();
+        let preview_epoch = app.file_search_dialog.preview_dialog.epoch();
+        let preview_generation = app
+            .file_search_dialog
+            .preview_dialog
+            .test_request_generation();
+        open_child(
+            &mut app,
+            super::super::FileSearchUiCommand::OpenPreview {
+                path: path.clone(),
+                content_match: Some(matched.clone()),
+            },
+        );
+        assert_eq!(app.file_search_dialog.preview_dialog.epoch(), preview_epoch);
+        assert_eq!(
+            app.file_search_dialog
+                .preview_dialog
+                .test_request_generation(),
+            preview_generation
+        );
+        assert_eq!(
+            app.file_search_dialog.preview_dialog.current_request,
+            request
+        );
+        assert_eq!(
+            app.file_search_dialog.preview_dialog.selected_match,
+            Some(matched)
+        );
+        assert!(!app.visible_flag_state());
+        app.file_search_host
+            .test_transition(super::super::utility_host::UtilityPresentation::Docked);
+        let preview_native =
+            super::super::utility_window_host::FilePreviewWindowHost::test_viewport(
+                app.file_search_dialog.preview_dialog.epoch(),
+            );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.file_search_dialog.preview_dialog.loading
+            || app.file_search_dialog.preview_dialog.pending_auto_scroll
+        {
+            run_host_viewport_frame(&ctx, &mut app, preview_native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview should complete after parent host moves"
+            );
+            std::thread::yield_now();
+        }
+        assert!(app.file_search_dialog.preview_dialog.open);
+        app.file_search_host
+            .test_transition(super::super::utility_host::UtilityPresentation::Popout);
+        let hash_native = super::super::utility_window_host::HashGeneratorWindowHost::test_viewport(
+            app.hash_generator_dialog.epoch(),
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, hash_native, Vec::new(), false, false);
+        }
+        let (mode, clip, enabled) = app
+            .hash_generator_dialog
+            .test_control("mode")
+            .expect("native mode control");
+        assert!(enabled && clip.contains_rect(mode));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                hash_native,
+                tool_dialog_pointer_events(mode, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, hash_native, Vec::new(), false, false);
+        }
+        let (text_mode, clip, enabled) = app
+            .hash_generator_dialog
+            .test_control("mode/Text")
+            .expect("native mode popup");
+        assert!(enabled && clip.contains_rect(text_mode));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                hash_native,
+                tool_dialog_pointer_events(text_mode, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.hash_generator_dialog.mode(),
+            crate::hash_generator::HashInputMode::Text
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, hash_native, Vec::new(), false, false);
+        }
+        let (editor, clip, enabled) = app
+            .hash_generator_dialog
+            .test_control("text")
+            .expect("native text editor");
+        assert!(enabled && clip.contains_rect(editor));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                hash_native,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            hash_native,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            true,
+        );
+        assert!(!app.hash_generator_dialog.text().contains("discarded"));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            hash_native,
+            vec![egui::Event::Text("λ".into())],
+            false,
+            false,
+        );
+        assert!(app.hash_generator_dialog.text().contains('λ'));
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, preview_native, Vec::new(), false, false);
+        }
+        let (button, clip, enabled) = app
+            .file_preview_host
+            .test_button
+            .expect("native preview host control");
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                preview_native,
+                tool_dialog_pointer_events(button, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.file_preview_host.is_popped_out());
+        assert_eq!(
+            app.file_search_dialog.preview_dialog.current_request,
+            request
+        );
+        app.hash_generator_dialog.request_close();
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, hash_native, Vec::new(), false, false);
+        }
+        assert!(!app.hash_generator_dialog.open);
+        app.focus_panel(super::Panel::HashGeneratorDialog);
+        assert!(app.hash_generator_dialog.open && app.hash_generator_host.is_popped_out());
+        assert_ne!(app.hash_generator_dialog.epoch(), epoch);
+        app.hash_generator_dialog.end_session();
+        workers.join_all();
     }
 
     #[test]

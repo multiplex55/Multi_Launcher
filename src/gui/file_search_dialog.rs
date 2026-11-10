@@ -396,6 +396,7 @@ impl FileSearchHostActions {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
+    OpenPreview { path: PathBuf, content_match: Option<ContentMatch> },
     OpenFolderSize(PathBuf),
     InspectFileUsers(PathBuf),
     ConfigureRipgrep(PathBuf),
@@ -939,6 +940,7 @@ impl FileSearchDialogState {
                 return None;
             }
         };
+        self.preview_dialog.retire();
         self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
@@ -973,7 +975,7 @@ impl FileSearchDialogState {
         }
         self.active_search_id = None;
         self.clear_results_and_selection();
-        self.preview_dialog = FileSearchPreviewDialogState::default();
+        self.preview_dialog.retire();
         self.current_status = SearchStatus::Pending;
         self.backend = None;
         self.warning_error_message = None;
@@ -3053,6 +3055,9 @@ impl FileSearchDialogState {
             })
             .unwrap_or_else(|| PreviewRequest::new(path));
         self.apply_preview_settings_to_request(&mut request);
+        if self.preview_dialog.open && self.preview_dialog.current_request.as_ref() == Some(&request)
+            && self.preview_dialog.selected_match.as_ref() == first_match
+        { self.preview_dialog.cancel_close_request(); return request; }
         if let Some(content_match) = first_match.cloned() {
             self.preview_dialog
                 .open_content_match(path, content_match, &self.settings);
@@ -3315,7 +3320,20 @@ impl FileSearchDialogState {
         };
         let action = match pending.action {
             FileSearchRowAction::Activate => {
-                self.open_result_row(&row);
+                self.select_result(&row);
+                if let FileSearchRowPayload::Content {
+                    path,
+                    content_match,
+                    ..
+                } = &row.payload
+                {
+                    commands.push(FileSearchUiCommand::OpenPreview {
+                        path: path.clone(),
+                        content_match: Some(content_match.clone()),
+                    });
+                } else {
+                    self.open_selected_result();
+                }
                 return;
             }
             FileSearchRowAction::Menu(action) => action,
@@ -3358,9 +3376,7 @@ impl FileSearchDialogState {
                     )
                 });
             }
-            Action::Preview => {
-                self.request_preview(&path, content_match.as_ref());
-            }
+            Action::Preview => { commands.push(FileSearchUiCommand::OpenPreview { path, content_match }); }
             Action::OpenFileOrDirectory | Action::RevealInExplorer => {
                 let label = if action == Action::OpenFileOrDirectory {
                     "open"

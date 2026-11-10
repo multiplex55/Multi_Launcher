@@ -757,6 +757,7 @@ pub enum Panel {
     HotkeyDirectoryDialog,
     FavDialog,
     FileSearchDialog,
+    FileSearchPreviewDialog,
     NotesDialog,
     NoteGraphDialog,
     UnusedAssetsDialog,
@@ -832,6 +833,7 @@ impl Panel {
             Self::HotkeyDirectoryDialog => "Hotkey Directory",
             Self::FavDialog => "Favorites",
             Self::FileSearchDialog => "File Search",
+            Self::FileSearchPreviewDialog => "File preview",
             Self::NotesDialog => "Quick Notes",
             Self::NoteGraphDialog => "Note Graph",
             Self::UnusedAssetsDialog => "Unused Note Assets",
@@ -908,6 +910,7 @@ struct PanelStates {
     hotkey_directory_dialog: bool,
     fav_dialog: bool,
     file_search_dialog: bool,
+    file_search_preview_dialog: bool,
     notes_dialog: bool,
     note_graph_dialog: bool,
     unused_assets_dialog: bool,
@@ -1256,6 +1259,9 @@ pub struct LauncherApp {
     paste_sequence_dialog: PasteSequenceDialog,
     paste_sequence_host: utility_window_host::PasteSequenceWindowHost,
     pub hash_generator_dialog: HashGeneratorDialogState,
+    hash_generator_host: utility_window_host::HashGeneratorWindowHost,
+    file_preview_host: utility_window_host::FilePreviewWindowHost,
+    file_preview_search: Option<crate::file_search::model::SearchId>,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
@@ -2826,6 +2832,7 @@ impl LauncherApp {
     ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
+            FileSearchUiCommand::OpenPreview { .. } => {},
             FileSearchUiCommand::OpenFolderSize(path) => {
                 if ctx.viewport_id() == egui::ViewportId::ROOT {
                     self.folder_size_dialog.stage_prefill(ctx, path);
@@ -4068,6 +4075,9 @@ impl LauncherApp {
             paste_sequence_dialog: PasteSequenceDialog::default(),
             paste_sequence_host: utility_window_host::PasteSequenceWindowHost::default(),
             hash_generator_dialog: HashGeneratorDialogState::default(),
+            hash_generator_host: Default::default(),
+            file_preview_host: Default::default(),
+            file_preview_search: None,
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
@@ -4885,7 +4895,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 70] = [
+    const TRACKED_PANELS: [Panel; 71] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4909,6 +4919,7 @@ impl LauncherApp {
         Panel::HotkeyDirectoryDialog,
         Panel::FavDialog,
         Panel::FileSearchDialog,
+        Panel::FileSearchPreviewDialog,
         Panel::NotesDialog,
         Panel::NoteGraphDialog,
         Panel::UnusedAssetsDialog,
@@ -4983,6 +4994,7 @@ impl LauncherApp {
             Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open,
             Panel::FavDialog => self.fav_dialog.open,
             Panel::FileSearchDialog => self.file_search_dialog.open,
+            Panel::FileSearchPreviewDialog => self.file_search_dialog.preview_dialog.open,
             Panel::NotesDialog => self.notes_dialog.open,
             Panel::NoteGraphDialog => self.note_graph_dialog.open,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.open,
@@ -5050,6 +5062,8 @@ impl LauncherApp {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
+            Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
+            Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
@@ -5359,10 +5373,8 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.close_paste_sequence_dialog();
             }
-            Panel::HashGeneratorDialog => {
-                self.hash_generator_dialog.end_session();
-                self.panel_states.hash_generator_dialog = false;
-            }
+            Panel::HashGeneratorDialog => { self.hash_generator_dialog.request_close(); }
+            Panel::FileSearchPreviewDialog => { self.file_search_dialog.preview_dialog.request_close(); }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
             }
@@ -5684,10 +5696,8 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.close_paste_sequence_dialog();
             }
-            Panel::HashGeneratorDialog => {
-                self.hash_generator_dialog.end_session();
-                self.panel_states.hash_generator_dialog = false;
-            }
+            Panel::HashGeneratorDialog => { self.hash_generator_dialog.request_close(); }
+            Panel::FileSearchPreviewDialog => { self.file_search_dialog.preview_dialog.request_close(); }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
             }
@@ -5980,6 +5990,7 @@ impl LauncherApp {
                 }
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
+            Panel::FileSearchPreviewDialog => {},
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
             Panel::MkMacroDialog => {
@@ -6316,6 +6327,28 @@ impl LauncherApp {
             if !self.regex_tester_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
+        } else if panel == Panel::HashGeneratorDialog {
+            let was_open = self.hash_generator_dialog.open;
+            self.hash_generator_dialog.ensure_open();
+            let desired = self.hash_generator_host.open_from_origin(
+                &self.egui_ctx,
+                &self.hash_generator_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
+        } else if panel == Panel::FileSearchPreviewDialog {
+            let desired = self.file_preview_host.open_from_origin(
+                &self.egui_ctx,
+                &self.file_search_dialog.preview_dialog,
+                true,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ProgrammerInspectorDialog {
             let was_open = self.programmer_inspector_dialog.open;
             self.programmer_inspector_dialog.open();
@@ -6485,6 +6518,7 @@ impl LauncherApp {
         check!(hotkey_directory_dialog, Panel::HotkeyDirectoryDialog);
         check!(fav_dialog, Panel::FavDialog);
         check!(file_search_dialog, Panel::FileSearchDialog);
+        check!(file_search_preview_dialog, Panel::FileSearchPreviewDialog);
         check!(notes_dialog, Panel::NotesDialog);
         check!(note_graph_dialog, Panel::NoteGraphDialog);
         check!(unused_assets_dialog, Panel::UnusedAssetsDialog);
