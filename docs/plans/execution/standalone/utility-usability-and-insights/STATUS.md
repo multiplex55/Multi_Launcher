@@ -29,7 +29,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M4-A | D1/D2 Mermaid Colors / menu strips | complete; automated verified, native pending |
 | M4-B | D4 toolbar / pinned inspector | complete; automated verified, native pending |
 | M4-C | D3 owned-text endpoint captions | complete; automated verified, native pending |
-| M4-D | D5 actual connector creation / reconnection | pending |
+| M4-D | D5 actual connector creation / reconnection | complete; automated verified, native pending |
 | M5-A | I1 bounded label-file exchange | pending |
 | M6-A | R1/R2 explicit duration / encoder timeline | pending |
 | M6-B | R1/R2 exact typing / 25-second steps | pending |
@@ -362,3 +362,21 @@ The existing shared object-caption owner uses each primitive's owned label, Text
 Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` batches `m4-c-first` (3/3, new formatter/combo plus existing connector Apply regression) and `m4-c-streaming` (2/2, formatter+actual combo after bounded-allocation correction) passed. Fixtures cover duplicate IDs, labelled rectangle/ellipse, Text/container/lane/empty/missing/multiline Unicode/long labels, actual combo selection and committed rename without anchor/endpoint change. Receipts/selectors/output under `target/utility-usability-and-insights/evidence/m4-c-*`; exit 0/no timeout/cleanup and drain verified.
 
 Parent inspected final scoped diff/whitespace/status; old truncation paths removed, only Diagram source/ledger changed. Source/Cargo returned; physical native pending M9. M4-D actual endpoint reassignment and interactive creation remains required; neither route-point editing nor existing attached-object movement counts as its proof.
+
+M4-C checkpoint `1972bed93ac303cf0509fa833193f6bad98453fd` pushed successfully; clean tree before M4-D. Implementer owns bounded actual connector tool/From-To handles and local preview→accepted atomic transaction, pure hit/anchor support and directly affected tests. Exact endpoint.object_id changes, route/style preservation, cancellation/noop/single undo and host/document/mapping fences required. Parent ledger/Git; one source/Cargo lane.
+
+M4-D source clarification: actual existing Add connector uses the first two eligible scene objects, despite Goal/planner wording describing a two-selected shortcut. The requested outcome governs: quick creation will use the actual two eligible selected objects; other selection states arm explicit source/destination picking. Relevant fixtures migrate intentionally while preserving transactional assertions. Target eligibility must preserve valid locked-object attachment without moving/unlocking targets.
+
+## M4-D acceptance: Actual connector creation and endpoint gestures
+
+Add connector uses two eligible selected objects, otherwise arms an accepted source→destination tool with a stable hint row and projected target/anchor feedback. Typed From/To attachment handles are distinct from manual-route controls; direct drag and connector double-click focus coexist with primitive inline editing. Preview changes only the chosen endpoint; accepted release performs one existing ReplaceObject transaction, preserving connector ID/label/style/direction/manual points and target geometry. Invalid/Escape/noop do not edit/history. Coincident self-loop projected endpoints get independently hittable labelled affordances around the unchanged attachment/anchors. Same-batch pointer handling uses qualified raw events, not delays or synthetic input.
+
+HostIdentity now participates in gesture authority alongside document/revision/owner/viewport/start acceptance/mapping. Tool state and delayed endpoint-editor focus use the same current-owner boundaries; discarded or retired source and changed mappings/documents cannot authorize stale edits. A narrow shared domain attachment query reuses existing projected anchor math. Current VisualObject/Layer model has no lock mechanism: no lock feature or fake fixture was invented; visible painted-target eligibility and nonmutation of targets are covered.
+
+Final separate fast-dev lib no-run compile passed. The initial compile's route-point conversion and unreachable arm were corrected. Final owned 100-second `--no-fail-fast` evidence:
+
+- `m4-d-final-authority`: 6/6; actual canvas creation/Escape, From and To endpoint.object_id reassignment to different objects, exact connector data/manual-route preservation/undo-redo, batched input, no-op/invalid/Escape/discarded start, stale document/host/source, rotated/clip/painted-prefix targeting, actual connector double-click focus, and explicit coincident self-loop projection with both handle hits.
+- `m4-d-regressions`: 5/5; existing connector controls, manual route controls, attached-object movement (distinct from new proof), inline-label behavior and child-discard transactions.
+- `m4-d-root-discard`: 1/1 exact root-discard regression.
+
+Receipts/selectors/output: `target/utility-usability-and-insights/evidence/m4-d-*`; final receipts exit 0/no timeout/cleanup and drain verified. Parent inspected scoped diff/whitespace/status; no diagnostics or duplicate implementation. Source/Cargo returned; only new-block formatting followed final successful tests. Physical native creation/reconnect remains pending M9; automated state/input tests are not native observations. M5–M8 and B2b/c adapters remain required.

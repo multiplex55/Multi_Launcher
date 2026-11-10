@@ -49,8 +49,15 @@ impl CanvasMapping {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasConnectorEnd {
+    From,
+    To,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasHandleKind {
     ConnectorPoint { object_id: VisualObjectId, index: usize },
+    ConnectorEndpoint { object_id: VisualObjectId, end: CanvasConnectorEnd },
     ResizeCorner {
         object_id: VisualObjectId,
         sign_x: i8,
@@ -752,16 +759,61 @@ pub fn selection_handles(
         && let VisualObjectKind::Connector { connector } = &object.kind
         && owners_fully_painted(projection, selection, painted_item_prefix)
         && let Some(item) = projection.items.iter().find(|item| item.object_id == id)
-        && let Some(route) = super::visual_scene::seed_manual_route(connector, item)
+        && let Some(path) = item.open_paths.first()
+        && let (Some(from), Some(to)) = (path.first(), path.last())
     {
-        let points = match route {
-            super::visual::VisualManualRoute::Polyline { points } => points,
-            super::visual::VisualManualRoute::Cubic { control1, control2 } => vec![control1, control2],
+        let mut handles = Vec::new();
+        if let Some(route) = super::visual_scene::seed_manual_route(connector, item) {
+            let points = match route {
+                super::visual::VisualManualRoute::Polyline { points } => points,
+                super::visual::VisualManualRoute::Cubic { control1, control2 } => {
+                    vec![control1, control2]
+                }
+            };
+            handles.extend(
+                points
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, point)| CanvasHandle {
+                        kind: CanvasHandleKind::ConnectorPoint {
+                            object_id: id,
+                            index,
+                        },
+                        center: ScenePoint {
+                            x: point.x,
+                            y: point.y,
+                        },
+                    }),
+            );
+        }
+        // Coincident attachments remain independently draggable without changing their anchors.
+        let same_attachment = squared_distance(*from, *to) * mapping.zoom * mapping.zoom <= 1.0;
+        let offset = if same_attachment {
+            10.0 / mapping.zoom.max(f64::MIN_POSITIVE)
+        } else {
+            0.0
         };
-        return points.into_iter().enumerate().map(|(index, point)| CanvasHandle {
-            kind: CanvasHandleKind::ConnectorPoint { object_id: id, index },
-            center: ScenePoint { x: point.x, y: point.y },
-        }).collect();
+        handles.push(CanvasHandle {
+            kind: CanvasHandleKind::ConnectorEndpoint {
+                object_id: id,
+                end: CanvasConnectorEnd::From,
+            },
+            center: ScenePoint {
+                x: from.x - offset,
+                y: from.y,
+            },
+        });
+        handles.push(CanvasHandle {
+            kind: CanvasHandleKind::ConnectorEndpoint {
+                object_id: id,
+                end: CanvasConnectorEnd::To,
+            },
+            center: ScenePoint {
+                x: to.x + offset,
+                y: to.y,
+            },
+        });
+        return handles;
     }
     let Some(resolved) = resolve_visual_membership(scene, selection) else {
         return Vec::new();
@@ -838,6 +890,44 @@ pub fn hit_test(
     screen_point: ScenePoint,
     handle_radius_screen_points: f64,
 ) -> CanvasHit {
+    hit_test_filtered(
+        projection,
+        painted_item_prefix,
+        handles,
+        mapping,
+        screen_point,
+        handle_radius_screen_points,
+        true,
+    )
+}
+
+pub fn connector_target_hit_test(
+    projection: &VisualSceneProjection,
+    painted_item_prefix: usize,
+    mapping: CanvasMapping,
+    screen_point: ScenePoint,
+    radius: f64,
+) -> CanvasHit {
+    hit_test_filtered(
+        projection,
+        painted_item_prefix,
+        &[],
+        mapping,
+        screen_point,
+        radius,
+        false,
+    )
+}
+
+fn hit_test_filtered(
+    projection: &VisualSceneProjection,
+    painted_item_prefix: usize,
+    handles: &[CanvasHandle],
+    mapping: CanvasMapping,
+    screen_point: ScenePoint,
+    handle_radius_screen_points: f64,
+    include_connectors: bool,
+) -> CanvasHit {
     if !mapping.contains_screen_point(screen_point) {
         return CanvasHit::Empty;
     }
@@ -855,6 +945,9 @@ pub fn hit_test(
         .take(painted_item_prefix)
         .rev()
         .find(|item| {
+            if !include_connectors && item.kind == VisualProjectedKind::Connector {
+                return false;
+            }
             if item.kind == VisualProjectedKind::Connector {
                 let stroke_radius = handle_radius_screen_points
                     + (item.style.border_width * mapping.zoom / 2.0).max(0.0);

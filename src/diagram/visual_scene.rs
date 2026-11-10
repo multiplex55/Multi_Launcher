@@ -638,6 +638,21 @@ fn connector_parallel_lanes(connectors: &[&VisualObject]) -> BTreeMap<VisualObje
     lanes
 }
 
+pub(crate) fn connector_attachment(
+    projection: &VisualSceneProjection,
+    object: &VisualObject,
+    anchor: VisualAnchor,
+) -> Option<ScenePoint> {
+    let items = projection
+        .items
+        .iter()
+        .filter(|item| item.object_id == object.id)
+        .cloned()
+        .collect::<Vec<_>>();
+    project_connector_anchor(Some(&items), anchor, 0.0, object.transform.rotation_degrees)
+        .map(|attachment| attachment.point)
+}
+
 fn project_connector_anchor(
     items: Option<&Vec<ProjectedVisualItem>>,
     anchor: VisualAnchor,
