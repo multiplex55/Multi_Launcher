@@ -463,7 +463,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_mkmacro_dialog(&mut self) {
-        self.mkmacro_dialog.open();
+        self.focus_panel(super::Panel::MkMacroDialog);
     }
 
     fn open_todo_dialog(&mut self) {
@@ -1043,7 +1043,11 @@ impl FileSearchCommandHost for LauncherApp {
 impl DiffCommandHost for LauncherApp {
     fn open_diff(&mut self, payload: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
         self.diff_dialog.open_payload(payload.clone())?;
+        self.diff_dialog.prepare_open_presentation(&self.egui_ctx);
         self.diff_dialog.request_host_focus();
+        if !self.diff_dialog.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
         Ok(())
     }
 }

@@ -4841,6 +4841,9 @@ impl LauncherApp {
         self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_settings_host.prepare_open(ctx, super::mouse_form_host::MOUSE_SETTINGS, self.mouse_settings_dialog.open);
         self.mouse_gesture_settings_host.prepare_open(ctx, super::mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open);
+        self.diff_dialog.prepare_open_presentation(ctx);
+        self.markdown_studio_dialog.prepare_open_presentation(ctx);
+        self.mkmacro_dialog.prepare_open_presentation(ctx);
         self.regex_tester_dialog.prepare_open_presentation(ctx);
         self.diagram_studio_dialog.prepare_open_presentation(ctx);
         self.date_time_studio_dialog.prepare_open_presentation(ctx);
@@ -7604,7 +7607,7 @@ impl LauncherApp {
                 return Err("The Paste shortcut destination is no longer valid.");
             }
             EditDestination::MacroPlayback { macro_id } => {
-                self.mkmacro_dialog.open();
+                self.focus_panel(super::Panel::MkMacroDialog);
                 if !self
                     .mkmacro_dialog
                     .draft
@@ -7624,7 +7627,7 @@ impl LauncherApp {
                 self.mkmacro_dialog.queue_macro_properties_preferences();
             }
             EditDestination::MacroRecorder(_) => {
-                self.mkmacro_dialog.open();
+                self.focus_panel(super::Panel::MkMacroDialog);
                 self.mkmacro_dialog
                     .mkmacro_properties_preferences
                     .master_open = true;
@@ -11853,7 +11856,11 @@ impl LauncherApp {
                 crate::activity::ActivityOwner::Macro => Some(super::Panel::MkMacroDialog),
                 crate::activity::ActivityOwner::FolderCompare => {
                     self.diff_dialog.open = true;
+                    self.diff_dialog.prepare_open_presentation(&ctx);
                     self.diff_dialog.request_host_focus();
+                    if !self.diff_dialog.is_popped_out() {
+                        self.request_launcher_visibility(true);
+                    }
                     ctx.request_repaint();
                     None
                 }
@@ -46043,6 +46050,96 @@ mod tests {
     }
 
     #[test]
+    fn document_hosts_restore_independent_preferences_without_demoting_live_sessions() {
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = boxed_app(&ctx);
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let keys = ["markdown-studio", "diff", "mkmacro"];
+        assert!(
+            !app.markdown_studio_dialog.open && !app.diff_dialog.open && !app.mkmacro_dialog.open
+        );
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Popout,
+            );
+        }
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        app.focus_panel(super::super::Panel::MkMacroDialog);
+        app.diff_dialog.open = true;
+        app.diff_dialog.prepare_open_presentation(&ctx);
+        assert!(app.markdown_studio_dialog.is_popped_out());
+        assert!(app.mkmacro_dialog.is_popped_out());
+        assert!(app.diff_dialog.is_popped_out());
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        app.focus_panel(super::super::Panel::MkMacroDialog);
+        app.diff_dialog.prepare_open_presentation(&ctx);
+        assert!(app.markdown_studio_dialog.is_popped_out());
+        assert!(app.mkmacro_dialog.is_popped_out());
+        assert!(app.diff_dialog.is_popped_out());
+        app.mkmacro_dialog.force_close(&ctx);
+        assert_eq!(
+            manager.preference(UtilityToolKey::parse("mkmacro").unwrap()),
+            Some(RememberedPresentation::Popout)
+        );
+        manager.remember(
+            &ctx,
+            UtilityToolKey::parse("mkmacro").unwrap(),
+            RememberedPresentation::Docked,
+        );
+        app.focus_panel(super::super::Panel::MkMacroDialog);
+        assert!(!app.mkmacro_dialog.is_popped_out());
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        for name in keys {
+            assert_eq!(
+                saved
+                    .utility_presentations
+                    .get(UtilityToolKey::parse(name).unwrap()),
+                Some(RememberedPresentation::Docked)
+            );
+        }
+    }
+
+    #[test]
     fn diff_moves_the_same_busy_folder_workspace_and_polls_while_root_is_hidden() {
         use crate::diff::model::DiffView;
 
@@ -46068,6 +46165,7 @@ mod tests {
                 .drop_without_applying_deltas();
         }
         assert!(app.diff_dialog.host_layer_if_root().is_none());
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("diff").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         let viewport = app.diff_dialog.test_host_viewport();
         let mut hide = actual_query_input(true);
         hide.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));

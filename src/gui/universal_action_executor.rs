@@ -723,7 +723,7 @@ impl LauncherApp {
                 }
             }
             UniversalUiIntent::OpenMkMacro { id } => {
-                self.mkmacro_dialog.open();
+                self.focus_panel(super::Panel::MkMacroDialog);
                 self.mkmacro_dialog.set_selected_macro(Some(id));
             }
         }

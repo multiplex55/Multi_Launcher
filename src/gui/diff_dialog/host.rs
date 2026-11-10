@@ -19,6 +19,7 @@ const MINIMUM: egui::Vec2 = egui::vec2(520.0, 360.0);
 #[derive(Default)]
 pub(super) struct DiffWindowHost {
     state: UtilityHostState,
+    presentation_prepared: bool,
     pending: Option<DiffHostFrame>,
     native_workspace: Option<u64>,
     deferred_close: Option<(u64, HostIdentity)>,
@@ -226,6 +227,22 @@ impl DiffDialogState {
             || self.host.pending.is_some()
     }
 
+    pub(crate) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.host.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::restore_remembered_presentation(
+                ctx,
+                key,
+                &mut self.host.state,
+            );
+            self.host.presentation_prepared = true;
+        }
+    }
+
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host.state.presentation() == UtilityPresentation::Popout
+    }
+
     pub(crate) fn request_host_focus(&mut self) {
         if self.host.state.presentation() == UtilityPresentation::Docked {
             self.host.docked_focus = Some(self.workspace.workspace_id);
@@ -243,6 +260,7 @@ impl DiffDialogState {
         root_input: bool,
         native_input: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         let root_owned = root_input && self.owns_root_input(ctx);
         let mut host = std::mem::take(&mut self.host);
         host.show(
@@ -310,6 +328,7 @@ impl DiffWindowHost {
                 self.state.request_focus();
             } else {
                 self.state.retire_to_docked();
+                self.presentation_prepared = false;
             }
         }
         if !dialog.open || (!root_visible && host.host == UtilityPresentation::Docked) {
@@ -498,13 +517,18 @@ impl DiffWindowHost {
             dialog.apply_ui_actions(frame.actions, PickerOwner::Hosted(hwnd));
         }
         if !dialog.open {
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::remember_presentation(ctx, key, frame.host.host);
             self.close_viewport(ctx, frame.workspace);
             self.state.retire_to_docked();
+            self.presentation_prepared = false;
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
         {
             self.close_viewport(ctx, frame.workspace);
             self.state.transition(presentation);
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::remember_presentation(ctx, key, presentation);
             ctx.request_repaint_of(egui::ViewportId::ROOT);
             if presentation == UtilityPresentation::Docked {
                 ctx.move_to_top(docked_layer(frame.workspace));

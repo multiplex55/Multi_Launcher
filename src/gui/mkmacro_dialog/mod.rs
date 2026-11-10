@@ -390,6 +390,7 @@ impl FirstStepRowGeometry {
 pub struct MkMacroDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     owner_instance: u64,
     show_root_after_host_change: bool,
     pending_host_frame: Option<MkMacroHostFrame>,
@@ -5186,7 +5187,7 @@ mod tests {
     fn mkmacro_visible_pop_out_and_dock_run_same_macro_once() {
         use eframe::egui::{self, vec2};
 
-        let (_directory, mut dialog, runtime, _fake) = real_runtime_dialog();
+        let (directory, mut dialog, runtime, _fake) = real_runtime_dialog();
         dialog.open = true;
         dialog.set_selected_macro(Some(1));
         dialog.selected_macro_mut().unwrap().description = "unsaved edit".into();
@@ -5194,12 +5195,38 @@ mod tests {
         dialog.selection.ids.insert(11);
         let previous_run_id = runtime.snapshot().run_id;
         let ctx = egui::Context::default();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("mkmacro").unwrap();
         ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
 
+        click_host_button(&ctx, &mut dialog, screen, true, false, true);
+        assert!(!dialog.is_popped_out());
+        assert_eq!(manager.preference(key), None);
         click_host_button(&ctx, &mut dialog, screen, true, false, false);
         assert!(dialog.is_popped_out());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        dialog.close_prompt_open = true;
+        assert!(!dialog.complete_close_choice(&ctx, MkMacroCloseChoice::Cancel));
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         assert!(dialog.dirty);
         assert!(dialog.selection.ids.contains(&11));
         assert!(dialog.store.snapshot().macros[0].description.is_empty());
@@ -5221,6 +5248,11 @@ mod tests {
 
         click_host_button(&ctx, &mut dialog, screen, false, false, false);
         assert!(!dialog.is_popped_out());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        workers.join_all();
         assert_eq!(dialog.selected_macro_id, Some(1));
         assert!(dialog.selection.ids.contains(&11));
         assert_eq!(runtime.snapshot().run_id, started.run_id);
@@ -6472,6 +6504,7 @@ impl MkMacroDialog {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             owner_instance: 0,
             show_root_after_host_change: false,
             pending_host_frame: None,
@@ -6579,6 +6612,9 @@ impl MkMacroDialog {
         }
     }
     pub fn open(&mut self) {
+        if !self.open {
+            self.presentation_prepared = false;
+        }
         if self.open && self.is_popped_out() {
             self.request_host_focus();
             return;
@@ -6587,6 +6623,15 @@ impl MkMacroDialog {
         self.refresh_environment();
         self.open = true;
         self.publish_recording_target();
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &eframe::egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key =
+                crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
     }
 
     pub(crate) fn is_popped_out(&self) -> bool {
@@ -6649,6 +6694,11 @@ impl MkMacroDialog {
     }
 
     pub(crate) fn force_close(&mut self, ctx: &eframe::egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+        }
+        self.presentation_prepared = false;
         let identity = mkmacro_native_identity(self.host_state.identity(), self.owner_instance);
         self.defer_host_effects = false;
         self.open = false;
@@ -6685,6 +6735,7 @@ impl MkMacroDialog {
         owner_instance: u64,
         jump_mode_enabled: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use eframe::egui;
 
         self.owner_instance = owner_instance;
@@ -7172,6 +7223,8 @@ impl MkMacroDialog {
                     );
                 }
                 if self.host_state.transition(requested) {
+                    let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+                    super::utility_host::remember_presentation(ctx, key, requested);
                     self.native_jump_mode.cancel_all();
                     self.native_jump_frame = None;
                     if requested == UtilityPresentation::Docked {
@@ -7772,6 +7825,9 @@ impl MkMacroDialog {
         host: HostIdentity,
         owner_instance: u64,
     ) {
+        let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+        super::utility_host::remember_presentation(ctx, key, host.host);
+        self.presentation_prepared = false;
         let identity = mkmacro_native_identity(host, owner_instance);
         if self.open {
             if self.dirty {

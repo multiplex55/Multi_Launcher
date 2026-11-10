@@ -6027,6 +6027,8 @@ impl LauncherApp {
             }
         }
         match panel {
+            Panel::MkMacroDialog => self.mkmacro_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::RegexTesterDialog => self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::TimerDialog => self.timer_dialog.prepare_open_presentation(&self.egui_ctx),
@@ -6091,6 +6093,10 @@ impl LauncherApp {
             self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
             self.mkmacro_dialog.open();
+            self.mkmacro_dialog.prepare_open_presentation(&self.egui_ctx);
+            if !self.mkmacro_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::FileSearchDialog {
             if !self.file_search_dialog.open {
                 self.file_search_dialog.open();
@@ -6214,6 +6220,10 @@ impl LauncherApp {
             }
         } else if panel == Panel::MarkdownStudioDialog {
             self.markdown_studio_dialog.open();
+            self.markdown_studio_dialog.prepare_open_presentation(&self.egui_ctx);
+            if self.markdown_studio_dialog.open && !self.markdown_studio_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ConvertPanel {
             self.convert_panel.open();
         } else {

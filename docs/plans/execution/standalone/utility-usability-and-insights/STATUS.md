@@ -140,7 +140,7 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | File Search / Settings / Mouse Settings / Gesture Settings / Mouse Gestures | M3-B1c1 implemented / automated verified |
 | Calendar / event details / event editor / DateTime Studio / Timer | M3-B1c2 implemented / automated verified |
 | Diagram Studio / Viewer / Regex | M3-B1c3a implemented / automated verified |
-| Markdown / Diff / MkMacro main | pending M3-B1c3b |
+| Markdown / Diff / MkMacro main | M3-B1c3b implemented / automated verified |
 | Other existing custom families enumerated above | pending remaining B1c groups |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
@@ -225,3 +225,16 @@ Separate fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` b
 - `m3-b1c3-regex-focus`: 3/3 passed, run `9ee911d4-483a-4a83-b6bd-fcaea7640cd2`, runner 9.586s: Regex saved-Docked/live-Popout policy, retained revision/copy host moves and full existing detached-query coexistence matrix after the Diagram change.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c3-{diagram,regex-focus}/`; cleanup/drain verified. Parent inspected source/open/close diff and whitespace; lanes returned. Other document/analysis hosts and B2 remain pending; native pending M9.
+
+M3-B1c3a checkpoint `7d3d1bffc3219906cf9e925eb275645753dce025` pushed successfully; clean tree before Markdown/Diff/MkMacro main M3-B1c3b. Implementer owns those existing parent hosts only; nested editors/help/pickers and typed child origins remain B2. Analysis/output families follow; parent ledger/Git, one source/Cargo lane.
+
+## M3-B1c3b partial acceptance: Docked-default document hosts
+
+Markdown Studio, Diff and MkMacro main use shared saved presentation at real open, preserving Docked default and live session state. Accepted transitions/final successful closes record before retirement; dirty decisions stay with document/workspace/macro owners. Direct universal-action MkMacro and activity-driven Diff routes now prepare through the normal open/focus boundary. Nested ordinary children and typed origin work remain B2, not claimed verified here.
+
+Separate fast-dev lib no-run compile passed after one activity-opener Context borrow correction. Owned 100-second `--no-fail-fast` batches:
+
+- `m3-b1c3b-markdown`: 3/3 passed, run `216bba8a-b2af-4525-bf3f-53e2d0a01868`, runner 2.776s: three-key/live-session policy, same-document host moves and cancelled-close no-repeat.
+- `m3-b1c3b-diff-mkmacro`: 5/5 passed, run `b774979e-aa64-425d-9f3e-0fe62b82f11e`, runner 2.778s: Diff dirty-close/undo preservation, busy hidden-root workspace, MkMacro retained action edit and same-macro Run/host move.
+
+Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c3b-{markdown,diff-mkmacro}/`; cleanup/drain verified. Parent inspected source/caller/close diff and whitespace; lanes returned. Eight analysis/output existing hosts and B2 remain pending; native pending M9.
