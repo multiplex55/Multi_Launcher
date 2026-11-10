@@ -209,6 +209,7 @@ struct PendingSelection {
 pub(crate) struct RecordingDialogState {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_focus: bool,
     host_os_close_pending: bool,
     host_popups: Vec<RecordingPopupAnchor>,
@@ -872,6 +873,27 @@ impl RecordingDialogState {
             },
         )
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("screen-recording")
+                .expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("screen-recording")
+                .expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -917,6 +939,7 @@ impl RecordingDialogState {
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
         self.host.retire_to_docked();
+        self.presentation_prepared = false;
         self.host_focus = false;
         self.host_os_close_pending = false;
         self.setup_pass = None;
@@ -1022,6 +1045,7 @@ impl RecordingDialogState {
         pinned: bool,
         shortcut_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::UtilityPresentation;
         if !self.open {
             return;
@@ -1506,6 +1530,9 @@ impl RecordingDialogState {
             }
             if let RecordingUiCommand::Host(next) = pending.command {
                 if !self.has_selector_operation() && self.host.transition(next) {
+                    let key =
+                        crate::settings::UtilityToolKey::parse("screen-recording").expect("stable utility key");
+                    super::utility_host::remember_presentation(ctx, key, next);
                     self.host_popups.clear();
                     if next == super::utility_host::UtilityPresentation::Docked {
                         if let Some(receipt) = pending.setup {
@@ -1887,7 +1914,7 @@ impl LauncherApp {
     pub(crate) fn open_recording_setup(&mut self) {
         self.recording_dialog.open();
         self.focus_panel(super::Panel::RecordingDialog);
-        if self.recording_dialog.root_layer().is_some() {
+        if !self.recording_dialog.is_popped_out() {
             self.request_launcher_state(Some(true), Some(true));
         } else {
             self.recording_dialog.request_host_focus();
@@ -2183,6 +2210,7 @@ impl LauncherApp {
                 .visual_overlay_controller()
                 .cancel_recording_region_operation(operation);
         }
+        self.recording_dialog.remember_final_presentation(&self.egui_ctx);
         self.recording_dialog.retire_host(&self.egui_ctx);
         self.recording_dialog.close();
         self.panel_states.recording_dialog = false;

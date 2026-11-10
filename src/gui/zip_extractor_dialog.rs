@@ -72,6 +72,7 @@ pub(super) struct ZipHostOutcome {
 pub(crate) struct ZipExtractorDialog {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_epoch: u64,
     #[cfg(windows)]
     host_pending: Option<ZipHostFrame>,
@@ -949,6 +950,27 @@ impl ZipExtractorDialog {
     pub(crate) fn target_generation(&self) -> u64 {
         self.host_epoch
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("zip-extractor")
+                .expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("zip-extractor")
+                .expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -1002,6 +1024,7 @@ impl ZipExtractorDialog {
         #[cfg(not(windows))]
         let _ = ctx;
         self.host.retire_to_docked();
+        self.presentation_prepared = false;
     }
     #[cfg(all(windows, test))]
     pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
@@ -1061,6 +1084,7 @@ impl ZipExtractorDialog {
         pinned: bool,
         root_shortcut_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         use crate::gui::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
@@ -1364,6 +1388,7 @@ impl ZipExtractorDialog {
         }
         self.host_focus = false;
         if frame.close || frame.actions.iter().any(|a| matches!(a, UiAction::Close)) {
+            self.remember_final_presentation(ctx);
             self.retire_host(ctx);
             session.close();
             creation.close();
@@ -1377,6 +1402,9 @@ impl ZipExtractorDialog {
         let show_root = frame.request == Some(UtilityPresentation::Docked);
         if let Some(next) = frame.request {
             if self.host.transition(next) {
+                let key =
+                    crate::settings::UtilityToolKey::parse("zip-extractor").expect("stable utility key");
+                super::utility_host::remember_presentation(ctx, key, next);
                 self.host_jump.cancel_all();
                 self.host_jump_frame = None;
                 if next == UtilityPresentation::Docked {

@@ -141,7 +141,7 @@ Exact output/selectors/cleanup receipts: `target/utility-usability-and-insights/
 | Calendar / event details / event editor / DateTime Studio / Timer | M3-B1c2 implemented / automated verified |
 | Diagram Studio / Viewer / Regex | M3-B1c3a implemented / automated verified |
 | Markdown / Diff / MkMacro main | M3-B1c3b implemented / automated verified |
-| Other existing custom families enumerated above | pending remaining B1c groups |
+| File Lock / Duplicate Finder / Folder Size / Image Compare / Recording / Table / XML / ZIP | M3-B1c4 implemented; policy verified, three existing-test limits below |
 | Accepted child-origin routes / ordinary companion adapters | pending B2 |
 | Native pickers, modal confirmations, menus, capture/radial/recording overlays | retain existing ownership; excluded from ordinary detached-tool policy |
 
@@ -238,3 +238,21 @@ Separate fast-dev lib no-run compile passed after one activity-opener Context bo
 - `m3-b1c3b-diff-mkmacro`: 5/5 passed, run `b774979e-aa64-425d-9f3e-0fe62b82f11e`, runner 2.778s: Diff dirty-close/undo preservation, busy hidden-root workspace, MkMacro retained action edit and same-macro Run/host move.
 
 Exact selectors/output/cleanup receipts: `target/utility-usability-and-insights/evidence/m3-b1c3b-{markdown,diff-mkmacro}/`; cleanup/drain verified. Parent inspected source/caller/close diff and whitespace; lanes returned. Eight analysis/output existing hosts and B2 remain pending; native pending M9.
+
+M3-B1c3b checkpoint `18cab48d9559a23db72daae8b08c513be7677b27` pushed successfully; clean tree before final eight existing analysis/output hosts M3-B1c4. Implementer owns preference lifecycle only, explicitly preserving scans/workers/recording/output and dirty-decision behavior; recording duration/treemap features remain later milestones. B2 typed origins/new ordinary adapters still pending. Parent ledger/Git; one source/Cargo lane.
+
+## M3-B1c4 partial acceptance: Final eight existing hosts
+
+All eight existing families use per-open preference preparation and accepted transition/final-close writes: file-lock, duplicate-finder, folder-size, image-comparison, screen-recording, table-utility, xml-toolkit and zip-extractor. Existing workers, scan/recording/output and dirty-decision behavior retained. XML's actual absent-preference Popout default preserved. Image Compare uses the registered image-comparison key, not its navigation label.
+
+Separate final fast-dev lib no-run compile passed. Owned 100-second `--no-fail-fast` batches and exact individual attribution checks:
+
+- `m3-b1c4-policy`: 3/3 passed, run `5f0e6a20-79c4-45e1-a152-936036d3f564`, runner 2.773s: eight keys/live-session policy, discarded File Lock actions and Folder Size explicit-scan-only.
+- `m3-b1c4-workers`: File Lock held inspection and retained Recording controller passed; Folder Size selection and Recorder preview fixture failed and reproduced individually.
+- `m3-b1c4-analysis-hosts`: Table Utility held file/selection and Image Compare in-flight pair/camera passed; XML retained close and ZIP inspection failed.
+- XML old fixture expected Popout after explicit Dock/reopen. This conflicts with intentional H2; it now asserts remembered Docked, explicitly pops out, then retains all original discarded/retained native-close assertions. A smaller Recorder accepted-host/close/reopen test covers H2 independently of the preview fixture.
+- `m3-b1c4-corrected`: both new/migrated cases passed 2/2, run `666f5214-b817-4abd-b5b4-504c445d47fa`, runner 2.724s.
+
+**Existing-test limits, not passes:** `folder_size_host_preserves_scan_and_drill_through_hidden_root` loses only selected_entry Some((1,1)) to None after Dock while the same scan/drilled directory remain; `recorder_setup_hosts_preserve_real_controls_popup_and_stale_region` cannot find enabled fully clipped preview-label; `zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions` times out waiting for inspection (about 11s, not runner deadline). Each fails individually and in available pre-task binary `target/fast-dev/deps/multi_launcher-057b516185de8672.exe`, last-write UTC 2026-11-08T21:54:39, SHA256 `A37114B09F4743A1C4A838B9709FD59D32FA50571AE123992762EC92CF63847E`. This is pre-task evidence, **not an exact-parent source attribution**. Assertions remain intact; no engine/fixture campaign added. Folder Size selection is directly relevant to upcoming M7 and must be considered there. Recorder/ZIP limits remain separately reported unless later changed behavior makes them relevant.
+
+Exact selectors/output/attribution receipts: `target/utility-usability-and-insights/evidence/m3-b1c4-*` (policy, workers, analysis-hosts, individual retests, old-binary/old-recording/old-xml/old-zip, corrected). All receipts show no runner deadline timeout and verified cleanup/output drain. Parent inspected final scoped diff and whitespace; lanes returned. All existing UtilityHostState families are now integrated; global H1/H2 remain pending B2 ordinary child origins/adapters. Native pending M9.

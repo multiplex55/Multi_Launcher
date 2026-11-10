@@ -5521,6 +5521,7 @@ impl LauncherApp {
     }
 
     fn close_zip_extractor_dialog(&mut self) {
+        self.zip_extractor_dialog.remember_final_presentation(&self.egui_ctx);
         self.zip_extractor_dialog.retire_host(&self.egui_ctx);
         self.zip_extractor_dialog.clear_presentation();
         #[cfg(windows)]
@@ -6027,6 +6028,14 @@ impl LauncherApp {
             }
         }
         match panel {
+            Panel::FileLockDialog => self.file_lock_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::FolderSizeDialog => self.folder_size_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::ImageCompareDialog => self.image_compare_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::RecordingDialog => self.recording_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::TableUtilityDialog => self.table_utility_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::ZipExtractorDialog => self.zip_extractor_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::MkMacroDialog => self.mkmacro_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.prepare_open_presentation(&self.egui_ctx),
             Panel::RegexTesterDialog => self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx),
@@ -6146,26 +6155,57 @@ impl LauncherApp {
             }
         } else if panel == Panel::ImageCompareDialog {
             self.image_compare_dialog.open();
+            self.image_compare_dialog.prepare_open_presentation(&self.egui_ctx);
             self.image_compare_dialog.request_host_focus();
+            if !self.image_compare_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::DuplicateFinderDialog {
             self.duplicate_finder_dialog.open();
+            self.duplicate_finder_dialog.prepare_open_presentation(&self.egui_ctx);
             self.duplicate_finder_dialog.request_host_focus();
+            if !self.duplicate_finder_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::FolderSizeDialog {
             self.folder_size_dialog.open();
+            self.folder_size_dialog.prepare_open_presentation(&self.egui_ctx);
             self.folder_size_dialog.request_host_focus();
+            if !self.folder_size_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::FileLockDialog {
             self.file_lock_dialog.ensure_open();
+            self.file_lock_dialog.prepare_open_presentation(&self.egui_ctx);
             self.file_lock_dialog.request_host_focus();
+            if !self.file_lock_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::RecordingDialog {
             self.recording_dialog.open();
+            self.recording_dialog.prepare_open_presentation(&self.egui_ctx);
             self.recording_dialog.request_host_focus();
+            if !self.recording_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ZipExtractorDialog {
             self.ensure_open(panel);
             self.zip_extractor_dialog.request_host_focus();
+            if self.zip_extractor_dialog.open && !self.zip_extractor_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::TableUtilityDialog {
             self.table_utility_dialog.open();
+            self.table_utility_dialog.prepare_open_presentation(&self.egui_ctx);
+            if !self.table_utility_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::XmlToolkitDialog {
             self.xml_toolkit_dialog.open();
+            self.xml_toolkit_dialog.prepare_open_presentation(&self.egui_ctx);
+            if !self.xml_toolkit_dialog.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::RegexTesterDialog {
             self.regex_tester_dialog.open();
             self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx);

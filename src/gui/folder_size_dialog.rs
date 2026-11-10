@@ -417,6 +417,7 @@ struct PendingFolderSizePass {
 pub(crate) struct FolderSizeDialogState {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_epoch: u64,
     host_focus: bool,
     host_os_close_pending: bool,
@@ -476,6 +477,7 @@ impl FolderSizeDialogState {
         Self {
             open: false,
             host: super::utility_host::UtilityHostState::docked(),
+            presentation_prepared: false,
             host_epoch: 0,
             host_focus: false,
             host_os_close_pending: false,
@@ -837,6 +839,27 @@ impl FolderSizeDialogState {
     pub(super) fn owns_row_menu_layer(&self, ctx: &egui::Context, layer: egui::LayerId) -> bool {
         self.owns_row_menu(ctx) && self.row_menu.is_some_and(|(_, _, popup, _, _, _)| layer.id == popup)
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key =
+                crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key =
+                crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -882,6 +905,7 @@ impl FolderSizeDialogState {
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
         self.host.retire_to_docked();
+        self.presentation_prepared = false;
         self.host_os_close_pending = false;
         self.host_focus = false;
     }
@@ -912,6 +936,7 @@ impl FolderSizeDialogState {
         pinned: bool,
         shortcut_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::UtilityPresentation;
         let view = self.session.view();
         self.sync_projection(&view);
@@ -1189,6 +1214,9 @@ impl FolderSizeDialogState {
             match action {
                 FolderSizeAction::Host(next) => {
                     if self.host.transition(next) {
+                        let key =
+                            crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
+                        super::utility_host::remember_presentation(ctx, key, next);
                         if next == super::utility_host::UtilityPresentation::Docked {
                             let identity = self.native_identity(pending.host);
                             super::utility_dialog_size::close_native_utility_geometry_viewport(
@@ -1406,6 +1434,7 @@ impl FolderSizeDialogState {
                     }
                 }
                 FolderSizeAction::Close => {
+                    self.remember_final_presentation(ctx);
                     if current.is_busy() {
                         let _ = self.session.cancel();
                     }

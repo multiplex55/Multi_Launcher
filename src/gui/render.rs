@@ -4841,6 +4841,14 @@ impl LauncherApp {
         self.mouse_gestures_host.prepare_open(ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_settings_host.prepare_open(ctx, super::mouse_form_host::MOUSE_SETTINGS, self.mouse_settings_dialog.open);
         self.mouse_gesture_settings_host.prepare_open(ctx, super::mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open);
+        self.file_lock_dialog.prepare_open_presentation(ctx);
+        self.duplicate_finder_dialog.prepare_open_presentation(ctx);
+        self.folder_size_dialog.prepare_open_presentation(ctx);
+        self.image_compare_dialog.prepare_open_presentation(ctx);
+        self.recording_dialog.prepare_open_presentation(ctx);
+        self.table_utility_dialog.prepare_open_presentation(ctx);
+        self.xml_toolkit_dialog.prepare_open_presentation(ctx);
+        self.zip_extractor_dialog.prepare_open_presentation(ctx);
         self.diff_dialog.prepare_open_presentation(ctx);
         self.markdown_studio_dialog.prepare_open_presentation(ctx);
         self.mkmacro_dialog.prepare_open_presentation(ctx);
@@ -17776,6 +17784,175 @@ mod tests {
     }
 
     #[test]
+    fn analysis_hosts_restore_independent_keys_without_demoting_live_sessions() {
+        use super::super::Panel;
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        #[inline(never)]
+        fn boxed_app(
+            ctx: &egui::Context,
+        ) -> (
+            crate::performance::workloads::IsolatedWorkspace,
+            Box<LauncherApp>,
+        ) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = boxed_app(&ctx);
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let keys = [
+            "file-lock",
+            "duplicate-finder",
+            "folder-size",
+            "image-comparison",
+            "screen-recording",
+            "table-utility",
+            "xml-toolkit",
+            "zip-extractor",
+        ];
+        assert!(
+            !app.file_lock_dialog.open
+                && !app.duplicate_finder_dialog.open
+                && !app.folder_size_dialog.open
+                && !app.image_compare_dialog.open
+                && !app.recording_dialog.open
+                && !app.table_utility_dialog.open
+                && !app.xml_toolkit_dialog.open
+                && !app.zip_extractor_dialog.open
+        );
+        app.focus_panel(Panel::XmlToolkitDialog);
+        assert!(
+            app.xml_toolkit_dialog.is_popped_out(),
+            "XML retains its pre-existing default"
+        );
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Popout,
+            );
+        }
+        for panel in [
+            Panel::FileLockDialog,
+            Panel::DuplicateFinderDialog,
+            Panel::FolderSizeDialog,
+            Panel::ImageCompareDialog,
+            Panel::RecordingDialog,
+            Panel::TableUtilityDialog,
+            Panel::XmlToolkitDialog,
+            Panel::ZipExtractorDialog,
+        ] {
+            app.focus_panel(panel);
+        }
+        assert!(
+            app.file_lock_dialog.is_popped_out()
+                && app.duplicate_finder_dialog.is_popped_out()
+                && app.folder_size_dialog.is_popped_out()
+                && app.image_compare_dialog.is_popped_out()
+                && app.recording_dialog.is_popped_out()
+                && app.table_utility_dialog.is_popped_out()
+                && app.xml_toolkit_dialog.is_popped_out()
+                && app.zip_extractor_dialog.is_popped_out()
+        );
+        for name in keys {
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        for panel in [
+            Panel::FileLockDialog,
+            Panel::DuplicateFinderDialog,
+            Panel::FolderSizeDialog,
+            Panel::ImageCompareDialog,
+            Panel::RecordingDialog,
+            Panel::TableUtilityDialog,
+            Panel::XmlToolkitDialog,
+            Panel::ZipExtractorDialog,
+        ] {
+            app.focus_panel(panel);
+        }
+        assert!(
+            app.file_lock_dialog.is_popped_out()
+                && app.duplicate_finder_dialog.is_popped_out()
+                && app.folder_size_dialog.is_popped_out()
+                && app.image_compare_dialog.is_popped_out()
+                && app.recording_dialog.is_popped_out()
+                && app.table_utility_dialog.is_popped_out()
+                && app.xml_toolkit_dialog.is_popped_out()
+                && app.zip_extractor_dialog.is_popped_out()
+        );
+        app.duplicate_finder_dialog.end_session_with_host(&ctx);
+        app.image_compare_dialog.end_session_with_host(&ctx);
+        app.table_utility_dialog.end_session_with_host(&ctx);
+        app.xml_toolkit_dialog.end_session_with_host(&ctx);
+        app.close_zip_extractor_dialog();
+        for name in [
+            "duplicate-finder",
+            "image-comparison",
+            "table-utility",
+            "xml-toolkit",
+            "zip-extractor",
+        ] {
+            assert_eq!(
+                manager.preference(UtilityToolKey::parse(name).unwrap()),
+                Some(RememberedPresentation::Popout)
+            );
+            manager.remember(
+                &ctx,
+                UtilityToolKey::parse(name).unwrap(),
+                RememberedPresentation::Docked,
+            );
+        }
+        for panel in [
+            Panel::DuplicateFinderDialog,
+            Panel::ImageCompareDialog,
+            Panel::TableUtilityDialog,
+            Panel::XmlToolkitDialog,
+            Panel::ZipExtractorDialog,
+        ] {
+            app.focus_panel(panel);
+        }
+        assert!(
+            !app.duplicate_finder_dialog.is_popped_out()
+                && !app.image_compare_dialog.is_popped_out()
+                && !app.table_utility_dialog.is_popped_out()
+                && !app.xml_toolkit_dialog.is_popped_out()
+                && !app.zip_extractor_dialog.is_popped_out()
+        );
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        for name in keys {
+            assert_eq!(
+                saved
+                    .utility_presentations
+                    .get(UtilityToolKey::parse(name).unwrap()),
+                Some(RememberedPresentation::Docked)
+            );
+        }
+    }
+
+    #[test]
     fn folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_scan() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -22855,6 +23032,37 @@ mod tests {
         }
     }
     #[test]
+    fn recorder_accepted_host_change_and_close_keep_preference() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.recording_dialog.test_install_display();
+        app.open_recording_setup();
+        let root = egui::ViewportId::ROOT;
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        assert!(app.recording_dialog.is_popped_out());
+        let key = crate::settings::UtilityToolKey::parse("screen-recording").unwrap();
+        let manager =
+            super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx)
+                .unwrap();
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        app.close_recording_setup();
+        assert!(!app.recording_dialog.open);
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        app.open_recording_setup();
+        assert!(app.recording_dialog.is_popped_out());
+    }
+
+    #[test]
     fn recorder_setup_hosts_preserve_real_controls_popup_and_stale_region() {
         use super::super::utility_host::UtilityPresentation;
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -22928,6 +23136,7 @@ mod tests {
             app.recording_dialog.test_presentation(),
             UtilityPresentation::Popout
         );
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("screen-recording").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -23653,6 +23862,7 @@ mod tests {
             app.file_lock_dialog.test_presentation(),
             UtilityPresentation::Popout
         );
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("file-lock").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -24179,6 +24389,7 @@ mod tests {
             app.folder_size_dialog.presentation(),
             UtilityPresentation::Popout
         );
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("folder-size").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         run_host_viewport_frame(
             &ctx,
             &mut app,
@@ -27283,23 +27494,41 @@ mod tests {
         for _ in 0..4 {
             run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
         }
-        let source_target = app.jump_mode_ui.retained_registry().targets().iter()
+        let source_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
             .find(|target| target.metadata().label() == "XML source text")
             .expect("the docked source editor is visible")
             .clipped_rect();
         for pressed in [true, false] {
             run_tool_dialog_frame(
-                &ctx, &mut app, tool_dialog_pointer_events(source_target, pressed), false,
-            ).drop_without_applying_deltas();
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(source_target, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
         }
         let source = "<root>\u{03bb}</root>";
-        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(source.into())], false)
-            .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Text(source.into())],
+            false,
+        )
+        .drop_without_applying_deltas();
         assert_eq!(app.xml_toolkit_dialog.test_source(), source);
         let pop_out = host_button(&app);
         for pressed in [true, false] {
-            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
-                .drop_without_applying_deltas();
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(pop_out, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
         }
         assert!(app.xml_toolkit_dialog.root_layer().is_none());
         for _ in 0..3 {
@@ -27312,21 +27541,29 @@ mod tests {
                 ..actual_query_input(true)
             },
             false,
-        ).0.drop_without_applying_deltas();
+        )
+        .0
+        .drop_without_applying_deltas();
         assert!(!app.visible_flag.load(Ordering::Relaxed));
         assert!(app.xml_toolkit_dialog.needs_root_ui_when_hidden());
 
         let path = workspace.root().join("xml-retained-overwrite.xml");
         std::fs::write(&path, b"initial bytes").unwrap();
-        app.xml_toolkit_dialog.test_request_overwrite_confirmation(57, path.clone(), source);
-        let frozen = app.xml_toolkit_dialog.test_pending_overwrite_signature().unwrap();
+        app.xml_toolkit_dialog
+            .test_request_overwrite_confirmation(57, path.clone(), source);
+        let frozen = app
+            .xml_toolkit_dialog
+            .test_pending_overwrite_signature()
+            .unwrap();
         for _ in 0..4 {
             native_frame(&mut app, Vec::new(), false);
         }
         assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
         assert_eq!(app.xml_toolkit_dialog.test_source(), source);
         let replace_button = |app: &LauncherApp| {
-            app.xml_toolkit_dialog.test_native_jump_targets().iter()
+            app.xml_toolkit_dialog
+                .test_native_jump_targets()
+                .iter()
                 .find(|target| target.metadata().label() == "Replace existing XML file")
                 .expect("the detached confirmation owns the Replace control")
                 .clipped_rect()
@@ -27335,7 +27572,10 @@ mod tests {
         native_frame(&mut app, tool_dialog_pointer_events(replace, true), false);
         native_frame(&mut app, tool_dialog_pointer_events(replace, false), true);
         assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
-        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen.clone()));
+        assert_eq!(
+            app.xml_toolkit_dialog.test_pending_overwrite_signature(),
+            Some(frozen.clone())
+        );
 
         native_frame(&mut app, Vec::new(), false);
         let replace = replace_button(&app);
@@ -27343,17 +27583,31 @@ mod tests {
         super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
         native_frame(&mut app, tool_dialog_pointer_events(replace, false), false);
         assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
-        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen));
+        assert_eq!(
+            app.xml_toolkit_dialog.test_pending_overwrite_signature(),
+            Some(frozen)
+        );
 
         native_frame(&mut app, Vec::new(), false);
         let replace = replace_button(&app);
         for pressed in [true, false] {
-            native_frame(&mut app, tool_dialog_pointer_events(replace, pressed), false);
+            native_frame(
+                &mut app,
+                tool_dialog_pointer_events(replace, pressed),
+                false,
+            );
         }
-        assert!(app.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_none());
+        assert!(
+            app.xml_toolkit_dialog
+                .jump_mode_pending_overwrite_identity()
+                .is_none()
+        );
         let start = std::time::Instant::now();
         while std::fs::read(&path).unwrap() != source.as_bytes() {
-            assert!(start.elapsed() < std::time::Duration::from_secs(10), "XML write did not finish");
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "XML write did not finish"
+            );
             native_frame(&mut app, Vec::new(), false);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -27371,12 +27625,32 @@ mod tests {
             run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
         }
         run_tool_dialog_frame(
-            &ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false,
-        ).drop_without_applying_deltas();
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        )
+        .drop_without_applying_deltas();
         assert!(!app.xml_toolkit_dialog.open);
         assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
 
         app.focus_panel(super::super::Panel::XmlToolkitDialog);
+        assert!(
+            !app.xml_toolkit_dialog.is_popped_out(),
+            "reopen restores the accepted Docked preference"
+        );
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                .drop_without_applying_deltas();
+        }
+        let popout = host_button(&app);
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.xml_toolkit_dialog.is_popped_out());
         for _ in 0..3 {
             native_frame(&mut app, Vec::new(), false);
         }
@@ -27384,9 +27658,15 @@ mod tests {
             super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
             native_frame(&mut app, Vec::new(), false);
         });
-        assert!(app.xml_toolkit_dialog.open, "discarded native close is deferred");
+        assert!(
+            app.xml_toolkit_dialog.open,
+            "discarded native close is deferred"
+        );
         native_frame(&mut app, Vec::new(), false);
-        assert!(!app.xml_toolkit_dialog.open, "the next retained owner closes");
+        assert!(
+            !app.xml_toolkit_dialog.open,
+            "the next retained owner closes"
+        );
     }
 
     #[cfg(windows)]
@@ -43212,6 +43492,7 @@ mod tests {
             root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
         }
         assert!(app.table_utility_dialog.root_layer().is_none());
+        assert_eq!(super::super::utility_presentation::UtilityPresentationManager::for_context(&ctx).unwrap().preference(crate::settings::UtilityToolKey::parse("table-utility").unwrap()), Some(crate::settings::RememberedPresentation::Popout));
         let viewport = egui::ViewportId::from_hash_of("table_utility_viewport");
         let native = |app: &mut LauncherApp, events| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {

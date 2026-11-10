@@ -374,6 +374,7 @@ struct XmlHostFrame {
 pub struct XmlToolkitDialogState {
     pub open: bool,
     host_state: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_staging: bool,
     host_first: bool,
     host_pinned: bool,
@@ -426,6 +427,7 @@ impl XmlToolkitDialogState {
         Self {
             open: false,
             host_state: super::utility_host::UtilityHostState::popped_out(),
+            presentation_prepared: false,
             host_staging: false,
             host_first: false,
             host_pinned: false,
@@ -468,6 +470,7 @@ impl XmlToolkitDialogState {
     /// current editor/session and never read the clipboard implicitly.
     pub fn open(&mut self) {
         if !self.open {
+            self.presentation_prepared = false;
             self.host_state = super::utility_host::UtilityHostState::popped_out();
             self.open = true;
             self.dialog_generation = self.dialog_generation.wrapping_add(1);
@@ -535,6 +538,7 @@ impl XmlToolkitDialogState {
 
     /// Retire the editor session and close the associated native viewport.
     pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        self.remember_final_presentation(ctx);
         let identity = crate::gui::utility_window_geometry::NativeViewportIdentity {
             key: crate::settings::UtilityToolKey::parse("xml-toolkit")
                 .expect("stable XML utility key"),
@@ -547,6 +551,7 @@ impl XmlToolkitDialogState {
         self.host_pending = None;
         self.end_session();
         self.host_state.retire_to_docked();
+        self.presentation_prepared = false;
     }
 
     #[cfg(test)]
@@ -802,6 +807,27 @@ impl XmlToolkitDialogState {
             || self.host_pending.is_some()
             || self.needs_viewport_bootstrap()
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key =
+                crate::settings::UtilityToolKey::parse("xml-toolkit").expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key =
+                crate::settings::UtilityToolKey::parse("xml-toolkit").expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host_state.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -853,6 +879,7 @@ impl XmlToolkitDialogState {
         first: bool,
         pinned: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         if let Some(draft) = self.host_pending.take().and_then(|previous| previous.draft) {
             self.restore_host_draft(draft);
@@ -1064,6 +1091,9 @@ impl XmlToolkitDialogState {
         if let Some(requested) = requested
             && self.host_state.transition(requested)
         {
+            let key =
+                crate::settings::UtilityToolKey::parse("xml-toolkit").expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, requested);
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
             self.observed_presentation = None;

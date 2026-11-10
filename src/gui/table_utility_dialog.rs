@@ -105,6 +105,7 @@ struct TableHostFrame {
 pub struct TableUtilityDialogState {
     pub open: bool,
     host_state: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_actions: Option<Vec<TableHostedAction>>,
     host_requested: Option<super::utility_host::UtilityPresentation>,
     host_pending: Option<TableHostFrame>,
@@ -212,6 +213,7 @@ impl Default for TableUtilityDialogState {
         Self {
             open: false,
             host_state: super::utility_host::UtilityHostState::docked(),
+            presentation_prepared: false,
             host_actions: None,
             host_requested: None,
             host_pending: None,
@@ -338,6 +340,7 @@ impl TableUtilityDialogState {
 
     pub fn open(&mut self) {
         if !self.open {
+            self.presentation_prepared = false;
             self.open = true;
             self.host_state = super::utility_host::UtilityHostState::docked();
         }
@@ -865,6 +868,27 @@ impl TableUtilityDialogState {
         }
     }
 
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("table-utility")
+                .expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("table-utility")
+                .expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         if self.host_state.presentation() == super::utility_host::UtilityPresentation::Docked {
             crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id()
@@ -891,6 +915,7 @@ impl TableUtilityDialogState {
         self.test_host_button
     }
     pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        self.remember_final_presentation(ctx);
         let identity = self.native_identity(self.host_state.identity());
         if let Some(identity) = identity {
             super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -899,6 +924,7 @@ impl TableUtilityDialogState {
         self.host_pending = None;
         self.host_os_close_pending = false;
         self.host_state.retire_to_docked();
+        self.presentation_prepared = false;
         self.host_jump.cancel_all();
         self.host_jump_frame = None;
         self.close();
@@ -931,6 +957,7 @@ impl TableUtilityDialogState {
         first: bool,
         pinned: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         use crate::gui::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
@@ -1486,6 +1513,9 @@ impl TableUtilityDialogState {
         if let Some(requested) = requested
             && self.host_state.transition(requested)
         {
+            let key =
+                crate::settings::UtilityToolKey::parse("table-utility").expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, requested);
             self.host_jump.cancel_all();
             self.host_jump_frame = None;
             self.host_focus = true;
