@@ -7588,6 +7588,14 @@ impl LauncherApp {
             ctx, first_ui_pass, root_visible, root_input_allowed,
             application_input_allowed, self.jump_mode_ui.active_session().is_some(),
         );
+        self.mkmacro_dialog.show_annotation_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
+        self.mkmacro_dialog.show_review_child(
+            ctx, first_ui_pass, root_visible, root_input_allowed,
+            application_input_allowed, self.jump_mode_ui.active_session().is_some(),
+        );
         self.mkmacro_dialog.show_editor_child(
             ctx, first_ui_pass, root_visible, root_input_allowed,
             application_input_allowed, self.jump_mode_ui.active_session().is_some(),
@@ -14285,11 +14293,13 @@ impl LauncherApp {
         let search_show_root = self.mkmacro_dialog.complete_search_child(ctx);
         let package_show_root = self.mkmacro_dialog.complete_package_children(ctx);
         let catalog_show_root = self.mkmacro_dialog.complete_catalog_child(ctx);
+        let annotation_show_root = self.mkmacro_dialog.complete_annotation_child(ctx);
+        let review_show_root = self.mkmacro_dialog.complete_review_child(ctx);
         let editor_show_root = self.mkmacro_dialog.complete_editor_child(ctx);
         let window_picker_show_root = self.mkmacro_dialog.complete_window_picker_child(ctx);
         let launcher_picker_show_root = self.mkmacro_dialog.complete_launcher_picker_child(ctx);
         let crop_show_root = self.mkmacro_dialog.complete_crop_child(ctx);
-        if search_show_root || package_show_root || catalog_show_root || editor_show_root || window_picker_show_root || launcher_picker_show_root || crop_show_root {
+        if search_show_root || package_show_root || catalog_show_root || annotation_show_root || review_show_root || editor_show_root || window_picker_show_root || launcher_picker_show_root || crop_show_root {
             self.request_launcher_visibility(true);
         }
         if completion.closed {
@@ -66076,6 +66086,8 @@ mod tests {
         app.focus_panel(Panel::MkMacroDialog);
         app.mkmacro_dialog.test_pop_out();
         app.mkmacro_dialog.test_open_native_search(&ctx);
+        app.mkmacro_dialog.test_open_native_review(&ctx);
+        app.mkmacro_dialog.test_open_native_editor(&ctx);
         let screen = egui::vec2(1600.0, 1200.0);
         launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
         notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);

@@ -2104,7 +2104,7 @@ static RECORDING_ARM: Lazy<RwLock<RecordingArm>> = Lazy::new(|| {
     })
 });
 static RECORDING_STATUS: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
-static RECORDING_ANNOTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RECORDING_ANNOTATION_ACTIVE: AtomicU64 = AtomicU64::new(0);
 static PENDING_RECORDINGS: Lazy<Mutex<Vec<RecordingResult>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static RECORD_STOP_COORDINATOR: Lazy<(Mutex<bool>, Condvar)> =
     Lazy::new(|| (Mutex::new(false), Condvar::new()));
@@ -2540,7 +2540,7 @@ fn enqueue_record_stop_for_review(
         super::RecorderRuntimeState::Idle => return Err(anyhow!("recorder is not active")),
     }
     *pending = true;
-    RECORDING_ANNOTATION_ACTIVE.store(false, Ordering::Release);
+    RECORDING_ANNOTATION_ACTIVE.store(0, Ordering::Release);
     if RECORD_STOP_WORKER
         .send(RecordStopJob {
             recorder,
@@ -2555,6 +2555,25 @@ fn enqueue_record_stop_for_review(
 }
 pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
     RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
+}
+#[cfg(test)]
+pub(crate) fn replace_recorder_for_test(recorder: Option<Arc<RecorderRuntime>>) -> Option<Arc<RecorderRuntime>> {
+    std::mem::replace(&mut *RECORDER.write().unwrap(), recorder)
+}
+pub(crate) fn record_pause_for(recording_id: u64) -> Result<u64> {
+    RECORDER.read().unwrap().clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .pause_for_recording(Some(recording_id), Vec::new())
+}
+pub(crate) fn record_resume_for(recording_id: u64, pause_id: u64) -> Result<()> {
+    RECORDER.read().unwrap().clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .resume_for_recording(Some(recording_id), Some(pause_id), Vec::new())
+}
+pub(crate) fn record_annotation_for(recording_id: u64, text: String) -> Result<()> {
+    RECORDER.read().unwrap().clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .annotation_for_recording(Some(recording_id), text)
 }
 pub fn record_marker() -> Result<()> {
     RECORDER
@@ -2572,8 +2591,19 @@ pub fn record_annotation(text: String) -> Result<()> {
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .annotation(text)
 }
-pub fn set_recording_annotation_active(active: bool) {
-    RECORDING_ANNOTATION_ACTIVE.store(active, Ordering::Release);
+pub(crate) fn set_recording_annotation_active(recording_id: u64, active: bool) -> Result<()> {
+    if active {
+        let recorder = RECORDER.read().unwrap().clone()
+            .ok_or_else(|| anyhow!("macro runtime is not initialized"))?;
+        recorder.with_active_recording(recording_id, || RECORDING_ANNOTATION_ACTIVE.store(recording_id, Ordering::Release))?;
+    } else {
+        let _ = RECORDING_ANNOTATION_ACTIVE.compare_exchange(recording_id, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+    Ok(())
+}
+#[cfg(test)]
+pub(crate) fn recording_annotation_owner_for_test() -> u64 {
+    RECORDING_ANNOTATION_ACTIVE.load(Ordering::Acquire)
 }
 pub fn arm_recording(target: Option<RecordingTarget>, options: NormalizationConfig) {
     *RECORDING_ARM.write().unwrap() = RecordingArm {
@@ -2625,14 +2655,16 @@ fn control_hotkey(
     }
 }
 pub(crate) fn recorder_control(action: super::recorder_hotkeys::RecorderControlAction) {
-    if RECORDING_ANNOTATION_ACTIVE.load(Ordering::Acquire)
+    let Some(recorder) = RECORDER.read().unwrap().clone() else {
+        return;
+    };
+    let annotation_owner = RECORDING_ANNOTATION_ACTIVE.load(Ordering::Acquire);
+    if annotation_owner != 0
+        && recorder.snapshot().recording_id == Some(annotation_owner)
         && action != super::recorder_hotkeys::RecorderControlAction::Toggle
     {
         return;
     }
-    let Some(recorder) = RECORDER.read().unwrap().clone() else {
-        return;
-    };
     let document = recorder.document_snapshot();
     let occurrence = document
         .as_deref()

@@ -312,8 +312,8 @@ pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
         || d.record_hotkey_capture
         || d.pause_record_hotkey_capture
         || d.marker_record_hotkey_capture
-        || d.recording_annotation_open
-        || d.recording_review.is_some()
+        || (d.annotation.open && !d.annotation_host.is_popped_out() && !d.is_popped_out())
+        || (d.recording_review.is_some() && !d.review_host.is_popped_out() && !d.is_popped_out())
         || (d.catalog.open && !d.catalog_host.is_popped_out())
         || d.structural_insertion.is_some()
         || d.uia_editor.editor_hidden()

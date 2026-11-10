@@ -27,6 +27,7 @@ mod package_ui;
 pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
 pub mod recording_review;
+mod recording_annotation;
 pub(crate) mod runtime_inspector;
 mod search;
 mod signature_editor;
@@ -92,10 +93,6 @@ fn mkmacro_close_prompt_layer(owner_instance: u64) -> eframe::egui::LayerId {
     )
 }
 
-fn mkmacro_recording_annotation_id(owner_instance: u64) -> eframe::egui::Id {
-    eframe::egui::Id::new(("mkmacro_recording_annotation", owner_instance))
-}
-
 fn has_draft_input_event(ctx: &eframe::egui::Context) -> bool {
     use eframe::egui::Event;
     ctx.input(|input| {
@@ -124,15 +121,13 @@ fn surrender_mkmacro_focus(ctx: &eframe::egui::Context, layer: eframe::egui::Lay
     }
 }
 
-fn mkmacro_owned_layers(owner_instance: u64) -> [eframe::egui::LayerId; 16] {
+fn mkmacro_owned_layers(owner_instance: u64) -> [eframe::egui::LayerId; 14] {
     use eframe::egui::{Id, LayerId, Order};
     [
         Id::new("mkmacro_main_window"),
         Id::new("mkmacro_package_modal"),
         Id::new(Some("Action Editor")),
         Id::new(Some("Window Picker")),
-        Id::new("mkmacro_recording_review"),
-        mkmacro_recording_annotation_id(owner_instance),
         Id::new("mkmacro_step_search"),
         Id::new("mkmacro_crop_reference_image"),
         Id::new("mkmacro_crop_overwrite_confirmation"),
@@ -468,12 +463,14 @@ pub struct MkMacroDialog {
     ui_notices: VecDeque<String>,
     /// Transient annotation editor. `annotation_pause_owned` is true only when
     /// opening it paused an actively recording session.
-    pub recording_annotation_open: bool,
-    pub recording_annotation_text: String,
-    recording_annotation_target: Option<u64>,
-    pub annotation_pause_owned: bool,
+    annotation: recording_annotation::AnnotationState,
+    annotation_host: super::utility_window_host::UtilityWindowHost<recording_annotation::AnnotationState>,
+    pending_annotation_open: Option<(super::utility_host::AcceptedParentOpen<u64>, bool)>,
     /// Process-local capture review. It never participates in draft dirty tracking or persistence.
     pub recording_review: Option<recording_review::RecordingReviewSession>,
+    review_host: super::utility_window_host::UtilityWindowHost<recording_review::RecordingReviewSession>,
+    pending_review_open: Option<(Option<super::utility_host::AcceptedParentOpen<u64>>, bool)>,
+    review_open_blocked: bool,
     next_review_epoch: u64,
     #[cfg(test)]
     recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
@@ -485,6 +482,10 @@ pub struct MkMacroDialog {
     last_main_window_rect: Option<eframe::egui::Rect>,
     #[cfg(test)]
     test_host_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    test_annotation_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    test_review_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
     #[cfg(test)]
     test_run_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
     #[cfg(test)]
@@ -571,10 +572,6 @@ struct MkMacroDraftCheckpoint {
     pending_recording_target_publish: bool,
     pending_recording_review_drain: bool,
     close_prompt_open: bool,
-    recording_annotation_open: bool,
-    recording_annotation_text: String,
-    recording_annotation_target: Option<u64>,
-    annotation_pause_owned: bool,
     package_ui: package_ui::PackageUiState,
     editor_state: editor_operations::EditorState,
 }
@@ -599,10 +596,6 @@ impl MkMacroDraftCheckpoint {
             pending_recording_target_publish: dialog.pending_recording_target_publish,
             pending_recording_review_drain: dialog.pending_recording_review_drain,
             close_prompt_open: dialog.close_prompt_open,
-            recording_annotation_open: dialog.recording_annotation_open,
-            recording_annotation_text: dialog.recording_annotation_text.clone(),
-            recording_annotation_target: dialog.recording_annotation_target,
-            annotation_pause_owned: dialog.annotation_pause_owned,
             package_ui: dialog.package_ui.clone(),
             editor_state: dialog.editor_state.clone(),
         }
@@ -626,10 +619,6 @@ impl MkMacroDraftCheckpoint {
         dialog.pending_recording_target_publish = self.pending_recording_target_publish;
         dialog.pending_recording_review_drain = self.pending_recording_review_drain;
         dialog.close_prompt_open = self.close_prompt_open;
-        dialog.recording_annotation_open = self.recording_annotation_open;
-        dialog.recording_annotation_text = self.recording_annotation_text;
-        dialog.recording_annotation_target = self.recording_annotation_target;
-        dialog.annotation_pause_owned = self.annotation_pause_owned;
         dialog.package_ui = self.package_ui;
         dialog.editor_state = self.editor_state;
         *dialog.recording_target_cache.borrow_mut() = None;
@@ -662,34 +651,24 @@ enum MkMacroHostActionKind {
         target: crate::mkmacro::RecordingTarget,
         expected_state: crate::mkmacro::RecorderRuntimeState,
     },
-    Review {
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    },
     AnnotationBegin {
         macro_id: Option<u64>,
+        recording_id: Option<u64>,
         expected_state: crate::mkmacro::RecorderRuntimeState,
-    },
-    AnnotationFinish {
-        macro_id: Option<u64>,
-        expected_state: crate::mkmacro::RecorderRuntimeState,
-        commit: bool,
-        text: String,
     },
     Package(package_ui::PackageHostAction),
     OpenSearch(search::SearchMode),
     OpenCatalog,
+    OpenReview { epoch: u64 },
     EditStep { step: crate::mkmacro::MkStep, generation: Option<u64> },
     OpenWindowPicker(window_picker::MatcherEditRequest),
-    OpenReviewEditor { review_epoch: u64, review_id: crate::mkmacro::ReviewStepId, step: crate::mkmacro::MkStep },
     CloseDecision(MkMacroCloseChoice),
 }
 
 enum EditorOpenOrigin {
     Main(super::utility_host::AcceptedParentOpen<u64>),
     Catalog(super::utility_host::AcceptedParentOpen<u64>),
-    Review(super::utility_host::AcceptedParentOpen<(u64, u64)>),
+    Review(super::utility_host::AcceptedParentOpen<u64>),
 }
 
 enum PickerOpenOrigin {
@@ -718,14 +697,6 @@ pub(super) enum RecorderCommand {
     Resume,
     Marker,
     StopForReview,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum ReviewCommand {
-    StopPreview,
-    Preview,
-    Apply,
-    Cancel,
 }
 
 #[derive(Clone, Copy)]
@@ -814,6 +785,25 @@ mod tests {
             Some(RecorderRuntimeState::Idle)
         ));
         assert!(!should_resume_annotation_owned(true, None));
+    }
+
+    #[test]
+    fn rejected_main_checkpoint_does_not_rewind_annotation_draft_or_pause_owner() {
+        let (_directory, mut dialog) = dialog();
+        dialog.annotation.open = true;
+        dialog.annotation.epoch = 7;
+        dialog.annotation.recording_id = Some(11);
+        dialog.annotation.pause_id = Some(13);
+        dialog.annotation.pause_owned = true;
+        dialog.annotation.text = "before".into();
+        let checkpoint = MkMacroDraftCheckpoint::capture(&dialog);
+        dialog.annotation.text = "retained child edit".into();
+        checkpoint.restore(&mut dialog);
+        assert_eq!(dialog.annotation.text, "retained child edit");
+        assert_eq!(dialog.annotation.epoch, 7);
+        assert_eq!(dialog.annotation.recording_id, Some(11));
+        assert_eq!(dialog.annotation.pause_id, Some(13));
+        assert!(dialog.annotation.pause_owned);
     }
 
     fn five_macros() -> MkMacroDocument {
@@ -5244,6 +5234,8 @@ mod tests {
                     false,
                 );
                 dialog.show_catalog_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_annotation_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_review_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
                 dialog.show_editor_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
                 dialog.show_window_picker_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
                 dialog.show_launcher_picker_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
@@ -5268,6 +5260,8 @@ mod tests {
         dialog.complete_search_child(ctx);
         dialog.complete_package_children(ctx);
         dialog.complete_catalog_child(ctx);
+        dialog.complete_annotation_child(ctx);
+        dialog.complete_review_child(ctx);
         dialog.complete_editor_child(ctx);
         dialog.complete_window_picker_child(ctx);
         dialog.complete_launcher_picker_child(ctx);
@@ -6147,6 +6141,11 @@ mod tests {
             crate::settings::UtilityToolKey::parse("mkmacro-action-editor").unwrap(),
             crate::settings::RememberedPresentation::Docked,
         );
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-recording-review").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
         click_host_button(&ctx, &mut dialog, screen, true, false, false);
         dialog
@@ -6167,6 +6166,86 @@ mod tests {
         for _ in 0..2 {
             render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
         }
+        assert!(dialog.review_host.is_popped_out());
+        let review_viewport =
+            super::super::utility_window_host::UtilityWindowHost::<
+                recording_review::RecordingReviewSession,
+            >::test_viewport(dialog.recording_review.as_ref().unwrap().epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
+        let review_epoch = dialog.recording_review.as_ref().unwrap().epoch;
+        let (dock, clip, enabled) = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .test_host_button
+            .unwrap();
+        assert!(
+            enabled && clip.contains_rect(dock),
+            "dock={dock:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(dock.center()),
+                    egui::Event::PointerButton {
+                        pos: dock.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
+        assert!(!dialog.review_host.is_popped_out());
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (reopen, clip, enabled) = dialog.test_review_button.unwrap();
+        assert!(
+            enabled && clip.contains_rect(reopen),
+            "reopen={reopen:?}, clip={clip:?}, enabled={enabled}"
+        );
+        click_host_position(&ctx, &mut dialog, screen, false, reopen.center(), false);
+        assert!(dialog.review_host.is_popped_out());
+        assert_eq!(
+            dialog.recording_review.as_ref().unwrap().epoch,
+            review_epoch
+        );
+        assert!(
+            dialog
+                .recording_review
+                .as_ref()
+                .unwrap()
+                .selection
+                .contains(&review_id)
+        );
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
         let (edit, clip, enabled) = dialog
             .recording_review
             .as_ref()
@@ -6177,7 +6256,25 @@ mod tests {
             enabled && clip.contains_rect(edit),
             "edit={edit:?}, clip={clip:?}, enabled={enabled}"
         );
-        click_host_position(&ctx, &mut dialog, screen, false, edit.center(), false);
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(edit.center()),
+                    egui::Event::PointerButton {
+                        pos: edit.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
         assert!(dialog.editor_host.is_popped_out());
         assert_eq!(dialog.action_editor.review_editing_id(), Some(review_id));
         dialog.action_editor.draft.as_mut().unwrap().action = MkAction::Delay(MkDelayPayload {
@@ -6227,7 +6324,420 @@ mod tests {
         assert!(
             matches!(&dialog.recording_review.as_ref().unwrap().proposed_steps()[0].action, MkAction::Delay(payload) if payload.fixed_ms == 99)
         );
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
+        let (cancel, clip, enabled) = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .test_cancel
+            .unwrap();
+        assert!(
+            enabled && clip.contains_rect(cancel),
+            "cancel={cancel:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(cancel.center()),
+                    egui::Event::PointerButton {
+                        pos: cancel.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
+        assert!(dialog.recording_review.is_none());
+        dialog
+            .open_recording_review(review_result(target, Vec::new()))
+            .unwrap();
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        assert!(dialog.review_host.is_popped_out());
+        assert_ne!(
+            dialog.recording_review.as_ref().unwrap().epoch,
+            review_epoch
+        );
         dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn stale_review_open_keeps_recording_without_root_fallback() {
+        use super::super::utility_host::{
+            AcceptedParentOpen, UtilityPresentation, ViewportPassProvenance,
+        };
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id: 1,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        dialog
+            .open_recording_review(review_result(target, Vec::new()))
+            .unwrap();
+        let epoch = dialog.recording_review.as_ref().unwrap().epoch;
+        let ctx = eframe::egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let pass = ViewportPassProvenance::current(&ctx, eframe::egui::ViewportId::ROOT);
+        let output = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
+        let origin = AcceptedParentOpen::from_retained(
+            &ctx,
+            dialog.host_state.identity(),
+            dialog.owner_instance,
+            pass,
+            pass,
+        )
+        .unwrap();
+        output.drop_without_applying_deltas();
+        dialog.pending_review_open = Some((Some(origin), false));
+        dialog.host_state.transition(UtilityPresentation::Popout);
+        assert!(!dialog.complete_review_child(&ctx));
+        assert!(dialog.review_open_blocked);
+        assert_eq!(dialog.recording_review.as_ref().unwrap().epoch, epoch);
+        assert!(dialog.ordinary_child_root_layer().is_none());
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn native_annotation_retains_draft_and_adds_once_without_resuming_manual_pause() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        let recorder = Arc::new(crate::mkmacro::recorder_runtime::isolated_test_recorder(
+            directory.path(),
+        ));
+        let previous = crate::mkmacro::runtime::replace_recorder_for_test(Some(recorder.clone()));
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.25;
+            }
+        });
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-recording-annotation").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (button, clip, enabled) = dialog.test_annotation_button.expect("Annotate control");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "button={button:?}, clip={clip:?}, enabled={enabled}"
+        );
+        click_host_position(&ctx, &mut dialog, screen, false, button.center(), false);
+        assert!(dialog.annotation_host.is_popped_out());
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Paused
+        );
+        let epoch = dialog.annotation.epoch;
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (text, clip, enabled, focused) = dialog.annotation.test_text.unwrap();
+        assert!(
+            enabled && focused && clip.contains_rect(text),
+            "text={text:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("discarded".into())],
+            true,
+            Some(viewport),
+        );
+        assert!(dialog.annotation.text.is_empty());
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(viewport),
+        );
+        let (text, clip, enabled, focused) = dialog.annotation.test_text.unwrap();
+        assert!(
+            enabled && focused && clip.contains_rect(text),
+            "after rejected pass: text={text:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("note".into())],
+            false,
+            Some(viewport),
+        );
+        assert_eq!(dialog.annotation.text, "note");
+        let (dock, clip, enabled) = dialog.annotation.test_host_button.unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(dock.center()),
+                    egui::Event::PointerButton {
+                        pos: dock.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(!dialog.annotation_host.is_popped_out());
+        assert_eq!(dialog.annotation.epoch, epoch);
+        assert_eq!(dialog.annotation.text, "note");
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (reopen, clip, enabled) = dialog.test_annotation_button.unwrap();
+        assert!(enabled && clip.contains_rect(reopen));
+        click_host_position(&ctx, &mut dialog, screen, false, reopen.center(), false);
+        assert!(dialog.annotation_host.is_popped_out());
+        assert_eq!(dialog.annotation.epoch, epoch);
+        assert_eq!(dialog.annotation.text, "note");
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (add, clip, enabled) = dialog.annotation.test_add.unwrap();
+        assert!(
+            enabled && clip.contains_rect(add),
+            "add={add:?}, clip={clip:?}, enabled={enabled}, owner={:?}, host={:?}, text={:?}",
+            dialog.annotation.test_owner,
+            dialog.annotation_host.identity(),
+            dialog.annotation.text
+        );
+        let (cancel, cancel_clip, cancel_enabled) = dialog.annotation.test_cancel.unwrap();
+        assert!(
+            cancel_enabled && cancel_clip.contains_rect(cancel),
+            "cancel={cancel:?}, clip={cancel_clip:?}, enabled={cancel_enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(add.center()),
+                    egui::Event::PointerButton {
+                        pos: add.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        assert_eq!(recorder.stop().unwrap().notes.len(), 1);
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        recorder.pause().unwrap();
+        dialog.begin_recording_annotation().unwrap();
+        assert!(!dialog.annotation.pause_owned);
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let manual_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(dialog.annotation.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(manual_viewport),
+            );
+        }
+        let (cancel, clip, enabled) = dialog.annotation.test_cancel.unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(cancel.center()),
+                    egui::Event::PointerButton {
+                        pos: cancel.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(manual_viewport),
+            );
+        }
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Paused
+        );
+        recorder.stop().unwrap();
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        dialog.begin_recording_annotation().unwrap();
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let close_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(dialog.annotation.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(close_viewport),
+            );
+        }
+        super::super::render::with_immediate_viewport_test_close_request(close_viewport, || {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(close_viewport),
+            );
+        });
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        dialog.begin_recording_annotation().unwrap();
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let retired_id = recorder.snapshot().recording_id.unwrap();
+        recorder.stop().unwrap();
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        let new_id = recorder.snapshot().recording_id.unwrap();
+        assert_ne!(retired_id, new_id);
+        crate::mkmacro::runtime::set_recording_annotation_active(new_id, true).unwrap();
+        dialog.complete_annotation_child(&ctx);
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        assert_eq!(
+            crate::mkmacro::runtime::recording_annotation_owner_for_test(),
+            new_id
+        );
+        crate::mkmacro::runtime::set_recording_annotation_active(new_id, false).unwrap();
+        recorder.stop().unwrap();
+        dialog.force_close(&ctx);
+        crate::mkmacro::runtime::replace_recorder_for_test(previous);
         workers.join_all();
     }
 
@@ -7732,11 +8242,13 @@ impl MkMacroDialog {
             launcher_action_picker: Default::default(),
             command_error: None,
             ui_notices: VecDeque::new(),
-            recording_annotation_open: false,
-            recording_annotation_text: String::new(),
-            recording_annotation_target: None,
-            annotation_pause_owned: false,
+            annotation: Default::default(),
+            annotation_host: Default::default(),
+            pending_annotation_open: None,
             recording_review: None,
+            review_host: Default::default(),
+            pending_review_open: None,
+            review_open_blocked: false,
             next_review_epoch: 0,
             #[cfg(test)]
             recording_preview_test_facade: None,
@@ -7748,6 +8260,10 @@ impl MkMacroDialog {
             last_main_window_rect: None,
             #[cfg(test)]
             test_host_button: None,
+            #[cfg(test)]
+            test_annotation_button: None,
+            #[cfg(test)]
+            test_review_button: None,
             #[cfg(test)]
             test_run_button: None,
             #[cfg(test)]
@@ -7832,6 +8348,8 @@ impl MkMacroDialog {
             || self.window_picker_host.needs_root_ui_when_hidden(self.window_picker.open)
             || self.launcher_picker_host.needs_root_ui_when_hidden(self.launcher_action_picker.open)
             || self.crop_host.needs_root_ui_when_hidden(self.image_crop_editor.is_open())
+            || self.annotation_host.needs_root_ui_when_hidden(self.annotation.open)
+            || self.review_host.needs_root_ui_when_hidden(self.recording_review.is_some())
     }
 
     #[cfg(test)]
@@ -7843,6 +8361,320 @@ impl MkMacroDialog {
             .or_else(|| self.window_picker.open.then(|| self.window_picker_host.root_layer()).flatten())
             .or_else(|| self.launcher_action_picker.open.then(|| self.launcher_picker_host.root_layer()).flatten())
             .or_else(|| self.image_crop_editor.is_open().then(|| self.crop_host.root_layer()).flatten())
+            .or_else(|| (self.annotation.open && self.pending_annotation_open.as_ref().is_none_or(|(_, was_open)| *was_open))
+                .then(|| self.annotation_host.root_layer()).flatten())
+            .or_else(|| (self.pending_review_open.as_ref().is_none_or(|(_, was_open)| *was_open) && !self.review_open_blocked)
+                .then(|| self.recording_review.as_ref().and_then(|_| self.review_host.root_layer())).flatten())
+    }
+
+    pub(crate) fn show_annotation_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if !self.annotation.open {
+            return;
+        }
+        let parent_owner = root_input
+            && self
+                .annotation_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        self.annotation_host.show(
+            ctx,
+            &mut self.annotation,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    pub(crate) fn show_review_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if self.pending_review_open.is_some() || self.review_open_blocked {
+            return;
+        }
+        let Some(ticket) = self
+            .recording_review
+            .as_ref()
+            .map(|review| review.preview_ticket)
+        else {
+            return;
+        };
+        let (preview_active, preview_snapshot) = ticket.map_or((false, None), |ticket| {
+            self.recording_preview_status(ticket)
+        });
+        if let Some(review) = self.recording_review.as_mut() {
+            if let Some(snapshot) = preview_snapshot.as_deref() {
+                review.observe_preview(snapshot);
+            } else if ticket.is_some() && !preview_active {
+                review.preview_state = Some(crate::mkmacro::RuntimeState::Stopped);
+            }
+        }
+        let apply_blocker = self.recording_review_apply_blocker();
+        let runtime = recording_review::ReviewRuntime {
+            review_editor_open: self.action_editor.review_editing_id().is_some(),
+            macros: if apply_blocker
+                .as_deref()
+                .is_some_and(|b| b.contains("target macro"))
+            {
+                self.draft
+                    .macros
+                    .iter()
+                    .map(|m| (m.id, m.name.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            apply_blocker,
+            preview_active,
+            playback_active: self
+                .recording_preview_runtime_snapshot()
+                .as_deref()
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.state,
+                        crate::mkmacro::RuntimeState::Running
+                            | crate::mkmacro::RuntimeState::Paused
+                            | crate::mkmacro::RuntimeState::Stopping
+                    )
+                }),
+        };
+        let parent_owner = root_input
+            && self
+                .review_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        if let Some(review) = self.recording_review.as_mut() {
+            self.review_host.show(
+                ctx,
+                review,
+                &runtime,
+                HostInput {
+                    first,
+                    root_visible,
+                    root_input,
+                    native_input,
+                    root_owner: NavigationOwner::Blocked,
+                    parent_owner,
+                    root_jump_active,
+                    close_shortcut: !runtime.review_editor_open,
+                    allow_os_close: !runtime.review_editor_open,
+                    confirmation_owner: NavigationOwner::Blocked,
+                    parent_instance: 0,
+                    root_scopes: (None, None),
+                },
+            );
+        }
+    }
+
+    pub(crate) fn complete_review_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        use recording_review::ReviewIntent;
+        let completion = self
+            .recording_review
+            .as_mut()
+            .and_then(|review| self.review_host.complete(ctx, review));
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    ReviewIntent::Edit(id) => {
+                        if self.action_editor.draft.is_none()
+                            && let (Some(review), Some(origin)) =
+                                (self.recording_review.as_ref(), completion.origin.clone())
+                            && self.review_host.accepts_origin(review, &origin)
+                            && let Some(step) = review.step_for_editor(id)
+                        {
+                            self.action_editor.begin_review_edit(
+                                review.effective_target().macro_id,
+                                id,
+                                &step,
+                            );
+                            self.action_editor.bind_review_epoch(review.epoch);
+                            self.pending_editor_origin =
+                                Some((EditorOpenOrigin::Review(origin), false));
+                        }
+                    }
+                    ReviewIntent::AppendRecovery => {
+                        if let Some(review) = &mut self.recording_review {
+                            review.recover_append_to_original_macro();
+                        }
+                    }
+                    ReviewIntent::Retarget(id) => {
+                        if self.draft.macros.iter().any(|item| item.id == id) {
+                            if let Some(review) = &mut self.recording_review {
+                                review.retarget_append(id);
+                            }
+                        }
+                    }
+                    ReviewIntent::StopPreview => self.stop_owned_recording_preview(),
+                    ReviewIntent::Preview(selected) => {
+                        if let Err(error) = self.preview_recording_review(selected) {
+                            if let Some(review) = &mut self.recording_review {
+                                review.message = Some(error.to_string());
+                            }
+                        }
+                    }
+                    ReviewIntent::Apply => {
+                        if let Err(error) = self.apply_recording_review() {
+                            if let Some(review) = &mut self.recording_review {
+                                review.message = Some(error);
+                            }
+                        } else {
+                            self.review_host.close_from_app(ctx);
+                            if self.recording_review.is_some() {
+                                self.pending_review_open = Some((None, false));
+                            }
+                        }
+                    }
+                    ReviewIntent::Cancel | ReviewIntent::Retired => {
+                        if self.action_editor.review_editing_id().is_none() {
+                            if !matches!(command, ReviewIntent::Retired) {
+                                self.review_host.close_from_app(ctx);
+                            }
+                            self.cancel_recording_review();
+                            if self.recording_review.is_some() {
+                                self.pending_review_open = Some((None, false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((origin, was_open)) = self.pending_review_open.take()
+            && let Some(review) = self.recording_review.as_ref()
+        {
+            let presentation = match origin {
+                Some(origin)
+                    if self.open
+                        && origin.is_current(self.host_state.identity(), &self.owner_instance) =>
+                {
+                    self.review_host.open_from_origin(
+                        ctx,
+                        review,
+                        was_open,
+                        &ChildOpenOrigin::Parent(origin),
+                    )
+                }
+                Some(_) => {
+                    if !was_open { self.review_open_blocked = true; }
+                    None
+                }
+                None if self.open => self.review_host.open_from_origin(
+                    ctx,
+                    review,
+                    was_open,
+                    &ChildOpenOrigin::<()>::Root,
+                ),
+                None => {
+                    self.review_open_blocked = true;
+                    None
+                }
+            };
+            show_root |= presentation == Some(UtilityPresentation::Docked);
+        }
+        show_root && self.recording_review.is_some() && !self.review_host.is_popped_out()
+    }
+
+    pub(crate) fn complete_annotation_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        use recording_annotation::AnnotationCommand;
+        let completion = self.annotation_host.complete(ctx, &mut self.annotation);
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                let commit = matches!(command, AnnotationCommand::Add);
+                if !matches!(command, AnnotationCommand::Retired) {
+                    self.annotation_host.close_from_app(ctx);
+                }
+                if let Err(error) = self.finish_recording_annotation(commit) {
+                    self.command_error = Some(error.to_string());
+                }
+            }
+        }
+        if self.annotation.open
+            && !crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
+                snapshot.recording_id == self.annotation.recording_id
+                    && matches!(
+                        snapshot.state,
+                        crate::mkmacro::RecorderRuntimeState::Recording
+                            | crate::mkmacro::RecorderRuntimeState::Paused
+                    )
+            })
+        {
+            self.annotation_host.close_from_app(ctx);
+            let _ = self.finish_recording_annotation(false);
+        }
+        if let Some((origin, was_open)) = self.pending_annotation_open.take() {
+            if self.open
+                && origin.is_current(self.host_state.identity(), &self.owner_instance)
+                && self.annotation.open
+            {
+                show_root |= self.annotation_host.open_from_origin(
+                    ctx,
+                    &self.annotation,
+                    was_open,
+                    &ChildOpenOrigin::Parent(origin),
+                ) == Some(UtilityPresentation::Docked);
+            } else if !was_open && self.annotation.open {
+                let _ = self.finish_recording_annotation(false);
+            }
+        }
+        show_root && self.annotation.open && !self.annotation_host.is_popped_out()
+    }
+
+    fn retire_review_and_annotation(&mut self, ctx: &eframe::egui::Context) {
+        if self.annotation.open {
+            if self
+                .pending_annotation_open
+                .as_ref()
+                .is_none_or(|(_, was_open)| *was_open)
+            {
+                self.annotation_host.close_from_app(ctx);
+            }
+            let _ = self.finish_recording_annotation(false);
+        }
+        self.pending_annotation_open = None;
+        if self.recording_review.is_some()
+            && self.pending_review_open.as_ref().is_none_or(|(_, was_open)| *was_open)
+            && !self.review_open_blocked
+        {
+            self.review_host.close_from_app(ctx);
+        }
+        self.pending_review_open = None;
+        self.review_open_blocked = false;
     }
 
     pub(crate) fn show_window_picker_child(
@@ -8441,7 +9273,7 @@ impl MkMacroDialog {
                     EditorOpenOrigin::Catalog(origin) => {
                         self.catalog_host.accepts_origin(&self.catalog, origin)
                     }
-                    EditorOpenOrigin::Review(origin) => self.recording_review.as_ref().is_some_and(|review| origin.is_current(self.host_state.identity(), &(self.owner_instance, review.epoch))),
+                    EditorOpenOrigin::Review(origin) => self.recording_review.as_ref().is_some_and(|review| self.review_host.accepts_origin(review, origin)),
                 };
             if current {
                 show_root |= match origin {
@@ -8488,6 +9320,30 @@ impl MkMacroDialog {
         let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
         manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-step-search").unwrap(), crate::settings::RememberedPresentation::Popout);
         self.search_host.open_from_origin(ctx, &self.navigation.search, false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_review(&mut self, ctx: &eframe::egui::Context) {
+        let result = crate::mkmacro::RecordingResult {
+            target: crate::mkmacro::RecordingTarget { macro_id: 1, insertion_anchor_step_id: None, insertion_anchor_generation: None },
+            literal_steps: Vec::new(), plan: crate::mkmacro::RecordingPlan { steps: Vec::new() },
+            suggestions: Vec::new(), clipboard_observations: Vec::new(), click_inspections: Vec::new(),
+            window_observations: Vec::new(), notes: Vec::new(), capture_duration: std::time::Duration::ZERO,
+            raw_event_count: 0, dropped_event_count: 0,
+        };
+        self.open_recording_review(result).unwrap();
+        self.pending_review_open = None;
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-recording-review").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.review_host.open_from_origin(ctx, self.recording_review.as_ref().unwrap(), false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_editor(&mut self, ctx: &eframe::egui::Context) {
+        self.action_editor.begin_new(crate::mkmacro::MkAction::Delay(Default::default()));
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-action-editor").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.editor_host.open_from_origin(ctx, &self.action_editor, false, &super::utility_host::ChildOpenOrigin::<()>::Root);
     }
 
     pub(crate) fn show_search_child(
@@ -8581,6 +9437,7 @@ impl MkMacroDialog {
     }
 
     pub(crate) fn force_close(&mut self, ctx: &eframe::egui::Context) {
+        self.retire_review_and_annotation(ctx);
         if self.open {
             let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
             super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
@@ -9119,8 +9976,24 @@ impl MkMacroDialog {
                     ctx, frame.host, frame.owner_instance, frame.root_pass, owner,
                 )
             });
+            if self.pending_review_open.as_ref().is_some_and(|(origin, _)| origin.is_none()) {
+                if let Some(origin) = child_origin.as_ref() {
+                    self.pending_review_open = Some((Some(origin.clone()), false));
+                }
+            }
             for action in frame.effects.actions.drain(..) {
                 if !self.host_action_is_current(&action, frame.host, frame.owner_instance) {
+                    continue;
+                }
+                if matches!(action.action, MkMacroHostActionKind::AnnotationBegin { .. }) {
+                    if let Some(origin) = child_origin.as_ref() {
+                        let was_open = self.annotation.open;
+                        let result = if was_open { Ok(()) } else { self.begin_recording_annotation() };
+                        match result {
+                            Ok(()) => self.pending_annotation_open = Some((origin.clone(), was_open)),
+                            Err(error) => self.command_error = Some(error.to_string()),
+                        }
+                    }
                     continue;
                 }
                 if let MkMacroHostActionKind::Package(package_ui::PackageHostAction::Open(open)) = &action.action {
@@ -9141,6 +10014,14 @@ impl MkMacroDialog {
                     }
                     continue;
                 }
+                if matches!(action.action, MkMacroHostActionKind::OpenReview { .. }) {
+                    if let Some(origin) = child_origin.as_ref() {
+                        let was_open = !self.review_open_blocked && self.pending_review_open.is_none();
+                        self.review_open_blocked = false;
+                        self.pending_review_open = Some((Some(origin.clone()), was_open));
+                    }
+                    continue;
+                }
                 if let MkMacroHostActionKind::EditStep { step, .. } = &action.action {
                     if let Some(origin) = child_origin.as_ref() {
                         let was_open = self.action_editor.draft.is_some();
@@ -9154,17 +10035,6 @@ impl MkMacroDialog {
                 if let MkMacroHostActionKind::OpenWindowPicker(request) = &action.action {
                     if let Some(origin) = child_origin.as_ref() {
                         self.pending_window_picker_open = Some((request.clone(), PickerOpenOrigin::Main(origin.clone())));
-                    }
-                    continue;
-                }
-                if let MkMacroHostActionKind::OpenReviewEditor { review_epoch, review_id, step } = &action.action {
-                    if let (Some(owner_pass), Some(review)) = (frame.owner_pass, self.recording_review.as_ref())
-                        && let Some(origin) = super::utility_host::AcceptedParentOpen::from_retained(ctx, frame.host, (frame.owner_instance, *review_epoch), frame.root_pass, owner_pass)
-                    {
-                        let macro_id = review.effective_target().macro_id;
-                        self.action_editor.begin_review_edit(macro_id, *review_id, step);
-                        self.action_editor.bind_review_epoch(*review_epoch);
-                        self.pending_editor_origin = Some((EditorOpenOrigin::Review(origin), false));
                     }
                     continue;
                 }
@@ -9508,52 +10378,16 @@ impl MkMacroDialog {
         });
     }
 
-    pub(super) fn stage_host_review_action(
-        &mut self,
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    ) {
-        self.pending_host_effects.push(MkMacroHostAction {
-            host: self.host_state.identity(),
-            draft_revision: self.draft_revision,
-            macro_id: Some(target.macro_id),
-            step_ids: Vec::new(),
-            action: MkMacroHostActionKind::Review {
-                command,
-                target,
-                selected_range,
-            },
-        });
-    }
-
-    pub(super) fn stage_review_editor(&mut self, review_epoch: u64, review_id: crate::mkmacro::ReviewStepId, step: crate::mkmacro::MkStep) {
-        self.stage_host_action(MkMacroHostActionKind::OpenReviewEditor { review_epoch, review_id, step });
-    }
-
     pub(super) fn stage_host_annotation_begin(
         &mut self,
         expected_state: crate::mkmacro::RecorderRuntimeState,
         macro_id: Option<u64>,
+        recording_id: Option<u64>,
     ) {
         self.stage_host_action(MkMacroHostActionKind::AnnotationBegin {
             macro_id,
+            recording_id,
             expected_state,
-        });
-    }
-
-    pub(super) fn stage_host_annotation_finish(
-        &mut self,
-        commit: bool,
-        text: String,
-        expected_state: crate::mkmacro::RecorderRuntimeState,
-        macro_id: Option<u64>,
-    ) {
-        self.stage_host_action(MkMacroHostActionKind::AnnotationFinish {
-            macro_id,
-            expected_state,
-            commit,
-            text,
         });
     }
 
@@ -9604,35 +10438,18 @@ impl MkMacroDialog {
                     })
                 }
             }
-            MkMacroHostActionKind::Review { target, .. } => self
-                .recording_review
-                .as_ref()
-                .is_some_and(|review| review.effective_target() == *target),
             MkMacroHostActionKind::AnnotationBegin {
                 macro_id,
+                recording_id,
                 expected_state,
             } => crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
                 snapshot.state == *expected_state
                     && snapshot.macro_id == *macro_id
                     && macro_id.is_some()
+                    && snapshot.recording_id == *recording_id
+                    && recording_id.is_some()
             }),
-            MkMacroHostActionKind::AnnotationFinish {
-                macro_id,
-                expected_state,
-                ..
-            } => {
-                if matches!(
-                    *expected_state,
-                    crate::mkmacro::RecorderRuntimeState::Idle
-                        | crate::mkmacro::RecorderRuntimeState::Stopping
-                ) {
-                    self.recording_annotation_open && self.recording_annotation_target == *macro_id
-                } else {
-                    crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
-                        snapshot.state == *expected_state && snapshot.macro_id == *macro_id
-                    })
-                }
-            }
+            MkMacroHostActionKind::OpenReview { epoch } => self.recording_review.as_ref().is_some_and(|review| review.epoch == *epoch),
             MkMacroHostActionKind::EditStep { step, generation } => {
                 (self.action_editor.draft.is_none() || self.action_editor.edits_source(action.macro_id, step))
                     && action.macro_id == self.selected_macro_id
@@ -9643,7 +10460,6 @@ impl MkMacroDialog {
                     })
             }
             MkMacroHostActionKind::OpenWindowPicker(request) => self.window_picker_request_is_current(request),
-            MkMacroHostActionKind::OpenReviewEditor { review_epoch, review_id, step } => self.action_editor.draft.is_none() && self.recording_review.as_ref().is_some_and(|review| review.epoch == *review_epoch && review.step_for_editor(*review_id).as_ref() == Some(step)),
             MkMacroHostActionKind::Package(package_action) => {
                 package_ui::host_action_is_current(self, package_action)
             }
@@ -9729,26 +10545,17 @@ impl MkMacroDialog {
             } => self
                 .complete_recorder_action(command, target, expected_state)
                 .map(|_| false),
-            MkMacroHostActionKind::Review {
-                command,
-                target,
-                selected_range,
-            } => self.complete_review_action(command, target, selected_range),
             MkMacroHostActionKind::AnnotationBegin { .. } => {
                 self.begin_recording_annotation().map(|_| false)
-            }
-            MkMacroHostActionKind::AnnotationFinish { commit, text, .. } => {
-                self.recording_annotation_text = text;
-                self.finish_recording_annotation(commit).map(|_| false)
             }
             MkMacroHostActionKind::Package(package_action) => {
                 package_ui::complete_host_action(self, package_action).map(|_| false)
             }
             MkMacroHostActionKind::OpenSearch(_) => Ok(false),
             MkMacroHostActionKind::OpenCatalog => Ok(false),
+            MkMacroHostActionKind::OpenReview { .. } => Ok(false),
             MkMacroHostActionKind::EditStep { .. } => Ok(false),
             MkMacroHostActionKind::OpenWindowPicker(_) => Ok(false),
-            MkMacroHostActionKind::OpenReviewEditor { .. } => Ok(false),
             MkMacroHostActionKind::CloseDecision(choice) => {
                 return self.complete_close_choice(ctx, choice);
             }
@@ -9757,33 +10564,6 @@ impl MkMacroDialog {
             self.command_error = Some(error.to_string());
         }
         false
-    }
-
-    fn complete_review_action(
-        &mut self,
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    ) -> anyhow::Result<bool> {
-        match command {
-            ReviewCommand::StopPreview => {
-                self.stop_owned_recording_preview();
-                Ok(false)
-            }
-            ReviewCommand::Preview => {
-                self.preview_recording_review(selected_range)?;
-                Ok(false)
-            }
-            ReviewCommand::Apply => {
-                self.apply_recording_review().map_err(anyhow::Error::msg)?;
-                Ok(false)
-            }
-            ReviewCommand::Cancel => {
-                self.cancel_recording_review();
-                let _ = target;
-                Ok(false)
-            }
-        }
     }
 
     fn complete_close_choice(
@@ -9807,6 +10587,7 @@ impl MkMacroDialog {
                 }
             },
             MkMacroCloseChoice::Discard => {
+                self.retire_review_and_annotation(ctx);
                 if self.catalog.open {
                     self.catalog_host.close_from_app(ctx);
                     self.catalog.open = false;
@@ -9844,6 +10625,7 @@ impl MkMacroDialog {
         host: HostIdentity,
         owner_instance: u64,
     ) {
+        self.retire_review_and_annotation(ctx);
         let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
         super::utility_host::remember_presentation(ctx, key, host.host);
         self.presentation_prepared = false;
@@ -10493,6 +11275,8 @@ impl MkMacroDialog {
             return Ok(RecordingReviewOpenDisposition::Queued);
         }
         self.recording_review = Some(review);
+        self.review_open_blocked = false;
+        self.pending_review_open = Some((None, false));
         self.publish_recording_target();
         Ok(RecordingReviewOpenDisposition::Opened)
     }
@@ -10525,45 +11309,68 @@ impl MkMacroDialog {
         let macro_id = snapshot
             .macro_id
             .ok_or_else(|| anyhow::anyhow!("The active recording has no macro target"))?;
+        let recording_id = snapshot.recording_id
+            .ok_or_else(|| anyhow::anyhow!("The active recording has no identity"))?;
         let pause_owned = annotation_pause_ownership(state)?;
-        crate::mkmacro::runtime::set_recording_annotation_active(true);
-        self.annotation_pause_owned = match pause_owned {
+        self.annotation.pause_id = None;
+        crate::mkmacro::runtime::set_recording_annotation_active(recording_id, true)?;
+        self.annotation.pause_owned = match pause_owned {
             true => {
-                if let Err(error) = crate::mkmacro::runtime::record_pause() {
-                    crate::mkmacro::runtime::set_recording_annotation_active(false);
-                    self.recording_annotation_target = None;
-                    return Err(error);
+                match crate::mkmacro::runtime::record_pause_for(recording_id) {
+                    Ok(pause_id) => self.annotation.pause_id = Some(pause_id),
+                    Err(error) => {
+                        let _ = crate::mkmacro::runtime::set_recording_annotation_active(recording_id, false);
+                        self.annotation.target = None;
+                        return Err(error);
+                    }
                 }
                 true
             }
             false => false,
         };
-        self.recording_annotation_text.clear();
-        self.recording_annotation_open = true;
-        self.recording_annotation_target = Some(macro_id);
+        self.annotation.text.clear();
+        self.annotation.open = true;
+        self.annotation.target = Some(macro_id);
+        self.annotation.recording_id = Some(recording_id);
+        self.annotation.epoch = self.annotation.epoch.wrapping_add(1).max(1);
+        self.annotation.focus_requested = true;
         Ok(())
     }
 
     pub fn finish_recording_annotation(&mut self, commit: bool) -> anyhow::Result<()> {
-        let text = self.recording_annotation_text.trim().to_owned();
+        let text = self.annotation.text.trim().to_owned();
+        let recording_id = self.annotation.recording_id;
+        let snapshot = crate::mkmacro::runtime::recorder_snapshot();
+        let current = snapshot.as_ref()
+            .is_some_and(|snapshot| snapshot.recording_id == recording_id && recording_id.is_some());
         let annotation_result = if commit {
             if text.is_empty() {
                 anyhow::bail!("Annotation cannot be empty");
             }
-            crate::mkmacro::runtime::record_annotation(text)
+            match recording_id.filter(|_| current) {
+                Some(id) => crate::mkmacro::runtime::record_annotation_for(id, text),
+                None => Err(anyhow::anyhow!("The recording has changed")),
+            }
         } else {
             Ok(())
         };
-        self.recording_annotation_open = false;
-        self.recording_annotation_text.clear();
-        self.recording_annotation_target = None;
-        crate::mkmacro::runtime::set_recording_annotation_active(false);
-        let resume = std::mem::take(&mut self.annotation_pause_owned);
+        self.annotation.open = false;
+        self.annotation.text.clear();
+        self.annotation.target = None;
+        self.annotation.recording_id = None;
+        if let Some(recording_id) = recording_id {
+            let _ = crate::mkmacro::runtime::set_recording_annotation_active(recording_id, false);
+        }
+        let resume = std::mem::take(&mut self.annotation.pause_owned);
+        let pause_id = self.annotation.pause_id.take();
         let resume_result = if should_resume_annotation_owned(
-            resume,
-            crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state),
+            resume && current && snapshot.as_ref().is_some_and(|snapshot| snapshot.pause_id == pause_id),
+            snapshot.as_ref().map(|snapshot| snapshot.state),
         ) {
-            crate::mkmacro::runtime::record_resume()
+            match (recording_id, pause_id) {
+                (Some(recording_id), Some(pause_id)) => crate::mkmacro::runtime::record_resume_for(recording_id, pause_id),
+                _ => Ok(()),
+            }
         } else {
             Ok(())
         };
@@ -10574,7 +11381,7 @@ impl MkMacroDialog {
     }
 
     pub fn preview_recording_review(&mut self, selected_range: bool) -> anyhow::Result<u64> {
-        if self.action_editor.draft.is_some() || self.recording_annotation_open {
+        if self.action_editor.draft.is_some() || self.annotation.open {
             anyhow::bail!("Close the active editor before previewing this recording");
         }
         if self
@@ -11314,7 +12121,7 @@ impl MkMacroDialog {
     fn close_children(&mut self) {
         self.hotkey_capture = false;
         self.cancel_record_hotkey_capture();
-        if self.recording_annotation_open {
+        if self.annotation.open {
             let _ = self.finish_recording_annotation(false);
         }
         search::close(self);
@@ -11492,7 +12299,6 @@ impl MkMacroDialog {
                 });
             }
         }
-        recording_review::show(ui.ctx(), self);
         package_ui::show(ui.ctx(), self);
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();

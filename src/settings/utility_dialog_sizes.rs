@@ -78,6 +78,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "mkmacro-parameters",
     "screen-recording",
     "mkmacro-recording-review",
+    "mkmacro-recording-annotation",
     "mkmacro-reference-crop",
     "mkmacro-runtime-prompt",
     "mkmacro-step-search",

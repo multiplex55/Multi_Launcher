@@ -15,6 +15,7 @@ use crate::mkmacro::{
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,14 +88,14 @@ pub struct RecordingReviewSession {
     pub cleaned_plan: RecordingPlan,
     pub suggestions: Vec<RecordingSuggestion>,
     pub enabled_suggestions: HashSet<RecordingSuggestionId>,
-    generated_plan: RecordingPlan,
-    editable_steps: Option<Vec<PlannedStep>>,
+    generated_plan: Arc<RecordingPlan>,
+    editable_steps: Option<Arc<Vec<PlannedStep>>>,
     pub mode: RecordingReviewMode,
     pub view: RecordingReviewView,
     pub selection: BTreeSet<ReviewStepId>,
     pub primary: Option<ReviewStepId>,
-    undo: Vec<ReviewEditSnapshot>,
-    redo: Vec<ReviewEditSnapshot>,
+    undo: Arc<Vec<ReviewEditSnapshot>>,
+    redo: Arc<Vec<ReviewEditSnapshot>>,
     pub statistics: RecordingReviewStatistics,
     pub dropped_event_count: u64,
     pub clipboard_observations: Vec<crate::mkmacro::ClipboardObservation>,
@@ -112,6 +113,10 @@ pub struct RecordingReviewSession {
     test_chrome: Option<ReviewChromeObservation>,
     #[cfg(test)]
     pub(super) test_edit: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_host_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_cancel: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
 }
 
 #[cfg(test)]
@@ -170,14 +175,14 @@ impl RecordingReviewSession {
             cleaned_plan,
             suggestions,
             enabled_suggestions: enabled,
-            generated_plan,
+            generated_plan: Arc::new(generated_plan),
             editable_steps: None,
             mode: RecordingReviewMode::Generated,
             view: RecordingReviewView::Actions,
             selection: BTreeSet::new(),
             primary: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            undo: Arc::new(Vec::new()),
+            redo: Arc::new(Vec::new()),
             statistics,
             dropped_event_count,
             clipboard_observations,
@@ -193,6 +198,10 @@ impl RecordingReviewSession {
             test_chrome: None,
             #[cfg(test)]
             test_edit: None,
+            #[cfg(test)]
+            test_host_button: None,
+            #[cfg(test)]
+            test_cancel: None,
         }
     }
 
@@ -221,6 +230,7 @@ impl RecordingReviewSession {
     pub fn proposed_steps(&self) -> &[PlannedStep] {
         self.editable_steps
             .as_deref()
+            .map(Vec::as_slice)
             .unwrap_or(&self.generated_plan.steps)
     }
 
@@ -284,7 +294,7 @@ impl RecordingReviewSession {
             .map_err(RecordingReviewError::Suggestion)?;
         assign_review_ids(&mut plan.steps);
         self.enabled_suggestions = candidate;
-        self.generated_plan = plan;
+        self.generated_plan = Arc::new(plan);
         self.clear_selection();
         self.update_generated_statistics();
         Ok(())
@@ -340,9 +350,7 @@ impl RecordingReviewSession {
         }
         self.begin_edit_operation();
         let selected = self.selection.clone();
-        self.editable_steps
-            .as_mut()
-            .unwrap()
+        Arc::make_mut(self.editable_steps.as_mut().unwrap())
             .retain(|step| !selected.contains(&step.review_id));
         self.clear_selection();
         self.update_generated_statistics();
@@ -352,7 +360,7 @@ impl RecordingReviewSession {
     pub fn trim_before_selection(&mut self) -> Result<(), RecordingReviewError> {
         let first = self.selected_bounds()?.0;
         self.begin_edit_operation();
-        self.editable_steps.as_mut().unwrap().drain(..first);
+        Arc::make_mut(self.editable_steps.as_mut().unwrap()).drain(..first);
         self.clear_selection();
         self.update_generated_statistics();
         Ok(())
@@ -361,7 +369,7 @@ impl RecordingReviewSession {
     pub fn trim_after_selection(&mut self) -> Result<(), RecordingReviewError> {
         let last = self.selected_bounds()?.1;
         self.begin_edit_operation();
-        self.editable_steps.as_mut().unwrap().truncate(last + 1);
+        Arc::make_mut(self.editable_steps.as_mut().unwrap()).truncate(last + 1);
         self.clear_selection();
         self.update_generated_statistics();
         Ok(())
@@ -380,10 +388,7 @@ impl RecordingReviewSession {
             return Err(RecordingReviewError::MissingReviewStep(id));
         }
         self.begin_edit_operation();
-        let step = self
-            .editable_steps
-            .as_mut()
-            .unwrap()
+        let step = Arc::make_mut(self.editable_steps.as_mut().unwrap())
             .iter_mut()
             .find(|step| step.review_id == id)
             .ok_or(RecordingReviewError::MissingReviewStep(id))?;
@@ -416,19 +421,21 @@ impl RecordingReviewSession {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(snapshot) = self.undo.pop() else {
+        let Some(snapshot) = Arc::make_mut(&mut self.undo).pop() else {
             return false;
         };
-        self.redo.push(self.snapshot());
+        let current = self.snapshot();
+        Arc::make_mut(&mut self.redo).push(current);
         self.restore(snapshot);
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(snapshot) = self.redo.pop() else {
+        let Some(snapshot) = Arc::make_mut(&mut self.redo).pop() else {
             return false;
         };
-        self.undo.push(self.snapshot());
+        let current = self.snapshot();
+        Arc::make_mut(&mut self.undo).push(current);
         self.restore(snapshot);
         true
     }
@@ -447,8 +454,8 @@ impl RecordingReviewSession {
         }
         self.mode = RecordingReviewMode::Generated;
         self.editable_steps = None;
-        self.undo.clear();
-        self.redo.clear();
+        Arc::make_mut(&mut self.undo).clear();
+        Arc::make_mut(&mut self.redo).clear();
         self.clear_selection();
         self.reconfigure_confirmation = false;
         self.update_generated_statistics();
@@ -466,7 +473,7 @@ impl RecordingReviewSession {
         // This method is a terminal Review cleanup boundary (Apply/Cancel/close).
         // Drop all materialized proposal actions too: an enabled Freeze Paste
         // suggestion may already have copied clipboard text into either plan.
-        self.generated_plan.steps.clear();
+        Arc::make_mut(&mut self.generated_plan).steps.clear();
         self.editable_steps = None;
     }
 
@@ -483,11 +490,12 @@ impl RecordingReviewSession {
 
     fn begin_edit_operation(&mut self) {
         if self.mode == RecordingReviewMode::Generated {
-            self.editable_steps = Some(self.generated_plan.steps.clone());
+            self.editable_steps = Some(Arc::new(self.generated_plan.steps.clone()));
             self.mode = RecordingReviewMode::Editable;
         }
-        self.undo.push(self.snapshot());
-        self.redo.clear();
+        let snapshot = self.snapshot();
+        Arc::make_mut(&mut self.undo).push(snapshot);
+        Arc::make_mut(&mut self.redo).clear();
     }
 
     fn snapshot(&self) -> ReviewEditSnapshot {
@@ -500,7 +508,7 @@ impl RecordingReviewSession {
 
     fn restore(&mut self, snapshot: ReviewEditSnapshot) {
         self.mode = RecordingReviewMode::Editable;
-        self.editable_steps = Some(snapshot.steps);
+        self.editable_steps = Some(Arc::new(snapshot.steps));
         self.selection = snapshot.selection;
         self.primary = snapshot.primary;
         self.update_generated_statistics();
@@ -619,11 +627,50 @@ fn recording_review_footer_reserved_height(ui: &mut eframe::egui::Ui, labels: &[
     (footer_height * pixels_per_point).ceil() / pixels_per_point
 }
 
-pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
-    if dialog.recording_review.is_none() {
-        return;
-    }
-    let mut open = true;
+#[derive(Clone)]
+pub(in crate::gui) struct ReviewCheckpoint {
+    recovery_target: Option<RecordingTarget>,
+    enabled_suggestions: HashSet<RecordingSuggestionId>,
+    generated_plan: Arc<RecordingPlan>,
+    editable_steps: Option<Arc<Vec<PlannedStep>>>,
+    mode: RecordingReviewMode,
+    view: RecordingReviewView,
+    selection: BTreeSet<ReviewStepId>,
+    primary: Option<ReviewStepId>,
+    undo: Arc<Vec<ReviewEditSnapshot>>,
+    redo: Arc<Vec<ReviewEditSnapshot>>,
+    statistics: RecordingReviewStatistics,
+    reconfigure_confirmation: bool,
+    message: Option<String>,
+}
+#[derive(Default)]
+pub(in crate::gui) struct ReviewRuntime {
+    pub review_editor_open: bool,
+    pub apply_blocker: Option<String>,
+    pub preview_active: bool,
+    pub playback_active: bool,
+    pub macros: Vec<(u64, String)>,
+}
+#[derive(Default)]
+pub(in crate::gui) struct ReviewActions {
+    presentation: Option<crate::gui::utility_host::UtilityPresentation>,
+    commands: Vec<ReviewIntent>,
+}
+pub(in crate::gui) enum ReviewIntent {
+    Edit(ReviewStepId),
+    AppendRecovery,
+    Retarget(u64),
+    StopPreview,
+    Preview(bool),
+    Apply,
+    Cancel,
+    Retired,
+}
+fn render_review_body(
+    ui: &mut eframe::egui::Ui,
+    review: &mut RecordingReviewSession,
+    runtime: &ReviewRuntime,
+) -> Vec<ReviewIntent> {
     let mut cancel = false;
     let mut apply = false;
     let mut edit = None;
@@ -632,58 +679,31 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     let mut preview_all = false;
     let mut preview_selected = false;
     let mut stop_preview = false;
-    let review_editor_open = dialog.action_editor.review_editing_id().is_some();
-    let apply_blocker = dialog.recording_review_apply_blocker();
-    let runtime = dialog.recording_preview_runtime_snapshot();
-    let preview_ticket = dialog
-        .recording_review
-        .as_ref()
-        .and_then(|review| review.preview_ticket);
-    let (preview_active, preview_snapshot) = preview_ticket.map_or((false, None), |ticket| {
-        dialog.recording_preview_status(ticket)
-    });
-    if let (Some(review), Some(snapshot)) = (
-        dialog.recording_review.as_mut(),
-        preview_snapshot.as_deref(),
-    ) {
-        review.observe_preview(snapshot);
-    } else if preview_ticket.is_some() && !preview_active {
-        // A runtime replacement invalidates an accepted ticket. Do not leave
-        // Review permanently displaying the optimistic Previewing state.
-        dialog.recording_review.as_mut().unwrap().preview_state =
-            Some(crate::mkmacro::RuntimeState::Stopped);
-    }
-    let playback_active = runtime.as_deref().is_some_and(|snapshot| {
-        matches!(
-            snapshot.state,
-            crate::mkmacro::RuntimeState::Running
-                | crate::mkmacro::RuntimeState::Paused
-                | crate::mkmacro::RuntimeState::Stopping
-        )
-    });
-    eframe::egui::Window::new("Recording Review")
-        .id(eframe::egui::Id::new("mkmacro_recording_review"))
-        .enabled(dialog.host_child_input_allowed())
-        .collapsible(false)
-        .default_size([780.0, 620.0])
-        .resizable(true)
-        .show_utility(ctx, "mkmacro-recording-review", eframe::egui::Id::new("Recording Review"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(eframe::egui::Vec2::from([780.0, 620.0])), eframe::egui::Vec2::ZERO, [None, None]), |ui| {
-            let footer_labels: &[&str] = if preview_active {
-                &["Stop Preview", "Apply", "Cancel"]
-            } else {
-                &["Play All", "Play Selected Range", "Apply", "Cancel"]
-            };
-            let footer_height = recording_review_footer_reserved_height(ui, footer_labels);
-            let body_max_height = (ui.available_height() - footer_height).max(0.0);
-            #[cfg(test)]
-            let mut last_action = None;
-            let body_output = eframe::egui::ScrollArea::vertical()
-                .id_salt("mkmacro_recording_review_body")
-                .auto_shrink([false, false])
-                .min_scrolled_height(0.0)
-                .max_height(body_max_height)
-                .show(ui, |ui| {
-            let review = dialog.recording_review.as_mut().unwrap();
+    let review_editor_open = runtime.review_editor_open;
+    let apply_blocker = &runtime.apply_blocker;
+    let preview_active = runtime.preview_active;
+    let playback_active = runtime.playback_active;
+    let footer_labels: &[&str] = if preview_active {
+        &["Stop Preview", "Apply", "Cancel"]
+    } else {
+        &["Play All", "Play Selected Range", "Apply", "Cancel"]
+    };
+    let footer_height = recording_review_footer_reserved_height(ui, footer_labels);
+    let body_max_height = (ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .height()
+        - footer_height)
+        .max(0.0);
+    #[cfg(test)]
+    let mut last_action = None;
+    let body_output = eframe::egui::ScrollArea::vertical()
+        .id_salt("mkmacro_recording_review_body")
+        .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .max_height(body_max_height)
+        .show(ui, |ui| {
+            let review = &mut *review;
             let stats = &review.statistics;
             ui.horizontal_wrapped(|ui| {
                 ui.strong(format!(
@@ -735,7 +755,8 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                         .collect();
                     for (id, description, rationale, confidence, mut enabled) in suggestions {
                         let response = ui.add_enabled(
-                            review.mode == RecordingReviewMode::Generated && !review_editor_open,
+                            review.mode == RecordingReviewMode::Generated
+                                && !review_editor_open,
                             eframe::egui::Checkbox::new(
                                 &mut enabled,
                                 format!("{description} ({confidence:?})"),
@@ -862,7 +883,10 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                                     *timestamp_us as f64 / 1_000_000.0
                                 ));
                             }
-                            crate::mkmacro::RecordingNote::Annotation { timestamp_us, text } => {
+                            crate::mkmacro::RecordingNote::Annotation {
+                                timestamp_us,
+                                text,
+                            } => {
                                 ui.label(format!(
                                     "Annotation at {:.3}s: {text}",
                                     *timestamp_us as f64 / 1_000_000.0
@@ -874,59 +898,59 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             }
 
             match review.view {
-                    RecordingReviewView::Literal => {
-                        for (index, step) in review.literal_steps.iter().enumerate() {
-                            ui.label(format!(
-                                "{}. {:?} · +{} ms",
-                                index + 1,
-                                step.action,
-                                step.delay_after_ms
+                RecordingReviewView::Literal => {
+                    for (index, step) in review.literal_steps.iter().enumerate() {
+                        ui.label(format!(
+                            "{}. {:?} · +{} ms",
+                            index + 1,
+                            step.action,
+                            step.delay_after_ms
+                        ));
+                    }
+                }
+                RecordingReviewView::Cleaned => {
+                    for (index, step) in review.cleaned_plan.steps.iter().enumerate() {
+                        ui.label(format!(
+                            "{}. {} — {}",
+                            index + 1,
+                            super::action_catalog::action_name(&step.action),
+                            provenance_label(step)
+                        ));
+                    }
+                }
+                RecordingReviewView::Actions => {
+                    let mut selection_request = None;
+                    for (index, step) in review.proposed_steps().iter().enumerate() {
+                        let selected = review.selection.contains(&step.review_id);
+                        #[cfg(test)]
+                        let is_last = index + 1 == review.proposed_steps().len();
+                        let label = format!(
+                            "{}. {} — {}",
+                            index + 1,
+                            super::action_catalog::action_name(&step.action),
+                            super::action_catalog::action_details(&step.action)
+                        );
+                        #[cfg(test)]
+                        let last_label = is_last.then(|| label.clone());
+                        let response = ui.selectable_label(selected, label);
+                        if response.clicked() {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            selection_request = Some((
+                                step.review_id,
+                                modifiers.ctrl || modifiers.command,
+                                modifiers.shift,
                             ));
                         }
-                    }
-                    RecordingReviewView::Cleaned => {
-                        for (index, step) in review.cleaned_plan.steps.iter().enumerate() {
-                            ui.label(format!(
-                                "{}. {} — {}",
-                                index + 1,
-                                super::action_catalog::action_name(&step.action),
-                                provenance_label(step)
-                            ));
+                        #[cfg(test)]
+                        if let Some(label) = last_label {
+                            last_action = Some((label, response.id, response.rect));
                         }
+                        response.on_hover_text(provenance_label(step));
                     }
-                    RecordingReviewView::Actions => {
-                        let mut selection_request = None;
-                        for (index, step) in review.proposed_steps().iter().enumerate() {
-                            let selected = review.selection.contains(&step.review_id);
-                            #[cfg(test)]
-                            let is_last = index + 1 == review.proposed_steps().len();
-                            let label = format!(
-                                "{}. {} — {}",
-                                index + 1,
-                                super::action_catalog::action_name(&step.action),
-                                super::action_catalog::action_details(&step.action)
-                            );
-                            #[cfg(test)]
-                            let last_label = is_last.then(|| label.clone());
-                            let response = ui.selectable_label(selected, label);
-                            if response.clicked() {
-                                let modifiers = ui.input(|input| input.modifiers);
-                                selection_request = Some((
-                                    step.review_id,
-                                    modifiers.ctrl || modifiers.command,
-                                    modifiers.shift,
-                                ));
-                            }
-                            #[cfg(test)]
-                            if let Some(label) = last_label {
-                                last_action = Some((label, response.id, response.rect));
-                            }
-                            response.on_hover_text(provenance_label(step));
-                        }
-                        if let Some((id, toggle, extend)) = selection_request {
-                            review.select(id, toggle, extend);
-                        }
+                    if let Some((id, toggle, extend)) = selection_request {
+                        review.select(id, toggle, extend);
                     }
+                }
             }
 
             ui.separator();
@@ -962,15 +986,17 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 {
                     review.message = Some(error.to_string());
                 }
-                let one =
-                    (review.selection.len() == 1).then(|| *review.selection.iter().next().unwrap());
-                let edit_response = ui
-                    .add_enabled(
-                        one.is_some() && !review_editor_open,
-                        eframe::egui::Button::new("Edit action"),
-                    );
+                let one = (review.selection.len() == 1)
+                    .then(|| *review.selection.iter().next().unwrap());
+                let edit_response = ui.add_enabled(
+                    one.is_some() && !review_editor_open,
+                    eframe::egui::Button::new("Edit action"),
+                );
                 #[cfg(test)]
-                { review.test_edit = Some((edit_response.rect, ui.clip_rect(), edit_response.enabled())); }
+                {
+                    review.test_edit =
+                        Some((edit_response.rect, ui.clip_rect(), edit_response.enabled()));
+                }
                 if edit_response.clicked() {
                     edit = one;
                 }
@@ -1065,19 +1091,19 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 if blocker.contains("target macro") {
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Retarget and append:");
-                        for macro_item in &dialog.draft.macros {
-                            ui.push_id(macro_item.id, |ui| {
+                        for macro_item in &runtime.macros {
+                            ui.push_id(macro_item.0, |ui| {
                                 if ui
                                     .add_enabled(
                                         !review_editor_open,
                                         eframe::egui::Button::new(format!(
                                             "{} (#{})",
-                                            macro_item.name, macro_item.id
+                                            macro_item.1, macro_item.0
                                         )),
                                     )
                                     .clicked()
                                 {
-                                    retarget = Some(macro_item.id);
+                                    retarget = Some(macro_item.0);
                                 }
                             });
                         }
@@ -1087,163 +1113,316 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             if review_editor_open {
                 ui.small("Finish or cancel the Action Editor before changing this review.");
             }
-                });
-            ui.separator();
-            #[cfg(test)]
-            let footer_clip = ui.clip_rect();
-            #[cfg(test)]
-            let mut footer_buttons = Vec::new();
-            let review = dialog.recording_review.as_mut().unwrap();
-            ui.horizontal_wrapped(|ui| {
-                if preview_active {
-                    let response = ui.button("Stop Preview");
-                    #[cfg(test)]
-                    footer_buttons.push(("Stop Preview".to_owned(), response.id, response.rect));
-                    if response.clicked() {
-                        stop_preview = true;
-                    }
-                } else {
-                    let response = ui.add_enabled(
-                        !review_editor_open
-                            && !playback_active
-                            && !review.proposed_steps().is_empty(),
-                        eframe::egui::Button::new("Play All"),
-                    );
-                    #[cfg(test)]
-                    footer_buttons.push(("Play All".to_owned(), response.id, response.rect));
-                    if response.clicked() {
-                        preview_all = true;
-                    }
-                    let response = ui
-                        .add_enabled(
-                            !review_editor_open
-                                && !playback_active
-                                && !review.selection.is_empty(),
-                            eframe::egui::Button::new("Play Selected Range"),
-                        )
-                        .on_hover_text("Plays from the first through the last selected action, including intervening rows");
-                    #[cfg(test)]
-                    footer_buttons.push((
-                        "Play Selected Range".to_owned(),
-                        response.id,
-                        response.rect,
-                    ));
-                    if response.clicked() {
-                        preview_selected = true;
-                    }
-                }
-                let response = ui.add_enabled(
-                    !review_editor_open && apply_blocker.is_none(),
-                    eframe::egui::Button::new("Apply"),
-                );
-                #[cfg(test)]
-                footer_buttons.push(("Apply".to_owned(), response.id, response.rect));
-                if response.clicked() {
-                    apply = true;
-                }
-                let response =
-                    ui.add_enabled(!review_editor_open, eframe::egui::Button::new("Cancel"));
-                #[cfg(test)]
-                footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
-                if response.clicked() {
-                    cancel = true;
-                }
-            });
-            #[cfg(test)]
-            {
-                review.test_chrome = Some(ReviewChromeObservation {
-                    body_id: body_output.id,
-                    body_rect: body_output.inner_rect,
-                    content_size: body_output.content_size,
-                    scroll_offset: body_output.state.offset,
-                    last_action,
-                    footer_clip,
-                    footer_buttons,
-                });
-            }
-            #[cfg(not(test))]
-            let _ = (body_output, footer_height);
         });
-
-    if let Some(id) = edit
-        && dialog.action_editor.draft.is_none()
-        && let Some(step) = dialog
-            .recording_review
-            .as_ref()
-            .and_then(|review| review.step_for_editor(id))
-    {
-        let macro_id = dialog
-            .recording_review
-            .as_ref()
-            .unwrap()
-            .effective_target()
-            .macro_id;
-        if dialog.defer_host_effects {
-            let epoch = dialog.recording_review.as_ref().unwrap().epoch;
-            dialog.stage_review_editor(epoch, id, step);
+    ui.separator();
+    #[cfg(test)]
+    let footer_clip = ui.clip_rect();
+    #[cfg(test)]
+    let mut footer_buttons = Vec::new();
+    let review = &mut *review;
+    ui.horizontal_wrapped(|ui| {
+        if preview_active {
+            let response = ui.button("Stop Preview");
+            #[cfg(test)]
+            footer_buttons.push(("Stop Preview".to_owned(), response.id, response.rect));
+            if response.clicked() {
+                stop_preview = true;
+            }
         } else {
-            dialog.action_editor.begin_review_edit(macro_id, id, &step);
+            let response = ui.add_enabled(
+                !review_editor_open
+                    && !playback_active
+                    && !review.proposed_steps().is_empty(),
+                eframe::egui::Button::new("Play All"),
+            );
+            #[cfg(test)]
+            footer_buttons.push(("Play All".to_owned(), response.id, response.rect));
+            if response.clicked() {
+                preview_all = true;
+            }
+            let response = ui
+                .add_enabled(
+                    !review_editor_open
+                        && !playback_active
+                        && !review.selection.is_empty(),
+                    eframe::egui::Button::new("Play Selected Range"),
+                )
+                .on_hover_text("Plays from the first through the last selected action, including intervening rows");
+            #[cfg(test)]
+            footer_buttons.push((
+                "Play Selected Range".to_owned(),
+                response.id,
+                response.rect,
+            ));
+            if response.clicked() {
+                preview_selected = true;
+            }
         }
+        let response = ui.add_enabled(
+            !review_editor_open && apply_blocker.is_none(),
+            eframe::egui::Button::new("Apply"),
+        );
+        #[cfg(test)]
+        footer_buttons.push(("Apply".to_owned(), response.id, response.rect));
+        if response.clicked() {
+            apply = true;
+        }
+        let response =
+            ui.add_enabled(!review_editor_open, eframe::egui::Button::new("Cancel"));
+        #[cfg(test)]
+        { review.test_cancel = Some((response.rect, ui.clip_rect(), response.enabled())); }
+        #[cfg(test)]
+        footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
+        if response.clicked() {
+            cancel = true;
+        }
+    });
+    #[cfg(test)]
+    {
+        review.test_chrome = Some(ReviewChromeObservation {
+            body_id: body_output.id,
+            body_rect: body_output.inner_rect,
+            content_size: body_output.content_size,
+            scroll_offset: body_output.state.offset,
+            last_action,
+            footer_clip,
+            footer_buttons,
+        });
+    }
+    #[cfg(not(test))]
+    let _ = (body_output, footer_height);
+
+    let mut commands = Vec::new();
+    if let Some(id) = edit {
+        commands.push(ReviewIntent::Edit(id));
     }
     if append_recovery {
-        dialog
-            .recording_review
-            .as_mut()
-            .unwrap()
-            .recover_append_to_original_macro();
+        commands.push(ReviewIntent::AppendRecovery);
     }
-    if let Some(macro_id) = retarget {
-        dialog
-            .recording_review
-            .as_mut()
-            .unwrap()
-            .retarget_append(macro_id);
+    if let Some(id) = retarget {
+        commands.push(ReviewIntent::Retarget(id));
     }
-    if dialog.defer_host_effects {
-        if let Some(target) = dialog
-            .recording_review
-            .as_ref()
-            .map(|review| review.effective_target())
-        {
-            if stop_preview {
-                dialog.stage_host_review_action(super::ReviewCommand::StopPreview, target, false);
-            }
-            if preview_all {
-                dialog.stage_host_review_action(super::ReviewCommand::Preview, target, false);
-            }
-            if preview_selected {
-                dialog.stage_host_review_action(super::ReviewCommand::Preview, target, true);
-            }
-            if apply {
-                dialog.stage_host_review_action(super::ReviewCommand::Apply, target, false);
-            }
-            if cancel || (!open && !review_editor_open) {
-                dialog.stage_host_review_action(super::ReviewCommand::Cancel, target, false);
-            }
-        }
-    } else {
-        if stop_preview {
-            dialog.stop_owned_recording_preview();
-        }
-        if preview_all && let Err(error) = dialog.preview_recording_review(false) {
-            dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
-        }
-        if preview_selected && let Err(error) = dialog.preview_recording_review(true) {
-            dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
-        }
-        if apply
-            && let Err(error) = dialog.apply_recording_review()
-            && let Some(review) = &mut dialog.recording_review
-        {
-            review.message = Some(error);
-        }
-        if cancel || (!open && !review_editor_open) {
-            dialog.cancel_recording_review();
+    if stop_preview {
+        commands.push(ReviewIntent::StopPreview);
+    }
+    if preview_all {
+        commands.push(ReviewIntent::Preview(false));
+    }
+    if preview_selected {
+        commands.push(ReviewIntent::Preview(true));
+    }
+    if apply {
+        commands.push(ReviewIntent::Apply);
+    }
+    if cancel {
+        commands.push(ReviewIntent::Cancel);
+    }
+    commands
+}
+
+impl crate::gui::utility_window_host::HostedUtilityDialog for RecordingReviewSession {
+    const KEY: &'static str = "mkmacro-recording-review";
+    const TITLE: &'static str = "Recording Review";
+    const SIZE: eframe::egui::Vec2 = eframe::egui::vec2(780.0, 620.0);
+    const MINIMUM: eframe::egui::Vec2 = eframe::egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ReviewRuntime;
+    type Actions = ReviewActions;
+    type Checkpoint = ReviewCheckpoint;
+    type Command = ReviewIntent;
+    fn layer() -> eframe::egui::LayerId {
+        eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new(Self::KEY),
+        )
+    }
+    fn navigation_owner(_: u64) -> crate::gui::jump_mode::ui::NavigationOwner {
+        crate::gui::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        true
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &ReviewRuntime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: crate::gui::jump_mode::ui::NavigationViewportBinding,
+        ctx: &eframe::egui::Context,
+        popup: Option<eframe::egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == eframe::egui::LayerId::background()
+            })
+    }
+    fn popup_layer(
+        &self,
+        _: &eframe::egui::Context,
+        _: eframe::egui::LayerId,
+    ) -> Option<eframe::egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: eframe::egui::ViewportId,
+        _: u64,
+    ) -> Option<crate::gui::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> ReviewCheckpoint {
+        ReviewCheckpoint {
+            recovery_target: self.recovery_target,
+            enabled_suggestions: self.enabled_suggestions.clone(),
+            generated_plan: self.generated_plan.clone(),
+            editable_steps: self.editable_steps.clone(),
+            mode: self.mode,
+            view: self.view,
+            selection: self.selection.clone(),
+            primary: self.primary,
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+            statistics: self.statistics.clone(),
+            reconfigure_confirmation: self.reconfigure_confirmation,
+            message: self.message.clone(),
         }
     }
-    if !open && review_editor_open {
-        dialog.recording_review.as_mut().unwrap().message =
-            Some("Finish or cancel the Action Editor before closing Recording Review.".into());
+    fn restore(&mut self, c: ReviewCheckpoint) {
+        self.recovery_target = c.recovery_target;
+        self.enabled_suggestions = c.enabled_suggestions;
+        self.generated_plan = c.generated_plan;
+        self.editable_steps = c.editable_steps;
+        self.mode = c.mode;
+        self.view = c.view;
+        self.selection = c.selection;
+        self.primary = c.primary;
+        self.undo = c.undo;
+        self.redo = c.redo;
+        self.statistics = c.statistics;
+        self.reconfigure_confirmation = c.reconfigure_confirmation;
+        self.message = c.message;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        _: (
+            Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+            Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        ),
+        _: crate::gui::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: crate::gui::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &ReviewRuntime,
+        child: Option<&mut eframe::egui::Ui>,
+        presentation: crate::gui::utility_host::UtilityPresentation,
+    ) -> ReviewActions {
+        use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+        let mut result = ReviewActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut eframe::egui::Ui| {
+            let (button, next) =
+                crate::gui::utility_host::presentation_button(ui, presentation, allowed);
+            #[cfg(test)]
+            {
+                self.test_host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+            }
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            ui.add_enabled_ui(allowed, |ui| {
+                result.commands = render_review_body(ui, self, runtime);
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = eframe::egui::Id::new(Self::KEY);
+            eframe::egui::Window::new(Self::TITLE).id(id).show_utility(
+                ctx,
+                Self::KEY,
+                id,
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE)
+                    .with_minimum(Self::MINIMUM),
+                body,
+            );
+        }
+        if !open && !runtime.review_editor_open {
+            result.commands.push(ReviewIntent::Cancel);
+        }
+        if !open && runtime.review_editor_open && first && !ctx.will_discard() {
+            self.message = Some(
+                "Finish or cancel the Action Editor before closing Recording Review.".into(),
+            );
+        }
+        if !first || ctx.will_discard() {
+            result.commands.clear();
+            result.presentation = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &ReviewActions,
+    ) -> Option<crate::gui::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> ReviewIntent {
+        ReviewIntent::Retired
+    }
+    fn command_closes(_: &ReviewIntent) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: ReviewActions,
+        _: Option<usize>,
+    ) -> Vec<ReviewIntent> {
+        actions.commands
+    }
+    #[cfg(test)]
+    fn test_button(
+        _: &ReviewActions,
+    ) -> Option<(eframe::egui::Rect, eframe::egui::Rect, bool)> {
+        None
+    }
+}
+
+#[cfg(test)]
+fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
+    use crate::gui::utility_window_host::HostedUtilityDialog as _;
+    let runtime = ReviewRuntime {
+        review_editor_open: dialog.action_editor.review_editing_id().is_some(),
+        apply_blocker: dialog.recording_review_apply_blocker(),
+        ..Default::default()
+    };
+    if let Some(review) = &mut dialog.recording_review {
+        let _ = review.render_host(
+            ctx,
+            (None, None),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            true,
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            true,
+            0,
+            &runtime,
+            None,
+            crate::gui::utility_host::UtilityPresentation::Docked,
+        );
     }
 }
 
@@ -1462,6 +1641,26 @@ mod tests {
             capture_duration: Duration::from_secs(2),
             raw_event_count: 12,
         }
+    }
+
+    #[test]
+    fn rejected_review_frame_restores_editable_state_without_cloning_capture() {
+        use crate::gui::utility_window_host::HostedUtilityDialog as _;
+        let mut review = RecordingReviewSession::new(result());
+        let generated = review.generated_plan.clone();
+        let baseline = review.cleaned_plan.clone();
+        review.preview_ticket = Some(42);
+        let checkpoint = review.capture();
+        assert!(Arc::ptr_eq(&generated, &checkpoint.generated_plan));
+        let id = review.proposed_steps()[0].review_id;
+        review.select(id, false, false);
+        review.delete_selected().unwrap();
+        crate::gui::utility_window_host::HostedUtilityDialog::restore(&mut review, checkpoint);
+        assert!(Arc::ptr_eq(&generated, &review.generated_plan));
+        assert_eq!(review.cleaned_plan, baseline);
+        assert!(review.selection.is_empty());
+        assert!(!review.can_undo());
+        assert_eq!(review.preview_ticket, Some(42));
     }
 
     const REVIEW_FOOTER_LABELS: [&str; 4] = ["Play All", "Play Selected Range", "Apply", "Cancel"];
