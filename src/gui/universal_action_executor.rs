@@ -650,7 +650,14 @@ impl LauncherApp {
                     ),
                 }
             }
-            UniversalUiIntent::EditTodo { index } => self.todo_view_dialog.open_edit(index),
+            UniversalUiIntent::EditTodo { index } => {
+                self.todo_view_dialog.ensure_open();
+                let id = self.todo_view_dialog.entry_id_at(index);
+                self.open_todo_view_from_origin(
+                    id.as_deref(),
+                    &super::utility_host::ChildOpenOrigin::<()>::Root,
+                );
+            }
             UniversalUiIntent::AddFavorite { action } => {
                 self.fav_dialog.open_prefilled_add(&action)
             }

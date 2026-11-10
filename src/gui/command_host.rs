@@ -765,11 +765,16 @@ impl NoteCommandHost for LauncherApp {
 
 impl TodoCommandHost for LauncherApp {
     fn open_todo_view(&mut self) {
-        self.todo_view_dialog.open();
+        self.open_todo_view_from_origin(None, &super::utility_host::ChildOpenOrigin::<()>::Root);
     }
 
     fn open_todo_editor(&mut self, index: usize) {
-        self.todo_view_dialog.open_edit(index);
+        self.todo_view_dialog.ensure_open();
+        let id = self.todo_view_dialog.entry_id_at(index);
+        self.open_todo_view_from_origin(
+            id.as_deref(),
+            &super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
     }
 }
 

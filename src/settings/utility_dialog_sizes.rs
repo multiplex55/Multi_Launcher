@@ -113,6 +113,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "theme-settings",
     "timer",
     "toast-log",
+    "todo-view",
     "todos",
     "unicode-inspector",
     "unused-note-assets",

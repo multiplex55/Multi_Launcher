@@ -42,6 +42,7 @@ pub(super) trait HostedUtilityDialog: Sized {
     const SIZE: egui::Vec2;
     const MINIMUM: egui::Vec2;
     const SCROLL_NATIVE_WINDOW: bool;
+    const RESIZABLE: bool = true;
     const REGISTER_TARGETS_ON_REPLAY: bool = false;
     type Runtime;
     type Actions;
@@ -343,6 +344,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         }
     }
 
+    pub(super) fn has_pending_frame(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(super) fn has_deferred_close(&self) -> bool {
         self.deferred_close.is_some()
     }
@@ -603,7 +608,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 .with_title(Self::title(session))
                 .with_inner_size(D::SIZE)
                 .with_min_inner_size(D::MINIMUM)
-                .with_resizable(true);
+                .with_resizable(D::RESIZABLE);
             ctx.show_viewport_immediate(id, builder, |child, class| {
                 let child_ctx = child.ctx().clone();
                 let native =
@@ -2561,6 +2566,112 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
             vec![HashGeneratorHostCommand::Closed]
         } else {
             vec![HashGeneratorHostCommand::Apply(actions, hwnd)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type TodoViewWindowHost =
+    UtilityWindowHost<super::todo_view_dialog::TodoViewDialog>;
+pub(super) enum TodoViewHostCommand {
+    Closed,
+    Apply(super::todo_view_dialog::TodoViewHostActions),
+}
+impl HostedUtilityDialog for super::todo_view_dialog::TodoViewDialog {
+    const KEY: &'static str = "todo-view";
+    const TITLE: &'static str = "View Todos";
+    const SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(360.0, 260.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const RESIZABLE: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = super::todo_view_dialog::TodoViewRuntime;
+    type Actions = super::todo_view_dialog::TodoViewHostActions;
+    type Checkpoint = ();
+    type Command = TodoViewHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("View Todos")))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self::Checkpoint {}
+    fn restore(&mut self, _: Self::Checkpoint) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        TodoViewHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, TodoViewHostCommand::Closed)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        _: Option<usize>,
+    ) -> Vec<Self::Command> {
+        if actions.close {
+            vec![TodoViewHostCommand::Closed]
+        } else {
+            vec![TodoViewHostCommand::Apply(actions)]
         }
     }
     #[cfg(test)]

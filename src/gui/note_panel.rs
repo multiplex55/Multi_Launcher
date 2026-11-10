@@ -953,8 +953,7 @@ pub(super) fn dispatch_note_link_from_origin<S>(
             return app.open_note_panel_from_origin(&slug, None, origin);
         }
         MarkdownLinkAction::TodoReference(todo_id) => {
-            open_todo_reference(app, &todo_id);
-            return true;
+            return app.open_todo_view_from_origin(Some(&todo_id), origin);
         }
         MarkdownLinkAction::Filesystem(action) => {
             if let Err(err) = execute_explorer_action(action) {
@@ -972,15 +971,6 @@ pub(super) fn dispatch_note_link_from_origin<S>(
         }
     }
     false
-}
-
-fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
-    let todos = load_todos_or_last_good(TODO_FILE);
-    if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id) {
-        app.todo_view_dialog.open_edit(idx);
-    } else {
-        app.todo_view_dialog.open();
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1244,6 +1234,8 @@ pub struct NotePanel {
     test_capture_markdown_fragment_ids: bool,
     #[cfg(test)]
     test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_todo_link: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_custom_table_insert_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -1927,6 +1919,8 @@ impl NotePanel {
             test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             test_markdown_toolbar_menu: None,
+            #[cfg(test)]
+            test_todo_link: None,
             #[cfg(test)]
             test_custom_table_insert_rect: None,
             #[cfg(test)]
@@ -2763,6 +2757,11 @@ impl NotePanel {
         let layer_is_focused = visible_layer == Some(layer)
             && focused_layer.is_none_or(|focused| focused == layer);
         modal_allowed && (layer_is_focused || own_prompt.is_some())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_todo_link(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_todo_link
     }
 
     #[cfg(test)]
@@ -7281,9 +7280,14 @@ impl NotePanel {
 
     fn activate_todo_reference(&mut self, app: &mut LauncherApp, id: &str) {
         if self.defer_host_actions {
-            self.pending_host_actions.links.push(egui::OpenUrl::same_tab(format!("todo:{id}")));
+            self.pending_host_actions
+                .links
+                .push(egui::OpenUrl::same_tab(format!("todo://{id}")));
         } else {
-            open_todo_reference(app, id);
+            app.open_todo_view_from_origin(
+                Some(id),
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
         }
     }
 
@@ -8950,6 +8954,10 @@ impl NotePanel {
                     let todo_id = &rest[..id_len];
                     let resp =
                         ui.link(RichText::new(format!("@todo:{todo_id}")).font(font.clone()));
+                    #[cfg(test)]
+                    {
+                        self.test_todo_link = Some((resp.rect, ui.clip_rect(), resp.enabled()));
+                    }
                     if resp.clicked() {
                         self.activate_todo_reference(app, todo_id);
                     }

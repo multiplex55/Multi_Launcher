@@ -1322,6 +1322,8 @@ pub struct LauncherApp {
     screen_draw_region_operation: Option<ScreenDrawRegionOperation>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
+    todo_view_host: utility_window_host::TodoViewWindowHost,
+    pending_todo_entry: Option<String>,
     clipboard_dialog: ClipboardDialog,
     clipboard_history_host: utility_window_host::ClipboardHistoryWindowHost,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
@@ -4142,6 +4144,8 @@ impl LauncherApp {
             screen_draw_region_operation: None,
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
+            todo_view_host: Default::default(),
+            pending_todo_entry: None,
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_history_host: Default::default(),
             clipboard_modify_runtime,
@@ -5074,6 +5078,7 @@ impl LauncherApp {
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
+            Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
             Panel::ImagePanel => self.image_panels.iter().any(|panel| panel.open && panel.host.root_layer().is_some()),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
@@ -5495,6 +5500,8 @@ impl LauncherApp {
                 self.panel_states.todo_dialog = false;
             }
             Panel::TodoViewDialog => {
+                self.todo_view_host.close_from_app(&self.egui_ctx);
+                self.pending_todo_entry = None;
                 self.todo_view_dialog.open = false;
                 self.panel_states.todo_view_dialog = false;
             }
@@ -5826,6 +5833,8 @@ impl LauncherApp {
                 self.panel_states.todo_dialog = false;
             }
             Panel::TodoViewDialog => {
+                self.todo_view_host.close_from_app(&self.egui_ctx);
+                self.pending_todo_entry = None;
                 self.todo_view_dialog.open = false;
                 self.panel_states.todo_view_dialog = false;
             }
@@ -6053,7 +6062,11 @@ impl LauncherApp {
             Panel::ScreenshotEditor => {}
             Panel::CropDialog => {}
             Panel::TodoDialog => self.todo_dialog.ensure_open(),
-            Panel::TodoViewDialog => self.todo_view_dialog.ensure_open(),
+            Panel::TodoViewDialog => {
+                if !self.todo_view_dialog.open {
+                    self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+                }
+            },
             Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
             Panel::ClipboardModifyDialog => {
                 if !self.clipboard_modify_dialog.open {
@@ -6355,6 +6368,8 @@ impl LauncherApp {
             }
         } else if panel == Panel::UnusedAssetsDialog {
             self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::TodoViewDialog {
+            self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::HashGeneratorDialog {
             let was_open = self.hash_generator_dialog.open;
             self.hash_generator_dialog.ensure_open();
@@ -6782,6 +6797,38 @@ impl LauncherApp {
             was_open,
             origin,
         );
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn open_todo_view_from_origin<S>(
+        &mut self,
+        id: Option<&str>,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
+        let was_open = self.todo_view_dialog.open;
+        self.todo_view_dialog.ensure_open();
+        if let Some(id) = id {
+            if self.todo_view_host.has_pending_frame() {
+                self.pending_todo_entry = Some(id.to_owned());
+            } else {
+                self.todo_view_dialog.open_entry(id);
+            }
+        }
+        let desired = self.todo_view_host.open_from_origin(
+            &self.egui_ctx,
+            &self.todo_view_dialog,
+            was_open,
+            origin,
+        );
+        self.panel_stack
+            .retain(|panel| *panel != Panel::TodoViewDialog);
+        self.panel_stack.push(Panel::TodoViewDialog);
+        self.panel_states.todo_view_dialog = true;
         if desired == Some(utility_host::UtilityPresentation::Docked) {
             self.request_launcher_visibility(true);
             true

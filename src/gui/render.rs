@@ -2205,7 +2205,7 @@ impl LauncherApp {
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer(),
             Panel::ScreenshotEditor => middle(egui::Id::new("Screenshot Editor")),
             Panel::TodoDialog => Some(crate::gui::jump_mode::ui::todo_dialog_layer_id()),
-            Panel::TodoViewDialog => middle(egui::Id::new(Some("View Todos"))),
+            Panel::TodoViewDialog => self.todo_view_host.root_layer(),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
@@ -4868,6 +4868,7 @@ impl LauncherApp {
         self.batch_rename_host.prepare_open(ctx, &self.batch_rename_dialog);
         self.search_replace_host.prepare_open(ctx, &self.search_replace_dialog);
         self.hash_generator_host.prepare_open(ctx, &self.hash_generator_dialog);
+        self.todo_view_host.prepare_open(ctx, &self.todo_view_dialog);
         self.file_preview_host.prepare_open(ctx, &self.file_search_dialog.preview_dialog);
         self.note_templates_host.prepare_open(ctx, &self.notes_dialog.template_manager);
         self.unused_assets_host.prepare_open(ctx, &self.unused_assets_dialog);
@@ -4965,6 +4966,7 @@ impl LauncherApp {
                 || self.calculation_dependency_host.needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.file_preview_host.needs_root_ui_when_hidden(self.file_search_dialog.preview_dialog.open)
                 || self.hash_generator_host.needs_root_ui_when_hidden(self.hash_generator_dialog.open)
+                || self.todo_view_host.needs_root_ui_when_hidden(self.todo_view_dialog.open)
                 || self.hash_generator_dialog.has_job()
                 || self.note_templates_host.needs_root_ui_when_hidden(self.notes_dialog.template_manager.is_open())
                 || self.unused_assets_host.needs_root_ui_when_hidden(self.unused_assets_dialog.open)
@@ -5571,6 +5573,44 @@ impl LauncherApp {
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !hash_pinned,
                 allow_os_close: !hash_pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        let todo_layer = self.todo_view_host.root_layer();
+        let todo_popup =
+            todo_layer.and_then(|layer| self.todo_view_dialog.owned_popup_layer(ctx, layer));
+        let todo_owner = root_input
+            && todo_layer.is_some()
+            && visible_top_middle_layer(ctx) == todo_layer
+            && (!egui::Popup::is_any_open(ctx) || todo_popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                Some(focus) == todo_layer
+                    || Some(focus) == todo_popup
+                    || focus.order == egui::Order::Background
+            });
+        let todo_pinned = self.pinned_panels.contains(&super::Panel::TodoViewDialog);
+        self.todo_view_host
+            .configure_jump(&self.jump_mode_ui, false);
+        let todo_runtime = super::todo_view_dialog::TodoViewRuntime {
+            pinned: todo_pinned,
+            host: self.todo_view_host.identity(),
+        };
+        self.todo_view_host.show(
+            ctx,
+            &mut self.todo_view_dialog,
+            &todo_runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: todo_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !todo_pinned,
+                allow_os_close: !todo_pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
                 root_scopes: (None, None),
@@ -12048,9 +12088,7 @@ impl LauncherApp {
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
         todo_dlg.ui_with_jump_mode(&ctx, self, todo_scope);
         self.todo_dialog = todo_dlg;
-        let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
-        todo_view.ui(&ctx, self);
-        self.todo_view_dialog = todo_view;
+
         self.show_clipboard_history_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_clipboard_modify_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_json_utility_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
@@ -12784,6 +12822,79 @@ impl LauncherApp {
             if panel.complete_child_forms(ctx) { form_root_requests.push(identity); }
             self.note_panels.insert(index.min(self.note_panels.len()), panel);
         }
+        let mut todo_show_root = false;
+        if let Some(completion) = self
+            .todo_view_host
+            .complete(ctx, &mut self.todo_view_dialog)
+        {
+            use super::utility_window_host::TodoViewHostCommand;
+            for command in completion.commands {
+                match command {
+                    TodoViewHostCommand::Closed => {
+                        self.pending_todo_entry = None;
+                        self.todo_view_dialog.open = false;
+                        self.panel_states.todo_view_dialog = false;
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::TodoViewDialog);
+                    }
+                    TodoViewHostCommand::Apply(mut actions) => {
+                        let mut dialog = std::mem::take(&mut self.todo_view_dialog);
+                        dialog.apply_host_actions(ctx, self, &mut actions, completion.owner_viewport);
+                        self.todo_view_dialog = dialog;
+                        for request in actions.notes {
+                            let session = (
+                                self.todo_view_dialog.epoch(),
+                                request.entry_id.clone(),
+                                request.entry_text.clone(),
+                            );
+                            if let Some(receipt) =
+                                super::utility_host::AcceptedParentOpen::from_retained(
+                                    ctx,
+                                    actions.host,
+                                    session.clone(),
+                                    actions.root,
+                                    actions.owner,
+                                )
+                            {
+                                if self.todo_view_dialog.accepts_note_origin(
+                                    self.todo_view_host.identity(),
+                                    &receipt,
+                                    &request,
+                                    session.0,
+                                ) {
+                                    let missing_anchor =
+                                        super::todo_view_dialog::TodoViewDialog::missing_note_anchor(
+                                            &request,
+                                        );
+                                    show_root |= self.open_note_panel_from_origin(
+                                        &request.slug,
+                                        None,
+                                        &super::utility_host::ChildOpenOrigin::Parent(receipt),
+                                    );
+                                    if let Some((anchor, title)) = missing_anchor {
+                                        self.report_error_message(
+                                            "ui operation",
+                                            format!(
+                                                "Anchor '{}' not found in note '{}'; opened note top.",
+                                                anchor, title
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            todo_show_root = completion.show_root;
+        }
+        if !self.todo_view_host.has_pending_frame() {
+            if let Some(id) = self.pending_todo_entry.take() {
+                if self.todo_view_dialog.open {
+                    self.todo_view_dialog.open_entry(&id);
+                }
+            }
+        }
         for (origin, request) in form_open_requests {
             let Some(panel) = self.note_panels.iter_mut().find(|panel| panel.accepts_note_open(&origin)) else { continue; };
             self.next_note_form_session = self.next_note_form_session.wrapping_add(1);
@@ -12830,6 +12941,9 @@ impl LauncherApp {
                 );
             }
         }
+        show_root |= todo_show_root
+            && self.todo_view_dialog.open
+            && self.todo_view_host.root_layer().is_some();
         show_root |= docked_host_requests.into_iter().any(|identity| {
             self.note_panels.iter().any(|panel| {
                 panel.prompt_identity() == identity && panel.open && !panel.is_popped_out()
@@ -19024,6 +19138,413 @@ mod tests {
         }
         assert_eq!(app.image_panels.len(), 1);
         assert_ne!(app.image_panels[0].session(), session);
+    }
+
+    #[test]
+    fn native_note_todo_and_todo_note_links_use_owned_hosts() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context, root: &std::path::Path) -> Box<LauncherApp> {
+            Box::new(root_list_app_at(ctx, Vec::new(), root))
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        std::fs::write(
+            workspace.root().join("notes/source.md"),
+            "- [ ] @todo:first",
+        )
+        .unwrap();
+        std::fs::write(workspace.root().join("notes/dest.md"), "destination").unwrap();
+        crate::plugins::note::refresh_cache().unwrap();
+        let entry = crate::plugins::todo::TodoEntry {
+            id: "first".into(),
+            text: "go @note:dest".into(),
+            done: false,
+            priority: 1,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        crate::plugins::todo::save_todos(crate::plugins::todo::TODO_FILE, &[entry]).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = boxed_app(&ctx, workspace.root());
+        let settings_path = workspace
+            .root()
+            .join("todo-host-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .utility_presentations
+            .set(
+                crate::settings::UtilityToolKey::parse("todo-view").unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            )
+            .unwrap();
+        settings.save(&settings_path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            settings.utility_presentations,
+        )
+        .install_in_context(&ctx);
+        app.open_note_panel("source", None);
+        app.note_panels[0].test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        app.note_panels[0].test_pop_out();
+        app.request_launcher_visibility(false);
+        let source = egui::ViewportId::from_hash_of((
+            "note-panel-editor",
+            app.note_panels[0].prompt_identity(),
+        ));
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, source, Vec::new(), false, false);
+        }
+        let (link, clip, enabled) = app.note_panels[0]
+            .test_todo_link()
+            .expect("rendered todo link");
+        assert!(enabled && clip.contains_rect(link));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            source,
+            tool_dialog_pointer_events(link, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            source,
+            tool_dialog_pointer_events(link, false),
+            false,
+            true,
+        );
+        assert!(!app.todo_view_dialog.open);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                source,
+                tool_dialog_pointer_events(link, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.todo_view_dialog.open && app.todo_view_host.is_popped_out());
+        assert!(!app.visible_flag_state());
+        let session = app.todo_view_dialog.epoch();
+        let target = super::super::utility_window_host::TodoViewWindowHost::test_viewport(session);
+        for _ in 0..5 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (sort, clip, enabled) = app.todo_view_dialog.test_sort_control().expect("todo sort");
+        assert!(enabled && clip.contains_rect(sort));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(sort, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (name, clip, enabled) = app
+            .todo_view_dialog
+            .test_sort_name()
+            .expect("sort Name option");
+        assert!(enabled && clip.contains_rect(name));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.todo_view_dialog.test_is_name_sort());
+        let (filter, clip, enabled) = app
+            .todo_view_dialog
+            .test_filter_control()
+            .expect("todo filter");
+        assert!(enabled && clip.contains_rect(filter));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            vec![egui::Event::PointerMoved(filter.center())],
+            false,
+            false,
+        );
+        run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        assert!(
+            app.todo_view_dialog.test_filter_state().0,
+            "filter owns the pointer after the popup closes"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(filter, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.todo_view_dialog.test_filter_state().1,
+            "filter accepts native focus"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            vec![egui::Event::Text("discarded".into())],
+            false,
+            true,
+        );
+        assert_eq!(app.todo_view_dialog.test_filter(), "");
+        assert!(
+            app.todo_view_dialog.test_filter_state().1,
+            "discard retains native focus"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            vec![egui::Event::Text("go".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.todo_view_dialog.test_filter(), "go");
+        let (edit, _, _) = app
+            .todo_view_dialog
+            .test_edit_control()
+            .expect("todo editor text");
+        app.todo_view_dialog.test_scroll_to(&ctx, edit);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (edit, clip, enabled) = app
+            .todo_view_dialog
+            .test_edit_control()
+            .expect("visible todo editor text");
+        assert!(
+            enabled && clip.contains_rect(edit),
+            "edit={edit:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(edit, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("discarded".into()),
+            ],
+            false,
+            true,
+        );
+        assert_eq!(app.todo_view_dialog.test_edit_text(), "go @note:dest");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("go @note:dest updated".into()),
+            ],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.todo_view_dialog.test_edit_text(),
+            "go @note:dest updated"
+        );
+        let (dock, clip, enabled) = app
+            .todo_view_dialog
+            .test_host_control()
+            .expect("native Dock control");
+        assert!(
+            enabled && clip.contains_rect(dock),
+            "dock={dock:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.todo_view_host.is_popped_out());
+        assert_eq!(app.todo_view_dialog.epoch(), session);
+        assert_eq!(
+            app.todo_view_dialog.test_edit_text(),
+            "go @note:dest updated"
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let (popout, clip, enabled) = app
+            .todo_view_dialog
+            .test_host_control()
+            .expect("docked Pop Out control");
+        assert!(
+            enabled && clip.contains_rect(popout),
+            "popout={popout:?}, clip={clip:?}"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.todo_view_host.is_popped_out());
+        assert_eq!(app.todo_view_dialog.epoch(), session);
+        assert_eq!(
+            app.todo_view_dialog.test_edit_text(),
+            "go @note:dest updated"
+        );
+        app.request_launcher_visibility(false);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (save, _, _) = app
+            .todo_view_dialog
+            .test_save_control()
+            .expect("todo editor save");
+        app.todo_view_dialog.test_scroll_to(&ctx, save);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (save, clip, enabled) = app
+            .todo_view_dialog
+            .test_save_control()
+            .expect("visible todo editor save");
+        assert!(
+            enabled && clip.contains_rect(save),
+            "save={save:?}, clip={clip:?}"
+        );
+        let version = crate::plugins::todo::todo_version();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(crate::plugins::todo::todo_version(), version + 1);
+        let stored = crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "first");
+        assert_eq!(stored[0].text, "go @note:dest updated");
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (link, _, _) = app
+            .todo_view_dialog
+            .test_note_link()
+            .expect("rendered note link");
+        app.todo_view_dialog.test_scroll_to(&ctx, link);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, target, Vec::new(), false, false);
+        }
+        let (link, clip, enabled) = app
+            .todo_view_dialog
+            .test_note_link()
+            .expect("visible note link");
+        assert!(
+            enabled && clip.contains_rect(link),
+            "link={link:?}, clip={clip:?}, enabled={enabled}"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            tool_dialog_pointer_events(link, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            target,
+            tool_dialog_pointer_events(link, false),
+            false,
+            true,
+        );
+        assert_eq!(app.note_panels.len(), 1);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                target,
+                tool_dialog_pointer_events(link, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.note_panels.len(), 2);
+        assert!(app.note_panels[1].is_popped_out());
+        assert!(!app.visible_flag_state());
+        app.open_todo_view_from_origin(
+            None,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        assert!(app.todo_view_host.is_popped_out());
+        assert_eq!(app.todo_view_dialog.epoch(), session);
+        assert_eq!(app.todo_view_dialog.test_filter(), "go");
+        app.todo_view_host.close_from_app(&ctx);
+        app.todo_view_dialog.open = false;
+        app.open_todo_view_from_origin(
+            None,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        assert!(app.todo_view_host.is_popped_out());
+        assert_ne!(app.todo_view_dialog.epoch(), session);
+        configure_launcher_show_focus_test_app(&mut app, "root query");
+        let screen = egui::vec2(1600.0, 1200.0);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen);
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen, false);
+        let query = ctx
+            .read_response(egui::Id::new("query_input"))
+            .unwrap()
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen, query);
+        notes_query_mouse_type(&mut app, &ctx, screen, "λ");
+        assert!(app.query.contains('λ'));
+        app.settings_save_workers.join_all();
+        workers.join_all();
     }
 
     #[test]
