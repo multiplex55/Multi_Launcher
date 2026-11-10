@@ -32,7 +32,7 @@ Goal section F supplies the authoritative objective, ownership, scope, invariant
 | M4-D | D5 actual connector creation / reconnection | complete; automated verified, native pending |
 | M5-A | I1 bounded label-file exchange | complete; automated verified, native pending |
 | M6-A | R1/R2 explicit duration / encoder timeline | complete foundation; UI pending M6-B |
-| M6-B | R1/R2 exact typing / 25-second steps | pending |
+| M6-B | R1/R2 exact typing / 25-second steps | complete; automated verified, native pending |
 | M7-A | F1 retained-tree treemap model | pending |
 | M7-B | F1/F2 linked navigation / visibility | pending |
 | M8-A | C1 cached stable dependency snapshot | pending |
@@ -410,3 +410,13 @@ Separate final fast-dev lib no-run compile passed without introduced warnings. O
 - `m6-a-terminal`: 1/1 slow-source terminal claim freezes time before cleanup.
 
 Final receipts exit 0/no timeout/cleanup and drain verified; selectors/output recorded there. Parent inspected scoped diff/whitespace/stale-cap search: no product 120-second cap remains in recording domain/encoders; remaining 120-second fixtures are legitimate, visible control remains explicitly deferred. Test-only GIF wrapper is retained for its existing trailer-error caller. Source/Cargo returned. No real long recording or physical native smoke claimed; M6-B exact input/steps/frozen status follows.
+
+M6-A checkpoint `1ef6715ff6712770843b261c9a5cdcf40e1f3dee` pushed successfully; clean tree before M6-B. Implementer owns exact integer 0–1,000 UI/25-second owned raw-wheel and step controls, invalid-input admission, frozen active request display and current README. Domain/encoder semantics remain M6-A; parent ledger/Git, one source/Cargo lane. M7/M8 and global B2b/c adapters follow before M9.
+
+## M6-B acceptance: Exact duration controls and frozen status
+
+Displayed duration text is the single selection value validated for a request: whole seconds 0–1,000, 0 = Unlimited, default 30. Buttons/arrows/owned raw-wheel events step by 25 from the current value with clamping; typed 17 remains 17. Invalid text cannot hide a prior valid number and is rejected both visually and at retained ChoosePath/request admission. Wheel handling uses this egui's actual event/smooth-scroll boundary, not DragValue speed or nonexistent raw-scroll fields; outside/blocked/discarded input cannot change duration and the parent does not also scroll. Active controller status derives timed/Unlimited and elapsed from the frozen session request, independently of later mutable setup selection. Countdown/Stop/capture guards and other defaults remain; README updated.
+
+Separate final fast-dev lib no-run compile passed without introduced warnings. Owned 100-second `--no-fail-fast` receipts under `target/utility-usability-and-insights/evidence/`: `m6-b-first` 3/3 (actual typing/blur, button/arrow/raw wheel, 0/1,000/invalid, retained same-pass frozen request and status); `m6-b-scroll-parent` 1/1 (genuinely scrollable parent at nonzero offset unchanged by owned 17→42 wheel step); `m6-b-regressions` 3/3 (cancelled path/frozen 17, reciprocal capture guards, hidden retained Stop). All exit 0/no timeout/cleanup and drain verified.
+
+Parent inspected scoped diff/whitespace/status; only Recording UI, current README and ledger changed. Source/Cargo returned. R1/R2 implementation and automated evidence complete; physical short timed GIF/MP4/Unlimited recording and playback remain M9. No real 1,000-second wait performed or required. M7/M8/global adapters continue.

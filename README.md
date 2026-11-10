@@ -1442,8 +1442,10 @@ Opening the setup or choosing a format does not start a recording.
    **Refresh** requests a new list. A window that has disappeared stays marked
    unavailable and must be selected again before recording.
 2. Choose **GIF** (10 fps by default) or **MP4** (30 fps by default). Both
-   formats are silent. Set the frame rate, clip limit (30 seconds by default,
-   up to 120 seconds), and whether to include the cursor.
+   formats are silent. Set the frame rate, clip limit (30 seconds by default;
+   enter 0 for Unlimited or 1–1,000 seconds for a timed clip), and whether to
+   include the cursor. The duration step controls change the current value by
+   25 seconds; you can also type an exact value.
 3. Choose **Fit**, **Half**, or **Quarter**. The output is limited to
    1920 × 1080. Check the displayed output size; MP4 pads odd dimensions
    to even values for the encoder.

@@ -137,7 +137,7 @@ struct RecordingSelection {
     region: Option<ScreenRect>,
     format: RecordingFormat,
     frames_per_second: u8,
-    duration_seconds: u32,
+    duration_text: String,
     scale: OutputScale,
     include_cursor: bool,
 }
@@ -151,7 +151,7 @@ impl Default for RecordingSelection {
             region: None,
             format: RecordingFormat::Gif,
             frames_per_second: RecordingFormat::Gif.default_frame_rate(),
-            duration_seconds: 30,
+            duration_text: "30".into(),
             scale: OutputScale::Fit,
             include_cursor: false,
         }
@@ -711,7 +711,7 @@ impl RecordingDialogState {
                             #[cfg(test)] { self.test_controls.insert("fps",(fps.rect,ui.clip_rect(),fps.enabled())); }
                             #[cfg(not(test))] let _ = fps;
                         });
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label("Output scale");
                             let combo = egui::ComboBox::from_id_salt("recording-output-scale")
                                 .selected_text(scale_label(draft.scale))
@@ -728,10 +728,68 @@ impl RecordingDialogState {
                                 });
                             self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
                             #[cfg(test)] { self.test_controls.insert("scale", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
-                            ui.label("Duration (seconds)");
-                            ui.add(
-                                egui::DragValue::new(&mut draft.duration_seconds).range(1..=120),
+                            ui.label("Duration (seconds; 0 = Unlimited)");
+                            let valid = parse_duration_seconds(&draft.duration_text).is_ok();
+                            let minus = ui.add_enabled(valid, egui::Button::new("−"));
+                            let duration = ui.add(
+                                egui::TextEdit::singleline(&mut draft.duration_text)
+                                    .desired_width(55.0)
+                                    .char_limit(16),
                             );
+                            let plus = ui.add_enabled(valid, egui::Button::new("+"));
+                            #[cfg(test)]
+                            {
+                                self.test_controls.insert(
+                                    "duration",
+                                    (duration.rect, ui.clip_rect(), duration.enabled()),
+                                );
+                                self.test_controls.insert(
+                                    "duration-minus",
+                                    (minus.rect, ui.clip_rect(), minus.enabled()),
+                                );
+                                self.test_controls
+                                    .insert("duration-plus", (plus.rect, ui.clip_rect(), plus.enabled()));
+                            }
+                            let owned = owner_allowed
+                                && first
+                                && !ctx.will_discard()
+                                && ui.is_visible()
+                                && !ui.is_sizing_pass()
+                                && duration.enabled();
+                            let mut steps = i32::from(plus.clicked()) - i32::from(minus.clicked());
+                            if owned && duration.has_focus() {
+                                steps += i32::from(
+                                    ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)),
+                                );
+                                steps -= i32::from(
+                                    ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)),
+                                );
+                            }
+                            let hover = duration.hovered()
+                                && ctx.pointer_hover_pos().is_some_and(|point| {
+                                    duration.rect.contains(point) && ctx.layer_id_at(point) == Some(duration.layer_id)
+                                });
+                            if owned && hover {
+                                let wheel_steps = ui.input_mut(|input| {
+                                    let mut count = 0_i32;
+                                    for event in &mut input.events {
+                                        if let egui::Event::MouseWheel { delta, .. } = event
+                                            && delta.y != 0.0
+                                        {
+                                            count = count.saturating_add(if delta.y > 0.0 { 1 } else { -1 });
+                                            delta.y = 0.0;
+                                        }
+                                    }
+                                    input.smooth_scroll_delta.y = 0.0;
+                                    count
+                                });
+                                steps += wheel_steps;
+                            }
+                            if steps != 0
+                                && let Ok(value) = parse_duration_seconds(&draft.duration_text)
+                            {
+                                draft.duration_text = step_duration_seconds(value, steps).to_string();
+                            }
                         });
                         let cursor = ui.checkbox(&mut draft.include_cursor, "Include cursor");
                         #[cfg(test)] { self.test_controls.insert("cursor",(cursor.rect,ui.clip_rect(),cursor.enabled())); }
@@ -745,6 +803,9 @@ impl RecordingDialogState {
                         commands.push(RecordingUiCommand::RefreshTargets { revision: self.selection_revision });
                     }
 
+                    if parse_duration_seconds(&draft.duration_text).is_err() {
+                        ui.colored_label(ui.visuals().error_fg_color, "Enter a whole number from 0 to 1000 seconds.");
+                    }
                     if self.target_refresh_pending() {
                         ui.label("Refreshing display targets…");
                     }
@@ -781,7 +842,7 @@ impl RecordingDialogState {
                     }
 
                     ui.horizontal(|ui| {
-                        let start = ui.add_enabled(!has_job, egui::Button::new("Choose output and record…"));
+                        let start = ui.add_enabled(!has_job && parse_duration_seconds(&draft.duration_text).is_ok(), egui::Button::new("Choose output and record…"));
                         #[cfg(test)] { self.test_controls.insert("start",(start.rect,ui.clip_rect(),start.enabled())); }
                         if start.clicked() {
                             commands.push(RecordingUiCommand::ChoosePath {
@@ -992,7 +1053,7 @@ impl RecordingDialogState {
             self.selection_revision,
             self.selection.format,
             self.selection.frames_per_second,
-            self.selection.duration_seconds,
+            self.selection.duration_text.parse().unwrap_or_default(),
             self.selection.scale,
             self.selection.include_cursor,
             self.selection.region,
@@ -1299,7 +1360,7 @@ impl RecordingDialogState {
                         format!("Starting in {:.0}…", remaining.as_secs_f64().ceil())
                     }
                     crate::recording::RecorderState::Recording { elapsed, .. } => {
-                        format!("Recording · {}s", elapsed.as_secs())
+                        recording_duration_status(*elapsed, snapshot.session.request().map(|request| request.options().duration_limit()))
                     }
                     crate::recording::RecorderState::Finalizing { .. } => {
                         "Finalizing output…".into()
@@ -1575,6 +1636,9 @@ impl RecordingDialogState {
                 continue;
             }
             if matches!(pending.command, RecordingUiCommand::ChoosePath { .. }) {
+                if parse_duration_seconds(&self.selection.duration_text).is_err() {
+                    continue;
+                }
                 self.accepted_chooser = pending.setup;
             }
             accepted.push(match pending.command {
@@ -2219,6 +2283,35 @@ impl LauncherApp {
     }
 }
 
+fn parse_duration_seconds(text: &str) -> Result<u32, String> {
+    let value = text
+        .parse::<u32>()
+        .map_err(|_| "Enter a whole number from 0 to 1000 seconds.".to_owned())?;
+    if value > 1000 {
+        return Err("Enter a whole number from 0 to 1000 seconds.".into());
+    }
+    Ok(value)
+}
+
+fn step_duration_seconds(value: u32, steps: i32) -> u32 {
+    (i64::from(value) + i64::from(steps) * 25).clamp(0, 1000) as u32
+}
+
+fn recording_duration_status(
+    elapsed: Duration,
+    limit: Option<crate::recording::RecordingDurationLimit>,
+) -> String {
+    match limit {
+        Some(crate::recording::RecordingDurationLimit::Unlimited) => {
+            format!("Recording · Unlimited · {}s", elapsed.as_secs())
+        }
+        Some(crate::recording::RecordingDurationLimit::Timed(limit)) => {
+            format!("Recording · {}s / {}s", elapsed.as_secs(), limit.as_secs())
+        }
+        None => format!("Recording · {}s", elapsed.as_secs()),
+    }
+}
+
 fn make_request(
     selection: &RecordingSelection,
     target: CaptureTarget,
@@ -2229,7 +2322,7 @@ fn make_request(
     let options = RecordingOptions::new(
         selection.format,
         frame_rate,
-        crate::recording::RecordingDurationLimit::from_seconds(u64::from(selection.duration_seconds))
+        crate::recording::RecordingDurationLimit::from_seconds(u64::from(parse_duration_seconds(&selection.duration_text)?))
             .map_err(|error| error.to_string())?,
         selection.include_cursor,
     )
@@ -2380,7 +2473,7 @@ mod tests {
         state.selection.region = Some(region);
         state.selection.format = RecordingFormat::Mp4;
         state.selection.frames_per_second = 24;
-        state.selection.duration_seconds = 17;
+        state.selection.duration_text = "17".into();
         state.selection.scale = OutputScale::Quarter;
         state.selection.include_cursor = true;
         (state, WindowCatalog::from_snapshot(Vec::new()))
@@ -2615,6 +2708,507 @@ mod tests {
         drop(display_tx);
     }
 
+    fn duration_frame(
+        state: &mut RecordingDialogState,
+        ctx: &egui::Context,
+        catalog: &WindowCatalog,
+        controller: &crate::recording::RecordingController,
+        events: Vec<egui::Event>,
+        owner: bool,
+        first: bool,
+    ) -> Vec<RecordingUiCommand> {
+        let mut staged = None;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 900.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            state.test_controls.clear();
+            let (draft, commands, _, _) =
+                state.render_setup_body(ctx, catalog, controller, owner, first, Some(ui), None);
+            staged = Some((draft, commands));
+        });
+        output.drop_without_applying_deltas();
+        let (draft, commands) = staged.unwrap();
+        if owner && first {
+            state.selection = draft;
+            commands
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn duration_click(
+        state: &mut RecordingDialogState,
+        ctx: &egui::Context,
+        catalog: &WindowCatalog,
+        controller: &crate::recording::RecordingController,
+        name: &str,
+    ) {
+        duration_frame(state, ctx, catalog, controller, vec![], true, true);
+        let (rect, clip, enabled) = state.test_control(name).unwrap();
+        assert!(
+            enabled && clip.contains_rect(rect),
+            "{name}: {rect:?} / {clip:?}"
+        );
+        let point = rect.center();
+        for pressed in [true, false] {
+            duration_frame(
+                state,
+                ctx,
+                catalog,
+                controller,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                true,
+                true,
+            );
+        }
+    }
+
+    fn duration_type(
+        state: &mut RecordingDialogState,
+        ctx: &egui::Context,
+        catalog: &WindowCatalog,
+        controller: &crate::recording::RecordingController,
+        text: &str,
+    ) {
+        duration_click(state, ctx, catalog, controller, "duration");
+        duration_frame(
+            state,
+            ctx,
+            catalog,
+            controller,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+                egui::Event::Text(text.into()),
+            ],
+            true,
+            true,
+        );
+    }
+
+    #[test]
+    fn recording_duration_actual_edit_step_wheel_and_invalid_input() {
+        let (mut state, catalog) = selected_display_state();
+        let ctx = egui::Context::default();
+        let controller = crate::recording::RecordingController::new(Arc::new(NeverBackend), || {});
+        duration_type(&mut state, &ctx, &catalog, &controller, "17");
+        assert_eq!(state.selection.duration_text, "17");
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            true,
+            true,
+        );
+        assert_eq!(state.selection.duration_text, "42");
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            true,
+            true,
+        );
+        assert_eq!(state.selection.duration_text, "17");
+        duration_click(&mut state, &ctx, &catalog, &controller, "format");
+        duration_click(&mut state, &ctx, &catalog, &controller, "format-gif");
+        assert_eq!(state.selection.duration_text, "17");
+        assert_eq!(
+            state
+                .build_request(&catalog)
+                .unwrap()
+                .options()
+                .duration_limit(),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(17))
+        );
+        duration_click(&mut state, &ctx, &catalog, &controller, "duration-plus");
+        assert_eq!(state.selection.duration_text, "42");
+        duration_type(&mut state, &ctx, &catalog, &controller, "17");
+        let point = state.test_control("duration").unwrap().0.center();
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::PointerMoved(point)],
+            true,
+            true,
+        );
+        let wheel = || egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![wheel()],
+            true,
+            true,
+        );
+        assert_eq!(state.selection.duration_text, "42");
+        duration_frame(&mut state, &ctx, &catalog, &controller, vec![], true, true);
+        assert_eq!(
+            state.selection.duration_text, "42",
+            "smoothed scroll must not repeat the step"
+        );
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(1090.0, 890.0)),
+                wheel(),
+            ],
+            true,
+            true,
+        );
+        assert_eq!(state.selection.duration_text, "42");
+        duration_type(&mut state, &ctx, &catalog, &controller, "999");
+        duration_click(&mut state, &ctx, &catalog, &controller, "duration-plus");
+        assert_eq!(state.selection.duration_text, "1000");
+        assert_eq!(
+            state
+                .build_request(&catalog)
+                .unwrap()
+                .options()
+                .duration_limit(),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(1000))
+        );
+        duration_type(&mut state, &ctx, &catalog, &controller, "1");
+        duration_click(&mut state, &ctx, &catalog, &controller, "duration-minus");
+        assert_eq!(state.selection.duration_text, "0");
+        assert_eq!(
+            state
+                .build_request(&catalog)
+                .unwrap()
+                .options()
+                .duration_limit(),
+            crate::recording::RecordingDurationLimit::Unlimited
+        );
+        for invalid in ["-1", "1001", "abc"] {
+            duration_type(&mut state, &ctx, &catalog, &controller, invalid);
+            assert_eq!(state.selection.duration_text, invalid);
+            duration_frame(&mut state, &ctx, &catalog, &controller, vec![], true, true);
+            assert!(!state.test_control("start").unwrap().2);
+            assert!(state.build_request(&catalog).is_err());
+        }
+        let before = state.selection.clone();
+        let point = state.test_control("duration").unwrap().0.center();
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::PointerMoved(point), wheel()],
+            false,
+            true,
+        );
+        assert_eq!(state.selection, before);
+    }
+
+    #[test]
+    fn recording_duration_wheel_is_owned_inside_scrolled_parent() {
+        let (mut state, catalog) = selected_display_state();
+        let ctx = egui::Context::default();
+        let controller = crate::recording::RecordingController::new(Arc::new(NeverBackend), || {});
+        fn frame(
+            state: &mut RecordingDialogState,
+            ctx: &egui::Context,
+            catalog: &WindowCatalog,
+            controller: &crate::recording::RecordingController,
+            events: Vec<egui::Event>,
+        ) -> (egui::Id, f32) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 600.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let mut result = None;
+            let output = ctx.run_ui(input, |ui| {
+                let scroll = egui::ScrollArea::vertical()
+                    .id_salt("recording-duration-parent-test")
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        ui.add_space(400.0);
+                        let (draft, _, _, _) = state.render_setup_body(
+                            ctx,
+                            catalog,
+                            controller,
+                            true,
+                            true,
+                            Some(ui),
+                            None,
+                        );
+                        ui.add_space(800.0);
+                        draft
+                    });
+                result = Some((scroll.id, scroll.state.offset.y, scroll.inner));
+            });
+            output.drop_without_applying_deltas();
+            let (id, offset, draft) = result.unwrap();
+            state.selection = draft;
+            (id, offset)
+        }
+        let (id, _) = frame(&mut state, &ctx, &catalog, &controller, vec![]);
+        let (duration, clip, _) = state.test_control("duration").unwrap();
+        let mut scroll = egui::scroll_area::State::load(&ctx, id).unwrap();
+        scroll.offset.y = (duration.center().y - clip.center().y).max(1.0);
+        scroll.store(&ctx, id);
+        let (_, before) = frame(&mut state, &ctx, &catalog, &controller, vec![]);
+        assert!(before > 0.0);
+        let (duration, clip, enabled) = state.test_control("duration").unwrap();
+        assert!(
+            enabled && clip.contains_rect(duration),
+            "duration={duration:?} clip={clip:?}"
+        );
+        let point = duration.center();
+        frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        let (_, after) = frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(state.selection.duration_text, "42");
+        assert_eq!(after, before, "owned wheel must not also scroll parent");
+        let (_, settled) = frame(&mut state, &ctx, &catalog, &controller, vec![]);
+        assert_eq!(settled, before, "wheel smoothing must not leak into parent");
+    }
+
+    #[test]
+    fn recording_duration_discarded_wheel_does_not_commit() {
+        let (mut state, catalog) = selected_display_state();
+        state.open();
+        let ctx = egui::Context::default();
+        let controller = crate::recording::RecordingController::new(Arc::new(NeverBackend), || {});
+        duration_frame(&mut state, &ctx, &catalog, &controller, vec![], true, true);
+        let point = state.test_control("duration").unwrap().0.center();
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::PointerMoved(point)],
+            true,
+            true,
+        );
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 900.0),
+            )),
+            focused: true,
+            events: vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            if ui.ctx().current_pass_index() == 0 {
+                let provenance = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+                let receipt = RecordingSetupReceipt {
+                    root: provenance,
+                    host: state.host.identity(),
+                    epoch: state.setup_epoch,
+                    native: false,
+                };
+                let (selection, _, _, _) = state.render_setup_body(
+                    &ctx,
+                    &catalog,
+                    &controller,
+                    true,
+                    true,
+                    Some(ui),
+                    None,
+                );
+                state.pending_selection = Some(PendingSelection {
+                    provenance,
+                    setup: Some(receipt),
+                    selection,
+                });
+                ui.ctx().request_discard("duration wheel discarded");
+            }
+        });
+        output.drop_without_applying_deltas();
+        state.complete_retained(&ctx);
+        assert_eq!(state.selection.duration_text, "17");
+    }
+
+    #[test]
+    fn recording_duration_retained_edit_and_choose_path_freeze_request() {
+        let (mut state, catalog) = selected_display_state();
+        state.open();
+        state.selection.duration_text = "30".into();
+        let ctx = egui::Context::default();
+        let controller = crate::recording::RecordingController::new(Arc::new(NeverBackend), || {});
+        duration_click(&mut state, &ctx, &catalog, &controller, "duration");
+        duration_frame(
+            &mut state,
+            &ctx,
+            &catalog,
+            &controller,
+            vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+            true,
+            true,
+        );
+        let start = state.test_control("start").unwrap().0.center();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 900.0),
+            )),
+            focused: true,
+            events: vec![
+                egui::Event::Text("17".into()),
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let provenance = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+            let receipt = RecordingSetupReceipt {
+                root: provenance,
+                host: state.host.identity(),
+                epoch: state.setup_epoch,
+                native: false,
+            };
+            let (selection, commands, _, _) =
+                state.render_setup_body(&ctx, &catalog, &controller, true, true, Some(ui), None);
+            state.pending_selection = Some(PendingSelection {
+                provenance,
+                setup: Some(receipt),
+                selection,
+            });
+            for command in commands {
+                state.pending_actions.push(PendingAction {
+                    provenance,
+                    setup: Some(receipt),
+                    command,
+                });
+            }
+        });
+        output.drop_without_applying_deltas();
+        let actions = state.complete_retained(&ctx);
+        assert!(
+            matches!(actions.as_slice(), [RetainedRecordingAction::ChoosePath { selection_revision }] if *selection_revision == state.selection_revision)
+        );
+        let frozen = state.build_request(&catalog).unwrap();
+        assert_eq!(
+            frozen.options().duration_limit(),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(17))
+        );
+        state.selection.duration_text = "0".into();
+        assert_eq!(
+            recording_duration_status(
+                Duration::from_secs(7),
+                Some(frozen.options().duration_limit())
+            ),
+            "Recording · 7s / 17s"
+        );
+        assert_eq!(
+            recording_duration_status(
+                Duration::from_secs(7),
+                Some(crate::recording::RecordingDurationLimit::Unlimited)
+            ),
+            "Recording · Unlimited · 7s"
+        );
+        let revision = state.selection_revision;
+        state.selection.duration_text = "1001".into();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let provenance = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+            let receipt = RecordingSetupReceipt {
+                root: provenance,
+                host: state.host.identity(),
+                epoch: state.setup_epoch,
+                native: false,
+            };
+            state.pending_actions.push(PendingAction {
+                provenance,
+                setup: Some(receipt),
+                command: RecordingUiCommand::ChoosePath { revision },
+            });
+        });
+        output.drop_without_applying_deltas();
+        assert!(state.complete_retained(&ctx).is_empty());
+    }
+
     #[test]
     fn recording_setup_cancelled_path_does_not_admit_work() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -2661,7 +3255,7 @@ mod tests {
 
         state.selection.format = RecordingFormat::Gif;
         state.selection.frames_per_second = 10;
-        state.selection.duration_seconds = 30;
+        state.selection.duration_text = "30".into();
         state.selection.scale = OutputScale::Fit;
         state.selection.include_cursor = false;
         assert_eq!(frozen.options().format(), RecordingFormat::Mp4);
