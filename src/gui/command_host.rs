@@ -275,10 +275,9 @@ impl DialogCommandHost for LauncherApp {
     fn open_date_time_studio_dialog(&mut self) {
         self.date_time_studio_dialog.open();
         self.focus_panel(super::Panel::DateTimeStudioDialog);
-        self.egui_ctx.move_to_top(eframe::egui::LayerId::new(
-            eframe::egui::Order::Middle,
-            eframe::egui::Id::new("date-time-studio-window"),
-        ));
+        if let Some(layer) = self.date_time_studio_dialog.root_layer() {
+            self.egui_ctx.move_to_top(layer);
+        }
     }
     fn open_diagram_studio_dialog(&mut self) {
         self.diagram_studio_dialog.open();
@@ -464,7 +463,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_mkmacro_dialog(&mut self) {
-        self.mkmacro_dialog.open();
+        self.focus_panel(super::Panel::MkMacroDialog);
     }
 
     fn open_todo_dialog(&mut self) {
@@ -498,7 +497,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_theme_dialog(&mut self) {
-        self.open_theme_settings_dialog();
+        self.focus_panel(super::Panel::ThemeSettingsDialog);
     }
 
     fn open_volume_dialog(&mut self) {
@@ -740,7 +739,7 @@ impl NoteCommandHost for LauncherApp {
     }
 
     fn open_unused_note_assets_dialog(&mut self) {
-        self.unused_assets_dialog.open();
+        self.open_unused_assets_from_origin(&super::utility_host::ChildOpenOrigin::<()>::Root);
     }
 
     fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
@@ -766,28 +765,59 @@ impl NoteCommandHost for LauncherApp {
 
 impl TodoCommandHost for LauncherApp {
     fn open_todo_view(&mut self) {
-        self.todo_view_dialog.open();
+        self.open_todo_view_from_origin(None, &super::utility_host::ChildOpenOrigin::<()>::Root);
     }
 
     fn open_todo_editor(&mut self, index: usize) {
-        self.todo_view_dialog.open_edit(index);
+        self.todo_view_dialog.ensure_open();
+        let id = self.todo_view_dialog.entry_id_at(index);
+        self.open_todo_view_from_origin(
+            id.as_deref(),
+            &super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
     }
 }
 
 impl MouseGestureCommandHost for LauncherApp {
     fn open_mouse_gesture_dialog(&mut self) {
         self.mouse_gestures_dialog.open();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_add_dialog(&mut self) {
         self.mouse_gestures_dialog.open_add();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_binding_dialog(&mut self) {
+        let was_open = self.mouse_gestures_dialog.binding_is_open();
         self.mouse_gestures_dialog.open_binding_editor();
-        self.mouse_gestures_host.request_focus();
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
+        if !self.mouse_gestures_dialog.binding_is_open() {
+            self.mouse_gestures_host.request_focus();
+            if !self.mouse_gestures_host.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
+            return;
+        }
+        self.mouse_gestures_dialog.set_binding_parent_instance(self.mouse_gestures_host.session());
+        let presentation = self.gesture_binding_host.open_from_origin(
+            &self.egui_ctx,
+            self.mouse_gestures_dialog.binding_dialog_mut(),
+            was_open,
+            &super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        if presentation == Some(super::utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_focus(
@@ -796,7 +826,11 @@ impl MouseGestureCommandHost for LauncherApp {
     ) {
         self.mouse_gestures_dialog
             .open_focus(&args.label, &args.tokens, args.dir_mode);
+        self.mouse_gestures_host.prepare_open(&self.egui_ctx, super::mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open);
         self.mouse_gestures_host.request_focus();
+        if !self.mouse_gestures_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn open_mouse_gesture_settings_dialog(&mut self) {
@@ -988,7 +1022,11 @@ impl crate::commands::HotFolderCommandHost for LauncherApp {
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
+        self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open);
         self.file_search_host.request_focus();
+        if !self.file_search_host.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn cancel_file_search(&mut self) {
@@ -1024,7 +1062,11 @@ impl FileSearchCommandHost for LauncherApp {
 impl DiffCommandHost for LauncherApp {
     fn open_diff(&mut self, payload: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
         self.diff_dialog.open_payload(payload.clone())?;
+        self.diff_dialog.prepare_open_presentation(&self.egui_ctx);
         self.diff_dialog.request_host_focus();
+        if !self.diff_dialog.is_popped_out() {
+            self.request_launcher_visibility(true);
+        }
         Ok(())
     }
 }

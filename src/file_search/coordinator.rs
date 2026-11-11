@@ -291,6 +291,21 @@ impl SearchCoordinator {
         }
     }
 
+    /// Cancel an active request and retire its publication identity immediately.
+    /// The worker owns its activity handle until it publishes a terminal outcome.
+    pub fn cancel_and_retire(&mut self) {
+        if self.active_status == SearchStatus::Running && self.active_search_id.is_some() {
+            self.cancel_active_token();
+            self.active_status = SearchStatus::Cancelled;
+        }
+        self.active_search_id = None;
+        self.active_token = None;
+        self.active_activity = None;
+        self.last_backend = None;
+        // Queued and later worker publications are stale and are discarded by
+        // the next ordinary drain. Retirement must never wait on a publisher.
+    }
+
     pub fn drain_current_events(&mut self) -> Vec<SearchEvent> {
         self.drain_events(false)
     }
@@ -331,6 +346,12 @@ impl SearchCoordinator {
                 .unwrap_or(SearchBackend::WalkDir)
         } else {
             match (&request.kind, &request.scope) {
+                (SearchKind::Filename, SearchScope::Roots { .. })
+                    if request.filename_match_mode
+                        != crate::file_search::model::FilenameMatchMode::RankedSubstring =>
+                {
+                    SearchBackend::WalkDir
+                }
                 (SearchKind::Filename, SearchScope::Roots { roots }) if roots.len() == 1 => {
                     SearchBackend::WalkDir
                 }

@@ -7,7 +7,7 @@ use super::{
 };
 use anyhow::{Result, anyhow, bail};
 use std::{
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::{AtomicU64, Ordering}},
     time::Duration,
 };
 
@@ -21,6 +21,9 @@ pub enum RecorderRuntimeState {
 #[derive(Debug, Clone)]
 pub struct RecorderSnapshot {
     pub state: RecorderRuntimeState,
+    /// Identity of this recording, stable across pause and resume.
+    pub recording_id: Option<u64>,
+    pub pause_id: Option<u64>,
     pub macro_id: Option<u64>,
     pub elapsed: Duration,
     pub raw_event_count: u64,
@@ -32,6 +35,8 @@ impl Default for RecorderSnapshot {
     fn default() -> Self {
         Self {
             state: RecorderRuntimeState::Idle,
+            recording_id: None,
+            pause_id: None,
             macro_id: None,
             elapsed: Duration::ZERO,
             raw_event_count: 0,
@@ -101,6 +106,8 @@ impl SharedOperationGuard {
 
 struct State {
     mode: RecorderRuntimeState,
+    recording_id: Option<u64>,
+    pause_id: Option<u64>,
     review_transfer_pending: bool,
     shutting_down: bool,
     services_shutdown: bool,
@@ -214,6 +221,8 @@ impl RecorderRuntime {
                 review_transfer_pending: false,
                 shutting_down: false,
                 services_shutdown: false,
+                recording_id: None,
+                pause_id: None,
                 target: None,
                 started_us: 0,
                 pause_started_us: None,
@@ -240,6 +249,8 @@ impl RecorderRuntime {
         let revision = self.snapshot.read().unwrap().revision + 1;
         *self.snapshot.write().unwrap() = Arc::new(RecorderSnapshot {
             state: s.mode,
+            recording_id: (s.mode != RecorderRuntimeState::Idle).then_some(s.recording_id).flatten(),
+            pause_id: (s.mode == RecorderRuntimeState::Paused).then_some(s.pause_id).flatten(),
             macro_id: s.target.map(|t| t.macro_id),
             elapsed: Duration::from_micros(elapsed),
             raw_event_count: p.raw_event_count,
@@ -255,6 +266,15 @@ impl RecorderRuntime {
         let s = self.state.lock().unwrap();
         self.publish(&s);
         self.snapshot.read().unwrap().clone()
+    }
+    pub(crate) fn with_active_recording<T>(&self, recording_id: u64, f: impl FnOnce() -> T) -> Result<T> {
+        let state = self.state.lock().unwrap();
+        if state.recording_id != Some(recording_id)
+            || !matches!(state.mode, RecorderRuntimeState::Recording | RecorderRuntimeState::Paused)
+        {
+            bail!("recording has changed")
+        }
+        Ok(f())
     }
     pub fn start(&self, macro_id: u64, config: NormalizationConfig) -> Result<()> {
         self.start_target(
@@ -298,6 +318,9 @@ impl RecorderRuntime {
             self.guard.release(Operation::Recording);
             return Err(anyhow!("failed to start hook service"));
         }
+        static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
+        s.recording_id = Some(NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed));
+        s.pause_id = None;
         s.mode = RecorderRuntimeState::Recording;
         s.target = Some(target);
         s.started_us = self.clock.now_us();
@@ -311,7 +334,13 @@ impl RecorderRuntime {
         self.pause_with_control(Vec::new())
     }
     pub fn pause_with_control(&self, occurrence: Vec<u32>) -> Result<()> {
+        self.pause_for_recording(None, occurrence).map(|_| ())
+    }
+    pub(crate) fn pause_for_recording(&self, recording_id: Option<u64>, occurrence: Vec<u32>) -> Result<u64> {
         let mut s = self.state.lock().unwrap();
+        if recording_id.is_some() && s.recording_id != recording_id {
+            bail!("recording has changed")
+        }
         if s.mode != RecorderRuntimeState::Recording {
             bail!("recorder is not recording")
         }
@@ -335,16 +364,28 @@ impl RecorderRuntime {
             self.publish(&s);
             return Err(anyhow!("failed to pause recorder processor: {error}"));
         }
+        static NEXT_PAUSE_ID: AtomicU64 = AtomicU64::new(1);
+        let pause_id = NEXT_PAUSE_ID.fetch_add(1, Ordering::Relaxed);
+        s.pause_id = Some(pause_id);
         s.pause_started_us = Some(now);
         s.mode = RecorderRuntimeState::Paused;
         self.publish(&s);
-        Ok(())
+        Ok(pause_id)
     }
     pub fn resume(&self) -> Result<()> {
         self.resume_with_held(Vec::new())
     }
     pub fn resume_with_held(&self, held_keys: Vec<u32>) -> Result<()> {
+        self.resume_for_recording(None, None, held_keys)
+    }
+    pub(crate) fn resume_for_recording(&self, recording_id: Option<u64>, pause_id: Option<u64>, held_keys: Vec<u32>) -> Result<()> {
         let mut s = self.state.lock().unwrap();
+        if recording_id.is_some() && s.recording_id != recording_id {
+            bail!("recording has changed")
+        }
+        if pause_id.is_some() && s.pause_id != pause_id {
+            bail!("recording pause has changed")
+        }
         if s.mode != RecorderRuntimeState::Paused {
             bail!("recorder is not paused")
         }
@@ -375,6 +416,7 @@ impl RecorderRuntime {
             s.paused_us += now.saturating_sub(p)
         }
         s.mode = RecorderRuntimeState::Recording;
+        s.pause_id = None;
         self.publish(&s);
         Ok(())
     }
@@ -404,7 +446,13 @@ impl RecorderRuntime {
     /// Adds transient review text. UI-owned pause/resume policy is intentionally
     /// kept outside this API so an annotation cannot resume a manual pause.
     pub fn annotation(&self, text: String) -> Result<()> {
+        self.annotation_for_recording(None, text)
+    }
+    pub(crate) fn annotation_for_recording(&self, recording_id: Option<u64>, text: String) -> Result<()> {
         let s = self.state.lock().unwrap();
+        if recording_id.is_some() && s.recording_id != recording_id {
+            bail!("recording has changed")
+        }
         if !matches!(
             s.mode,
             RecorderRuntimeState::Recording | RecorderRuntimeState::Paused
@@ -534,6 +582,11 @@ impl Drop for RecorderRuntime {
     fn drop(&mut self) {
         self.shutdown()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn isolated_test_recorder(path: &std::path::Path) -> RecorderRuntime {
+    tests::isolated_recorder(path)
 }
 
 #[cfg(test)]
@@ -710,6 +763,12 @@ mod tests {
         )
     }
 
+    pub(super) fn isolated_recorder(path: &std::path::Path) -> RecorderRuntime {
+        test_runtime(path, Arc::new(SharedOperationGuard::default()),
+            Arc::new(Mutex::new(VecDeque::new())), Arc::new(Mutex::new(Vec::new())),
+            0, Arc::new(empty_observer))
+    }
+
     #[test]
     fn false_stop_acknowledgement_releases_admission_and_allows_retry_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -732,6 +791,37 @@ mod tests {
         runtime.start(2, NormalizationConfig::default()).unwrap();
         assert_eq!(runtime.stop().unwrap().target.macro_id, 2);
         assert!(!guard.active(Operation::Recording));
+    }
+
+    #[test]
+    fn retired_recording_identity_cannot_annotate_or_resume_a_restarted_macro() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(
+            dir.path(), Arc::new(SharedOperationGuard::default()),
+            Arc::new(Mutex::new(VecDeque::new())), Arc::new(Mutex::new(Vec::new())),
+            0, Arc::new(empty_observer),
+        );
+        runtime.start(1, NormalizationConfig::default()).unwrap();
+        let old = runtime.snapshot().recording_id.unwrap();
+        runtime.pause_for_recording(Some(old), Vec::new()).unwrap();
+        runtime.stop().unwrap();
+        runtime.start(1, NormalizationConfig::default()).unwrap();
+        let current = runtime.snapshot().recording_id.unwrap();
+        assert_ne!(old, current);
+        runtime.pause_for_recording(Some(current), Vec::new()).unwrap();
+        let first_pause = runtime.snapshot().pause_id.unwrap();
+        assert!(runtime.annotation_for_recording(Some(old), "old".into()).is_err());
+        assert!(runtime.resume_for_recording(Some(old), None, Vec::new()).is_err());
+        assert_eq!(runtime.snapshot().state, RecorderRuntimeState::Paused);
+        runtime.annotation_for_recording(Some(current), "current".into()).unwrap();
+        runtime.resume_for_recording(Some(current), Some(first_pause), Vec::new()).unwrap();
+        let manual_pause = runtime.pause_for_recording(Some(current), Vec::new()).unwrap();
+        assert_ne!(first_pause, manual_pause);
+        assert!(runtime.resume_for_recording(Some(current), Some(first_pause), Vec::new()).is_err());
+        assert_eq!(runtime.snapshot().state, RecorderRuntimeState::Paused);
+        runtime.resume_for_recording(Some(current), Some(manual_pause), Vec::new()).unwrap();
+        let result = runtime.stop().unwrap();
+        assert_eq!(result.notes.len(), 1);
     }
 
     #[test]

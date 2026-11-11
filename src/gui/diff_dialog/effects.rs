@@ -5,6 +5,7 @@ pub(super) enum ViewEffect {
     SaveText(TextSaveRequest),
     Export(super::export::ExportRequest),
     SetTextRules(crate::diff::text_compare::TextComparisonRules),
+    OpenTextRules,
     ResolveTextConflict { side: DiffSide, reload: bool },
 }
 

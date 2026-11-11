@@ -359,6 +359,7 @@ enum FileSearchHostAction {
     Row(PendingFileSearchRowAction),
     Start,
     Cancel(Option<SearchId>),
+    Clear(Option<SearchId>, u64),
     Sort(Option<SearchId>),
     Escape(Option<SearchId>),
     Copy {
@@ -380,9 +381,22 @@ pub(crate) struct FileSearchHostActions {
     commands: Vec<FileSearchUiCommand>,
 }
 
+#[cfg(test)]
+impl FileSearchHostActions {
+    pub(super) fn test_command(command: FileSearchUiCommand) -> Self {
+        Self {
+            host_request: None,
+            host_button: (egui::Rect::NOTHING, egui::Rect::NOTHING, false),
+            actions: Vec::new(),
+            commands: vec![command],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
+    OpenPreview { path: PathBuf, content_match: Option<ContentMatch> },
     OpenFolderSize(PathBuf),
     InspectFileUsers(PathBuf),
     ConfigureRipgrep(PathBuf),
@@ -555,6 +569,7 @@ pub(crate) enum FileSearchTestPopupControl {
     InspectFileUsers,
     NestedContentSearch,
     ExportAnchor,
+    ClearResults,
 }
 
 impl Default for FileSearchDialogState {
@@ -613,6 +628,10 @@ fn validate_ripgrep_selection(path: &std::path::Path) -> Result<PathBuf, String>
 }
 
 impl FileSearchDialogState {
+    pub(super) fn child_open_revision(&self) -> (Option<SearchId>, u64) {
+        (self.active_search_id, self.jump_mode_results_revision)
+    }
+
     pub(crate) fn from_settings(settings: FileSearchSettings) -> Self {
         Self {
             ui_preferences: settings.ui_preferences.clone(),
@@ -921,6 +940,7 @@ impl FileSearchDialogState {
                 return None;
             }
         };
+        self.preview_dialog.retire();
         self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
@@ -945,6 +965,26 @@ impl FileSearchDialogState {
             self.current_status = SearchStatus::Cancelled;
             self.request_immediate_repaint = true;
         }
+    }
+
+    fn clear_search_results(&mut self, coordinator: &mut SearchCoordinator) {
+        if self.active_search_id.is_some()
+            && coordinator.active_search_id() == self.active_search_id
+        {
+            coordinator.cancel_and_retire();
+        }
+        self.active_search_id = None;
+        self.clear_results_and_selection();
+        self.preview_dialog.retire();
+        self.current_status = SearchStatus::Pending;
+        self.backend = None;
+        self.warning_error_message = None;
+        self.inaccessible_path_warnings = 0;
+        self.diagnostics.clear();
+        self.last_submitted_request = None;
+        self.pending_sort_change = false;
+        self.show_ripgrep_missing_prompt = false;
+        self.request_immediate_repaint = true;
     }
 
     pub fn handle_escape(&mut self, coordinator: &mut SearchCoordinator) -> FileSearchEscapeAction {
@@ -1624,8 +1664,21 @@ impl FileSearchDialogState {
         owner_hwnd: Option<usize>,
     ) -> Vec<FileSearchUiCommand> {
         let mut commands = actions.commands;
+        // Clear wins over any result actions queued earlier in this same pass.
+        for action in &actions.actions {
+            if matches!(action, FileSearchHostAction::Clear(..)) {
+                self.execute_host_action(
+                    action.clone(),
+                    coordinator,
+                    &mut commands,
+                    Some(owner_hwnd),
+                );
+            }
+        }
         for action in actions.actions {
-            self.execute_host_action(action, coordinator, &mut commands, Some(owner_hwnd));
+            if !matches!(action, FileSearchHostAction::Clear(..)) {
+                self.execute_host_action(action, coordinator, &mut commands, Some(owner_hwnd));
+            }
         }
         commands
     }
@@ -1654,6 +1707,11 @@ impl FileSearchDialogState {
             }
             FileSearchHostAction::Cancel(search) if self.active_search_id == search => {
                 self.cancel_search(coordinator)
+            }
+            FileSearchHostAction::Clear(search, revision)
+                if self.active_search_id == search && self.jump_mode_results_revision == revision =>
+            {
+                self.clear_search_results(coordinator)
             }
             FileSearchHostAction::Sort(search) if self.active_search_id == search => {
                 self.handle_sort_changed()
@@ -2064,6 +2122,33 @@ impl FileSearchDialogState {
             if cancel.clicked() && first_ui_pass && navigation_owner {
                 if !self.stage_host_action(FileSearchHostAction::Cancel(self.active_search_id)) {
                     self.cancel_search(coordinator);
+                }
+                ui.ctx().request_repaint();
+            }
+            let clear = ui.add_enabled(
+                self.active_search_id.is_some() || !self.results.is_empty(),
+                egui::Button::new("Clear results"),
+            );
+            #[cfg(test)]
+            self.record_test_native_popup_control(
+                FileSearchTestPopupControl::ClearResults,
+                &clear,
+            );
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &clear,
+                "form/actions/clear-results",
+                "Clear results",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
+            if clear.clicked() && first_ui_pass && navigation_owner {
+                if !self.stage_host_action(FileSearchHostAction::Clear(
+                    self.active_search_id,
+                    self.jump_mode_results_revision,
+                )) {
+                    self.clear_search_results(coordinator);
                 }
                 ui.ctx().request_repaint();
             }
@@ -2970,6 +3055,9 @@ impl FileSearchDialogState {
             })
             .unwrap_or_else(|| PreviewRequest::new(path));
         self.apply_preview_settings_to_request(&mut request);
+        if self.preview_dialog.open && self.preview_dialog.current_request.as_ref() == Some(&request)
+            && self.preview_dialog.selected_match.as_ref() == first_match
+        { self.preview_dialog.cancel_close_request(); return request; }
         if let Some(content_match) = first_match.cloned() {
             self.preview_dialog
                 .open_content_match(path, content_match, &self.settings);
@@ -3232,7 +3320,20 @@ impl FileSearchDialogState {
         };
         let action = match pending.action {
             FileSearchRowAction::Activate => {
-                self.open_result_row(&row);
+                self.select_result(&row);
+                if let FileSearchRowPayload::Content {
+                    path,
+                    content_match,
+                    ..
+                } = &row.payload
+                {
+                    commands.push(FileSearchUiCommand::OpenPreview {
+                        path: path.clone(),
+                        content_match: Some(content_match.clone()),
+                    });
+                } else {
+                    self.open_selected_result();
+                }
                 return;
             }
             FileSearchRowAction::Menu(action) => action,
@@ -3275,9 +3376,7 @@ impl FileSearchDialogState {
                     )
                 });
             }
-            Action::Preview => {
-                self.request_preview(&path, content_match.as_ref());
-            }
+            Action::Preview => { commands.push(FileSearchUiCommand::OpenPreview { path, content_match }); }
             Action::OpenFileOrDirectory | Action::RevealInExplorer => {
                 let label = if action == Action::OpenFileOrDirectory {
                     "open"
@@ -3398,6 +3497,259 @@ mod tests {
             self.requests.lock().unwrap().push(request);
             let _ = events.send(SearchEvent::Completed { id: SearchId(1) });
         }
+    }
+
+    struct HeldSearchExecutor {
+        started: mpsc::Sender<(
+            SearchId,
+            CancellationToken,
+            SearchEventSender,
+            mpsc::Sender<()>,
+        )>,
+        finished: mpsc::Sender<SearchId>,
+    }
+
+    impl SearchExecutor for HeldSearchExecutor {
+        fn execute(
+            &self,
+            id: SearchId,
+            _request: SearchRequest,
+            token: CancellationToken,
+            events: SearchEventSender,
+        ) {
+            let (release, wait) = mpsc::channel();
+            self.started
+                .send((id, token.clone(), events.clone(), release))
+                .unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+            let event = if token.is_cancelled() {
+                SearchEvent::Cancelled { id }
+            } else {
+                SearchEvent::Completed { id }
+            };
+            let _ = events.send(event);
+            let _ = self.finished.send(id);
+        }
+    }
+
+    #[test]
+    fn clear_retires_running_search_and_preserves_form_through_late_events() {
+        use crate::activity::{ActivityCenter, ActivityLifecycle, ActivityOutcome};
+
+        let (_root, mut state) = searchable_state();
+        state.selected_scope = FileSearchScopeMode::Global;
+        state.custom_roots = vec!["kept root".into()];
+        state.case_sensitive = true;
+        state.include_hidden = true;
+        state.ui_preferences.whole_word = true;
+        let preferences = state.ui_preferences.clone();
+        let settings = state.settings.clone();
+        let (started, started_rx) = mpsc::channel();
+        let (finished, finished_rx) = mpsc::channel();
+        let executor = Arc::new(HeldSearchExecutor { started, finished });
+        let mut coordinator = SearchCoordinator::with_executor(executor);
+        let activities = ActivityCenter::new();
+        coordinator.attach_activity_center(activities.clone());
+        let old = state.start_search(&mut coordinator).unwrap();
+        let (observed, token, events, release) =
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(observed, old);
+        state.apply_event(SearchEvent::Result {
+            id: old,
+            result: filename_search_result("/tmp/old.txt"),
+        });
+        let row = state.result_rows[0].clone();
+        state.select_result(&row);
+        state.refinement_restore_selection = state.selected_result.clone();
+        state.refinement_text = "old".into();
+        state.preview_dialog.open = true;
+        state.preview_dialog.current_request =
+            Some(PreviewRequest::for_match("/tmp/old.txt", 1, 1));
+        state.warning_error_message = Some("old error".into());
+        state.inaccessible_path_warnings = 3;
+        state
+            .diagnostics
+            .record(SearchDiagnostic::Warning("old warning".into()));
+        state.pending_sort_change = true;
+        let revision = state.jump_mode_results_revision;
+
+        state.clear_search_results(&mut coordinator);
+        assert!(
+            token.is_cancelled(),
+            "the active worker receives cancellation"
+        );
+        assert_eq!(coordinator.active_search_id(), None);
+        assert_eq!(coordinator.active_status(), SearchStatus::Cancelled);
+        assert_eq!(state.active_search_id, None);
+        assert_eq!(state.current_status, SearchStatus::Pending);
+        assert_eq!(
+            format_status_line(state.current_status, 0, false),
+            "Ready — 0 results"
+        );
+        assert!(state.results.is_empty() && state.result_rows.is_empty());
+        assert!(state.selected_result.is_none() && state.refinement_restore_selection.is_none());
+        assert!(state.refinement_text.is_empty() && !state.preview_dialog.open);
+        assert!(state.preview_dialog.current_request.is_none());
+        assert!(state.warning_error_message.is_none() && state.last_submitted_request.is_none());
+        assert_eq!(state.inaccessible_path_warnings, 0);
+        assert_eq!(state.diagnostics, FileSearchDiagnostics::default());
+        assert!(state.backend.is_none() && !state.pending_sort_change);
+        assert_ne!(state.jump_mode_results_revision, revision);
+        assert_eq!(state.search_text, "foo");
+        assert_eq!(state.custom_roots, vec!["kept root"]);
+        assert_eq!(state.selected_scope, FileSearchScopeMode::Global);
+        assert!(state.case_sensitive && state.include_hidden);
+        assert_eq!(state.ui_preferences, preferences);
+        assert_eq!(state.settings, settings);
+        assert!(!state.requires_repaint_polling());
+        release.send(()).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            old
+        );
+        let activity = activities
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.incarnation().get() == old.0)
+            .unwrap();
+        assert_eq!(
+            activity.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+
+        let late = vec![
+            SearchEvent::Started {
+                id: old,
+                backend: SearchBackend::WalkDir,
+            },
+            SearchEvent::Result {
+                id: old,
+                result: filename_search_result("/tmp/late.txt"),
+            },
+            SearchEvent::Progress {
+                id: old,
+                progress: SearchProgress {
+                    files_scanned: 2,
+                    directories_scanned: 1,
+                    results_found: 1,
+                    status: SearchStatus::Running,
+                    global_truncated: false,
+                },
+            },
+            SearchEvent::Completed { id: old },
+        ];
+        for event in &late {
+            assert!(!state.apply_event(event.clone()));
+            events.send(event.clone()).unwrap();
+        }
+        assert!(state.results.is_empty());
+        state.clear_search_results(&mut coordinator);
+        let new = state.start_search(&mut coordinator).unwrap();
+        let (observed, _, _, release_new) =
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(observed, new);
+        assert_ne!(old, new);
+        state.drain_events(&mut coordinator);
+        for event in late {
+            assert!(!state.apply_event(event));
+        }
+        state.apply_event(SearchEvent::Result {
+            id: new,
+            result: filename_search_result("/tmp/new.txt"),
+        });
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.active_search_id, Some(new));
+        release_new.send(()).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            new
+        );
+    }
+
+    #[test]
+    fn accepted_clear_precedes_deferred_row_copy_and_export_actions() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(42)),
+            current_status: SearchStatus::Completed,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(42),
+            result: filename_search_result("/tmp/old.txt"),
+        });
+        let row = state.result_rows[0].id.clone();
+        let revision = state.jump_mode_results_revision;
+        let search = state.active_search_id;
+        // If a stale Copy were incorrectly dispatched, the existing staging
+        // seam captures it instead of touching the system clipboard.
+        state.host_actions = Some(Vec::new());
+        let mut staged = vec![
+            FileSearchHostAction::Row(PendingFileSearchRowAction {
+                row,
+                action: FileSearchRowAction::Menu(FileSearchContextMenuAction::CalculateHash),
+            }),
+            FileSearchHostAction::Copy {
+                search,
+                revision,
+                label: "test",
+                payload: "private fixture".into(),
+            },
+        ];
+        #[cfg(windows)]
+        staged.push(FileSearchHostAction::Export(search, revision));
+        staged.push(FileSearchHostAction::Clear(search, revision));
+        let actions = FileSearchHostActions {
+            host_request: None,
+            host_button: (egui::Rect::NOTHING, egui::Rect::NOTHING, false),
+            actions: staged,
+            commands: Vec::new(),
+        };
+        let mut coordinator = SearchCoordinator::new();
+        let commands = state.complete_host_actions(&mut coordinator, actions, None);
+        assert!(commands.is_empty(), "stale row cannot open another tool");
+        assert!(
+            state.host_actions.take().unwrap().is_empty(),
+            "stale copy cannot reach the clipboard"
+        );
+        assert!(
+            state.warning_error_message.is_none(),
+            "stale export cannot invoke the picker"
+        );
+        assert!(state.results.is_empty() && state.active_search_id.is_none());
+    }
+
+    #[test]
+    fn stale_clear_identity_cannot_retire_newer_results_or_coordinator() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(43)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(43),
+            result: filename_search_result("/tmp/new.txt"),
+        });
+        let mut coordinator = SearchCoordinator::new();
+        let mut commands = Vec::new();
+        state.execute_host_action(
+            FileSearchHostAction::Clear(Some(SearchId(42)), state.jump_mode_results_revision),
+            &mut coordinator,
+            &mut commands,
+            None,
+        );
+        state.execute_host_action(
+            FileSearchHostAction::Clear(
+                Some(SearchId(43)),
+                state.jump_mode_results_revision.wrapping_add(1),
+            ),
+            &mut coordinator,
+            &mut commands,
+            None,
+        );
+        assert_eq!(state.active_search_id, Some(SearchId(43)));
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.current_status, SearchStatus::Running);
     }
 
     fn recorded_request(

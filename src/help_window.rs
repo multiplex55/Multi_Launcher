@@ -119,6 +119,32 @@ impl HelpWindow {
                             ui.label(
                                 "Empty queries can show the dashboard. Pinned queries and Omni Search provider controls remain available. File Search uses its own Global/Directory search roots.",
                             );
+                            ui.label(
+                                "Inline result descriptions show up to seven words and can shorten further to fit. The full action and its existing help and details remain available.",
+                            );
+                            ui.label(
+                                "Ordinary utility windows remember Dock or Pop Out across close and restart without reopening automatically. Children inherit a popped-out parent; direct and docked-parent opens use the child's preference. Reopening a live tool preserves its draft.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("File Search").strong());
+                            ui.label(
+                                "Clear results cancels the current search and clears rows, selection, preview, refinement and diagnostics. Query, roots, filters and sort remain; press Search to run again. Filename contains matches a literal contiguous part of the leaf name, including its extension.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Calculation Pad").strong());
+                            ui.label(
+                                "Dependencies… opens a read-only explorer of current Pad rows and their upstream inputs and downstream dependents. Select a relationship or use Go to source to navigate. Inspect bits… offers labels-only Import labels… and Export labels…; these do not change Pad source or working bits.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Folder Size").strong());
+                            ui.label(
+                                "Table, Treemap and Both share the current directory and selection. Click a tile to select it, double-click a directory to drill down, and use Up to return. Changing views or size reuses the current scan; only Scan or Refresh starts another. Partial, unknown and skipped entries remain identified.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Screen Recorder").strong());
+                            ui.label(
+                                "Duration accepts 0 for Unlimited or 1–1,000 seconds; arrows and the wheel step by 25 while typed values stay exact. Unlimited removes the automatic time stop, not Stop or target and encoder safeguards. The active limit is frozen when recording starts; the countdown is separate.",
+                            );
                             ui.separator();
                             ui.label(egui::RichText::new("Snippets").strong());
                             ui.label(
@@ -201,6 +227,9 @@ impl HelpWindow {
                                      context links, or weather location.",
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            ui.label(
+                                "Show preview uses matching S markers in the slot list and grid. Hover highlights the partner; the tooltip identifies its widget and position. * marks selection and ! marks a conflict.",
                             );
                             ui.separator();
                             ui.label(egui::RichText::new("Linked context").strong());

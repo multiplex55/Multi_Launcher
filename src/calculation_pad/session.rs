@@ -15,6 +15,7 @@ use super::{IntegerMode, IntegerWidth, TypedInteger};
 use crate::platform::app_data::AppDataRoot;
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 const MAX_UNDO_ENTRIES: usize = 64;
 const MAX_UNDO_BYTES: usize = 2 * 1024 * 1024;
@@ -231,6 +232,9 @@ struct ActiveDocument {
     revision: u64,
     baseline: DocumentBaseline,
     cached_evaluation: Option<SessionEvaluation>,
+    dependency_snapshot: Option<Arc<super::dependencies::DependencySnapshot>>,
+    #[cfg(test)]
+    dependency_build_count: usize,
     #[cfg(test)]
     evaluation_count: usize,
 }
@@ -257,6 +261,9 @@ impl ActiveDocument {
                 next_line_id: 2,
             },
             cached_evaluation: None,
+            dependency_snapshot: None,
+            #[cfg(test)]
+            dependency_build_count: 0,
             #[cfg(test)]
             evaluation_count: 0,
         };
@@ -288,6 +295,9 @@ impl ActiveDocument {
                 next_line_id: saved_next_line_id,
             },
             cached_evaluation: None,
+            dependency_snapshot: None,
+            #[cfg(test)]
+            dependency_build_count: 0,
             #[cfg(test)]
             evaluation_count: 0,
         };
@@ -443,6 +453,57 @@ impl CalculationPadSession {
             document_id: document.id,
             revision: document.revision,
             rows: rows.into(),
+        })
+    }
+
+    /// Read the current dependency graph without triggering Pad evaluation.
+    pub fn dependency_snapshot(&mut self) -> Option<Arc<super::DependencySnapshot>> {
+        let current = self.current.as_mut()?;
+        let evaluation = current.cached_evaluation.as_ref()?;
+        if evaluation.revision != current.revision {
+            return None;
+        }
+        if let Some(snapshot) = current.dependency_snapshot.as_ref()
+            && snapshot.document_id == current.id
+            && snapshot.incarnation == current.incarnation
+            && snapshot.revision == current.revision
+        {
+            return Some(Arc::clone(snapshot));
+        }
+        let snapshot = Arc::new(super::DependencySnapshot::from_evaluation(
+            current.id,
+            current.incarnation,
+            &current.source,
+            evaluation,
+        )?);
+        current.dependency_snapshot = Some(Arc::clone(&snapshot));
+        #[cfg(test)]
+        {
+            current.dependency_build_count += 1;
+        }
+        Some(snapshot)
+    }
+
+    /// Resolve a stable row against the currently cached evaluation, never reevaluating.
+    pub fn resolve_dependency_line(
+        &self,
+        document_id: DocumentId,
+        incarnation: DocumentIncarnation,
+        id: LineId,
+    ) -> Option<super::DependencyLocation> {
+        let current = self.current.as_ref()?;
+        if current.id != document_id || current.incarnation != incarnation {
+            return None;
+        }
+        let evaluation = current.cached_evaluation.as_ref()?;
+        if evaluation.revision != current.revision {
+            return None;
+        }
+        let row = evaluation.lines.iter().find(|row| row.id == id)?;
+        current.source.get(row.source_range.clone())?;
+        Some(super::DependencyLocation {
+            line_index: row.line_index,
+            source_range: row.source_range.clone(),
         })
     }
 
@@ -1423,6 +1484,134 @@ mod tests {
         ));
         assert_eq!(session.source(), Some(original.as_str()));
         assert_eq!(session.line_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dependency_snapshot_uses_cached_physical_rows_and_reuses_one_build() {
+        use std::sync::Arc;
+        let (_directory, _root, mut session) = fixture();
+        let source = "# comment\n\nα = 2\n{顧客 名} = α + 1\nr3 + {顧客 名}\nα * 2\n[1, 2]\nlater + 1\nlater = 2\nself = self + 1\na = b\nb = a\nx = 1\nx = 2\nz = x + 1";
+        session.replace_source(source).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let id = session.current_id().unwrap();
+        let incarnation = session.document_incarnation().unwrap();
+        assert!(session.dependency_snapshot().is_none());
+        assert!(
+            session
+                .resolve_dependency_line(id, incarnation, ids[2])
+                .is_none()
+        );
+        assert_eq!(session.evaluation_count(), 0);
+        let evaluation = session.evaluation().unwrap().clone();
+        let before = (
+            session.source().unwrap().to_owned(),
+            session.revision(),
+            session.line_ids().unwrap().to_vec(),
+            session.is_dirty(),
+            session.can_undo(),
+            session.can_redo(),
+            session.evaluation_count(),
+        );
+        let graph = session.dependency_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&graph, &session.dependency_snapshot().unwrap()));
+        assert_eq!(session.current.as_ref().unwrap().dependency_build_count, 1);
+        assert_eq!(graph.rows.len(), ids.len());
+        assert_eq!(graph.rows[0].outcome, LineOutcome::Comment);
+        assert_eq!(graph.rows[1].outcome, LineOutcome::Blank);
+        assert_eq!(graph.rows[3].assignment_name.as_deref(), Some("顧客 名"));
+        assert_eq!(graph.rows[3].source, "{顧客 名} = α + 1");
+        assert_eq!(graph.rows[3].dependencies, vec![ids[2]]);
+        assert_eq!(graph.rows[4].dependencies, vec![ids[2], ids[3]]);
+        assert_eq!(graph.upstream(ids[4]), Some(vec![ids[2], ids[3]]));
+        assert_eq!(graph.downstream(ids[2]), Some(vec![ids[3], ids[4], ids[5]]));
+        assert!(matches!(
+            graph.rows[6].outcome,
+            LineOutcome::Value(CalculationValue::Vector(_))
+        ));
+        for (row, original) in graph.rows.iter().zip(&evaluation.lines) {
+            assert_eq!(row.outcome, original.outcome);
+            let mut expected = original
+                .dependency_indices
+                .iter()
+                .map(|&index| ids[index])
+                .collect::<Vec<_>>();
+            expected.sort_by_key(|id| ids.iter().position(|candidate| candidate == id));
+            expected.dedup();
+            assert_eq!(row.dependencies, expected);
+        }
+        assert!(matches!(graph.rows[7].outcome, LineOutcome::Error(_)));
+        assert!(matches!(graph.rows[9].outcome, LineOutcome::Error(_)));
+        assert!(matches!(graph.rows[10].outcome, LineOutcome::Error(_)));
+        assert_eq!(
+            (
+                session.source().unwrap().to_owned(),
+                session.revision(),
+                session.line_ids().unwrap().to_vec(),
+                session.is_dirty(),
+                session.can_undo(),
+                session.can_redo(),
+                session.evaluation_count()
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn dependency_location_tracks_live_line_and_rejects_stale_incarnations() {
+        let (_directory, _root, mut session) = fixture();
+        session.replace_source("α = 2\nα + 1").unwrap();
+        session.save_as("dependencies").unwrap();
+        let document = session.current_id().unwrap();
+        let incarnation = session.document_incarnation().unwrap();
+        let line = session.line_id(1).unwrap();
+        session.evaluation();
+        let first = session.dependency_snapshot().unwrap();
+        let location = session
+            .resolve_dependency_line(document, incarnation, line)
+            .unwrap();
+        assert_eq!(&session.source().unwrap()[location.source_range], "α + 1");
+        session.replace_source("# inserted\nα = 2\nα + 1").unwrap();
+        assert!(session.dependency_snapshot().is_none());
+        assert!(
+            session
+                .resolve_dependency_line(document, incarnation, line)
+                .is_none()
+        );
+        assert_eq!(session.evaluation_count(), 1);
+        session.evaluation();
+        let second = session.dependency_snapshot().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(session.current.as_ref().unwrap().dependency_build_count, 2);
+        let moved = session
+            .resolve_dependency_line(document, incarnation, line)
+            .unwrap();
+        assert_eq!(moved.line_index, 2);
+        assert_eq!(&session.source().unwrap()[moved.source_range], "α + 1");
+        session.replace_source("# inserted\nα = 2").unwrap();
+        session.evaluation();
+        assert!(
+            session
+                .resolve_dependency_line(document, incarnation, line)
+                .is_none()
+        );
+        assert_eq!(
+            session.request_open(document).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            session
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        session.evaluation();
+        assert_eq!(session.current_id(), Some(document));
+        assert_ne!(session.document_incarnation(), Some(incarnation));
+        assert!(
+            session
+                .resolve_dependency_line(document, incarnation, line)
+                .is_none()
+        );
     }
 
     #[test]

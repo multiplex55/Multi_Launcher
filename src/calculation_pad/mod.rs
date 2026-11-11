@@ -3,7 +3,9 @@
 //! The expression grammar and evaluation limits are documented in this module's
 //! `README.md`.
 
+mod bit_labels;
 mod comparison;
+mod dependencies;
 mod document;
 mod examples;
 mod inspector;
@@ -15,10 +17,12 @@ mod quantity;
 mod session;
 mod vector;
 
+pub(crate) use bit_labels::{read_bit_labels, write_bit_labels};
 pub use comparison::{
     ComparisonContext, ComparisonRelation, ComparisonRequest, ComparisonResult,
     ComparisonResultRef, ComparisonRow, ComparisonSide, ComparisonSlot,
 };
+pub use dependencies::{DependencyLocation, DependencyRow, DependencySnapshot};
 pub use document::{
     CalculationDocument, CalculationEvaluation, CalculationLineResult, CalculationValue,
     Diagnostic, DiagnosticKind, DocumentDiagnostic, EditError, LineOutcome, MAX_DEPENDENCIES,

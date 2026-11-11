@@ -419,7 +419,7 @@ fn show_activation(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
     let _ = macro_;
     if let Some(original) = picker_original {
-        d.window_picker.open(MatcherEditRequest {
+        d.open_window_picker_from_main(MatcherEditRequest {
             destination: MatcherDestination::MacroHotkey { macro_id },
             original,
         });

@@ -150,7 +150,7 @@ pub(super) fn show(
     ui.separator();
     ui.heading("Search Settings");
     if find_action {
-        egui::ComboBox::from_label("When not found")
+        super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("When not found")
             .selected_text(match payload.not_found_policy {
                 MkImageNotFoundPolicy::Continue => "Continue",
                 MkImageNotFoundPolicy::Fail => "Fail Action",
@@ -166,7 +166,7 @@ pub(super) fn show(
                     MkImageNotFoundPolicy::Fail,
                     "Fail Action",
                 );
-            });
+            }));
         ui.separator();
         super::image_search_controls::show_image_outputs_editor(ui, &mut payload.outputs);
     } else {

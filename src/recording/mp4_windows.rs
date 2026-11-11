@@ -32,8 +32,8 @@ use windows::core::{Interface, PCWSTR};
 
 use super::output::{FinalizedOutputStage, OutputStage, RecordingOutputError, publish_finalized};
 use super::{
-    CanvasSize, CaptureTerminal, ConsumerFrame, FrameRate, MAX_FRAME_BYTES, MAX_RECORDING_SECONDS,
-    RecorderState, RecordingFormat, RecordingSession, RecordingSessionError,
+    CanvasSize, CaptureTerminal, ConsumerFrame, FrameRate, MAX_FRAME_BYTES, RecorderState,
+    RecordingFormat, RecordingSession, RecordingSessionError,
 };
 
 const HNS_PER_SECOND: u128 = 10_000_000;
@@ -308,18 +308,25 @@ struct TimedNv12Frame {
 }
 
 fn ticks_for(elapsed: Duration) -> Result<u64, Mp4RecordingError> {
-    if elapsed > Duration::from_secs(MAX_RECORDING_SECONDS) {
+    let ticks = elapsed.as_nanos() / 100;
+    i64::try_from(ticks)
+        .map(|tick| tick as u64)
+        .map_err(|_| Mp4RecordingError::InvalidInput("MP4 timestamp overflow".into()))
+}
+
+fn sample_duration(start: u64, end: u64) -> Result<u64, Mp4RecordingError> {
+    if end > i64::MAX as u64 {
         return Err(Mp4RecordingError::InvalidInput(
-            "the MP4 timestamp exceeds the 120-second recording limit".into(),
+            "MP4 timestamp overflow".into(),
         ));
     }
-    let ticks = elapsed.as_nanos() / 100;
-    u64::try_from(ticks)
-        .ok()
-        .filter(|tick| *tick <= (u128::from(MAX_RECORDING_SECONDS) * HNS_PER_SECOND) as u64)
-        .ok_or(Mp4RecordingError::InvalidInput(
-            "the MP4 timestamp exceeds the 120-second recording limit".into(),
-        ))
+    let duration = end
+        .checked_sub(start)
+        .ok_or(Mp4RecordingError::TimestampMovedBackwards)?;
+    if duration == 0 {
+        return Err(Mp4RecordingError::TimestampMovedBackwards);
+    }
+    Ok(duration)
 }
 
 fn frame_tick_for(
@@ -771,7 +778,14 @@ impl Mp4Recording {
             return Err(self.fail_sink(Mp4RecordingError::Session(error)));
         }
         self.last_elapsed = Some(elapsed);
-        self.acknowledged_inputs = self.acknowledged_inputs.saturating_add(1);
+        self.acknowledged_inputs = match self.acknowledged_inputs.checked_add(1) {
+            Some(count) => count,
+            None => {
+                return Err(self.fail_sink(Mp4RecordingError::InvalidInput(
+                    "MP4 frame count overflow".into(),
+                )));
+            }
+        };
         Ok(elapsed)
     }
 
@@ -780,12 +794,11 @@ impl Mp4Recording {
         pending: PendingSample,
         next_tick: u64,
     ) -> Result<(), Mp4RecordingError> {
-        let duration = next_tick
-            .checked_sub(pending.display_tick)
-            .ok_or(Mp4RecordingError::TimestampMovedBackwards)?;
-        if duration == 0 {
-            return Err(Mp4RecordingError::TimestampMovedBackwards);
-        }
+        let duration = sample_duration(pending.display_tick, next_tick)?;
+        let next_count = self
+            .encoded_samples
+            .checked_add(1)
+            .ok_or_else(|| Mp4RecordingError::InvalidInput("MP4 sample count overflow".into()))?;
         let runtime = self
             .runtime
             .as_ref()
@@ -816,7 +829,7 @@ impl Mp4Recording {
             sink.WriteSample(self.stream_index, &sample)
                 .map_err(|error| native_error("H.264 MP4 sink rejected an NV12 sample", error))?;
         }
-        self.encoded_samples = self.encoded_samples.saturating_add(1);
+        self.encoded_samples = next_count;
         Ok(())
     }
 
@@ -1230,12 +1243,24 @@ mod tests {
         assert_eq!(ticks_for(Duration::from_nanos(100)).unwrap(), 1);
         assert_eq!(ticks_for(Duration::from_nanos(199)).unwrap(), 1);
         assert_eq!(ticks_for(Duration::from_millis(30)).unwrap(), 300_000);
+        assert_eq!(ticks_for(Duration::from_secs(121)).unwrap(), 1_210_000_000);
         assert_eq!(
-            ticks_for(Duration::from_secs(MAX_RECORDING_SECONDS)).unwrap(),
-            1_200_000_000
+            ticks_for(Duration::from_secs(1001)).unwrap(),
+            10_010_000_000
+        );
+        let max = Duration::from_nanos(100 * (i64::MAX as u128 % 10_000_000) as u64)
+            + Duration::from_secs(i64::MAX as u64 / 10_000_000);
+        assert_eq!(ticks_for(max).unwrap(), i64::MAX as u64);
+        assert_eq!(
+            sample_duration(i64::MAX as u64 - 1, i64::MAX as u64).unwrap(),
+            1
         );
         assert!(matches!(
-            ticks_for(Duration::from_secs(MAX_RECORDING_SECONDS) + Duration::from_nanos(1)),
+            sample_duration(i64::MAX as u64, i64::MAX as u64 + 1),
+            Err(Mp4RecordingError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            ticks_for(max + Duration::from_nanos(100)),
             Err(Mp4RecordingError::InvalidInput(_))
         ));
         assert_eq!(
@@ -1331,7 +1356,12 @@ mod tests {
         let request = RecordingRequest::new(
             CaptureTarget::window(1, 1, 1, rect)?,
             rect,
-            RecordingOptions::new(RecordingFormat::Mp4, rate, Duration::from_secs(5), false)?,
+            RecordingOptions::new(
+                RecordingFormat::Mp4,
+                rate,
+                crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(5)),
+                false,
+            )?,
         )?;
         let generation = session.select(request)?;
         let directory = tempfile::tempdir()?;
@@ -1503,7 +1533,7 @@ mod tests {
         let options = RecordingOptions::new(
             RecordingFormat::Mp4,
             frame_rate,
-            Duration::from_secs(30),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(30)),
             false,
         )?;
         let target =

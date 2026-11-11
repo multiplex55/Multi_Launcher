@@ -27,6 +27,7 @@ mod package_ui;
 pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
 pub mod recording_review;
+mod recording_annotation;
 pub(crate) mod runtime_inspector;
 mod search;
 mod signature_editor;
@@ -92,10 +93,6 @@ fn mkmacro_close_prompt_layer(owner_instance: u64) -> eframe::egui::LayerId {
     )
 }
 
-fn mkmacro_recording_annotation_id(owner_instance: u64) -> eframe::egui::Id {
-    eframe::egui::Id::new(("mkmacro_recording_annotation", owner_instance))
-}
-
 fn has_draft_input_event(ctx: &eframe::egui::Context) -> bool {
     use eframe::egui::Event;
     ctx.input(|input| {
@@ -124,15 +121,13 @@ fn surrender_mkmacro_focus(ctx: &eframe::egui::Context, layer: eframe::egui::Lay
     }
 }
 
-fn mkmacro_owned_layers(owner_instance: u64) -> [eframe::egui::LayerId; 16] {
+fn mkmacro_owned_layers(owner_instance: u64) -> [eframe::egui::LayerId; 14] {
     use eframe::egui::{Id, LayerId, Order};
     [
         Id::new("mkmacro_main_window"),
         Id::new("mkmacro_package_modal"),
         Id::new(Some("Action Editor")),
         Id::new(Some("Window Picker")),
-        Id::new("mkmacro_recording_review"),
-        mkmacro_recording_annotation_id(owner_instance),
         Id::new("mkmacro_step_search"),
         Id::new("mkmacro_crop_reference_image"),
         Id::new("mkmacro_crop_overwrite_confirmation"),
@@ -390,10 +385,15 @@ impl FirstStepRowGeometry {
 pub struct MkMacroDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     owner_instance: u64,
     show_root_after_host_change: bool,
     pending_host_frame: Option<MkMacroHostFrame>,
     retained_host_checkpoint: Option<(u64, u64, MkMacroDraftCheckpoint)>,
+    package_hosts: package_ui::PackageHosts,
+    pending_package_open: Option<(package_ui::PackageOpen, u64, Option<u64>, super::utility_host::AcceptedParentOpen<u64>)>,
+    search_host: super::utility_window_host::UtilityWindowHost<search::SearchState>,
+    pending_search_open: Option<(search::SearchMode, u64, Option<u64>, super::utility_host::AcceptedParentOpen<u64>)>,
     active_host: Option<HostIdentity>,
     native_jump_mode: crate::gui::jump_mode::ui::JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -441,8 +441,17 @@ pub struct MkMacroDialog {
     record_hotkey_capture_owner: RecordHotkeyCaptureOwner,
     pub pause_record_hotkey_capture: bool,
     pub marker_record_hotkey_capture: bool,
-    pub action_catalog_visible: bool,
-    pub action_search: String,
+    catalog: action_catalog::CatalogState,
+    catalog_host: super::utility_window_host::UtilityWindowHost<action_catalog::CatalogState>,
+    pending_catalog_open: Option<(u64, Option<u64>, super::utility_host::AcceptedParentOpen<u64>)>,
+    pending_editor_origin: Option<(EditorOpenOrigin, bool)>,
+    editor_host: super::utility_window_host::UtilityWindowHost<action_editor::ActionEditorState>,
+    window_picker_host: super::utility_window_host::UtilityWindowHost<window_picker::WindowPickerState>,
+    pending_window_picker_open: Option<(window_picker::MatcherEditRequest, PickerOpenOrigin)>,
+    launcher_picker_host: super::utility_window_host::UtilityWindowHost<launcher_action_picker::LauncherActionPickerState>,
+    pending_launcher_picker_open: Option<(launcher_action_picker::LauncherActionRequest, super::utility_host::AcceptedParentOpen<u64>)>,
+    crop_host: super::utility_window_host::UtilityWindowHost<image_crop_editor::ImageCropEditorState>,
+    pending_crop_open: Option<(image_authoring_destination::ImageCropDestination, super::utility_host::AcceptedParentOpen<u64>)>,
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
@@ -454,12 +463,15 @@ pub struct MkMacroDialog {
     ui_notices: VecDeque<String>,
     /// Transient annotation editor. `annotation_pause_owned` is true only when
     /// opening it paused an actively recording session.
-    pub recording_annotation_open: bool,
-    pub recording_annotation_text: String,
-    recording_annotation_target: Option<u64>,
-    pub annotation_pause_owned: bool,
+    annotation: recording_annotation::AnnotationState,
+    annotation_host: super::utility_window_host::UtilityWindowHost<recording_annotation::AnnotationState>,
+    pending_annotation_open: Option<(super::utility_host::AcceptedParentOpen<u64>, bool)>,
     /// Process-local capture review. It never participates in draft dirty tracking or persistence.
     pub recording_review: Option<recording_review::RecordingReviewSession>,
+    review_host: super::utility_window_host::UtilityWindowHost<recording_review::RecordingReviewSession>,
+    pending_review_open: Option<(Option<super::utility_host::AcceptedParentOpen<u64>>, bool)>,
+    review_open_blocked: bool,
+    next_review_epoch: u64,
     #[cfg(test)]
     recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
     #[cfg(test)]
@@ -471,7 +483,13 @@ pub struct MkMacroDialog {
     #[cfg(test)]
     test_host_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
     #[cfg(test)]
+    test_annotation_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    test_review_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
     test_run_button: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
+    #[cfg(test)]
+    test_add_action: Option<(eframe::egui::Rect, eframe::egui::Rect, bool)>,
     #[cfg(test)]
     last_first_step_row_geometry: Option<FirstStepRowGeometry>,
     #[cfg(test)]
@@ -554,10 +572,6 @@ struct MkMacroDraftCheckpoint {
     pending_recording_target_publish: bool,
     pending_recording_review_drain: bool,
     close_prompt_open: bool,
-    recording_annotation_open: bool,
-    recording_annotation_text: String,
-    recording_annotation_target: Option<u64>,
-    annotation_pause_owned: bool,
     package_ui: package_ui::PackageUiState,
     editor_state: editor_operations::EditorState,
 }
@@ -582,10 +596,6 @@ impl MkMacroDraftCheckpoint {
             pending_recording_target_publish: dialog.pending_recording_target_publish,
             pending_recording_review_drain: dialog.pending_recording_review_drain,
             close_prompt_open: dialog.close_prompt_open,
-            recording_annotation_open: dialog.recording_annotation_open,
-            recording_annotation_text: dialog.recording_annotation_text.clone(),
-            recording_annotation_target: dialog.recording_annotation_target,
-            annotation_pause_owned: dialog.annotation_pause_owned,
             package_ui: dialog.package_ui.clone(),
             editor_state: dialog.editor_state.clone(),
         }
@@ -609,10 +619,6 @@ impl MkMacroDraftCheckpoint {
         dialog.pending_recording_target_publish = self.pending_recording_target_publish;
         dialog.pending_recording_review_drain = self.pending_recording_review_drain;
         dialog.close_prompt_open = self.close_prompt_open;
-        dialog.recording_annotation_open = self.recording_annotation_open;
-        dialog.recording_annotation_text = self.recording_annotation_text;
-        dialog.recording_annotation_target = self.recording_annotation_target;
-        dialog.annotation_pause_owned = self.annotation_pause_owned;
         dialog.package_ui = self.package_ui;
         dialog.editor_state = self.editor_state;
         *dialog.recording_target_cache.borrow_mut() = None;
@@ -645,28 +651,29 @@ enum MkMacroHostActionKind {
         target: crate::mkmacro::RecordingTarget,
         expected_state: crate::mkmacro::RecorderRuntimeState,
     },
-    Review {
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    },
     AnnotationBegin {
         macro_id: Option<u64>,
+        recording_id: Option<u64>,
         expected_state: crate::mkmacro::RecorderRuntimeState,
-    },
-    AnnotationFinish {
-        macro_id: Option<u64>,
-        expected_state: crate::mkmacro::RecorderRuntimeState,
-        commit: bool,
-        text: String,
-    },
-    ActionPicker(action_editor::NativeFilePickerIntent),
-    FinishActionEditor {
-        generation: u64,
-        action: action_editor::ActionEditorFinish,
     },
     Package(package_ui::PackageHostAction),
+    OpenSearch(search::SearchMode),
+    OpenCatalog,
+    OpenReview { epoch: u64 },
+    EditStep { step: crate::mkmacro::MkStep, generation: Option<u64> },
+    OpenWindowPicker(window_picker::MatcherEditRequest),
     CloseDecision(MkMacroCloseChoice),
+}
+
+enum EditorOpenOrigin {
+    Main(super::utility_host::AcceptedParentOpen<u64>),
+    Catalog(super::utility_host::AcceptedParentOpen<u64>),
+    Review(super::utility_host::AcceptedParentOpen<u64>),
+}
+
+enum PickerOpenOrigin {
+    Main(super::utility_host::AcceptedParentOpen<u64>),
+    Editor(super::utility_host::AcceptedParentOpen<u64>),
 }
 
 #[derive(Clone, Copy)]
@@ -690,14 +697,6 @@ pub(super) enum RecorderCommand {
     Resume,
     Marker,
     StopForReview,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum ReviewCommand {
-    StopPreview,
-    Preview,
-    Apply,
-    Cancel,
 }
 
 #[derive(Clone, Copy)]
@@ -786,6 +785,25 @@ mod tests {
             Some(RecorderRuntimeState::Idle)
         ));
         assert!(!should_resume_annotation_owned(true, None));
+    }
+
+    #[test]
+    fn rejected_main_checkpoint_does_not_rewind_annotation_draft_or_pause_owner() {
+        let (_directory, mut dialog) = dialog();
+        dialog.annotation.open = true;
+        dialog.annotation.epoch = 7;
+        dialog.annotation.recording_id = Some(11);
+        dialog.annotation.pause_id = Some(13);
+        dialog.annotation.pause_owned = true;
+        dialog.annotation.text = "before".into();
+        let checkpoint = MkMacroDraftCheckpoint::capture(&dialog);
+        dialog.annotation.text = "retained child edit".into();
+        checkpoint.restore(&mut dialog);
+        assert_eq!(dialog.annotation.text, "retained child edit");
+        assert_eq!(dialog.annotation.epoch, 7);
+        assert_eq!(dialog.annotation.recording_id, Some(11));
+        assert_eq!(dialog.annotation.pause_id, Some(13));
+        assert!(dialog.annotation.pause_owned);
     }
 
     fn five_macros() -> MkMacroDocument {
@@ -2771,6 +2789,92 @@ mod tests {
     }
 
     #[test]
+    fn picker_confirmation_rejects_changed_original_matcher() {
+        let (_dir, mut d) = dialog();
+        let original = picker_matcher("Original");
+        let changed = picker_matcher("Changed");
+        d.draft.macros = vec![picker_macro(17, MkHotkeyScope::ActiveWindow(changed.clone()))];
+        assert!(!d.apply_window_picker_confirmation(&picker_request(17, original), picker_matcher("Picked")));
+        assert_eq!(d.draft.macros[0].hotkey_scope, MkHotkeyScope::ActiveWindow(changed));
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn macro_hotkey_picker_inherits_retained_parent_and_rejects_retired_origin() {
+        use super::super::utility_host::{AcceptedParentOpen, UtilityPresentation, ViewportPassProvenance};
+        let (directory, mut d) = dialog();
+        let original = picker_matcher("Original");
+        d.draft.macros = vec![picker_macro(17, MkHotkeyScope::ActiveWindow(original.clone()))];
+        d.selected_macro_id = Some(17);
+        d.open = true;
+        d.host_state.transition(UtilityPresentation::Popout);
+        d.window_picker.test_candidates = Some(Vec::new());
+        let ctx = eframe::egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(directory.path().join("settings.json").to_string_lossy().into_owned(), workers.clone(), crate::settings::UtilityPresentations::default());
+        manager.install_in_context(&ctx);
+        manager.remember(&ctx, crate::settings::UtilityToolKey::parse("mkmacro-window-picker").unwrap(), crate::settings::RememberedPresentation::Docked);
+        let pass = ViewportPassProvenance::current(&ctx, eframe::egui::ViewportId::ROOT);
+        let output = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
+        let origin = AcceptedParentOpen::from_retained(&ctx, d.host_state.identity(), d.owner_instance, pass, pass).unwrap();
+        output.drop_without_applying_deltas();
+        let request = picker_request(17, original);
+        d.pending_window_picker_open = Some((request.clone(), PickerOpenOrigin::Main(origin.clone())));
+        assert!(!d.complete_window_picker_child(&ctx));
+        assert!(d.window_picker.open && d.window_picker_host.is_popped_out());
+        let epoch = d.window_picker.epoch;
+        d.window_picker.search = "unsaved filter".into();
+        d.pending_window_picker_open = Some((request.clone(), PickerOpenOrigin::Main(origin.clone())));
+        assert!(!d.complete_window_picker_child(&ctx));
+        assert_eq!(d.window_picker.epoch, epoch);
+        assert_eq!(d.window_picker.search, "unsaved filter");
+        d.window_picker_host.close_from_app(&ctx);
+        d.window_picker.cancel("closed");
+        d.host_state.transition(UtilityPresentation::Docked);
+        d.pending_window_picker_open = Some((request, PickerOpenOrigin::Main(origin)));
+        assert!(!d.complete_window_picker_child(&ctx));
+        assert!(!d.window_picker.open);
+        workers.join_all();
+    }
+
+    #[test]
+    fn live_step_editor_reopens_from_native_parent_without_replacing_draft() {
+        use super::super::utility_host::{AcceptedParentOpen, ChildOpenOrigin, UtilityPresentation, ViewportPassProvenance};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let step = dialog.selected_macro().unwrap().steps[0].clone();
+        dialog.action_editor.begin_edit_in_macro(Some(1), &step);
+        dialog.action_editor.draft.as_mut().unwrap().delay_after_ms = 987;
+        let epoch = dialog.action_editor.host_epoch;
+        let ctx = eframe::egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory.path().join("settings.json").to_string_lossy().into_owned(),
+            workers.clone(), crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        dialog.editor_host.open_from_origin(&ctx, &dialog.action_editor, false, &ChildOpenOrigin::<()>::Root);
+        assert!(dialog.editor_host.root_layer().is_some());
+        dialog.host_state.transition(UtilityPresentation::Popout);
+        let pass = ViewportPassProvenance::current(&ctx, eframe::egui::ViewportId::ROOT);
+        let output = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
+        let origin = AcceptedParentOpen::from_retained(&ctx, dialog.host_state.identity(), dialog.owner_instance, pass, pass).unwrap();
+        output.drop_without_applying_deltas();
+        dialog.defer_host_effects = true;
+        dialog.open_action_editor_from_main(step.clone());
+        let staged = dialog.pending_host_effects.pop().expect("same-step open is staged");
+        assert!(dialog.host_action_is_current(&staged, dialog.host_state.identity(), dialog.owner_instance));
+        dialog.pending_editor_origin = Some((EditorOpenOrigin::Main(origin), true));
+        assert!(!dialog.complete_editor_child(&ctx));
+        assert!(dialog.editor_host.is_popped_out());
+        assert_eq!(dialog.action_editor.host_epoch, epoch);
+        assert_eq!(dialog.action_editor.draft.as_ref().unwrap().delay_after_ms, 987);
+        assert!(dialog.action_editor.edits_source(Some(1), &step));
+        workers.join_all();
+    }
+
+    #[test]
     fn picker_confirmation_replaces_matching_active_window_matcher_and_marks_dirty() {
         let (_dir, mut d) = dialog();
         let original = picker_matcher("Original");
@@ -3181,7 +3285,7 @@ mod tests {
     fn structural_editor_is_atomic_configurable_and_cancelable() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
+        d.catalog.open = true;
         action_catalog::select_descriptor(&mut d, &catalog_descriptor("Repeat"));
         assert!(d.selected_macro().unwrap().steps.is_empty());
         if let MkAction::RepeatStart { count } = &mut d.action_editor.draft.as_mut().unwrap().action
@@ -3243,7 +3347,7 @@ mod tests {
     fn direct_loop_controls_require_context_and_keep_palette() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
+        d.catalog.open = true;
         let before = serde_json::to_vec(d.selected_macro().unwrap()).unwrap();
         action_catalog::insert_action(&mut d, MkAction::Break);
         assert_eq!(
@@ -3251,7 +3355,7 @@ mod tests {
             before
         );
         assert!(d.command_error.is_some());
-        assert!(d.action_catalog_visible);
+        assert!(d.catalog.open);
         action_catalog::insert_action(&mut d, MkAction::RepeatStart { count: 5 });
         let opener = d.selected_macro().unwrap().steps[0].id;
         d.selection.ids.clear();
@@ -3261,7 +3365,7 @@ mod tests {
             d.selected_macro().unwrap().steps[1].action,
             MkAction::Continue
         ));
-        assert!(d.action_catalog_visible);
+        assert!(d.catalog.open);
         assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
     }
     // Independent expectations for every model variant, including hidden actions.
@@ -3949,15 +4053,15 @@ mod tests {
     fn configurable_catalog_selection_is_transactional_and_keeps_catalog_state() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
-        d.action_search = "key".into();
+        d.catalog.open = true;
+        d.catalog.query = "key".into();
 
         assert!(action_catalog::select_descriptor(
             &mut d,
             &catalog_descriptor("Key Press")
         ));
         let original = d.action_editor.draft.as_ref().unwrap().action.clone();
-        assert!(d.action_catalog_visible);
+        assert!(d.catalog.open);
         assert!(!action_catalog::select_descriptor(
             &mut d,
             &catalog_descriptor("Text")
@@ -3968,8 +4072,8 @@ mod tests {
         assert!(editor.apply(&mut d).is_some());
         d.action_editor = editor;
         assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
-        assert!(d.action_catalog_visible);
-        assert_eq!(d.action_search, "key");
+        assert!(d.catalog.open);
+        assert_eq!(d.catalog.query, "key");
     }
 
     #[test]
@@ -4015,8 +4119,8 @@ mod tests {
     fn palette_supports_five_consecutive_configurable_insertions() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
-        d.action_search = "delay".into();
+        d.catalog.open = true;
+        d.catalog.query = "delay".into();
         for _ in 0..5 {
             assert!(action_catalog::select_descriptor(
                 &mut d,
@@ -4025,8 +4129,8 @@ mod tests {
             let mut editor = d.take_action_editor();
             assert!(editor.apply(&mut d).is_some());
             d.action_editor = editor;
-            assert!(d.action_catalog_visible);
-            assert_eq!(d.action_search, "delay");
+            assert!(d.catalog.open);
+            assert_eq!(d.catalog.query, "delay");
         }
         assert_eq!(d.selected_macro().unwrap().steps.len(), 5);
     }
@@ -4035,13 +4139,13 @@ mod tests {
     fn cancelling_catalog_editor_preserves_macro_and_catalog() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
-        d.action_search = "mouse".into();
+        d.catalog.open = true;
+        d.catalog.query = "mouse".into();
         action_catalog::select_descriptor(&mut d, &catalog_descriptor("Mouse Click"));
         d.action_editor.cancel();
         assert!(d.selected_macro().unwrap().steps.is_empty());
-        assert!(d.action_catalog_visible);
-        assert_eq!(d.action_search, "mouse");
+        assert!(d.catalog.open);
+        assert_eq!(d.catalog.query, "mouse");
     }
 
     #[test]
@@ -4070,14 +4174,14 @@ mod tests {
     fn catalog_close_paths_and_parent_close_reset_children() {
         let (_dir, mut d) = dialog();
         d.create_macro();
-        d.action_catalog_visible = true;
+        d.catalog.open = true;
         action_catalog::close(&mut d); // Explicit Close button transition.
-        assert!(!d.action_catalog_visible);
-        d.action_catalog_visible = true;
+        assert!(!d.catalog.open);
+        d.catalog.open = true;
         action_catalog::close(&mut d); // Simulated window-X transition.
-        assert!(!d.action_catalog_visible);
+        assert!(!d.catalog.open);
 
-        d.action_catalog_visible = true;
+        d.catalog.open = true;
         d.action_editor
             .begin_new(MkAction::Delay(crate::mkmacro::MkDelayPayload {
                 fixed_ms: 1,
@@ -4085,7 +4189,7 @@ mod tests {
             }));
         d.open = false;
         d.close_children();
-        assert!(!d.action_catalog_visible);
+        assert!(!d.catalog.open);
         assert!(d.action_editor.draft.is_none());
     }
 
@@ -5077,8 +5181,20 @@ mod tests {
         events: Vec<eframe::egui::Event>,
         discard: bool,
     ) {
+        render_host_frame_for(ctx, dialog, screen, root_visible, events, discard, None);
+    }
+
+    fn render_host_frame_for(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen: eframe::egui::Rect,
+        root_visible: bool,
+        events: Vec<eframe::egui::Event>,
+        discard: bool,
+        target: Option<eframe::egui::ViewportId>,
+    ) {
         let mut input = layout_input(screen, 1.0);
-        let child = dialog.is_popped_out().then(|| dialog.test_viewport_id());
+        let child = target.or_else(|| dialog.is_popped_out().then(|| dialog.test_viewport_id()));
         let child_events = if child.is_some() {
             events
         } else {
@@ -5101,6 +5217,29 @@ mod tests {
                     77,
                     false,
                 );
+                dialog.show_search_child(
+                    ui.ctx(),
+                    first_pass,
+                    root_visible,
+                    root_visible,
+                    true,
+                    false,
+                );
+                dialog.show_package_children(
+                    ui.ctx(),
+                    first_pass,
+                    root_visible,
+                    root_visible,
+                    true,
+                    false,
+                );
+                dialog.show_catalog_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_annotation_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_review_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_editor_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_window_picker_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_launcher_picker_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
+                dialog.show_crop_child(ui.ctx(), first_pass, root_visible, root_visible, true, false);
                 if discard && first_pass {
                     ui.ctx().request_discard("discard the MkMacro click");
                 }
@@ -5118,6 +5257,15 @@ mod tests {
             }
         });
         dialog.on_host_frame_complete(ctx);
+        dialog.complete_search_child(ctx);
+        dialog.complete_package_children(ctx);
+        dialog.complete_catalog_child(ctx);
+        dialog.complete_annotation_child(ctx);
+        dialog.complete_review_child(ctx);
+        dialog.complete_editor_child(ctx);
+        dialog.complete_window_picker_child(ctx);
+        dialog.complete_launcher_picker_child(ctx);
+        dialog.complete_crop_child(ctx);
         output.drop_without_applying_deltas();
     }
 
@@ -5186,7 +5334,7 @@ mod tests {
     fn mkmacro_visible_pop_out_and_dock_run_same_macro_once() {
         use eframe::egui::{self, vec2};
 
-        let (_directory, mut dialog, runtime, _fake) = real_runtime_dialog();
+        let (directory, mut dialog, runtime, _fake) = real_runtime_dialog();
         dialog.open = true;
         dialog.set_selected_macro(Some(1));
         dialog.selected_macro_mut().unwrap().description = "unsaved edit".into();
@@ -5194,12 +5342,38 @@ mod tests {
         dialog.selection.ids.insert(11);
         let previous_run_id = runtime.snapshot().run_id;
         let ctx = egui::Context::default();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("mkmacro").unwrap();
         ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
 
+        click_host_button(&ctx, &mut dialog, screen, true, false, true);
+        assert!(!dialog.is_popped_out());
+        assert_eq!(manager.preference(key), None);
         click_host_button(&ctx, &mut dialog, screen, true, false, false);
         assert!(dialog.is_popped_out());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        dialog.close_prompt_open = true;
+        assert!(!dialog.complete_close_choice(&ctx, MkMacroCloseChoice::Cancel));
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         assert!(dialog.dirty);
         assert!(dialog.selection.ids.contains(&11));
         assert!(dialog.store.snapshot().macros[0].description.is_empty());
@@ -5221,19 +5395,1498 @@ mod tests {
 
         click_host_button(&ctx, &mut dialog, screen, false, false, false);
         assert!(!dialog.is_popped_out());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        workers.join_all();
         assert_eq!(dialog.selected_macro_id, Some(1));
         assert!(dialog.selection.ids.contains(&11));
         assert_eq!(runtime.snapshot().run_id, started.run_id);
     }
 
     #[test]
-    fn mkmacro_detached_action_editor_finishes_only_on_retained_clicks() {
+    fn mkmacro_native_parent_opens_ordinary_children_with_retained_origin() {
         use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let draft = dialog.draft.clone();
+        let revision = dialog.draft_revision;
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        for key in [
+            "mkmacro-step-search",
+            "mkmacro-help",
+            "mkmacro-templates",
+            "mkmacro-template-save",
+            "mkmacro-package-export",
+        ] {
+            manager.remember(
+                &ctx,
+                crate::settings::UtilityToolKey::parse(key).unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            );
+        }
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        assert!(dialog.is_popped_out());
+        let ctrl_f = egui::Event::Key {
+            key: egui::Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_f.clone()], true);
+        assert!(dialog.navigation.search.mode.is_none());
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_f], false);
+        assert!(dialog.navigation.search.mode.is_some());
+        assert!(dialog.search_host.is_popped_out());
+        let original_text_styles = ctx.style_of(ctx.theme()).text_styles.clone();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.2;
+            }
+        });
+        let search_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            search::SearchState,
+        >::test_viewport(dialog.navigation.search.test_epoch());
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(search_viewport),
+        );
+        // The new native window's first observation is its non-interactive sizing pass.
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(search_viewport),
+        );
+        let (query, clip, enabled, focused) = dialog
+            .navigation
+            .search
+            .test_query_response
+            .expect("native search query");
+        assert!(
+            enabled && focused && clip.contains_rect(query),
+            "query={query:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(query.center()),
+                egui::Event::PointerButton {
+                    pos: query.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(search_viewport),
+            );
+        }
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("discarded".into())],
+            true,
+            Some(search_viewport),
+        );
+        assert_eq!(dialog.navigation.search.test_query(), "");
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("result".into())],
+            false,
+            Some(search_viewport),
+        );
+        assert_eq!(dialog.navigation.search.test_query(), "result");
+        let (next, next_clip, next_enabled) = dialog
+            .navigation
+            .search
+            .test_next_response
+            .expect("Next response");
+        let (close, close_clip, close_enabled) = dialog
+            .navigation
+            .search
+            .test_close_response
+            .expect("Close response");
+        assert!(
+            next_enabled && next_clip.contains_rect(next),
+            "next={next:?}, clip={next_clip:?}, enabled={next_enabled}"
+        );
+        assert!(
+            close_enabled && close_clip.contains_rect(close),
+            "close={close:?}, clip={close_clip:?}, enabled={close_enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(next.center()),
+                egui::Event::PointerButton {
+                    pos: next.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(search_viewport),
+            );
+        }
+        assert_eq!(dialog.selection.primary, Some(12));
+        assert_eq!(dialog.draft_revision, revision);
+        assert!(!dialog.dirty);
+        let epoch = dialog.navigation.search.test_epoch();
+        let ctrl_h = egui::Event::Key {
+            key: egui::Key::H,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        render_host_frame(&ctx, &mut dialog, screen, false, vec![ctrl_h], false);
+        assert_eq!(
+            dialog.navigation.search.mode,
+            Some(search::SearchMode::Replace)
+        );
+        assert_eq!(dialog.navigation.search.test_epoch(), epoch);
+        assert_eq!(dialog.navigation.search.test_query(), "result");
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.text_styles = original_text_styles
+        });
+        for item in ["help", "templates", "save", "export"] {
+            for _ in 0..3 {
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+            }
+            let (reuse, clip, enabled) =
+                dialog.package_ui.test_reuse().expect("Reuse menu response");
+            assert!(
+                enabled && clip.contains_rect(reuse),
+                "Reuse rect={reuse:?} clip={clip:?} enabled={enabled}"
+            );
+            click_host_position(&ctx, &mut dialog, screen, false, reuse.center(), false);
+            for _ in 0..2 {
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+            }
+            let (item_rect, clip, enabled) = dialog
+                .package_ui
+                .test_item(item)
+                .expect("package menu response");
+            assert!(
+                enabled && clip.contains_rect(item_rect),
+                "{item} rect={item_rect:?} clip={clip:?} enabled={enabled}"
+            );
+            click_host_position(&ctx, &mut dialog, screen, false, item_rect.center(), false);
+            assert!(
+                dialog.package_hosts.test_popped(item),
+                "{item} inherited native parent"
+            );
+            if item == "save" {
+                dialog.package_hosts.test_set_save_name("unsaved template");
+                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), true);
+                assert_eq!(
+                    dialog.package_hosts.test_save_name(),
+                    Some("unsaved template")
+                );
+                let viewport = dialog.package_hosts.test_save_viewport();
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    Vec::new(),
+                    false,
+                    Some(viewport),
+                );
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    Vec::new(),
+                    false,
+                    Some(viewport),
+                );
+                let (button, clip, enabled) = dialog
+                    .package_hosts
+                    .test_save_response()
+                    .expect("save template button");
+                assert!(
+                    enabled && clip.contains_rect(button),
+                    "save={button:?}, clip={clip:?}, enabled={enabled}"
+                );
+                let before = dialog
+                    .store
+                    .load_template_catalog()
+                    .unwrap()
+                    .templates
+                    .len();
+                for discard_release in [true, false] {
+                    for pressed in [true, false] {
+                        let events = vec![
+                            egui::Event::PointerMoved(button.center()),
+                            egui::Event::PointerButton {
+                                pos: button.center(),
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ];
+                        render_host_frame_for(
+                            &ctx,
+                            &mut dialog,
+                            screen,
+                            false,
+                            events,
+                            discard_release && !pressed,
+                            Some(viewport),
+                        );
+                    }
+                    let count = dialog
+                        .store
+                        .load_template_catalog()
+                        .unwrap()
+                        .templates
+                        .len();
+                    assert_eq!(count, before + usize::from(!discard_release));
+                }
+            }
+            dialog.package_hosts.close_all(&ctx);
+        }
+        assert_eq!(dialog.draft, draft);
+        assert_eq!(dialog.draft_revision, revision);
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
 
-        let (_directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+    #[test]
+    fn native_catalog_opens_editor_and_commits_one_action() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let revision = dialog.draft_revision;
+        let before = dialog.selected_macro().unwrap().steps.len();
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        for key in [
+            "mkmacro-action-catalog",
+            "mkmacro-action-editor",
+            "mkmacro-launcher-picker",
+        ] {
+            manager.remember(
+                &ctx,
+                crate::settings::UtilityToolKey::parse(key).unwrap(),
+                crate::settings::RememberedPresentation::Docked,
+            );
+        }
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        let (add, clip, enabled) = dialog.test_add_action.expect("Add Action control");
+        assert!(enabled && clip.contains_rect(add));
+        click_host_position(&ctx, &mut dialog, screen, false, add.center(), true);
+        assert!(!dialog.catalog.open);
+        render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        let (add, clip, enabled) = dialog.test_add_action.expect("fresh Add Action control");
+        assert!(
+            enabled && clip.contains_rect(add),
+            "add={add:?} clip={clip:?} enabled={enabled}"
+        );
+        click_host_position(&ctx, &mut dialog, screen, false, add.center(), false);
+        assert!(
+            dialog.catalog.open && dialog.catalog_host.is_popped_out(),
+            "open={} popped={} pending={} parent={:?} revision={} selected={:?}",
+            dialog.catalog.open,
+            dialog.catalog_host.is_popped_out(),
+            dialog.pending_catalog_open.is_some(),
+            dialog.host_state.identity(),
+            dialog.draft_revision,
+            dialog.selected_macro_id
+        );
+        let catalog_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            action_catalog::CatalogState,
+        >::test_viewport(dialog.catalog.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(catalog_viewport),
+            );
+        }
+        let (query, clip, enabled) = dialog.catalog.test_query.expect("Catalog query");
+        assert!(
+            enabled && clip.contains_rect(query),
+            "query={query:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(query.center()),
+                egui::Event::PointerButton {
+                    pos: query.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(catalog_viewport),
+            );
+        }
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("Delay".into())],
+            false,
+            Some(catalog_viewport),
+        );
+        let (entry, clip, enabled) = dialog.catalog.test_delay.expect("Delay entry");
+        assert!(
+            enabled && clip.contains_rect(entry),
+            "entry={entry:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(entry.center()),
+                egui::Event::PointerButton {
+                    pos: entry.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(catalog_viewport),
+            );
+        }
+        assert!(dialog.action_editor.draft.is_some() && dialog.editor_host.is_popped_out());
+        assert_eq!(dialog.draft_revision, revision);
+        let editor_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            action_editor::ActionEditorState,
+        >::test_viewport(dialog.action_editor.host_epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(editor_viewport),
+            );
+        }
+        let (combo, clip, enabled) = dialog
+            .action_editor
+            .test_error_combo
+            .expect("On error combo");
+        assert!(
+            enabled && clip.contains_rect(combo),
+            "combo={combo:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(combo.center()),
+                egui::Event::PointerButton {
+                    pos: combo.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(editor_viewport),
+            );
+        }
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(editor_viewport),
+        );
+        let (choice, clip, enabled) = dialog
+            .action_editor
+            .test_error_continue
+            .expect("Continue option");
+        assert!(
+            enabled && clip.contains_rect(choice),
+            "choice={choice:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(choice.center()),
+                egui::Event::PointerButton {
+                    pos: choice.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(editor_viewport),
+            );
+        }
+        assert!(matches!(
+            dialog.action_editor.draft.as_ref().unwrap().on_error,
+            crate::mkmacro::MkErrorPolicy::Continue
+        ));
+        render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), true);
+        assert!(matches!(
+            dialog.action_editor.draft.as_ref().unwrap().on_error,
+            crate::mkmacro::MkErrorPolicy::Continue
+        ));
+        assert_eq!(dialog.draft_revision, revision);
+        let (apply, clip) = action_editor::finish_button_geometry(&dialog.action_editor, true)
+            .expect("Editor Apply");
+        assert!(clip.contains_rect(apply), "apply={apply:?}, clip={clip:?}");
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(apply.center()),
+                egui::Event::PointerButton {
+                    pos: apply.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(editor_viewport),
+            );
+        }
+        assert_eq!(dialog.draft_revision, revision + 1);
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), before + 1);
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(catalog_viewport),
+        );
+        let (query, clip, enabled) = dialog
+            .catalog
+            .test_query
+            .expect("Catalog query after editor close");
+        assert!(enabled && clip.contains_rect(query));
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(query.center()),
+                egui::Event::PointerButton {
+                    pos: query.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(catalog_viewport),
+            );
+        }
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+        };
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![select_all, egui::Event::Text("Run Program".into())],
+            false,
+            Some(catalog_viewport),
+        );
+        assert_eq!(
+            dialog.catalog.query, "Run Program",
+            "Catalog query must be replaced before finding the new entry"
+        );
+        let (entry, clip, enabled) = dialog.catalog.test_run_program.expect("Run Program entry");
+        assert!(
+            enabled && clip.contains_rect(entry),
+            "entry={entry:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(entry.center()),
+                egui::Event::PointerButton {
+                    pos: entry.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(catalog_viewport),
+            );
+        }
+        assert!(dialog.action_editor.draft.is_some() && dialog.editor_host.is_popped_out());
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            action_editor::ActionEditorState,
+        >::test_viewport(dialog.action_editor.host_epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (picker, clip, enabled): (egui::Rect, egui::Rect, bool) = ctx
+            .data(|data| data.get_temp(egui::Id::new(("mkmacro-test-launcher-button", viewport))))
+            .expect("Choose From Launcher control");
+        assert!(
+            enabled && clip.contains_rect(picker),
+            "picker={picker:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(picker.center()),
+                egui::Event::PointerButton {
+                    pos: picker.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(dialog.launcher_action_picker.open && dialog.launcher_picker_host.is_popped_out());
+        assert_eq!(dialog.draft_revision, revision + 1);
+        let picker_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            launcher_action_picker::LauncherActionPickerState,
+        >::test_viewport(dialog.launcher_action_picker.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(picker_viewport),
+            );
+        }
+        let (search, clip, enabled, focused) = dialog
+            .launcher_action_picker
+            .test_search_response
+            .expect("Launcher picker search");
+        assert!(
+            enabled && focused && clip.contains_rect(search),
+            "search={search:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("discarded".into())],
+            true,
+            Some(picker_viewport),
+        );
+        assert!(dialog.launcher_action_picker.search.is_empty());
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("query".into())],
+            false,
+            Some(picker_viewport),
+        );
+        assert_eq!(dialog.launcher_action_picker.search, "query");
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn native_review_opens_editor_and_returns_same_review_step() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id: 1,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        let before = dialog.draft.clone();
+        let revision = dialog.draft_revision;
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-action-editor").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-recording-review").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        dialog
+            .open_recording_review(review_result(
+                target,
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 1,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+        let review_id = dialog.recording_review.as_ref().unwrap().proposed_steps()[0].review_id;
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .select(review_id, false, false);
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        assert!(dialog.review_host.is_popped_out());
+        let review_viewport =
+            super::super::utility_window_host::UtilityWindowHost::<
+                recording_review::RecordingReviewSession,
+            >::test_viewport(dialog.recording_review.as_ref().unwrap().epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
+        let review_epoch = dialog.recording_review.as_ref().unwrap().epoch;
+        let (dock, clip, enabled) = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .test_host_button
+            .unwrap();
+        assert!(
+            enabled && clip.contains_rect(dock),
+            "dock={dock:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(dock.center()),
+                    egui::Event::PointerButton {
+                        pos: dock.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
+        assert!(!dialog.review_host.is_popped_out());
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (reopen, clip, enabled) = dialog.test_review_button.unwrap();
+        assert!(
+            enabled && clip.contains_rect(reopen),
+            "reopen={reopen:?}, clip={clip:?}, enabled={enabled}"
+        );
+        click_host_position(&ctx, &mut dialog, screen, false, reopen.center(), false);
+        assert!(dialog.review_host.is_popped_out());
+        assert_eq!(
+            dialog.recording_review.as_ref().unwrap().epoch,
+            review_epoch
+        );
+        assert!(
+            dialog
+                .recording_review
+                .as_ref()
+                .unwrap()
+                .selection
+                .contains(&review_id)
+        );
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
+        let (edit, clip, enabled) = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .test_edit
+            .expect("Review Edit control");
+        assert!(
+            enabled && clip.contains_rect(edit),
+            "edit={edit:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(edit.center()),
+                    egui::Event::PointerButton {
+                        pos: edit.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
+        assert!(dialog.editor_host.is_popped_out());
+        assert_eq!(dialog.action_editor.review_editing_id(), Some(review_id));
+        dialog.action_editor.draft.as_mut().unwrap().action = MkAction::Delay(MkDelayPayload {
+            fixed_ms: 99,
+            ..Default::default()
+        });
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            action_editor::ActionEditorState,
+        >::test_viewport(dialog.action_editor.host_epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (apply, clip) =
+            action_editor::finish_button_geometry(&dialog.action_editor, true).unwrap();
+        assert!(clip.contains_rect(apply));
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(apply.center()),
+                egui::Event::PointerButton {
+                    pos: apply.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(viewport),
+            );
+        }
+        assert_eq!(dialog.draft, before);
+        assert_eq!(dialog.draft_revision, revision);
+        assert!(!dialog.dirty);
+        assert!(
+            matches!(&dialog.recording_review.as_ref().unwrap().proposed_steps()[0].action, MkAction::Delay(payload) if payload.fixed_ms == 99)
+        );
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(review_viewport),
+            );
+        }
+        let (cancel, clip, enabled) = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .test_cancel
+            .unwrap();
+        assert!(
+            enabled && clip.contains_rect(cancel),
+            "cancel={cancel:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(cancel.center()),
+                    egui::Event::PointerButton {
+                        pos: cancel.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(review_viewport),
+            );
+        }
+        assert!(dialog.recording_review.is_none());
+        dialog
+            .open_recording_review(review_result(target, Vec::new()))
+            .unwrap();
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        assert!(dialog.review_host.is_popped_out());
+        assert_ne!(
+            dialog.recording_review.as_ref().unwrap().epoch,
+            review_epoch
+        );
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn stale_review_open_keeps_recording_without_root_fallback() {
+        use super::super::utility_host::{
+            AcceptedParentOpen, UtilityPresentation, ViewportPassProvenance,
+        };
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id: 1,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        dialog
+            .open_recording_review(review_result(target, Vec::new()))
+            .unwrap();
+        let epoch = dialog.recording_review.as_ref().unwrap().epoch;
+        let ctx = eframe::egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let pass = ViewportPassProvenance::current(&ctx, eframe::egui::ViewportId::ROOT);
+        let output = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
+        let origin = AcceptedParentOpen::from_retained(
+            &ctx,
+            dialog.host_state.identity(),
+            dialog.owner_instance,
+            pass,
+            pass,
+        )
+        .unwrap();
+        output.drop_without_applying_deltas();
+        dialog.pending_review_open = Some((Some(origin), false));
+        dialog.host_state.transition(UtilityPresentation::Popout);
+        assert!(!dialog.complete_review_child(&ctx));
+        assert!(dialog.review_open_blocked);
+        assert_eq!(dialog.recording_review.as_ref().unwrap().epoch, epoch);
+        assert!(dialog.ordinary_child_root_layer().is_none());
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn native_annotation_retains_draft_and_adds_once_without_resuming_manual_pause() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        let recorder = Arc::new(crate::mkmacro::recorder_runtime::isolated_test_recorder(
+            directory.path(),
+        ));
+        let previous = crate::mkmacro::runtime::replace_recorder_for_test(Some(recorder.clone()));
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
         dialog.open = true;
         dialog.set_selected_macro(Some(1));
         let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.25;
+            }
+        });
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-recording-annotation").unwrap(),
+            crate::settings::RememberedPresentation::Docked,
+        );
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        click_host_button(&ctx, &mut dialog, screen, true, false, false);
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (button, clip, enabled) = dialog.test_annotation_button.expect("Annotate control");
+        assert!(
+            enabled && clip.contains_rect(button),
+            "button={button:?}, clip={clip:?}, enabled={enabled}"
+        );
+        click_host_position(&ctx, &mut dialog, screen, false, button.center(), false);
+        assert!(dialog.annotation_host.is_popped_out());
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Paused
+        );
+        let epoch = dialog.annotation.epoch;
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (text, clip, enabled, focused) = dialog.annotation.test_text.unwrap();
+        assert!(
+            enabled && focused && clip.contains_rect(text),
+            "text={text:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("discarded".into())],
+            true,
+            Some(viewport),
+        );
+        assert!(dialog.annotation.text.is_empty());
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            Vec::new(),
+            false,
+            Some(viewport),
+        );
+        let (text, clip, enabled, focused) = dialog.annotation.test_text.unwrap();
+        assert!(
+            enabled && focused && clip.contains_rect(text),
+            "after rejected pass: text={text:?}, clip={clip:?}, enabled={enabled}, focused={focused}"
+        );
+        render_host_frame_for(
+            &ctx,
+            &mut dialog,
+            screen,
+            false,
+            vec![egui::Event::Text("note".into())],
+            false,
+            Some(viewport),
+        );
+        assert_eq!(dialog.annotation.text, "note");
+        let (dock, clip, enabled) = dialog.annotation.test_host_button.unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(dock.center()),
+                    egui::Event::PointerButton {
+                        pos: dock.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(!dialog.annotation_host.is_popped_out());
+        assert_eq!(dialog.annotation.epoch, epoch);
+        assert_eq!(dialog.annotation.text, "note");
+        for _ in 0..2 {
+            render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+        }
+        let (reopen, clip, enabled) = dialog.test_annotation_button.unwrap();
+        assert!(enabled && clip.contains_rect(reopen));
+        click_host_position(&ctx, &mut dialog, screen, false, reopen.center(), false);
+        assert!(dialog.annotation_host.is_popped_out());
+        assert_eq!(dialog.annotation.epoch, epoch);
+        assert_eq!(dialog.annotation.text, "note");
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let (add, clip, enabled) = dialog.annotation.test_add.unwrap();
+        assert!(
+            enabled && clip.contains_rect(add),
+            "add={add:?}, clip={clip:?}, enabled={enabled}, owner={:?}, host={:?}, text={:?}",
+            dialog.annotation.test_owner,
+            dialog.annotation_host.identity(),
+            dialog.annotation.text
+        );
+        let (cancel, cancel_clip, cancel_enabled) = dialog.annotation.test_cancel.unwrap();
+        assert!(
+            cancel_enabled && cancel_clip.contains_rect(cancel),
+            "cancel={cancel:?}, clip={cancel_clip:?}, enabled={cancel_enabled}"
+        );
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(add.center()),
+                    egui::Event::PointerButton {
+                        pos: add.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        assert_eq!(recorder.stop().unwrap().notes.len(), 1);
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        recorder.pause().unwrap();
+        dialog.begin_recording_annotation().unwrap();
+        assert!(!dialog.annotation.pause_owned);
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let manual_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(dialog.annotation.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(manual_viewport),
+            );
+        }
+        let (cancel, clip, enabled) = dialog.annotation.test_cancel.unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        for pressed in [true, false] {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                vec![
+                    egui::Event::PointerMoved(cancel.center()),
+                    egui::Event::PointerButton {
+                        pos: cancel.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                Some(manual_viewport),
+            );
+        }
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Paused
+        );
+        recorder.stop().unwrap();
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        dialog.begin_recording_annotation().unwrap();
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let close_viewport = super::super::utility_window_host::UtilityWindowHost::<
+            recording_annotation::AnnotationState,
+        >::test_viewport(dialog.annotation.epoch);
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(close_viewport),
+            );
+        }
+        super::super::render::with_immediate_viewport_test_close_request(close_viewport, || {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(close_viewport),
+            );
+        });
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        dialog.begin_recording_annotation().unwrap();
+        dialog.annotation_host.open_from_origin(
+            &ctx,
+            &dialog.annotation,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let retired_id = recorder.snapshot().recording_id.unwrap();
+        recorder.stop().unwrap();
+        recorder
+            .start(1, crate::mkmacro::NormalizationConfig::default())
+            .unwrap();
+        let new_id = recorder.snapshot().recording_id.unwrap();
+        assert_ne!(retired_id, new_id);
+        crate::mkmacro::runtime::set_recording_annotation_active(new_id, true).unwrap();
+        dialog.complete_annotation_child(&ctx);
+        assert!(!dialog.annotation.open);
+        assert_eq!(
+            recorder.snapshot().state,
+            crate::mkmacro::RecorderRuntimeState::Recording
+        );
+        assert_eq!(
+            crate::mkmacro::runtime::recording_annotation_owner_for_test(),
+            new_id
+        );
+        crate::mkmacro::runtime::set_recording_annotation_active(new_id, false).unwrap();
+        recorder.stop().unwrap();
+        dialog.force_close(&ctx);
+        crate::mkmacro::runtime::replace_recorder_for_test(previous);
+        workers.join_all();
+    }
+
+    #[test]
+    fn stale_native_crop_save_never_writes_asset() {
+        use eframe::egui::{self, vec2};
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let action = crate::mkmacro::MkAction::ImageFind(crate::mkmacro::MkImagePayload {
+            image: crate::mkmacro::MkImageRef::from_filename("source.png"),
+            region: crate::mkmacro::SearchRegion::Desktop,
+            wait: crate::mkmacro::MkWaitOptions::default(),
+            tolerance: 0,
+            alpha: crate::mkmacro::AlphaPolicy::Ignore,
+            return_point: crate::mkmacro::ReturnPoint::TopLeft,
+            not_found_policy: crate::mkmacro::MkImageNotFoundPolicy::Fail,
+            outputs: Default::default(),
+        });
+        dialog.action_editor.begin_new(action);
+        dialog.action_editor.bind_owner(Some(1));
+        let destination = dialog.action_editor.image_crop_destination(1).unwrap();
+        dialog.image_crop_editor.test_seed_loading(destination);
+        let ctx = egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-reference-crop").unwrap(),
+            crate::settings::RememberedPresentation::Popout,
+        );
+        dialog.crop_host.open_from_origin(
+            &ctx,
+            &dialog.image_crop_editor,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
+        let viewport = super::super::utility_window_host::UtilityWindowHost::<
+            image_crop_editor::ImageCropEditorState,
+        >::test_viewport(dialog.image_crop_editor.epoch);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        for _ in 0..2 {
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                Vec::new(),
+                false,
+                Some(viewport),
+            );
+        }
+        let identity = dialog.crop_host.identity();
+        let (status, rect, clip) = dialog.image_crop_editor.test_status.unwrap();
+        assert_eq!(status, "loading");
+        assert!(clip.contains_rect(rect), "loading={rect:?}, clip={clip:?}");
+        dialog.image_crop_editor.test_set_error();
+        render_host_frame_for(&ctx, &mut dialog, screen, false, Vec::new(), false, Some(viewport));
+        let (status, rect, clip) = dialog.image_crop_editor.test_status.unwrap();
+        assert_eq!(status, "error");
+        assert!(clip.contains_rect(rect), "error={rect:?}, clip={clip:?}");
+        assert_eq!(dialog.crop_host.identity(), identity);
+        dialog.image_crop_editor.test_set_ready();
+        for _ in 0..2 {
+            render_host_frame_for(&ctx, &mut dialog, screen, false, Vec::new(), false, Some(viewport));
+        }
+        assert_eq!(dialog.crop_host.identity(), identity);
+        dialog.action_editor.draft_generation =
+            dialog.action_editor.draft_generation.wrapping_add(1);
+        let (save, clip, enabled) = dialog
+            .image_crop_editor
+            .test_save_button()
+            .expect("Crop Save As");
+        assert!(
+            enabled && clip.contains_rect(save),
+            "save={save:?}, clip={clip:?}, enabled={enabled}"
+        );
+        for pressed in [true, false] {
+            let events = vec![
+                egui::Event::PointerMoved(save.center()),
+                egui::Event::PointerButton {
+                    pos: save.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_host_frame_for(
+                &ctx,
+                &mut dialog,
+                screen,
+                false,
+                events,
+                false,
+                Some(viewport),
+            );
+        }
+        assert!(
+            !dialog
+                .store
+                .asset_root()
+                .join("should-not-write.png")
+                .exists()
+        );
+        assert!(
+            dialog
+                .action_editor
+                .capture_message
+                .as_deref()
+                .is_some_and(|message| message.contains("no image was saved"))
+        );
+        assert!(dialog.image_crop_editor.is_open());
+        dialog.force_close(&ctx);
+        workers.join_all();
+    }
+
+    #[test]
+    fn mkmacro_detached_action_editor_finishes_only_on_retained_clicks() {
+        use eframe::egui::{self, vec2};
+
+        let (directory, mut dialog, _runtime, _fake) = real_runtime_dialog();
+        dialog.open = true;
+        dialog.set_selected_macro(Some(1));
+        let ctx = egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        manager.remember(
+            &ctx,
+            crate::settings::UtilityToolKey::parse("mkmacro-action-editor").unwrap(),
+            crate::settings::RememberedPresentation::Popout,
+        );
         ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
@@ -5242,21 +6895,63 @@ mod tests {
 
         let original = dialog.selected_macro().unwrap().steps[0].clone();
         dialog.action_editor.begin_edit_in_macro(Some(1), &original);
+        dialog.editor_host.open_from_origin(
+            &ctx,
+            &dialog.action_editor,
+            false,
+            &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+        );
         dialog.action_editor.draft.as_mut().unwrap().delay_after_ms = 125;
 
         for (apply, discard) in [(true, true), (true, false), (false, true), (false, false)] {
             if !apply && dialog.action_editor.draft.is_none() {
                 let step = dialog.selected_macro().unwrap().steps[0].clone();
                 dialog.action_editor.begin_edit_in_macro(Some(1), &step);
+                dialog.editor_host.open_from_origin(
+                    &ctx,
+                    &dialog.action_editor,
+                    false,
+                    &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+                );
                 dialog.action_editor.draft.as_mut().unwrap().delay_after_ms = 250;
             }
+            let viewport = super::super::utility_window_host::UtilityWindowHost::<
+                action_editor::ActionEditorState,
+            >::test_viewport(dialog.action_editor.host_epoch);
             for _ in 0..3 {
-                render_host_frame(&ctx, &mut dialog, screen, false, Vec::new(), false);
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    Vec::new(),
+                    false,
+                    Some(viewport),
+                );
             }
             let (rect, clip) = action_editor::finish_button_geometry(&dialog.action_editor, apply)
                 .expect("Action Editor footer button was rendered");
             assert!(clip.contains_rect(rect));
-            click_host_position(&ctx, &mut dialog, screen, false, rect.center(), discard);
+            for pressed in [true, false] {
+                let events = vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ];
+                render_host_frame_for(
+                    &ctx,
+                    &mut dialog,
+                    screen,
+                    false,
+                    events,
+                    discard && !pressed,
+                    Some(viewport),
+                );
+            }
             assert_eq!(
                 dialog.action_editor.draft.is_some(),
                 discard,
@@ -5272,6 +6967,8 @@ mod tests {
                 }
             );
         }
+        dialog.force_close(&ctx);
+        workers.join_all();
     }
 
     #[test]
@@ -6472,10 +8169,15 @@ impl MkMacroDialog {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             owner_instance: 0,
             show_root_after_host_change: false,
             pending_host_frame: None,
             retained_host_checkpoint: None,
+            package_hosts: Default::default(),
+            pending_package_open: None,
+            search_host: Default::default(),
+            pending_search_open: None,
             active_host: None,
             native_jump_mode: Default::default(),
             native_jump_frame: None,
@@ -6523,19 +8225,31 @@ impl MkMacroDialog {
             record_hotkey_capture_owner: RecordHotkeyCaptureOwner::None,
             pause_record_hotkey_capture: false,
             marker_record_hotkey_capture: false,
-            action_catalog_visible: false,
-            action_search: String::new(),
+            catalog: Default::default(),
+            catalog_host: Default::default(),
+            pending_catalog_open: None,
+            pending_editor_origin: None,
+            editor_host: Default::default(),
+            window_picker_host: Default::default(),
+            pending_window_picker_open: None,
+            launcher_picker_host: Default::default(),
+            pending_launcher_picker_open: None,
+            crop_host: Default::default(),
+            pending_crop_open: None,
             structural_insertion: None,
             uia_editor: Default::default(),
             window_picker: Default::default(),
             launcher_action_picker: Default::default(),
             command_error: None,
             ui_notices: VecDeque::new(),
-            recording_annotation_open: false,
-            recording_annotation_text: String::new(),
-            recording_annotation_target: None,
-            annotation_pause_owned: false,
+            annotation: Default::default(),
+            annotation_host: Default::default(),
+            pending_annotation_open: None,
             recording_review: None,
+            review_host: Default::default(),
+            pending_review_open: None,
+            review_open_blocked: false,
+            next_review_epoch: 0,
             #[cfg(test)]
             recording_preview_test_facade: None,
             #[cfg(test)]
@@ -6547,7 +8261,13 @@ impl MkMacroDialog {
             #[cfg(test)]
             test_host_button: None,
             #[cfg(test)]
+            test_annotation_button: None,
+            #[cfg(test)]
+            test_review_button: None,
+            #[cfg(test)]
             test_run_button: None,
+            #[cfg(test)]
+            test_add_action: None,
             #[cfg(test)]
             last_first_step_row_geometry: None,
             #[cfg(test)]
@@ -6579,6 +8299,9 @@ impl MkMacroDialog {
         }
     }
     pub fn open(&mut self) {
+        if !self.open {
+            self.presentation_prepared = false;
+        }
         if self.open && self.is_popped_out() {
             self.request_host_focus();
             return;
@@ -6587,6 +8310,15 @@ impl MkMacroDialog {
         self.refresh_environment();
         self.open = true;
         self.publish_recording_target();
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &eframe::egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key =
+                crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
     }
 
     pub(crate) fn is_popped_out(&self) -> bool {
@@ -6609,6 +8341,1060 @@ impl MkMacroDialog {
         (self.open && self.is_popped_out())
             || self.host_state.bootstrap_pending()
             || self.pending_host_frame.is_some()
+            || self.search_host.needs_root_ui_when_hidden(self.navigation.search.mode.is_some())
+            || self.package_hosts.needs_root_ui_when_hidden()
+            || self.catalog_host.needs_root_ui_when_hidden(self.catalog.open)
+            || self.editor_host.needs_root_ui_when_hidden(self.action_editor.draft.is_some())
+            || self.window_picker_host.needs_root_ui_when_hidden(self.window_picker.open)
+            || self.launcher_picker_host.needs_root_ui_when_hidden(self.launcher_action_picker.open)
+            || self.crop_host.needs_root_ui_when_hidden(self.image_crop_editor.is_open())
+            || self.annotation_host.needs_root_ui_when_hidden(self.annotation.open)
+            || self.review_host.needs_root_ui_when_hidden(self.recording_review.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catalog_is_open(&self) -> bool { self.catalog.open }
+    pub(crate) fn ordinary_child_root_layer(&self) -> Option<eframe::egui::LayerId> {
+        self.package_hosts.root_layer().or_else(|| self.search_root_layer())
+            .or_else(|| self.catalog.open.then(|| self.catalog_host.root_layer()).flatten())
+            .or_else(|| self.action_editor.draft.as_ref().and_then(|_| self.editor_host.root_layer()))
+            .or_else(|| self.window_picker.open.then(|| self.window_picker_host.root_layer()).flatten())
+            .or_else(|| self.launcher_action_picker.open.then(|| self.launcher_picker_host.root_layer()).flatten())
+            .or_else(|| self.image_crop_editor.is_open().then(|| self.crop_host.root_layer()).flatten())
+            .or_else(|| (self.annotation.open && self.pending_annotation_open.as_ref().is_none_or(|(_, was_open)| *was_open))
+                .then(|| self.annotation_host.root_layer()).flatten())
+            .or_else(|| (self.pending_review_open.as_ref().is_none_or(|(_, was_open)| *was_open) && !self.review_open_blocked)
+                .then(|| self.recording_review.as_ref().and_then(|_| self.review_host.root_layer())).flatten())
+    }
+
+    pub(crate) fn show_annotation_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if !self.annotation.open {
+            return;
+        }
+        let parent_owner = root_input
+            && self
+                .annotation_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        self.annotation_host.show(
+            ctx,
+            &mut self.annotation,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    pub(crate) fn show_review_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if self.pending_review_open.is_some() || self.review_open_blocked {
+            return;
+        }
+        let Some(ticket) = self
+            .recording_review
+            .as_ref()
+            .map(|review| review.preview_ticket)
+        else {
+            return;
+        };
+        let (preview_active, preview_snapshot) = ticket.map_or((false, None), |ticket| {
+            self.recording_preview_status(ticket)
+        });
+        if let Some(review) = self.recording_review.as_mut() {
+            if let Some(snapshot) = preview_snapshot.as_deref() {
+                review.observe_preview(snapshot);
+            } else if ticket.is_some() && !preview_active {
+                review.preview_state = Some(crate::mkmacro::RuntimeState::Stopped);
+            }
+        }
+        let apply_blocker = self.recording_review_apply_blocker();
+        let runtime = recording_review::ReviewRuntime {
+            review_editor_open: self.action_editor.review_editing_id().is_some(),
+            macros: if apply_blocker
+                .as_deref()
+                .is_some_and(|b| b.contains("target macro"))
+            {
+                self.draft
+                    .macros
+                    .iter()
+                    .map(|m| (m.id, m.name.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            apply_blocker,
+            preview_active,
+            playback_active: self
+                .recording_preview_runtime_snapshot()
+                .as_deref()
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.state,
+                        crate::mkmacro::RuntimeState::Running
+                            | crate::mkmacro::RuntimeState::Paused
+                            | crate::mkmacro::RuntimeState::Stopping
+                    )
+                }),
+        };
+        let parent_owner = root_input
+            && self
+                .review_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        if let Some(review) = self.recording_review.as_mut() {
+            self.review_host.show(
+                ctx,
+                review,
+                &runtime,
+                HostInput {
+                    first,
+                    root_visible,
+                    root_input,
+                    native_input,
+                    root_owner: NavigationOwner::Blocked,
+                    parent_owner,
+                    root_jump_active,
+                    close_shortcut: !runtime.review_editor_open,
+                    allow_os_close: !runtime.review_editor_open,
+                    confirmation_owner: NavigationOwner::Blocked,
+                    parent_instance: 0,
+                    root_scopes: (None, None),
+                },
+            );
+        }
+    }
+
+    pub(crate) fn complete_review_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        use recording_review::ReviewIntent;
+        let completion = self
+            .recording_review
+            .as_mut()
+            .and_then(|review| self.review_host.complete(ctx, review));
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    ReviewIntent::Edit(id) => {
+                        if self.action_editor.draft.is_none()
+                            && let (Some(review), Some(origin)) =
+                                (self.recording_review.as_ref(), completion.origin.clone())
+                            && self.review_host.accepts_origin(review, &origin)
+                            && let Some(step) = review.step_for_editor(id)
+                        {
+                            self.action_editor.begin_review_edit(
+                                review.effective_target().macro_id,
+                                id,
+                                &step,
+                            );
+                            self.action_editor.bind_review_epoch(review.epoch);
+                            self.pending_editor_origin =
+                                Some((EditorOpenOrigin::Review(origin), false));
+                        }
+                    }
+                    ReviewIntent::AppendRecovery => {
+                        if let Some(review) = &mut self.recording_review {
+                            review.recover_append_to_original_macro();
+                        }
+                    }
+                    ReviewIntent::Retarget(id) => {
+                        if self.draft.macros.iter().any(|item| item.id == id)
+                            && let Some(review) = &mut self.recording_review
+                        {
+                            review.retarget_append(id);
+                        }
+                    }
+                    ReviewIntent::StopPreview => self.stop_owned_recording_preview(),
+                    ReviewIntent::Preview(selected) => {
+                        if let Err(error) = self.preview_recording_review(selected)
+                            && let Some(review) = &mut self.recording_review
+                        {
+                            review.message = Some(error.to_string());
+                        }
+                    }
+                    ReviewIntent::Apply => {
+                        if let Err(error) = self.apply_recording_review() {
+                            if let Some(review) = &mut self.recording_review {
+                                review.message = Some(error);
+                            }
+                        } else {
+                            self.review_host.close_from_app(ctx);
+                            if self.recording_review.is_some() {
+                                self.pending_review_open = Some((None, false));
+                            }
+                        }
+                    }
+                    ReviewIntent::Cancel | ReviewIntent::Retired => {
+                        if self.action_editor.review_editing_id().is_none() {
+                            if !matches!(command, ReviewIntent::Retired) {
+                                self.review_host.close_from_app(ctx);
+                            }
+                            self.cancel_recording_review();
+                            if self.recording_review.is_some() {
+                                self.pending_review_open = Some((None, false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((origin, was_open)) = self.pending_review_open.take()
+            && let Some(review) = self.recording_review.as_ref()
+        {
+            let presentation = match origin {
+                Some(origin)
+                    if self.open
+                        && origin.is_current(self.host_state.identity(), &self.owner_instance) =>
+                {
+                    self.review_host.open_from_origin(
+                        ctx,
+                        review,
+                        was_open,
+                        &ChildOpenOrigin::Parent(origin),
+                    )
+                }
+                Some(_) => {
+                    if !was_open { self.review_open_blocked = true; }
+                    None
+                }
+                None if self.open => self.review_host.open_from_origin(
+                    ctx,
+                    review,
+                    was_open,
+                    &ChildOpenOrigin::<()>::Root,
+                ),
+                None => {
+                    self.review_open_blocked = true;
+                    None
+                }
+            };
+            show_root |= presentation == Some(UtilityPresentation::Docked);
+        }
+        show_root && self.recording_review.is_some() && !self.review_host.is_popped_out()
+    }
+
+    pub(crate) fn complete_annotation_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        use recording_annotation::AnnotationCommand;
+        let completion = self.annotation_host.complete(ctx, &mut self.annotation);
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                let commit = matches!(command, AnnotationCommand::Add);
+                if !matches!(command, AnnotationCommand::Retired) {
+                    self.annotation_host.close_from_app(ctx);
+                }
+                if let Err(error) = self.finish_recording_annotation(commit) {
+                    self.command_error = Some(error.to_string());
+                }
+            }
+        }
+        if self.annotation.open
+            && !crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
+                snapshot.recording_id == self.annotation.recording_id
+                    && matches!(
+                        snapshot.state,
+                        crate::mkmacro::RecorderRuntimeState::Recording
+                            | crate::mkmacro::RecorderRuntimeState::Paused
+                    )
+            })
+        {
+            self.annotation_host.close_from_app(ctx);
+            let _ = self.finish_recording_annotation(false);
+        }
+        if let Some((origin, was_open)) = self.pending_annotation_open.take() {
+            if self.open
+                && origin.is_current(self.host_state.identity(), &self.owner_instance)
+                && self.annotation.open
+            {
+                show_root |= self.annotation_host.open_from_origin(
+                    ctx,
+                    &self.annotation,
+                    was_open,
+                    &ChildOpenOrigin::Parent(origin),
+                ) == Some(UtilityPresentation::Docked);
+            } else if !was_open && self.annotation.open {
+                let _ = self.finish_recording_annotation(false);
+            }
+        }
+        show_root && self.annotation.open && !self.annotation_host.is_popped_out()
+    }
+
+    fn retire_review_and_annotation(&mut self, ctx: &eframe::egui::Context) {
+        if self.annotation.open {
+            if self
+                .pending_annotation_open
+                .as_ref()
+                .is_none_or(|(_, was_open)| *was_open)
+            {
+                self.annotation_host.close_from_app(ctx);
+            }
+            let _ = self.finish_recording_annotation(false);
+        }
+        self.pending_annotation_open = None;
+        if self.recording_review.is_some()
+            && self.pending_review_open.as_ref().is_none_or(|(_, was_open)| *was_open)
+            && !self.review_open_blocked
+        {
+            self.review_host.close_from_app(ctx);
+        }
+        self.pending_review_open = None;
+        self.review_open_blocked = false;
+    }
+
+    pub(crate) fn show_window_picker_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if !self.window_picker.open {
+            return;
+        }
+        let parent_owner = root_input
+            && self
+                .window_picker_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        self.window_picker_host.show(
+            ctx,
+            &mut self.window_picker,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    pub(crate) fn complete_window_picker_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let completion = self
+            .window_picker_host
+            .complete(ctx, &mut self.window_picker);
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    window_picker::WindowPickerIntent::Refresh => self.window_picker.refresh(),
+                    window_picker::WindowPickerIntent::Retired => {
+                        self.window_picker.cancel("Window picking cancelled")
+                    }
+                    window_picker::WindowPickerIntent::Close => {
+                        self.window_picker_host.close_from_app(ctx);
+                        self.window_picker.cancel("Window picking cancelled");
+                    }
+                    window_picker::WindowPickerIntent::Confirm => {
+                        if let Some((request, matcher)) = self.window_picker.take_confirmation() {
+                            self.window_picker_host.close_from_app(ctx);
+                            if !self.apply_window_picker_confirmation(&request, matcher) {
+                                self.command_error = Some(
+                                    "The matcher target no longer exists; no changes were made"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if self.window_picker.open {
+            window_picker::prepare(&mut self.window_picker, ctx);
+            if !self.window_picker.open { self.window_picker_host.close_from_app(ctx); }
+        }
+        if let Some((request, origin)) = self.pending_window_picker_open.take() {
+            let current = self.open
+                && !self.close_prompt_open
+                && self.window_picker_request_is_current(&request)
+                && match &origin {
+                    PickerOpenOrigin::Main(origin) => {
+                        origin.is_current(self.host_state.identity(), &self.owner_instance)
+                    }
+                    PickerOpenOrigin::Editor(origin) => {
+                        self.editor_host.accepts_origin(&self.action_editor, origin)
+                    }
+                };
+            if current {
+                let was_open = self.window_picker.open;
+                if !was_open {
+                    self.window_picker.open(request.clone());
+                }
+                if self.window_picker.request.as_ref() == Some(&request) {
+                    let origin = match origin {
+                        PickerOpenOrigin::Main(origin) | PickerOpenOrigin::Editor(origin) => {
+                            ChildOpenOrigin::Parent(origin)
+                        }
+                    };
+                    show_root |= self.window_picker_host.open_from_origin(
+                        ctx,
+                        &self.window_picker,
+                        was_open,
+                        &origin,
+                    ) == Some(UtilityPresentation::Docked);
+                } else {
+                    self.window_picker.message =
+                        Some("Finish the current window selection first.".into());
+                }
+            }
+        }
+        show_root && self.window_picker.open && !self.window_picker_host.is_popped_out()
+    }
+
+    pub(crate) fn show_launcher_picker_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if !self.launcher_action_picker.open {
+            return;
+        }
+        let parent_owner = root_input
+            && self
+                .launcher_picker_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        self.launcher_picker_host.show(
+            ctx,
+            &mut self.launcher_action_picker,
+            &self.authoring_context.launcher_actions,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    pub(crate) fn complete_launcher_picker_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let completion = self
+            .launcher_picker_host
+            .complete(ctx, &mut self.launcher_action_picker);
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    launcher_action_picker::LauncherPickerIntent::Retired => {
+                        self.launcher_action_picker.cancel()
+                    }
+                    launcher_action_picker::LauncherPickerIntent::Close => {
+                        self.launcher_picker_host.close_from_app(ctx);
+                        self.launcher_action_picker.cancel();
+                    }
+                    launcher_action_picker::LauncherPickerIntent::Choose { action, convert } => {
+                        let applied =
+                            self.launcher_action_picker
+                                .request
+                                .as_ref()
+                                .is_some_and(|request| {
+                                    self.authoring_context.launcher_actions.contains(&action)
+                                        && self.action_editor.apply_launcher_picker_action(
+                                            request,
+                                            &action,
+                                            self.selected_macro_id,
+                                            convert,
+                                        )
+                                });
+                        if applied {
+                            self.launcher_picker_host.close_from_app(ctx);
+                            self.launcher_action_picker.cancel();
+                        } else {
+                            self.launcher_action_picker.error =
+                                Some("The action or editor changed; choose again.".into());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((request, origin)) = self.pending_launcher_picker_open.take()
+            && self.open
+            && !self.close_prompt_open
+            && self
+                .editor_host
+                .accepts_origin(&self.action_editor, &origin)
+            && self
+                .action_editor
+                .launcher_request_is_current(&request, self.selected_macro_id)
+        {
+            let was_open = self.launcher_action_picker.open;
+            if !was_open {
+                self.launcher_action_picker.open(request.clone());
+            }
+            if self.launcher_action_picker.request.as_ref() == Some(&request) {
+                show_root |= self.launcher_picker_host.open_from_origin(
+                    ctx,
+                    &self.launcher_action_picker,
+                    was_open,
+                    &ChildOpenOrigin::Parent(origin),
+                ) == Some(UtilityPresentation::Docked);
+            } else {
+                self.launcher_action_picker.error =
+                    Some("Finish the current launcher selection first.".into());
+            }
+        }
+        show_root && self.launcher_action_picker.open && !self.launcher_picker_host.is_popped_out()
+    }
+
+    pub(crate) fn show_crop_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::{HostInput, HostedUtilityDialog};
+        if !self.image_crop_editor.is_open() {
+            return;
+        }
+        self.image_crop_editor.poll_load(ctx);
+        let parent_owner = root_input
+            && self
+                .crop_host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        let confirmation_owner = self
+            .image_crop_editor
+            .confirmation_binding(eframe::egui::ViewportId::ROOT, self.image_crop_editor.epoch)
+            .filter(|binding| {
+                root_input
+                    && binding.base_is_current(ctx)
+                    && binding.focus_is_owned(ctx, None)
+                    && !eframe::egui::Popup::is_any_open(ctx)
+            })
+            .map_or(NavigationOwner::Blocked, |binding| binding.owner);
+        self.crop_host.show(
+            ctx,
+            &mut self.image_crop_editor,
+            &(),
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    pub(crate) fn complete_crop_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let completion = self.crop_host.complete(ctx, &mut self.image_crop_editor);
+        let mut show_root = false;
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                let retired = matches!(command, image_crop_editor::CropUiAction::Retired);
+                let cancel = retired || matches!(command, image_crop_editor::CropUiAction::Cancel);
+                if !cancel
+                    && (!self.open
+                        || self.close_prompt_open
+                        || !self.action_editor.crop_destination_is_current(
+                            self.image_crop_editor.destination(),
+                            self.selected_macro_id,
+                        ))
+                {
+                    self.action_editor.capture_message =
+                        Some("The crop target changed; no image was saved.".into());
+                    continue;
+                }
+                let mut crop = std::mem::take(&mut self.image_crop_editor);
+                image_crop_editor::apply_action(ctx, self, &mut crop, command);
+                self.image_crop_editor = crop;
+                if !self.image_crop_editor.is_open() && !retired {
+                    self.crop_host.close_from_app(ctx);
+                }
+            }
+        }
+        if let Some((destination, origin)) = self.pending_crop_open.take()
+            && self.open
+            && !self.close_prompt_open
+            && self
+                .editor_host
+                .accepts_origin(&self.action_editor, &origin)
+            && self
+                .action_editor
+                .crop_destination_is_current(&destination, self.selected_macro_id)
+        {
+            let was_open = self.image_crop_editor.is_open();
+            if !was_open
+                && let Err(error) = self
+                    .image_crop_editor
+                    .open(self.store.clone(), destination.clone())
+            {
+                self.action_editor.capture_message = Some(error.into());
+            }
+            if self.image_crop_editor.is_open()
+                && self.image_crop_editor.destination() == &destination
+            {
+                show_root |= self.crop_host.open_from_origin(
+                    ctx,
+                    &self.image_crop_editor,
+                    was_open,
+                    &ChildOpenOrigin::Parent(origin),
+                ) == Some(UtilityPresentation::Docked);
+            }
+        }
+        show_root && self.image_crop_editor.is_open() && !self.crop_host.is_popped_out()
+    }
+
+    pub(crate) fn show_catalog_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        let mut host = std::mem::take(&mut self.catalog_host);
+        let mut catalog = std::mem::take(&mut self.catalog);
+        let parent_owner = root_input
+            && host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        host.show(
+            ctx,
+            &mut catalog,
+            self,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        self.catalog = catalog;
+        self.catalog_host = host;
+    }
+
+    pub(crate) fn complete_catalog_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let mut host = std::mem::take(&mut self.catalog_host);
+        let mut catalog = std::mem::take(&mut self.catalog);
+        let mut show_root = false;
+        if let Some(completion) = host.complete(ctx, &mut catalog) {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    action_catalog::CatalogCommand::Retired => catalog.open = false,
+                    action_catalog::CatalogCommand::Close => {
+                        host.close_from_app(ctx);
+                        catalog.open = false;
+                    }
+                    action_catalog::CatalogCommand::Select(name) => {
+                        let current = self.open
+                            && !self.close_prompt_open
+                            && catalog.owner == self.owner_instance
+                            && catalog.revision == self.draft_revision
+                            && catalog.macro_id == self.selected_macro_id;
+                        if !current {
+                            catalog.error =
+                                Some("The macro or draft changed. Reopen Add Action.".into());
+                            continue;
+                        }
+                        let Some(origin) = completion.origin.clone() else {
+                            continue;
+                        };
+                        let Some(descriptor) = action_catalog::descriptors()
+                            .into_iter()
+                            .find(|entry| entry.name == name)
+                        else {
+                            continue;
+                        };
+                        if action_catalog::select_descriptor(self, &descriptor) {
+                            if self.action_editor.draft.is_some() {
+                                self.pending_editor_origin =
+                                    Some((EditorOpenOrigin::Catalog(origin), false));
+                            } else {
+                                catalog.revision = self.draft_revision;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.catalog = catalog;
+        if let Some((revision, macro_id, origin)) = self.pending_catalog_open.take()
+            && self.open
+            && !self.close_prompt_open
+            && revision == self.draft_revision
+            && macro_id == self.selected_macro_id
+            && origin.is_current(self.host_state.identity(), &self.owner_instance)
+        {
+            let was_open = self.catalog.open;
+            if !was_open {
+                self.catalog.epoch = self.catalog.epoch.wrapping_add(1).max(1);
+                self.catalog.open = true;
+                self.catalog.owner = self.owner_instance;
+                self.catalog.revision = self.draft_revision;
+                self.catalog.macro_id = self.selected_macro_id;
+                self.catalog.error = None;
+            }
+            show_root |= host.open_from_origin(
+                ctx,
+                &self.catalog,
+                was_open,
+                &ChildOpenOrigin::Parent(origin),
+            ) == Some(UtilityPresentation::Docked);
+        }
+        show_root &= self.catalog.open && !host.is_popped_out();
+        self.catalog_host = host;
+        show_root
+    }
+
+    pub(crate) fn show_editor_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        if self.action_editor.draft.is_none() {
+            return;
+        }
+        action_editor::prepare_editor(ctx, self);
+        let mut host = std::mem::take(&mut self.editor_host);
+        let mut editor = self.take_action_editor();
+        let parent_owner = root_input
+            && host
+                .root_layer()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        let confirmation_owner = <action_editor::ActionEditorState as super::utility_window_host::HostedUtilityDialog>::confirmation_binding(&editor, eframe::egui::ViewportId::ROOT, editor.host_epoch)
+            .filter(|binding| root_input && binding.base_is_current(ctx) && binding.focus_is_owned(ctx, None) && !eframe::egui::Popup::is_any_open(ctx))
+            .map_or(NavigationOwner::Blocked, |binding| binding.owner);
+        host.show(
+            ctx,
+            &mut editor,
+            self,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner,
+                root_jump_active,
+                close_shortcut: true,
+                allow_os_close: true,
+                confirmation_owner,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+        self.action_editor = editor;
+        self.editor_host = host;
+    }
+
+    pub(crate) fn complete_editor_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let mut host = std::mem::take(&mut self.editor_host);
+        let mut editor = self.take_action_editor();
+        let completion = host.complete(ctx, &mut editor);
+        self.action_editor = editor;
+        self.editor_host = host;
+        if self.action_editor.review_epoch().is_some_and(|epoch| self.recording_review.as_ref().is_none_or(|review| review.epoch != epoch)) {
+            self.editor_host.close_from_app(ctx);
+            self.action_editor.cancel();
+            return false;
+        }
+        let window_was_open = self.window_picker.open;
+        let launcher_was_open = self.launcher_action_picker.open;
+        let crop_was_open = self.image_crop_editor.is_open();
+        let mut show_root = false;
+        let mut retired = false;
+        let had_completion = completion.is_some();
+        if let Some(completion) = completion {
+            show_root = completion.show_root;
+            for command in completion.commands {
+                match command {
+                    action_editor::EditorCommand::Retired => {
+                        retired = true;
+                        action_editor::complete_finish(
+                            self,
+                            action_editor::ActionEditorFinish::Cancel,
+                        );
+                    }
+                    action_editor::EditorCommand::Effects {
+                        effects,
+                        hwnd,
+                        epoch,
+                        generation,
+                        owner,
+                        owner_instance,
+                    } => {
+                        if self.open
+                            && !self.close_prompt_open
+                            && self.owner_instance == owner_instance
+                            && self.action_editor.host_epoch == epoch
+                            && self.action_editor.draft_generation == generation
+                            && self.action_editor.owner_macro_id() == Some(owner)
+                            && self.action_editor.review_epoch().is_none_or(|epoch| self.recording_review.as_ref().is_some_and(|review| review.epoch == epoch))
+                            && let Some(origin) = completion.origin.clone()
+                        {
+                            let before_revision = self.draft_revision;
+                            action_editor::complete_editor_actions(
+                                ctx,
+                                self,
+                                effects,
+                                hwnd,
+                                Some(origin),
+                            );
+                            if self.catalog.open
+                                && self.catalog.owner == self.owner_instance
+                                && self.catalog.macro_id == self.selected_macro_id
+                                && self.catalog.revision == before_revision
+                            {
+                                self.catalog.revision = self.draft_revision;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if window_was_open && !self.window_picker.open {
+            self.window_picker_host.close_from_app(ctx);
+        }
+        if launcher_was_open && !self.launcher_action_picker.open {
+            self.launcher_picker_host.close_from_app(ctx);
+        }
+        if crop_was_open && !self.image_crop_editor.is_open() {
+            self.crop_host.close_from_app(ctx);
+        }
+        let mut host = std::mem::take(&mut self.editor_host);
+        if had_completion && !retired && self.action_editor.draft.is_none() {
+            host.close_from_app(ctx);
+        }
+        if let Some((origin, was_open)) = self.pending_editor_origin.take() {
+            let current = self.open
+                && !self.close_prompt_open
+                && self.action_editor.draft.is_some()
+                && match &origin {
+                    EditorOpenOrigin::Main(origin) => {
+                        origin.is_current(self.host_state.identity(), &self.owner_instance)
+                    }
+                    EditorOpenOrigin::Catalog(origin) => {
+                        self.catalog_host.accepts_origin(&self.catalog, origin)
+                    }
+                    EditorOpenOrigin::Review(origin) => self.recording_review.as_ref().is_some_and(|review| self.review_host.accepts_origin(review, origin)),
+                };
+            if current {
+                show_root |= match origin {
+                    EditorOpenOrigin::Main(origin) | EditorOpenOrigin::Catalog(origin) => host.open_from_origin(ctx, &self.action_editor, was_open, &ChildOpenOrigin::Parent(origin)),
+                    EditorOpenOrigin::Review(origin) => host.open_from_origin(ctx, &self.action_editor, was_open, &ChildOpenOrigin::Parent(origin)),
+                } == Some(UtilityPresentation::Docked);
+            } else if !was_open {
+                self.action_editor.cancel();
+            }
+        }
+        show_root &= self.action_editor.draft.is_some() && !host.is_popped_out();
+        self.editor_host = host;
+        show_root
+    }
+
+    pub(crate) fn show_package_children(&mut self, ctx: &eframe::egui::Context, first: bool, root_visible: bool, root_input: bool, native_input: bool, root_jump_active: bool) {
+        let mut hosts = std::mem::take(&mut self.package_hosts);
+        hosts.show(ctx, self, first, root_visible, root_input, native_input, root_jump_active);
+        self.package_hosts = hosts;
+    }
+
+    pub(crate) fn complete_package_children(&mut self, ctx: &eframe::egui::Context) -> bool {
+        let mut hosts = std::mem::take(&mut self.package_hosts);
+        let mut show_root = hosts.complete(ctx, self);
+        if let Some((request, revision, macro_id, origin)) = self.pending_package_open.take()
+            && self.open && !self.close_prompt_open
+            && revision == self.draft_revision && macro_id == self.selected_macro_id
+            && origin.is_current(self.host_state.identity(), &self.owner_instance)
+        {
+            show_root |= hosts.open(ctx, self, request, origin);
+        }
+        show_root &= hosts.has_root_layer();
+        self.package_hosts = hosts;
+        show_root
+    }
+
+    pub(crate) fn search_root_layer(&self) -> Option<eframe::egui::LayerId> {
+        self.navigation.search.mode.and_then(|_| self.search_host.root_layer())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_search(&mut self, ctx: &eframe::egui::Context) {
+        search::open_accepted(self, search::SearchMode::Find);
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-step-search").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.search_host.open_from_origin(ctx, &self.navigation.search, false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_review(&mut self, ctx: &eframe::egui::Context) {
+        let result = crate::mkmacro::RecordingResult {
+            target: crate::mkmacro::RecordingTarget { macro_id: 1, insertion_anchor_step_id: None, insertion_anchor_generation: None },
+            literal_steps: Vec::new(), plan: crate::mkmacro::RecordingPlan { steps: Vec::new() },
+            suggestions: Vec::new(), clipboard_observations: Vec::new(), click_inspections: Vec::new(),
+            window_observations: Vec::new(), notes: Vec::new(), capture_duration: std::time::Duration::ZERO,
+            raw_event_count: 0, dropped_event_count: 0,
+        };
+        self.open_recording_review(result).unwrap();
+        self.pending_review_open = None;
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-recording-review").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.review_host.open_from_origin(ctx, self.recording_review.as_ref().unwrap(), false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_native_editor(&mut self, ctx: &eframe::egui::Context) {
+        self.action_editor.begin_new(crate::mkmacro::MkAction::Delay(Default::default()));
+        let manager = super::utility_presentation::UtilityPresentationManager::for_context(ctx).unwrap();
+        manager.remember(ctx, crate::settings::UtilityToolKey::parse("mkmacro-action-editor").unwrap(), crate::settings::RememberedPresentation::Popout);
+        self.editor_host.open_from_origin(ctx, &self.action_editor, false, &super::utility_host::ChildOpenOrigin::<()>::Root);
+    }
+
+    pub(crate) fn show_search_child(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_input: bool,
+        native_input: bool,
+        root_jump_active: bool,
+    ) {
+        use super::jump_mode::ui::{NavigationOwner, visible_top_middle_layer};
+        use super::utility_window_host::HostInput;
+        let mut host = std::mem::take(&mut self.search_host);
+        let mut state = std::mem::take(&mut self.navigation.search);
+        let parent_owner = root_input && host.root_layer().is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && !eframe::egui::Popup::is_any_open(ctx);
+        host.show(ctx, &mut state, self, HostInput {
+            first, root_visible, root_input, native_input,
+            root_owner: NavigationOwner::Blocked, parent_owner, root_jump_active,
+            close_shortcut: true, allow_os_close: true,
+            confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+        });
+        self.navigation.search = state;
+        self.search_host = host;
+    }
+
+    pub(crate) fn complete_search_child(&mut self, ctx: &eframe::egui::Context) -> bool {
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+        let mut host = std::mem::take(&mut self.search_host);
+        let mut state = std::mem::take(&mut self.navigation.search);
+        let mut show_root = false;
+        if let Some(completion) = host.complete(ctx, &mut state) {
+            show_root = completion.show_root;
+            for actions in completion.commands {
+                let (closed, retired) = search::apply_host_actions(self, &mut state, actions);
+                if closed && !retired { host.close_from_app(ctx); }
+            }
+        }
+        self.navigation.search = state;
+        if let Some((mode, revision, macro_id, origin)) = self.pending_search_open.take()
+            && self.open && !self.close_prompt_open
+            && self.draft_revision == revision && self.selected_macro_id == macro_id
+            && origin.is_current(self.host_state.identity(), &self.owner_instance)
+        {
+            let was_open = self.navigation.search.mode.is_some();
+            if self.navigation.search.mode != Some(mode) { search::open_accepted(self, mode); }
+            let desired = host.open_from_origin(ctx, &self.navigation.search, was_open, &ChildOpenOrigin::Parent(origin));
+            show_root |= desired == Some(UtilityPresentation::Docked);
+        }
+        show_root &= self.navigation.search.mode.is_some() && !host.is_popped_out();
+        self.search_host = host;
+        show_root
     }
 
     pub(crate) fn owns_root_input(&self, ctx: &eframe::egui::Context) -> bool {
@@ -6649,6 +9435,42 @@ impl MkMacroDialog {
     }
 
     pub(crate) fn force_close(&mut self, ctx: &eframe::egui::Context) {
+        self.retire_review_and_annotation(ctx);
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+        }
+        if self.navigation.search.mode.is_some() { self.search_host.close_from_app(ctx); }
+        self.package_hosts.close_all(ctx);
+        if self.catalog.open {
+            self.catalog_host.close_from_app(ctx);
+            self.catalog.open = false;
+        }
+        if self.action_editor.draft.is_some()
+            && self.pending_editor_origin.as_ref().is_none_or(|(_, was_open)| *was_open)
+        {
+            self.editor_host.close_from_app(ctx);
+        }
+        if self.window_picker.open {
+            self.window_picker_host.close_from_app(ctx);
+            self.window_picker.cancel("Window picking cancelled");
+        }
+        if self.launcher_action_picker.open {
+            self.launcher_picker_host.close_from_app(ctx);
+            self.launcher_action_picker.cancel();
+        }
+        if self.image_crop_editor.is_open() {
+            self.crop_host.close_from_app(ctx);
+            self.image_crop_editor.cancel();
+        }
+        self.pending_crop_open = None;
+        self.pending_launcher_picker_open = None;
+        self.pending_window_picker_open = None;
+        self.pending_catalog_open = None;
+        self.pending_editor_origin = None;
+        self.pending_search_open = None;
+        self.pending_package_open = None;
+        self.presentation_prepared = false;
         let identity = mkmacro_native_identity(self.host_state.identity(), self.owner_instance);
         self.defer_host_effects = false;
         self.open = false;
@@ -6685,6 +9507,7 @@ impl MkMacroDialog {
         owner_instance: u64,
         jump_mode_enabled: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use eframe::egui;
 
         self.owner_instance = owner_instance;
@@ -7146,8 +9969,71 @@ impl MkMacroDialog {
 
         let mut closed = !self.open;
         if self.open && !is_closing {
+            let child_origin = frame.owner_pass.and_then(|owner| {
+                super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, frame.host, frame.owner_instance, frame.root_pass, owner,
+                )
+            });
+            if self.pending_review_open.as_ref().is_some_and(|(origin, _)| origin.is_none())
+                && let Some(origin) = child_origin.as_ref()
+            {
+                self.pending_review_open = Some((Some(origin.clone()), false));
+            }
             for action in frame.effects.actions.drain(..) {
                 if !self.host_action_is_current(&action, frame.host, frame.owner_instance) {
+                    continue;
+                }
+                if matches!(action.action, MkMacroHostActionKind::AnnotationBegin { .. }) {
+                    if let Some(origin) = child_origin.as_ref() {
+                        let was_open = self.annotation.open;
+                        let result = if was_open { Ok(()) } else { self.begin_recording_annotation() };
+                        match result {
+                            Ok(()) => self.pending_annotation_open = Some((origin.clone(), was_open)),
+                            Err(error) => self.command_error = Some(error.to_string()),
+                        }
+                    }
+                    continue;
+                }
+                if let MkMacroHostActionKind::Package(package_ui::PackageHostAction::Open(open)) = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_package_open = Some((open.clone(), action.draft_revision, action.macro_id, origin.clone()));
+                    }
+                    continue;
+                }
+                if let MkMacroHostActionKind::OpenSearch(mode) = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_search_open = Some((*mode, action.draft_revision, action.macro_id, origin.clone()));
+                    }
+                    continue;
+                }
+                if matches!(action.action, MkMacroHostActionKind::OpenCatalog) {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_catalog_open = Some((action.draft_revision, action.macro_id, origin.clone()));
+                    }
+                    continue;
+                }
+                if matches!(action.action, MkMacroHostActionKind::OpenReview { .. }) {
+                    if let Some(origin) = child_origin.as_ref() {
+                        let was_open = !self.review_open_blocked && self.pending_review_open.is_none();
+                        self.review_open_blocked = false;
+                        self.pending_review_open = Some((Some(origin.clone()), was_open));
+                    }
+                    continue;
+                }
+                if let MkMacroHostActionKind::EditStep { step, .. } = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        let was_open = self.action_editor.draft.is_some();
+                        if !was_open {
+                            self.action_editor.begin_edit_in_macro(action.macro_id, step);
+                        }
+                        self.pending_editor_origin = Some((EditorOpenOrigin::Main(origin.clone()), was_open));
+                    }
+                    continue;
+                }
+                if let MkMacroHostActionKind::OpenWindowPicker(request) = &action.action {
+                    if let Some(origin) = child_origin.as_ref() {
+                        self.pending_window_picker_open = Some((request.clone(), PickerOpenOrigin::Main(origin.clone())));
+                    }
                     continue;
                 }
                 if self.complete_host_action(ctx, action) {
@@ -7172,6 +10058,8 @@ impl MkMacroDialog {
                     );
                 }
                 if self.host_state.transition(requested) {
+                    let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+                    super::utility_host::remember_presentation(ctx, key, requested);
                     self.native_jump_mode.cancel_all();
                     self.native_jump_frame = None;
                     if requested == UtilityPresentation::Docked {
@@ -7430,6 +10318,28 @@ impl MkMacroDialog {
         self.stage_host_action(action);
     }
 
+    pub(super) fn open_action_editor_from_main(&mut self, step: crate::mkmacro::MkStep) {
+        if self.action_editor.draft.is_some()
+            && !self.action_editor.edits_source(self.selected_macro_id, &step)
+        {
+            return;
+        }
+        if self.defer_host_effects {
+            let generation = self.selected_macro_id.and_then(|id| self.step_instance_generations.get(&(id, step.id)).copied());
+            self.stage_host_action(MkMacroHostActionKind::EditStep { step, generation });
+        } else {
+            self.action_editor.begin_edit_in_macro(self.selected_macro_id, &step);
+        }
+    }
+
+    pub(super) fn open_window_picker_from_main(&mut self, request: window_picker::MatcherEditRequest) {
+        if self.defer_host_effects {
+            self.stage_host_action(MkMacroHostActionKind::OpenWindowPicker(request));
+        } else {
+            self.window_picker.open(request);
+        }
+    }
+
     pub(super) fn stage_host_playback_action(&mut self, command: PlaybackCommand) {
         let Some(snapshot) = self.host_runtime_snapshot() else {
             return;
@@ -7466,48 +10376,16 @@ impl MkMacroDialog {
         });
     }
 
-    pub(super) fn stage_host_review_action(
-        &mut self,
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    ) {
-        self.pending_host_effects.push(MkMacroHostAction {
-            host: self.host_state.identity(),
-            draft_revision: self.draft_revision,
-            macro_id: Some(target.macro_id),
-            step_ids: Vec::new(),
-            action: MkMacroHostActionKind::Review {
-                command,
-                target,
-                selected_range,
-            },
-        });
-    }
-
     pub(super) fn stage_host_annotation_begin(
         &mut self,
         expected_state: crate::mkmacro::RecorderRuntimeState,
         macro_id: Option<u64>,
+        recording_id: Option<u64>,
     ) {
         self.stage_host_action(MkMacroHostActionKind::AnnotationBegin {
             macro_id,
+            recording_id,
             expected_state,
-        });
-    }
-
-    pub(super) fn stage_host_annotation_finish(
-        &mut self,
-        commit: bool,
-        text: String,
-        expected_state: crate::mkmacro::RecorderRuntimeState,
-        macro_id: Option<u64>,
-    ) {
-        self.stage_host_action(MkMacroHostActionKind::AnnotationFinish {
-            macro_id,
-            expected_state,
-            commit,
-            text,
         });
     }
 
@@ -7558,42 +10436,28 @@ impl MkMacroDialog {
                     })
                 }
             }
-            MkMacroHostActionKind::Review { target, .. } => self
-                .recording_review
-                .as_ref()
-                .is_some_and(|review| review.effective_target() == *target),
             MkMacroHostActionKind::AnnotationBegin {
                 macro_id,
+                recording_id,
                 expected_state,
             } => crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
                 snapshot.state == *expected_state
                     && snapshot.macro_id == *macro_id
                     && macro_id.is_some()
+                    && snapshot.recording_id == *recording_id
+                    && recording_id.is_some()
             }),
-            MkMacroHostActionKind::AnnotationFinish {
-                macro_id,
-                expected_state,
-                ..
-            } => {
-                if matches!(
-                    *expected_state,
-                    crate::mkmacro::RecorderRuntimeState::Idle
-                        | crate::mkmacro::RecorderRuntimeState::Stopping
-                ) {
-                    self.recording_annotation_open && self.recording_annotation_target == *macro_id
-                } else {
-                    crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
-                        snapshot.state == *expected_state && snapshot.macro_id == *macro_id
+            MkMacroHostActionKind::OpenReview { epoch } => self.recording_review.as_ref().is_some_and(|review| review.epoch == *epoch),
+            MkMacroHostActionKind::EditStep { step, generation } => {
+                (self.action_editor.draft.is_none() || self.action_editor.edits_source(action.macro_id, step))
+                    && action.macro_id == self.selected_macro_id
+                    && generation.is_some()
+                    && self.selected_macro_id.is_some_and(|id| {
+                        self.step_instance_generations.get(&(id, step.id)).copied() == *generation
+                            && self.selected_macro().is_some_and(|m| m.steps.iter().any(|current| current == step))
                     })
-                }
             }
-            MkMacroHostActionKind::ActionPicker(intent) => {
-                action_editor::native_file_picker_is_current(self, intent)
-            }
-            MkMacroHostActionKind::FinishActionEditor { generation, .. } => {
-                self.action_editor.draft.is_some()
-                    && self.action_editor.draft_generation == *generation
-            }
+            MkMacroHostActionKind::OpenWindowPicker(request) => self.window_picker_request_is_current(request),
             MkMacroHostActionKind::Package(package_action) => {
                 package_ui::host_action_is_current(self, package_action)
             }
@@ -7679,28 +10543,17 @@ impl MkMacroDialog {
             } => self
                 .complete_recorder_action(command, target, expected_state)
                 .map(|_| false),
-            MkMacroHostActionKind::Review {
-                command,
-                target,
-                selected_range,
-            } => self.complete_review_action(command, target, selected_range),
             MkMacroHostActionKind::AnnotationBegin { .. } => {
                 self.begin_recording_annotation().map(|_| false)
-            }
-            MkMacroHostActionKind::AnnotationFinish { commit, text, .. } => {
-                self.recording_annotation_text = text;
-                self.finish_recording_annotation(commit).map(|_| false)
-            }
-            MkMacroHostActionKind::ActionPicker(intent) => {
-                action_editor::complete_native_file_picker(ctx, self, intent).map(|_| false)
-            }
-            MkMacroHostActionKind::FinishActionEditor { action, .. } => {
-                action_editor::complete_finish(self, action);
-                Ok(false)
             }
             MkMacroHostActionKind::Package(package_action) => {
                 package_ui::complete_host_action(self, package_action).map(|_| false)
             }
+            MkMacroHostActionKind::OpenSearch(_) => Ok(false),
+            MkMacroHostActionKind::OpenCatalog => Ok(false),
+            MkMacroHostActionKind::OpenReview { .. } => Ok(false),
+            MkMacroHostActionKind::EditStep { .. } => Ok(false),
+            MkMacroHostActionKind::OpenWindowPicker(_) => Ok(false),
             MkMacroHostActionKind::CloseDecision(choice) => {
                 return self.complete_close_choice(ctx, choice);
             }
@@ -7709,33 +10562,6 @@ impl MkMacroDialog {
             self.command_error = Some(error.to_string());
         }
         false
-    }
-
-    fn complete_review_action(
-        &mut self,
-        command: ReviewCommand,
-        target: crate::mkmacro::RecordingTarget,
-        selected_range: bool,
-    ) -> anyhow::Result<bool> {
-        match command {
-            ReviewCommand::StopPreview => {
-                self.stop_owned_recording_preview();
-                Ok(false)
-            }
-            ReviewCommand::Preview => {
-                self.preview_recording_review(selected_range)?;
-                Ok(false)
-            }
-            ReviewCommand::Apply => {
-                self.apply_recording_review().map_err(anyhow::Error::msg)?;
-                Ok(false)
-            }
-            ReviewCommand::Cancel => {
-                self.cancel_recording_review();
-                let _ = target;
-                Ok(false)
-            }
-        }
     }
 
     fn complete_close_choice(
@@ -7759,6 +10585,31 @@ impl MkMacroDialog {
                 }
             },
             MkMacroCloseChoice::Discard => {
+                self.retire_review_and_annotation(ctx);
+                if self.catalog.open {
+                    self.catalog_host.close_from_app(ctx);
+                    self.catalog.open = false;
+                }
+                if self.action_editor.draft.is_some()
+                    && self.pending_editor_origin.as_ref().is_none_or(|(_, was_open)| *was_open)
+                {
+                    self.editor_host.close_from_app(ctx);
+                }
+                if self.window_picker.open {
+                    self.window_picker_host.close_from_app(ctx);
+                    self.window_picker.cancel("Window picking cancelled");
+                }
+                if self.launcher_action_picker.open {
+                    self.launcher_picker_host.close_from_app(ctx);
+                    self.launcher_action_picker.cancel();
+                }
+                if self.image_crop_editor.is_open() {
+                    self.crop_host.close_from_app(ctx);
+                    self.image_crop_editor.cancel();
+                }
+                self.pending_crop_open = None;
+                self.pending_launcher_picker_open = None;
+                self.pending_window_picker_open = None;
                 self.close_with_decision(DirtyDecision::Discard);
                 self.finish_host_close(ctx, self.host_state.identity(), self.owner_instance);
                 true
@@ -7772,7 +10623,43 @@ impl MkMacroDialog {
         host: HostIdentity,
         owner_instance: u64,
     ) {
+        self.retire_review_and_annotation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("mkmacro").expect("stable MkMacro key");
+        super::utility_host::remember_presentation(ctx, key, host.host);
+        self.presentation_prepared = false;
         let identity = mkmacro_native_identity(host, owner_instance);
+        if self.navigation.search.mode.is_some() {
+            self.search_host.close_from_app(ctx);
+        }
+        self.pending_search_open = None;
+        self.pending_package_open = None;
+        self.package_hosts.close_all(ctx);
+        if self.catalog.open {
+            self.catalog_host.close_from_app(ctx);
+            self.catalog.open = false;
+        }
+        if self.action_editor.draft.is_some()
+            && self.pending_editor_origin.as_ref().is_none_or(|(_, was_open)| *was_open)
+        {
+            self.editor_host.close_from_app(ctx);
+        }
+        if self.window_picker.open {
+            self.window_picker_host.close_from_app(ctx);
+            self.window_picker.cancel("Window picking cancelled");
+        }
+        if self.launcher_action_picker.open {
+            self.launcher_picker_host.close_from_app(ctx);
+            self.launcher_action_picker.cancel();
+        }
+        if self.image_crop_editor.is_open() {
+            self.crop_host.close_from_app(ctx);
+            self.image_crop_editor.cancel();
+        }
+        self.pending_crop_open = None;
+        self.pending_launcher_picker_open = None;
+        self.pending_window_picker_open = None;
+        self.pending_catalog_open = None;
+        self.pending_editor_origin = None;
         if self.open {
             if self.dirty {
                 let _ = self.close_with_decision(DirtyDecision::Discard);
@@ -8301,6 +11188,7 @@ impl MkMacroDialog {
         request: &window_picker::MatcherEditRequest,
         matcher: MkWindowMatcher,
     ) -> bool {
+        if !self.window_picker_request_is_current(request) { return false; }
         match &request.destination {
             window_picker::MatcherDestination::Action { .. } => self
                 .action_editor
@@ -8308,6 +11196,13 @@ impl MkMacroDialog {
             window_picker::MatcherDestination::MacroHotkey { macro_id } => {
                 self.apply_hotkey_scope_matcher(*macro_id, matcher)
             }
+        }
+    }
+
+    fn window_picker_request_is_current(&self, request: &window_picker::MatcherEditRequest) -> bool {
+        match &request.destination {
+            window_picker::MatcherDestination::Action { .. } => self.action_editor.window_matcher_request_is_current(request, self.selected_macro_id),
+            window_picker::MatcherDestination::MacroHotkey { macro_id } => self.draft.macros.iter().find(|m| m.id == *macro_id).is_some_and(|m| matches!(&m.hotkey_scope, MkHotkeyScope::ActiveWindow(current) if *current == request.original)),
         }
     }
     /// Rename intent shared by non-widget controllers and the dialog.
@@ -8367,7 +11262,9 @@ impl MkMacroDialog {
         &mut self,
         result: crate::mkmacro::RecordingResult,
     ) -> Result<RecordingReviewOpenDisposition, String> {
-        let review = recording_review::RecordingReviewSession::new(result);
+        let mut review = recording_review::RecordingReviewSession::new(result);
+        self.next_review_epoch = self.next_review_epoch.wrapping_add(1).max(1);
+        review.epoch = self.next_review_epoch;
         if self.recording_review.is_some() {
             self.queued_recording_reviews.push_back(review);
             self.queue_ui_notice(
@@ -8376,6 +11273,8 @@ impl MkMacroDialog {
             return Ok(RecordingReviewOpenDisposition::Queued);
         }
         self.recording_review = Some(review);
+        self.review_open_blocked = false;
+        self.pending_review_open = Some((None, false));
         self.publish_recording_target();
         Ok(RecordingReviewOpenDisposition::Opened)
     }
@@ -8408,45 +11307,68 @@ impl MkMacroDialog {
         let macro_id = snapshot
             .macro_id
             .ok_or_else(|| anyhow::anyhow!("The active recording has no macro target"))?;
+        let recording_id = snapshot.recording_id
+            .ok_or_else(|| anyhow::anyhow!("The active recording has no identity"))?;
         let pause_owned = annotation_pause_ownership(state)?;
-        crate::mkmacro::runtime::set_recording_annotation_active(true);
-        self.annotation_pause_owned = match pause_owned {
+        self.annotation.pause_id = None;
+        crate::mkmacro::runtime::set_recording_annotation_active(recording_id, true)?;
+        self.annotation.pause_owned = match pause_owned {
             true => {
-                if let Err(error) = crate::mkmacro::runtime::record_pause() {
-                    crate::mkmacro::runtime::set_recording_annotation_active(false);
-                    self.recording_annotation_target = None;
-                    return Err(error);
+                match crate::mkmacro::runtime::record_pause_for(recording_id) {
+                    Ok(pause_id) => self.annotation.pause_id = Some(pause_id),
+                    Err(error) => {
+                        let _ = crate::mkmacro::runtime::set_recording_annotation_active(recording_id, false);
+                        self.annotation.target = None;
+                        return Err(error);
+                    }
                 }
                 true
             }
             false => false,
         };
-        self.recording_annotation_text.clear();
-        self.recording_annotation_open = true;
-        self.recording_annotation_target = Some(macro_id);
+        self.annotation.text.clear();
+        self.annotation.open = true;
+        self.annotation.target = Some(macro_id);
+        self.annotation.recording_id = Some(recording_id);
+        self.annotation.epoch = self.annotation.epoch.wrapping_add(1).max(1);
+        self.annotation.focus_requested = true;
         Ok(())
     }
 
     pub fn finish_recording_annotation(&mut self, commit: bool) -> anyhow::Result<()> {
-        let text = self.recording_annotation_text.trim().to_owned();
+        let text = self.annotation.text.trim().to_owned();
+        let recording_id = self.annotation.recording_id;
+        let snapshot = crate::mkmacro::runtime::recorder_snapshot();
+        let current = snapshot.as_ref()
+            .is_some_and(|snapshot| snapshot.recording_id == recording_id && recording_id.is_some());
         let annotation_result = if commit {
             if text.is_empty() {
                 anyhow::bail!("Annotation cannot be empty");
             }
-            crate::mkmacro::runtime::record_annotation(text)
+            match recording_id.filter(|_| current) {
+                Some(id) => crate::mkmacro::runtime::record_annotation_for(id, text),
+                None => Err(anyhow::anyhow!("The recording has changed")),
+            }
         } else {
             Ok(())
         };
-        self.recording_annotation_open = false;
-        self.recording_annotation_text.clear();
-        self.recording_annotation_target = None;
-        crate::mkmacro::runtime::set_recording_annotation_active(false);
-        let resume = std::mem::take(&mut self.annotation_pause_owned);
+        self.annotation.open = false;
+        self.annotation.text.clear();
+        self.annotation.target = None;
+        self.annotation.recording_id = None;
+        if let Some(recording_id) = recording_id {
+            let _ = crate::mkmacro::runtime::set_recording_annotation_active(recording_id, false);
+        }
+        let resume = std::mem::take(&mut self.annotation.pause_owned);
+        let pause_id = self.annotation.pause_id.take();
         let resume_result = if should_resume_annotation_owned(
-            resume,
-            crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state),
+            resume && current && snapshot.as_ref().is_some_and(|snapshot| snapshot.pause_id == pause_id),
+            snapshot.as_ref().map(|snapshot| snapshot.state),
         ) {
-            crate::mkmacro::runtime::record_resume()
+            match (recording_id, pause_id) {
+                (Some(recording_id), Some(pause_id)) => crate::mkmacro::runtime::record_resume_for(recording_id, pause_id),
+                _ => Ok(()),
+            }
         } else {
             Ok(())
         };
@@ -8457,7 +11379,7 @@ impl MkMacroDialog {
     }
 
     pub fn preview_recording_review(&mut self, selected_range: bool) -> anyhow::Result<u64> {
-        if self.action_editor.draft.is_some() || self.recording_annotation_open {
+        if self.action_editor.draft.is_some() || self.annotation.open {
             anyhow::bail!("Close the active editor before previewing this recording");
         }
         if self
@@ -9197,12 +12119,12 @@ impl MkMacroDialog {
     fn close_children(&mut self) {
         self.hotkey_capture = false;
         self.cancel_record_hotkey_capture();
-        if self.recording_annotation_open {
+        if self.annotation.open {
             let _ = self.finish_recording_annotation(false);
         }
         search::close(self);
         self.cancel_folder_operations();
-        self.action_catalog_visible = false;
+        self.catalog.open = false;
         self.discard_all_recording_reviews();
         self.action_editor.cancel();
         self.image_crop_editor.cancel();
@@ -9375,24 +12297,7 @@ impl MkMacroDialog {
                 });
             }
         }
-        action_catalog::show_modal(ui.ctx(), self);
-        search::show(ui.ctx(), self);
-        recording_review::show(ui.ctx(), self);
-        action_editor::show(ui.ctx(), self);
-        image_crop_editor::show(ui.ctx(), self);
-        launcher_action_picker::show(ui.ctx(), self);
-        window_picker::show(ui.ctx(), &mut self.window_picker);
         package_ui::show(ui.ctx(), self);
-        if self.window_picker.confirm_ready {
-            self.window_picker.confirm_ready = false;
-            if let Some((request, matcher)) = self.window_picker.take_confirmation() {
-                let applied = self.apply_window_picker_confirmation(&request, matcher);
-                if !applied {
-                    self.command_error =
-                        Some("The matcher target no longer exists; no changes were made".into());
-                }
-            }
-        }
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
         }

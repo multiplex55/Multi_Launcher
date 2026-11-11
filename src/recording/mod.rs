@@ -17,7 +17,7 @@ pub use model::{
     CanvasSize, CaptureIdentity, CaptureTarget, FrameError, FrameRate, FrameStamp, FrameTimeline,
     MAX_CANVAS_HEIGHT, MAX_CANVAS_WIDTH, MAX_DISPLAY_DEVICE_NAME_BYTES, MAX_FRAME_BYTES,
     MAX_FRAMES_PER_SECOND, MAX_RECORDING_SECONDS, MIN_FRAMES_PER_SECOND, OutputScale,
-    RecorderState, RecordingEndReason, RecordingFailure, RecordingFormat, RecordingOptions,
+    RecorderState, RecordingDurationLimit, RecordingEndReason, RecordingFailure, RecordingFormat, RecordingOptions,
     RecordingRequest, RecordingSummary, RequestError, RgbaFrame, TimedFrame,
 };
 #[cfg(windows)]

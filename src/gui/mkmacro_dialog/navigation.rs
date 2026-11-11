@@ -239,7 +239,7 @@ pub(super) fn rows(d: &MkMacroDialog) -> Arc<Vec<SearchRow>> {
 
 /// Query work is shared by all three consumers and repeated only on a changed
 /// row generation, query, or explicit empty-query policy.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct RowFilter {
     rows: Option<Arc<Vec<SearchRow>>>,
     query: String,

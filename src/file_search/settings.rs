@@ -706,6 +706,31 @@ mod diagnostics_state_tests {
     }
 
     #[test]
+    fn filename_contains_preference_roundtrips_and_old_defaults_stay_ranked() {
+        use crate::file_search::model::FilenameMatchMode;
+        let old: FileSearchUiPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.filename_match_mode, FilenameMatchMode::RankedSubstring);
+        let prefs = FileSearchUiPreferences {
+            filename_match_mode: FilenameMatchMode::FilenameContains,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains("\"filename_match_mode\":\"filename_contains\""));
+        assert_eq!(
+            serde_json::from_str::<FileSearchUiPreferences>(&json).unwrap(),
+            prefs
+        );
+        assert_eq!(
+            serde_json::from_str::<FilenameMatchMode>("\"fuzzy\"").unwrap(),
+            FilenameMatchMode::Fuzzy
+        );
+        assert_eq!(
+            serde_json::from_str::<FilenameMatchMode>("\"ranked_substring\"").unwrap(),
+            FilenameMatchMode::RankedSubstring
+        );
+    }
+
+    #[test]
     fn existing_settings_json_without_preview_limit_remains_deserializable() {
         let parsed: FileSearchSettings = serde_json::from_str(
             r#"{

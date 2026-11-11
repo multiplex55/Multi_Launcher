@@ -84,6 +84,21 @@ impl CalendarEventDetails {
         self.snooze_minutes = 15;
     }
 
+    pub(super) fn shows_occurrence(&self, instance: &EventInstance) -> bool {
+        self.instance.as_ref().is_some_and(|current| {
+            current.instance_id == instance.instance_id
+                && current.source_event_id == instance.source_event_id
+                && current.start == instance.start
+                && current.end == instance.end
+                && current.all_day == instance.all_day
+                && match (&current.recurrence, &instance.recurrence) {
+                    (Some(left), Some(right)) => left.occurrence_index == right.occurrence_index && left.rule == right.rule,
+                    (None, None) => true,
+                    _ => false,
+                }
+        })
+    }
+
     fn event_duration(event: &CalendarEvent) -> Duration {
         if let Some(end) = event.end {
             end - event.start

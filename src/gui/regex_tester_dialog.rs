@@ -406,6 +406,7 @@ pub struct RegexTesterDialogState {
     hosted_effects: Option<RegexHostedEffects>,
     pending_host_effects: Option<RegexHostedEffects>,
     host: UtilityHostState,
+    presentation_prepared: bool,
     host_frame: Option<RegexHostFrame>,
     host_epoch: u64,
     pending_host_request: Option<UtilityPresentation>,
@@ -625,6 +626,7 @@ impl RegexTesterDialogState {
             hosted_effects: None,
             pending_host_effects: None,
             host: UtilityHostState::popped_out(),
+            presentation_prepared: false,
             host_frame: None,
             host_epoch: 0,
             pending_host_request: None,
@@ -685,6 +687,7 @@ impl RegexTesterDialogState {
         self.focus_viewport = true;
         if !self.open {
             self.host = UtilityHostState::popped_out();
+            self.presentation_prepared = false;
             self.host_epoch = self.host_epoch.wrapping_add(1);
             self.focus_pattern = true;
             if self.information_open
@@ -694,6 +697,18 @@ impl RegexTesterDialogState {
             }
             self.open = true;
         }
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = UtilityToolKey::parse("regex-tester").expect("stable regex utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == UtilityPresentation::Popout
     }
 
     /// Explicit production storage configuration; default construction does no IO.
@@ -776,6 +791,11 @@ impl RegexTesterDialogState {
     }
 
     pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if self.open {
+            let key = UtilityToolKey::parse("regex-tester").expect("stable regex utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+        self.presentation_prepared = false;
         if let Some(draft) = self.host_frame.take().and_then(|frame| frame.draft) {
             self.restore_host_draft(draft);
         }
@@ -997,6 +1017,7 @@ impl RegexTesterDialogState {
             &mut Option<RegexViewportObservation>,
         >,
     ) {
+        self.prepare_open_presentation(ctx);
         if let Some(draft) = self.host_frame.take().and_then(|frame| frame.draft) {
             self.restore_host_draft(draft);
         }
@@ -1729,6 +1750,8 @@ impl RegexTesterDialogState {
         {
             self.retire_native_host(ctx);
             self.host.transition(request);
+            let key = UtilityToolKey::parse("regex-tester").expect("stable regex utility key");
+            super::utility_host::remember_presentation(ctx, key, request);
             self.focus_viewport = true;
             reveal = request == UtilityPresentation::Docked;
             if let Some((target, _)) = &mut self.deferred_syntax_focus {
@@ -3460,6 +3483,60 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_restores_saved_docked_without_demoting_live_popout() {
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{RememberedPresentation, Settings, UtilityPresentations};
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = UtilityToolKey::parse("regex-tester").unwrap();
+        let mut dialog = RegexTesterDialogState::default();
+        assert!(!dialog.open);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert!(dialog.is_popped_out());
+        manager.remember(&ctx, key, RememberedPresentation::Docked);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert!(dialog.is_popped_out());
+        dialog.end_session_with_host(&ctx);
+        assert_eq!(
+            manager.preference(key),
+            Some(RememberedPresentation::Popout)
+        );
+        manager.remember(&ctx, key, RememberedPresentation::Docked);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert!(!dialog.is_popped_out());
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        let ctx2 = egui::Context::default();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let manager2 =
+            UtilityPresentationManager::new(path, workers2.clone(), saved.utility_presentations);
+        manager2.install_in_context(&ctx2);
+        let mut restarted = RegexTesterDialogState::default();
+        assert!(!restarted.open);
+        restarted.open();
+        restarted.prepare_open_presentation(&ctx2);
+        assert!(!restarted.is_popped_out());
+        workers2.join_all();
+    }
 
     #[test]
     fn regex_tester_theme_scaled_layout_keeps_core_regions_and_source_bounded() {

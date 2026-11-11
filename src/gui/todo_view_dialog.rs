@@ -1,10 +1,13 @@
+use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
-use crate::plugins::note::load_notes;
-use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, replace_todos};
+use crate::plugins::note::{Note, load_notes};
+#[cfg(test)]
+use crate::plugins::todo::replace_todos;
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, update_todos};
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -96,29 +99,99 @@ pub struct TodoViewDialog {
     filter: String,
     sort_mode: TodoSortMode,
     editing_idx: Option<usize>,
+    editing_basis: Option<TodoEntry>,
+    editor_generation: u64,
     editing_text: String,
     editing_priority: u8,
     editing_tags: String,
     load_error: Option<String>,
+    epoch: u64,
+    list_revision: u64,
+    store_path: String,
+    notes: Vec<Note>,
+    notice: Option<String>,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    popup_viewport: Option<egui::ViewportId>,
     #[cfg(test)]
     test_row_response: Option<egui::Response>,
     #[cfg(test)]
     test_window_close_requested: bool,
     #[cfg(test)]
     test_layout: Option<TodoViewLayout>,
+    #[cfg(test)]
+    test_filter_control: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_filter_state: (bool, bool),
+    #[cfg(test)]
+    test_note_link: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_list: Option<TodoViewScrollLayout>,
+    #[cfg(test)]
+    test_sort_control: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_sort_name: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_edit_control: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_save_control: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_host_control: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+#[derive(Clone)]
+struct TodoViewDraft {
+    filter: String,
+    sort_mode: TodoSortMode,
+    editing_idx: Option<usize>,
+    editing_basis: Option<TodoEntry>,
+    editor_generation: u64,
+    editing_text: String,
+    editing_priority: u8,
+    editing_tags: String,
+}
+#[derive(Clone)]
+pub(super) struct TodoNoteOpen {
+    pub entry_id: String,
+    pub entry_text: String,
+    pub slug: String,
+    pub anchor: Option<String>,
+    pub check_anchor: bool,
+}
+pub(super) struct TodoViewHostActions {
+    epoch: u64,
+    revision: u64,
+    pub host_request: Option<super::utility_host::UtilityPresentation>,
+    pub close: bool,
+    draft: TodoViewDraft,
+    changes: Vec<(TodoEntry, TodoEntry)>,
+    editor_submitted: bool,
+    pub notes: Vec<TodoNoteOpen>,
+    pub host: super::utility_host::HostIdentity,
+    pub root: super::utility_host::ViewportPassProvenance,
+    pub owner: super::utility_host::ViewportPassProvenance,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+}
+pub(super) struct TodoViewRuntime {
+    pub pinned: bool,
+    pub host: super::utility_host::HostIdentity,
 }
 
 impl TodoViewDialog {
     pub fn open(&mut self) {
-        self.open_from(TODO_FILE);
+        self.ensure_open_from(TODO_FILE);
     }
 
     fn open_from(&mut self, path: &str) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.store_path = path.to_owned();
         let _ = self.load_from(path);
+        self.notes = load_notes().unwrap_or_default();
+        self.notice = None;
         self.open = true;
         self.filter.clear();
         self.sort_mode = TodoSortMode::Priority;
         self.editing_idx = None;
+        self.editing_basis = None;
     }
 
     pub fn ensure_open(&mut self) {
@@ -132,22 +205,87 @@ impl TodoViewDialog {
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        if self.load_from(TODO_FILE).is_err() {
-            self.editing_idx = None;
-            self.open = true;
+        self.ensure_open();
+        if let Some(id) = self.entries.get(idx).map(|entry| entry.id.clone()) {
+            self.open_entry(&id);
+        }
+    }
+
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub(super) fn open_entry(&mut self, id: &str) {
+        if let Some(current) = self.editing_idx.and_then(|index| self.entries.get(index)) {
+            if current.id == id {
+                return;
+            }
+            let basis = self.editing_basis.as_ref().unwrap_or(current);
+            if self.editing_text != basis.text
+                || self.editing_priority != basis.priority
+                || self.editing_tags != basis.tags.join(", ")
+            {
+                self.notice =
+                    Some("Finish or cancel the current edit before opening another todo.".into());
+                return;
+            }
+        }
+        let entries = match load_todos(&self.store_path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                return;
+            }
+        };
+        let mut matches = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !id.is_empty() && entry.id == id);
+        let Some((index, _)) = matches.next() else {
+            self.notice = Some("That todo is no longer available.".into());
+            return;
+        };
+        if matches.next().is_some() {
+            self.notice = Some("This todo has a duplicate identity and cannot be opened.".into());
             return;
         }
-        if let Some(e) = self.entries.get(idx) {
-            self.editing_idx = Some(idx);
-            self.editing_text = e.text.clone();
-            self.editing_priority = e.priority;
-            self.editing_tags = e.tags.join(", ");
-        } else {
-            self.editing_idx = None;
+        self.entries = entries;
+        self.list_revision = self.list_revision.wrapping_add(1);
+        let entry = &self.entries[index];
+        self.editing_idx = Some(index);
+        self.editing_basis = Some(entry.clone());
+        self.editor_generation = self.editor_generation.wrapping_add(1);
+        self.editing_text = entry.text.clone();
+        self.editing_priority = entry.priority;
+        self.editing_tags = entry.tags.join(", ");
+        self.load_error = None;
+        self.notice = None;
+    }
+    pub(super) fn entry_id_at(&self, index: usize) -> Option<String> {
+        load_todos(&self.store_path)
+            .ok()?
+            .get(index)
+            .map(|entry| entry.id.clone())
+    }
+    pub(super) fn owned_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        base: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        if self.popup_viewport != Some(ctx.viewport_id()) {
+            return None;
         }
-        self.open = true;
-        self.filter.clear();
-        self.sort_mode = TodoSortMode::Priority;
+        self.popup_anchors.iter().find_map(|(id, layer)| {
+            if *layer != base
+                || !ctx
+                    .read_response(*id)
+                    .is_some_and(|response| response.enabled() && response.layer_id == base)
+            {
+                return None;
+            }
+            let popup = id.with("popup");
+            egui::Popup::is_id_open(ctx, popup)
+                .then_some(egui::LayerId::new(egui::Order::Foreground, popup))
+        })
     }
 
     fn sorted_todo_indices(
@@ -224,6 +362,7 @@ impl TodoViewDialog {
         match load_todos(path) {
             Ok(entries) => {
                 self.entries = entries;
+                self.list_revision = self.list_revision.wrapping_add(1);
                 self.load_error = None;
                 Ok(())
             }
@@ -234,10 +373,12 @@ impl TodoViewDialog {
         }
     }
 
+    #[cfg(test)]
     fn commit_entries(&mut self, path: &str, candidate: Vec<TodoEntry>) -> anyhow::Result<()> {
         match replace_todos(path, candidate) {
             Ok(committed) => {
                 self.entries = committed;
+                self.list_revision = self.list_revision.wrapping_add(1);
                 self.load_error = None;
                 Ok(())
             }
@@ -248,36 +389,45 @@ impl TodoViewDialog {
         }
     }
 
-    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<TodoEntry>) -> bool {
-        if let Err(e) = self.commit_entries(TODO_FILE, candidate) {
-            app.report_error_message("ui operation", format!("Failed to save todos: {e}"));
-            false
-        } else {
-            app.search();
-            app.focus_input();
-            true
-        }
-    }
-
-    pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    pub(super) fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &TodoViewRuntime,
+        allowed: bool,
+        first: bool,
+        child: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> TodoViewHostActions {
         #[cfg(test)]
         {
             self.test_row_response = None;
             self.test_window_close_requested = false;
             self.test_layout = None;
         }
-        if !self.open {
-            return;
-        }
-        let pinned = app
-            .pinned_panels
-            .contains(&crate::gui::Panel::TodoViewDialog);
-        let (window_size, list_height) = todo_view_layout_sizes();
-        let (min_size, max_size) = todo_view_window_constraints();
+        let mut draft = TodoViewDraft {
+            filter: self.filter.clone(),
+            sort_mode: self.sort_mode,
+            editing_idx: self.editing_idx,
+            editing_basis: self.editing_basis.clone().or_else(|| {
+                self.editing_idx
+                    .and_then(|index| self.entries.get(index).cloned())
+            }),
+            editor_generation: self.editor_generation,
+            editing_text: self.editing_text.clone(),
+            editing_priority: self.editing_priority,
+            editing_tags: self.editing_tags.clone(),
+        };
         let mut window_open = self.open;
         let mut close = false;
         let mut save_now = false;
+        let mut editor_submitted = false;
         let mut candidate_entries = self.entries.clone();
+        let notes = &self.notes;
+        let mut note_opens = Vec::new();
+        let mut host_request = None;
+        let mut popup_anchors = Vec::new();
+        #[cfg(test)]
+        let mut test_row_response = None;
         #[cfg(test)]
         let window_id = egui::Id::new("View Todos");
         #[cfg(test)]
@@ -302,13 +452,26 @@ impl TodoViewDialog {
         let mut visible = false;
         #[cfg(test)]
         let mut sizing_pass = false;
-        let window_output = egui::Window::new("View Todos")
-            .open(&mut window_open)
-            .resizable(false)
-            .default_size(window_size)
-            .min_size(min_size)
-            .max_size(max_size)
-            .show(ctx, |ui| {
+        #[cfg(test)]
+        let mut test_filter_control = None;
+        #[cfg(test)]
+        let mut test_filter_state = (false, false);
+        #[cfg(test)]
+        let mut test_note_link = None;
+        #[cfg(test)]
+        let mut test_sort_control = None;
+        #[cfg(test)]
+        let mut test_sort_name = None;
+        #[cfg(test)]
+        let mut test_edit_control = None;
+        #[cfg(test)]
+        let mut test_save_control = None;
+        #[cfg(test)]
+        let mut test_host_control = None;
+        let list_height = TODO_VIEW_LIST_HEIGHT;
+        let mut body = |ui: &mut egui::Ui| {
+            let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
+            ui.add_enabled_ui(interactive, |ui| {
                 #[cfg(test)]
                 {
                     visible = ui.is_visible();
@@ -321,41 +484,75 @@ impl TodoViewDialog {
                         "Todos are read-only because loading failed",
                         Some(error),
                     );
-                    let close_button = ui.button("Close");
-                    #[cfg(test)]
-                    {
-                        close_rect = close_button.rect;
-                        close_clicked |= close_button.clicked();
-                    }
-                    if close_button.clicked() {
-                        close = true;
-                    }
+                    ui.horizontal(|ui| {
+                        let close_button = ui.button("Close");
+                        #[cfg(test)]
+                        {
+                            close_rect = close_button.rect;
+                            close_clicked |= close_button.clicked();
+                        }
+                        if close_button.clicked() {
+                            close = true;
+                        }
+                        let (host, next) =
+                            super::utility_host::presentation_button(ui, presentation, interactive);
+                        #[cfg(test)]
+                        {
+                            test_host_control = Some((host.rect, ui.clip_rect(), host.enabled()));
+                        }
+                        if first && !ctx.will_discard() && host.clicked() {
+                            host_request = Some(next);
+                        }
+                    });
                     return;
                 }
+                if let Some(notice) = &self.notice {
+                    ui.weak(notice);
+                }
                 let toolbar = ui.horizontal_wrapped(|ui| {
-                    egui::ComboBox::from_label("Sort")
-                        .selected_text(match self.sort_mode {
+                    let sort = egui::ComboBox::from_label("Sort")
+                        .selected_text(match draft.sort_mode {
                             TodoSortMode::Priority => "Priority",
                             TodoSortMode::Name => "Name",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut self.sort_mode,
+                                &mut draft.sort_mode,
                                 TodoSortMode::Priority,
                                 "Priority",
                             );
-                            ui.selectable_value(
-                                &mut self.sort_mode,
+                            let name = ui.selectable_value(
+                                &mut draft.sort_mode,
                                 TodoSortMode::Name,
                                 "Name",
                             );
+                            #[cfg(test)]
+                            {
+                                test_sort_name = Some((name.rect, ui.clip_rect(), name.enabled()));
+                            }
+                            #[cfg(not(test))]
+                            let _ = name;
                         });
+                    #[cfg(test)]
+                    {
+                        test_sort_control =
+                            Some((sort.response.rect, ui.clip_rect(), sort.response.enabled()));
+                    }
+                    popup_anchors.push((sort.response.id, sort.response.layer_id));
                     let filter_label = ui.label("Filter");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .desired_width(ui.available_width().min(180.0).max(72.0)),
-                    )
-                    .labelled_by(filter_label.id)
+                    let response = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut draft.filter)
+                                .desired_width(ui.available_width().min(180.0).max(72.0)),
+                        )
+                        .labelled_by(filter_label.id);
+                    #[cfg(test)]
+                    {
+                        test_filter_control =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
+                        test_filter_state = (response.hovered(), response.has_focus());
+                    }
+                    response
                 });
                 #[cfg(test)]
                 {
@@ -371,11 +568,14 @@ impl TodoViewDialog {
                     .max(0.0)
                     .min(list_height);
                 let indices =
-                    Self::sorted_todo_indices(&candidate_entries, &self.filter, self.sort_mode);
-                let note_titles: HashMap<String, String> = load_notes()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|n| (n.slug, n.title))
+                    Self::sorted_todo_indices(&candidate_entries, &draft.filter, draft.sort_mode);
+                let mut id_counts = HashMap::<String, usize>::new();
+                for entry in &candidate_entries {
+                    *id_counts.entry(entry.id.clone()).or_default() += 1;
+                }
+                let note_titles: HashMap<String, String> = notes
+                    .iter()
+                    .map(|n| (n.slug.clone(), n.title.clone()))
                     .collect();
                 #[cfg(test)]
                 let mut list_clip_rect = egui::Rect::NOTHING;
@@ -390,258 +590,352 @@ impl TodoViewDialog {
                             list_clip_rect = ui.clip_rect();
                         }
                         for idx in indices {
-                            if Some(idx) == self.editing_idx {
-                                ui.vertical(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        let label = ui.label("Text:");
-                                        let _field = ui.add(
-                                            egui::TextEdit::singleline(&mut self.editing_text)
-                                                .desired_width(
-                                                    ui.available_width().min(260.0).max(72.0),
-                                                ),
-                                        ).labelled_by(label.id);
-                                        #[cfg(test)]
-                                        edit_fields.push(_field.rect);
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        let label = ui.label("Priority:");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.editing_priority)
-                                                .range(0..=255),
-                                        )
-                                        .labelled_by(label.id);
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        let label = ui.label("Tags:");
-                                        let _field = ui.add(
-                                            egui::TextEdit::singleline(&mut self.editing_tags)
-                                                .desired_width(
-                                                    ui.available_width().min(260.0).max(72.0),
-                                                ),
-                                        ).labelled_by(label.id);
-                                        #[cfg(test)]
-                                        edit_fields.push(_field.rect);
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("Link note:");
-                                        ui.menu_button("Select existing note", |ui| {
-                                            for note in load_notes()
-                                                .unwrap_or_default()
-                                                .into_iter()
-                                                .take(12)
-                                            {
-                                                if ui
-                                                    .button(format!(
-                                                        "{} ({})",
-                                                        note.title, note.slug
-                                                    ))
-                                                    .clicked()
+                            let id = candidate_entries[idx].id.clone();
+                            let fallback = (id.is_empty()
+                                || id_counts.get(&id).copied().unwrap_or(0) != 1)
+                                .then_some(idx);
+                            ui.push_id(
+                                (
+                                    "todo_view_entry",
+                                    self.epoch,
+                                    Some(idx) == draft.editing_idx,
+                                    if Some(idx) == draft.editing_idx {
+                                        draft.editor_generation
+                                    } else {
+                                        self.list_revision
+                                    },
+                                    id,
+                                    fallback,
+                                ),
+                                |ui| {
+                                    if Some(idx) == draft.editing_idx {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                let label = ui.label("Text:");
+                                                let _field = ui
+                                                    .add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut draft.editing_text,
+                                                        )
+                                                        .desired_width(
+                                                            ui.available_width()
+                                                                .min(260.0)
+                                                                .max(72.0),
+                                                        ),
+                                                    )
+                                                    .labelled_by(label.id);
+                                                #[cfg(test)]
                                                 {
-                                                    if !self
-                                                        .editing_text
-                                                        .contains(&format!("@note:{}", note.slug))
+                                                    edit_fields.push(_field.rect);
+                                                    test_edit_control = Some((
+                                                        _field.rect,
+                                                        ui.clip_rect(),
+                                                        _field.enabled(),
+                                                    ));
+                                                }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let label = ui.label("Priority:");
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut draft.editing_priority,
+                                                    )
+                                                    .range(0..=255),
+                                                )
+                                                .labelled_by(label.id);
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let label = ui.label("Tags:");
+                                                let _field = ui
+                                                    .add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut draft.editing_tags,
+                                                        )
+                                                        .desired_width(
+                                                            ui.available_width()
+                                                                .min(260.0)
+                                                                .max(72.0),
+                                                        ),
+                                                    )
+                                                    .labelled_by(label.id);
+                                                #[cfg(test)]
+                                                edit_fields.push(_field.rect);
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Link note:");
+                                                let menu =
+                                                    ui.menu_button("Select existing note", |ui| {
+                                                        for note in notes.iter().take(12) {
+                                                            if ui
+                                                                .button(format!(
+                                                                    "{} ({})",
+                                                                    note.title, note.slug
+                                                                ))
+                                                                .clicked()
+                                                            {
+                                                                if !draft.editing_text.contains(
+                                                                    &format!("@note:{}", note.slug),
+                                                                ) {
+                                                                    if !draft
+                                                                        .editing_text
+                                                                        .is_empty()
+                                                                    {
+                                                                        draft
+                                                                            .editing_text
+                                                                            .push(' ');
+                                                                    }
+                                                                    draft.editing_text.push_str(
+                                                                        &format!(
+                                                                            "@note:{}",
+                                                                            note.slug
+                                                                        ),
+                                                                    );
+                                                                }
+                                                                ui.close();
+                                                            }
+                                                        }
+                                                    });
+                                                popup_anchors.push((
+                                                    menu.response.id,
+                                                    menu.response.layer_id,
+                                                ));
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let save_button = ui.button("Save");
+                                                #[cfg(test)]
+                                                {
+                                                    edit_save_rect = save_button.rect;
+                                                    test_save_control = Some((
+                                                        save_button.rect,
+                                                        ui.clip_rect(),
+                                                        save_button.enabled(),
+                                                    ));
+                                                }
+                                                let save_button = with_button_emphasis(
+                                                    ui,
+                                                    save_button,
+                                                    ButtonEmphasis::Primary,
+                                                );
+                                                if save_button.clicked() {
+                                                    editor_submitted = true;
+                                                    let tags: Vec<String> = draft
+                                                        .editing_tags
+                                                        .split(',')
+                                                        .map(|t| t.trim())
+                                                        .filter(|t| !t.is_empty())
+                                                        .map(|t| t.to_string())
+                                                        .collect();
+                                                    if let Some(e) = candidate_entries.get_mut(idx)
                                                     {
-                                                        if !self.editing_text.is_empty() {
-                                                            self.editing_text.push(' ');
+                                                        e.text = draft.editing_text.clone();
+                                                        e.priority = draft.editing_priority;
+                                                        e.tags = tags;
+                                                        for token in
+                                                            draft.editing_text.split_whitespace()
+                                                        {
+                                                            if let Some(slug) =
+                                                                token.strip_prefix("@note:")
+                                                                && !slug.trim().is_empty()
+                                                            {
+                                                                Self::link_note_to_todo(
+                                                                    e,
+                                                                    slug.trim(),
+                                                                    slug.trim(),
+                                                                );
+                                                            }
                                                         }
-                                                        self.editing_text.push_str(&format!(
-                                                            "@note:{}",
-                                                            note.slug
-                                                        ));
                                                     }
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        let save_button = ui.button("Save");
-                                        #[cfg(test)]
-                                        {
-                                            edit_save_rect = save_button.rect;
-                                        }
-                                        let save_button = with_button_emphasis(
-                                            ui,
-                                            save_button,
-                                            ButtonEmphasis::Primary,
-                                        );
-                                        if save_button.clicked() {
-                                            let tags: Vec<String> = self
-                                                .editing_tags
-                                                .split(',')
-                                                .map(|t| t.trim())
-                                                .filter(|t| !t.is_empty())
-                                                .map(|t| t.to_string())
-                                                .collect();
-                                            if let Some(e) = candidate_entries.get_mut(idx) {
-                                                e.text = self.editing_text.clone();
-                                                e.priority = self.editing_priority;
-                                                e.tags = tags;
-                                                for token in self.editing_text.split_whitespace() {
-                                                    if let Some(slug) = token.strip_prefix("@note:")
-                                                        && !slug.trim().is_empty() {
-                                                            Self::link_note_to_todo(
-                                                                e,
-                                                                slug.trim(),
-                                                                slug.trim(),
-                                                            );
-                                                        }
-                                                }
-                                            }
-                                            save_now = true;
-                                        }
-                                        let cancel_button = ui.button("Cancel");
-                                        #[cfg(test)]
-                                        {
-                                            edit_cancel_rect = cancel_button.rect;
-                                            edit_cancel_clicked |= cancel_button.clicked();
-                                        }
-                                        if cancel_button.clicked() {
-                                            self.editing_idx = None;
-                                        }
-                                    });
-                                });
-                            } else {
-                                let entry = &mut candidate_entries[idx];
-                                ui.push_id(("todo_view_row", idx), |ui| {
-                                    ui.horizontal(|ui| {
-                                        if ui.checkbox(&mut entry.done, "").changed() {
-                                            save_now = true;
-                                        }
-                                        let text_for_render = entry.text.replace('\n', " ");
-                                        let row_contents = ui.horizontal_wrapped(|ui| {
-                                            let mut child_response: Option<egui::Response> = None;
-                                            for token in text_for_render.split_whitespace() {
-                                                let response = if let Some((slug, anchor)) =
-                                                    parse_note_token(token)
-                                                {
-                                                    let label = note_titles
-                                                        .get(&slug)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| slug.to_string());
-                                                    let link_label = if let Some(anchor) = anchor.as_ref() {
-                                                        format!("{label}#{anchor}")
-                                                    } else {
-                                                        label
-                                                    };
-                                                    let response = ui.link(link_label);
-                                                    if response.clicked() {
-                                                        app.open_note_panel(&slug, None);
-                                                    }
-                                                    response
-                                                } else {
-                                                    ui.label(token)
-                                                };
-                                                child_response = Some(match child_response.take() {
-                                                    Some(combined) => combined.union(response),
-                                                    None => response,
-                                                });
-                                            }
-                                            child_response
-                                        });
-                                        let mut resp = row_contents
-                                            .response
-                                            .interact(egui::Sense::click());
-                                        if let Some(child_response) = row_contents.inner {
-                                            resp = resp.union(child_response);
-                                        }
-                                        #[cfg(test)]
-                                        {
-                                            self.test_row_response = Some(resp.clone());
-                                        }
-                                        let idx_copy = idx;
-                                        resp.clone().context_menu(|ui: &mut egui::Ui| {
-                                            if ui.button("Edit Todo").clicked() {
-                                                self.editing_idx = Some(idx_copy);
-                                                self.editing_text = entry.text.clone();
-                                                self.editing_priority = entry.priority;
-                                                self.editing_tags = entry.tags.join(", ");
-                                                ui.close();
-                                            }
-                                            ui.separator();
-                                            ui.label("Link note");
-                                            for note in load_notes()
-                                                .unwrap_or_default()
-                                                .into_iter()
-                                                .take(10)
-                                            {
-                                                if ui
-                                                    .button(format!(
-                                                        "@note:{} {}",
-                                                        note.slug, note.title
-                                                    ))
-                                                    .clicked()
-                                                {
-                                                    Self::link_note_to_todo(
-                                                        entry,
-                                                        &note.slug,
-                                                        &note.title,
-                                                    );
                                                     save_now = true;
-                                                    ui.close();
                                                 }
-                                            }
+                                                let cancel_button = ui.button("Cancel");
+                                                #[cfg(test)]
+                                                {
+                                                    edit_cancel_rect = cancel_button.rect;
+                                                    edit_cancel_clicked |= cancel_button.clicked();
+                                                }
+                                                if cancel_button.clicked() {
+                                                    draft.editing_idx = None;
+                                                    draft.editing_basis = None;
+                                                }
+                                            });
                                         });
-                                        ui.add(
-                                            egui::Label::new(format!("p{}", entry.priority))
-                                                .wrap_mode(egui::TextWrapMode::Extend),
-                                        );
-                                        if !entry.tags.is_empty() {
-                                            ui.add(
-                                                egui::Label::new(format!(
-                                                    "#{:?}",
-                                                    entry.tags.join(", ")
-                                                ))
-                                                .wrap_mode(egui::TextWrapMode::Extend),
-                                            );
-                                        }
-                                    });
-                                    let linked_tokens: Vec<(String, Option<String>)> = entry
-                                        .text
-                                        .split_whitespace()
-                                        .filter_map(parse_note_token)
-                                        .collect();
-                                    if !linked_tokens.is_empty() {
-                                        ui.group(|ui| {
-                                            ui.label("Attached notes");
-                                            for (slug, anchor) in linked_tokens {
-                                                let note = load_notes()
-                                                    .unwrap_or_default()
-                                                    .into_iter()
-                                                    .find(|n| n.slug == slug);
-                                                let title = note_titles
-                                                    .get(&slug)
-                                                    .cloned()
-                                                    .unwrap_or_else(|| slug.clone());
-                                                let snippet = note
-                                                    .as_ref()
-                                                    .map(|n| extract_anchor_snippet(&n.content, anchor.as_deref()))
-                                                    .unwrap_or_else(|| "note not found".to_string());
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.strong(&title);
-                                                    ui.small(&snippet);
-                                                    if ui
+                                    } else {
+                                        let entry = &mut candidate_entries[idx];
+                                        ui.push_id("todo_view_row", |ui| {
+                                            ui.horizontal(|ui| {
+                                                if ui.checkbox(&mut entry.done, "").changed() {
+                                                    save_now = true;
+                                                }
+                                                let text_for_render = entry.text.replace('\n', " ");
+                                                let row_contents = ui.horizontal_wrapped(|ui| {
+                                                    let mut child_response: Option<egui::Response> =
+                                                        None;
+                                                    for token in text_for_render.split_whitespace()
+                                                    {
+                                                        let response = if let Some((slug, anchor)) =
+                                                            parse_note_token(token)
+                                                        {
+                                                            let label = note_titles
+                                                                .get(&slug)
+                                                                .cloned()
+                                                                .unwrap_or_else(|| {
+                                                                    slug.to_string()
+                                                                });
+                                                            let link_label = if let Some(anchor) =
+                                                                anchor.as_ref()
+                                                            {
+                                                                format!("{label}#{anchor}")
+                                                            } else {
+                                                                label.clone()
+                                                            };
+                                                            let response = ui.link(link_label);
+                                                            #[cfg(test)]
+                                                            {
+                                                                test_note_link = Some((
+                                                                    response.rect,
+                                                                    ui.clip_rect(),
+                                                                    response.enabled(),
+                                                                ));
+                                                            }
+                                                            if response.clicked() {
+                                                                note_opens.push(TodoNoteOpen {
+                                                                    entry_id: entry.id.clone(),
+                                                                    entry_text: entry.text.clone(),
+                                                                    slug: slug.clone(),
+                                                                    anchor: anchor.clone(),
+                                                                    check_anchor: false,
+                                                                });
+                                                            }
+                                                            response
+                                                        } else {
+                                                            ui.label(token)
+                                                        };
+                                                        child_response =
+                                                            Some(match child_response.take() {
+                                                                Some(combined) => {
+                                                                    combined.union(response)
+                                                                }
+                                                                None => response,
+                                                            });
+                                                    }
+                                                    child_response
+                                                });
+                                                let mut resp = row_contents
+                                                    .response
+                                                    .interact(egui::Sense::click());
+                                                if let Some(child_response) = row_contents.inner {
+                                                    resp = resp.union(child_response);
+                                                }
+                                                #[cfg(test)]
+                                                {
+                                                    test_row_response = Some(resp.clone());
+                                                }
+                                                let idx_copy = idx;
+                                                popup_anchors.push((resp.id, resp.layer_id));
+                                                resp.clone().context_menu(|ui: &mut egui::Ui| {
+                                                    if ui.button("Edit Todo").clicked() {
+                                                        draft.editing_idx = Some(idx_copy);
+                                                        draft.editing_basis = Some(entry.clone());
+                                                        draft.editor_generation =
+                                                            draft.editor_generation.wrapping_add(1);
+                                                        draft.editing_text = entry.text.clone();
+                                                        draft.editing_priority = entry.priority;
+                                                        draft.editing_tags = entry.tags.join(", ");
+                                                        ui.close();
+                                                    }
+                                                    ui.separator();
+                                                    ui.label("Link note");
+                                                    for note in notes.iter().take(10) {
+                                                        if ui
+                                                            .button(format!(
+                                                                "@note:{} {}",
+                                                                note.slug, note.title
+                                                            ))
+                                                            .clicked()
+                                                        {
+                                                            Self::link_note_to_todo(
+                                                                entry,
+                                                                &note.slug,
+                                                                &note.title,
+                                                            );
+                                                            save_now = true;
+                                                            ui.close();
+                                                        }
+                                                    }
+                                                });
+                                                ui.add(
+                                                    egui::Label::new(format!(
+                                                        "p{}",
+                                                        entry.priority
+                                                    ))
+                                                    .wrap_mode(egui::TextWrapMode::Extend),
+                                                );
+                                                if !entry.tags.is_empty() {
+                                                    ui.add(
+                                                        egui::Label::new(format!(
+                                                            "#{:?}",
+                                                            entry.tags.join(", ")
+                                                        ))
+                                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                                    );
+                                                }
+                                            });
+                                            let linked_tokens: Vec<(String, Option<String>)> =
+                                                entry
+                                                    .text
+                                                    .split_whitespace()
+                                                    .filter_map(parse_note_token)
+                                                    .collect();
+                                            if !linked_tokens.is_empty() {
+                                                ui.group(|ui| {
+                                                    ui.label("Attached notes");
+                                                    for (slug, anchor) in linked_tokens {
+                                                        let note =
+                                                            notes.iter().find(|n| n.slug == slug);
+                                                        let title = note_titles
+                                                            .get(&slug)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| slug.clone());
+                                                        let snippet = note
+                                                            .as_ref()
+                                                            .map(|n| {
+                                                                extract_anchor_snippet(
+                                                                    &n.content,
+                                                                    anchor.as_deref(),
+                                                                )
+                                                            })
+                                                            .unwrap_or_else(|| {
+                                                                "note not found".to_string()
+                                                            });
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.strong(&title);
+                                                            ui.small(&snippet);
+                                                            if ui
                                                         .button("Open at anchor")
-                                                        .on_hover_text("Open note at referenced anchor")
+                                                        .on_hover_text(
+                                                            "Open note at referenced anchor",
+                                                        )
                                                         .clicked()
                                                     {
-                                                        app.open_note_panel(&slug, None);
-                                                        if let Some(anchor) = anchor.as_deref()
-                                                            && let Some(n) = note.as_ref()
-                                                                && !note_has_anchor(&n.content, anchor) {
-                                                                    app.report_error_message("ui operation", format!(
-                                                                        "Anchor '{}' not found in note '{}'; opened note top.",
-                                                                        anchor, title
-                                                                    ));
-                                                                }
+                                                        note_opens.push(TodoNoteOpen {
+                                                            entry_id: entry.id.clone(),
+                                                            entry_text: entry.text.clone(),
+                                                            slug: slug.clone(),
+                                                            anchor: anchor.clone(),
+                                                            check_anchor: true,
+                                                        });
+                                                    }
+                                                        });
                                                     }
                                                 });
                                             }
                                         });
                                     }
-                                });
-                            }
+                                },
+                            );
                         }
+                        // Leave enough scrollable space for the final control's frame.
+                        ui.add_space(ui.spacing().item_spacing.y);
                     });
                 #[cfg(test)]
                 {
@@ -666,15 +960,61 @@ impl TodoViewDialog {
                     if close_button.clicked() {
                         close = true;
                     }
+                    let (host, next) =
+                        super::utility_host::presentation_button(ui, presentation, interactive);
+                    #[cfg(test)]
+                    {
+                        test_host_control = Some((host.rect, ui.clip_rect(), host.enabled()));
+                    }
+                    if first && !ctx.will_discard() && host.clicked() {
+                        host_request = Some(next);
+                    }
                 });
             });
+        };
+        let mut window_rect = None;
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let (window_size, list_height_unused) = todo_view_layout_sizes();
+            let _ = list_height_unused;
+            let (min_size, max_size) = todo_view_window_constraints();
+            let output = egui::Window::new("View Todos")
+                .resizable(false)
+                .default_size(window_size)
+                .min_size(min_size)
+                .max_size(max_size)
+                .show_utility(
+                    ctx,
+                    "todo-view",
+                    egui::Id::new("View Todos"),
+                    Some(&mut window_open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        super::utility_dialog_size::UtilityWindowSizeDefault::outer(window_size),
+                        min_size,
+                        [Some(max_size.x), Some(max_size.y)],
+                    ),
+                    |ui| body(ui),
+                );
+            window_rect = output.map(|output| output.response.rect);
+        }
         #[cfg(test)]
         {
+            self.test_filter_control = test_filter_control;
+            self.test_filter_state = test_filter_state;
+            self.test_note_link = test_note_link;
+            self.test_list = list_layout;
+            self.test_sort_control = test_sort_control;
+            self.test_sort_name = test_sort_name;
+            self.test_edit_control = test_edit_control;
+            self.test_save_control = test_save_control;
+            self.test_host_control = test_host_control;
+            self.test_row_response = test_row_response;
             self.test_window_close_requested = !window_open;
-            self.test_layout = window_output.as_ref().map(|window| TodoViewLayout {
+            self.test_layout = window_rect.map(|rect| TodoViewLayout {
                 window_rect: ctx
                     .memory(|memory| memory.area_rect(window_id))
-                    .unwrap_or(window.response.rect),
+                    .unwrap_or(rect),
                 toolbar_rect,
                 filter_rect,
                 list: list_layout,
@@ -690,14 +1030,244 @@ impl TodoViewDialog {
             });
         }
         #[cfg(not(test))]
-        let _ = window_output;
-        if close && !pinned {
-            window_open = false;
+        let _ = window_rect;
+        let changes = if save_now && first && allowed && !ctx.will_discard() {
+            self.entries
+                .iter()
+                .zip(candidate_entries)
+                .enumerate()
+                .filter_map(|(index, (before, after))| {
+                    let basis = if editor_submitted && Some(index) == draft.editing_idx {
+                        draft.editing_basis.as_ref().unwrap_or(before)
+                    } else {
+                        before
+                    };
+                    (basis != &after || (editor_submitted && Some(index) == draft.editing_idx))
+                        .then(|| (basis.clone(), after))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        TodoViewHostActions {
+            epoch: self.epoch,
+            revision: self.list_revision,
+            host_request,
+            close: (close || !window_open) && !runtime.pinned,
+            draft,
+            changes,
+            editor_submitted: editor_submitted && first && allowed && !ctx.will_discard(),
+            notes: if first && allowed && !ctx.will_discard() {
+                note_opens
+            } else {
+                Vec::new()
+            },
+            host: runtime.host,
+            root: super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            owner: super::utility_host::ViewportPassProvenance::current(ctx, ctx.viewport_id()),
+            popup_anchors,
         }
-        self.open = window_open || pinned;
-        if save_now && self.save(app, candidate_entries) {
-            self.editing_idx = None;
+    }
+
+    pub(super) fn apply_host_actions(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        actions: &mut TodoViewHostActions,
+        owner: egui::ViewportId,
+    ) {
+        if !self.open || self.epoch != actions.epoch || self.list_revision != actions.revision {
+            actions.notes.clear();
+            return;
         }
+        self.filter = actions.draft.filter.clone();
+        self.sort_mode = actions.draft.sort_mode;
+        self.editing_idx = actions.draft.editing_idx;
+        self.editing_basis = actions.draft.editing_basis.clone();
+        self.editor_generation = actions.draft.editor_generation;
+        self.editing_text = actions.draft.editing_text.clone();
+        self.editing_priority = actions.draft.editing_priority;
+        self.editing_tags = actions.draft.editing_tags.clone();
+        self.popup_anchors = std::mem::take(&mut actions.popup_anchors);
+        self.popup_viewport = Some(owner);
+        if self.load_error.is_some() {
+            actions.changes.clear();
+        }
+        if !actions.changes.is_empty() {
+            let mut stale = false;
+            let result = update_todos(&self.store_path, |candidate| {
+                if !actions.editor_submitted
+                    && let Some(basis) = &actions.draft.editing_basis
+                    && candidate
+                        .iter()
+                        .filter(|entry| entry.id == basis.id)
+                        .count()
+                        != 1
+                {
+                    stale = true;
+                    anyhow::bail!("The edited todo is no longer uniquely available.");
+                }
+                for (before, after) in &actions.changes {
+                    let matches: Vec<_> = candidate
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| !before.id.is_empty() && entry.id == before.id)
+                        .map(|(index, _)| index)
+                        .collect();
+                    if matches.len() != 1 || candidate[matches[0]] != *before {
+                        stale = true;
+                        anyhow::bail!("The todo changed; reload before saving.");
+                    }
+                    candidate[matches[0]] = after.clone();
+                }
+                Ok(true)
+            });
+            match result {
+                Ok(committed) => {
+                    self.entries = committed;
+                    self.list_revision = self.list_revision.wrapping_add(1);
+                    self.load_error = None;
+                    if actions.editor_submitted {
+                        self.editing_idx = None;
+                        self.editing_basis = None;
+                    } else if let Some(basis) = &self.editing_basis {
+                        self.editing_idx =
+                            self.entries.iter().position(|entry| entry.id == basis.id);
+                    }
+                    app.search();
+                }
+                Err(_) if stale => {
+                    self.notice = Some("The todo changed; reload before saving.".into());
+                    actions.notes.clear();
+                }
+                Err(error) => {
+                    self.load_error = Some(error.to_string());
+                    app.report_error_message(
+                        "ui operation",
+                        format!("Failed to save todos: {error}"),
+                    );
+                    actions.notes.clear();
+                }
+            }
+        }
+
+        let _ = ctx;
+    }
+
+    pub(super) fn missing_note_anchor(request: &TodoNoteOpen) -> Option<(String, String)> {
+        if !request.check_anchor {
+            return None;
+        }
+        let anchor = request.anchor.as_deref()?;
+        let note = load_notes()
+            .ok()?
+            .into_iter()
+            .find(|note| note.slug == request.slug)?;
+        (!note_has_anchor(&note.content, anchor)).then(|| (anchor.to_owned(), note.title))
+    }
+
+    pub(super) fn accepts_note_origin(
+        &self,
+        host: super::utility_host::HostIdentity,
+        receipt: &super::utility_host::AcceptedParentOpen<(u64, String, String)>,
+        request: &TodoNoteOpen,
+        epoch: u64,
+    ) -> bool {
+        let source = (epoch, request.entry_id.clone(), request.entry_text.clone());
+        if !self.open || self.epoch != epoch || !receipt.is_current(host, &source) {
+            return false;
+        }
+        let matches_entry =
+            |entry: &&TodoEntry| entry.id == request.entry_id && entry.text == request.entry_text;
+        self.entries.iter().filter(matches_entry).count() == 1
+            && load_todos(&self.store_path)
+                .is_ok_and(|entries| entries.iter().filter(matches_entry).count() == 1)
+            && request
+                .entry_text
+                .split_whitespace()
+                .filter_map(parse_note_token)
+                .any(|(slug, anchor)| slug == request.slug && anchor == request.anchor)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_filter_state(&self) -> (bool, bool) {
+        self.test_filter_state
+    }
+    #[cfg(test)]
+    pub(super) fn test_filter_control(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_filter_control
+    }
+    #[cfg(test)]
+    pub(super) fn test_note_link(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_note_link
+    }
+    #[cfg(test)]
+    pub(super) fn test_sort_control(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_sort_control
+    }
+    #[cfg(test)]
+    pub(super) fn test_sort_name(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_sort_name
+    }
+    #[cfg(test)]
+    pub(super) fn test_is_name_sort(&self) -> bool {
+        self.sort_mode == TodoSortMode::Name
+    }
+    #[cfg(test)]
+    pub(super) fn test_edit_control(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_edit_control
+    }
+    #[cfg(test)]
+    pub(super) fn test_edit_text(&self) -> &str {
+        &self.editing_text
+    }
+    #[cfg(test)]
+    pub(super) fn test_save_control(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_save_control
+    }
+    #[cfg(test)]
+    pub(super) fn test_host_control(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_host_control
+    }
+    #[cfg(test)]
+    pub(super) fn test_scroll_to(&self, ctx: &egui::Context, target: egui::Rect) {
+        let list = self.test_list.expect("rendered Todo list");
+        let max_offset = (list.content_size.y - list.clip_rect.height()).max(0.0);
+        let offset =
+            (list.offset.y + target.center().y - list.clip_rect.center().y).clamp(0.0, max_offset);
+        let mut state =
+            egui::scroll_area::State::load(ctx, list.id).expect("Todo list scroll state");
+        state.offset.y = offset;
+        state.store(ctx, list.id);
+    }
+    #[cfg(test)]
+    pub(super) fn test_filter(&self) -> &str {
+        &self.filter
+    }
+
+    #[cfg(test)]
+    pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        if !self.open {
+            return;
+        }
+        let pinned = app
+            .pinned_panels
+            .contains(&crate::gui::Panel::TodoViewDialog);
+        let mut actions = self.render_host(
+            ctx,
+            &TodoViewRuntime {
+                pinned,
+                host: super::utility_host::UtilityHostState::default().identity(),
+            },
+            true,
+            true,
+            None,
+            super::utility_host::UtilityPresentation::Docked,
+        );
+        if actions.close {
+            self.open = false;
+        }
+        self.apply_host_actions(ctx, app, &mut actions, egui::ViewportId::ROOT);
     }
 }
 
@@ -748,6 +1318,8 @@ mod tests {
         settings.show_inline_errors = false;
         settings.show_error_toasts = false;
         settings.dashboard.enabled = false;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         crate::gui::LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -977,6 +1549,251 @@ mod tests {
 
         let by_tag = TodoViewDialog::sorted_todo_indices(&entries, "#work", TodoSortMode::Priority);
         assert_eq!(by_tag, vec![2, 1]);
+    }
+
+    #[test]
+    fn live_target_navigation_preserves_dirty_editor_and_session() {
+        let mut dialog = TodoViewDialog::default();
+        dialog.open = true;
+        dialog.epoch = 7;
+        dialog.entries = vec![todo_entry("first", 1, &[]), todo_entry("second", 2, &[])];
+        dialog.editing_idx = Some(0);
+        dialog.editing_text = "unsaved text".into();
+        dialog.open_entry("id-first");
+        assert_eq!(dialog.editing_text, "unsaved text");
+        dialog.open_entry("id-second");
+        assert_eq!(dialog.editing_idx, Some(0));
+        assert_eq!(dialog.editing_text, "unsaved text");
+        assert_eq!(dialog.epoch, 7);
+        assert!(dialog.notice.is_some());
+    }
+
+    #[test]
+    fn todo_note_receipt_rejects_host_epoch_and_replaced_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let original = todo_entry("go @note:dest#section", 1, &[]);
+        write_todos(&path, &[original.clone()]);
+        let ctx = egui::Context::default();
+        let mut dialog = TodoViewDialog::default();
+        dialog.open_from(path.to_str().unwrap());
+        let mut host = super::super::utility_host::UtilityHostState::default();
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let epoch = dialog.epoch();
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            host.identity(),
+            (epoch, original.id.clone(), original.text.clone()),
+            pass,
+            pass,
+        )
+        .unwrap();
+        let request = TodoNoteOpen {
+            entry_id: original.id.clone(),
+            entry_text: original.text.clone(),
+            slug: "dest".into(),
+            anchor: Some("section".into()),
+            check_anchor: false,
+        };
+        assert!(dialog.accepts_note_origin(host.identity(), &receipt, &request, epoch));
+        host.transition(super::super::utility_host::UtilityPresentation::Popout);
+        assert!(!dialog.accepts_note_origin(host.identity(), &receipt, &request, epoch));
+        host.transition(super::super::utility_host::UtilityPresentation::Docked);
+        assert!(!dialog.accepts_note_origin(host.identity(), &receipt, &request, epoch));
+        let current_receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            host.identity(),
+            (epoch, original.id.clone(), original.text.clone()),
+            pass,
+            pass,
+        )
+        .unwrap();
+        assert!(dialog.accepts_note_origin(host.identity(), &current_receipt, &request, epoch));
+        let mut replacement = original;
+        replacement.text = "changed @note:dest#section".into();
+        write_todos(&path, &[replacement]);
+        assert!(!dialog.accepts_note_origin(host.identity(), &current_receipt, &request, epoch));
+        dialog.open_from(path.to_str().unwrap());
+        assert!(!dialog.accepts_note_origin(host.identity(), &current_receipt, &request, epoch));
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn accepted_todo_edit_targets_identity_after_store_reorder() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let first = todo_entry("first", 1, &[]);
+        let second = todo_entry("second", 2, &[]);
+        write_todos(&path, &[first.clone(), second.clone()]);
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = TodoViewDialog::default();
+        dialog.open_from(path.to_str().unwrap());
+        let mut updated = first.clone();
+        updated.text = "changed".into();
+        write_todos(&path, &[second.clone(), first.clone()]);
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let mut actions = TodoViewHostActions {
+            epoch: dialog.epoch,
+            revision: dialog.list_revision,
+            host_request: None,
+            close: false,
+            draft: TodoViewDraft {
+                filter: String::new(),
+                sort_mode: TodoSortMode::Priority,
+                editing_idx: Some(0),
+                editing_basis: Some(first.clone()),
+                editor_generation: 1,
+                editing_text: updated.text.clone(),
+                editing_priority: 1,
+                editing_tags: String::new(),
+            },
+            changes: vec![(first, updated.clone())],
+            editor_submitted: true,
+            notes: Vec::new(),
+            host: super::super::utility_host::UtilityHostState::default().identity(),
+            root: pass,
+            owner: pass,
+            popup_anchors: Vec::new(),
+        };
+        dialog.apply_host_actions(&ctx, &mut app, &mut actions, egui::ViewportId::ROOT);
+        assert_eq!(
+            load_todos(path.to_str().unwrap()).unwrap(),
+            vec![second, updated]
+        );
+        app.settings_save_workers.join_all();
+    }
+
+    #[test]
+    fn unrelated_commit_keeps_editor_draft_and_original_basis() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let first = todo_entry("first", 1, &[]);
+        let second = todo_entry("second", 2, &[]);
+        write_todos(&path, &[first.clone(), second.clone()]);
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = TodoViewDialog::default();
+        dialog.open_from(path.to_str().unwrap());
+        dialog.open_entry(&first.id);
+        dialog.editing_text = "unsaved draft".into();
+        let mut updated_second = second.clone();
+        updated_second.done = true;
+        write_todos(&path, &[second.clone(), first.clone()]);
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let mut actions = TodoViewHostActions {
+            epoch: dialog.epoch,
+            revision: dialog.list_revision,
+            host_request: None,
+            close: false,
+            draft: TodoViewDraft {
+                filter: String::new(),
+                sort_mode: TodoSortMode::Priority,
+                editing_idx: Some(0),
+                editing_basis: Some(first.clone()),
+                editor_generation: dialog.editor_generation,
+                editing_text: "unsaved draft".into(),
+                editing_priority: first.priority,
+                editing_tags: String::new(),
+            },
+            changes: vec![(second, updated_second)],
+            editor_submitted: false,
+            notes: Vec::new(),
+            host: super::super::utility_host::UtilityHostState::default().identity(),
+            root: pass,
+            owner: pass,
+            popup_anchors: Vec::new(),
+        };
+        let generation = dialog.editor_generation;
+        dialog.apply_host_actions(&ctx, &mut app, &mut actions, egui::ViewportId::ROOT);
+        assert_eq!(dialog.editing_idx, Some(1));
+        assert_eq!(dialog.editing_text, "unsaved draft");
+        assert_eq!(dialog.editing_basis.as_ref(), Some(&first));
+        assert_eq!(dialog.editor_generation, generation);
+        let mut changed_first = first.clone();
+        changed_first.text = "externally replaced".into();
+        let mut stored = load_todos(path.to_str().unwrap()).unwrap();
+        stored[1] = changed_first.clone();
+        write_todos(&path, &stored);
+        actions.revision = dialog.list_revision;
+        actions.draft.editing_idx = Some(1);
+        actions.editor_submitted = true;
+        let mut proposed = first.clone();
+        proposed.text = "unsaved draft".into();
+        actions.changes = vec![(first, proposed)];
+        dialog.apply_host_actions(&ctx, &mut app, &mut actions, egui::ViewportId::ROOT);
+        assert_eq!(
+            load_todos(path.to_str().unwrap()).unwrap()[1],
+            changed_first
+        );
+        assert_eq!(dialog.editing_text, "unsaved draft");
+        assert!(dialog.notice.is_some());
+        app.settings_save_workers.join_all();
+    }
+
+    #[test]
+    fn replaced_todo_source_does_not_accept_stale_edit() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let first = todo_entry("first", 1, &[]);
+        write_todos(&path, &[first.clone()]);
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = TodoViewDialog::default();
+        dialog.open_from(path.to_str().unwrap());
+        let mut replacement = first.clone();
+        replacement.text = "replacement".into();
+        write_todos(&path, &[replacement.clone()]);
+        let mut proposed = first.clone();
+        proposed.text = "stale edit".into();
+        let pass = super::super::utility_host::ViewportPassProvenance::current(
+            &ctx,
+            egui::ViewportId::ROOT,
+        );
+        let mut actions = TodoViewHostActions {
+            epoch: dialog.epoch,
+            revision: dialog.list_revision,
+            host_request: None,
+            close: false,
+            draft: TodoViewDraft {
+                filter: String::new(),
+                sort_mode: TodoSortMode::Priority,
+                editing_idx: Some(0),
+                editing_basis: Some(first.clone()),
+                editor_generation: 1,
+                editing_text: proposed.text.clone(),
+                editing_priority: 1,
+                editing_tags: String::new(),
+            },
+            changes: vec![(first, proposed)],
+            editor_submitted: true,
+            notes: Vec::new(),
+            host: super::super::utility_host::UtilityHostState::default().identity(),
+            root: pass,
+            owner: pass,
+            popup_anchors: Vec::new(),
+        };
+        dialog.apply_host_actions(&ctx, &mut app, &mut actions, egui::ViewportId::ROOT);
+        assert_eq!(
+            load_todos(path.to_str().unwrap()).unwrap(),
+            vec![replacement]
+        );
+        assert!(dialog.notice.is_some());
+        assert_eq!(dialog.editing_text, "stale edit");
+        app.settings_save_workers.join_all();
     }
 
     #[test]
@@ -1230,6 +2047,41 @@ mod tests {
         );
         assert!(list.offset.y >= 0.0);
         assert!(!layout.window_close_requested);
+    }
+
+    #[test]
+    fn enlarged_text_keeps_editor_and_footer_reachable() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.animation_time = 0.0;
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.2;
+            }
+        });
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = TodoViewDialog {
+            open: true,
+            entries: vec![todo_entry("long task", 1, &[])],
+            editing_idx: Some(0),
+            editing_text: "draft".into(),
+            ..Default::default()
+        };
+        let _ = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new(), 1.0);
+        let (layout, _) = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new(), 1.1);
+        let layout = layout.expect("enlarged todo window");
+        let list = layout.list.expect("enlarged list");
+        let controls = layout.edit_save_rect.union(layout.edit_cancel_rect);
+        scroll_todo_view_control_into_view(&ctx, list, controls);
+        let _ = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new(), 1.2);
+        let (layout, _) = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new(), 1.3);
+        let layout = layout.unwrap();
+        let list = layout.list.unwrap();
+        assert_todo_view_control_visible(list, "Save", layout.edit_save_rect);
+        assert_todo_view_control_visible(list, "Cancel", layout.edit_cancel_rect);
+        assert!(layout.window_rect.contains_rect(layout.close_rect));
+        app.settings_save_workers.join_all();
     }
 
     #[test]

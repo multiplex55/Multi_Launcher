@@ -8,10 +8,13 @@ use crate::settings::{
     ColorScheme, Settings, ThemeColor, ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
 };
 use eframe::egui;
-use egui_toast::{Toast, ToastKind, ToastOptions};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 
 #[derive(Debug, Clone)]
 pub struct ThemeSettingsDialogState {
+    pub(crate) host_open: bool,
+    host_epoch: u64,
+    combo_anchors: Vec<egui::Id>,
     pub draft: ThemeSettings,
     pub dirty: bool,
     pub last_error: Option<String>,
@@ -27,6 +30,8 @@ pub struct ThemeSettingsDialogState {
     #[cfg(test)]
     pub(crate) saw_noninteractive_window_pass: bool,
     #[cfg(test)]
+    pub(crate) test_scroll_offset: Option<egui::Vec2>,
+    #[cfg(test)]
     pub(crate) test_scroll_area_history: Vec<String>,
     #[cfg(test)]
     density_option_rects: [egui::Rect; 2],
@@ -35,6 +40,9 @@ pub struct ThemeSettingsDialogState {
 impl Default for ThemeSettingsDialogState {
     fn default() -> Self {
         Self {
+            host_open: false,
+            host_epoch: 0,
+            combo_anchors: Vec::new(),
             draft: ThemeSettings::default(),
             dirty: false,
             last_error: None,
@@ -50,6 +58,8 @@ impl Default for ThemeSettingsDialogState {
             #[cfg(test)]
             saw_noninteractive_window_pass: false,
             #[cfg(test)]
+            test_scroll_offset: None,
+            #[cfg(test)]
             test_scroll_area_history: Vec::new(),
             #[cfg(test)]
             density_option_rects: [egui::Rect::NOTHING; 2],
@@ -58,6 +68,17 @@ impl Default for ThemeSettingsDialogState {
 }
 
 impl ThemeSettingsDialogState {
+    #[cfg(test)]
+    pub(super) fn test_host_epoch(&self) -> u64 { self.host_epoch }
+
+    pub(crate) fn start_host_session(&mut self, ctx: &egui::Context, settings_path: &str) {
+        if !self.host_open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+            self.host_open = true;
+            self.begin_session(ctx, settings_path);
+        }
+    }
+
     pub fn begin_session(&mut self, ctx: &egui::Context, settings_path: &str) {
         self.persisted_baseline = None;
         self.conflicted = false;
@@ -69,6 +90,7 @@ impl ThemeSettingsDialogState {
         {
             self.last_window_pass_state = None;
             self.saw_noninteractive_window_pass = false;
+            self.test_scroll_offset = None;
             self.test_scroll_area_history.clear();
         }
         self.reload_from_path(ctx, settings_path);
@@ -391,186 +413,254 @@ impl ThemeSettingsDialogState {
     }
 }
 
-pub fn ui(
-    ctx: &egui::Context,
-    app: &mut crate::gui::LauncherApp,
-    open: &mut bool,
-    state: &mut ThemeSettingsDialogState,
-) {
-    if !*open {
-        return;
-    }
+pub(super) struct ThemeHostRuntime {
+    pub navigation: Option<crate::settings_editor::render::SettingsNavigationFrameObserver>,
+}
 
-    let mut keep_open = *open;
-    let mut reload_requested = false;
-    let mut draft_changed = false;
-    let settings_path = app.settings_path.clone();
-    let key = crate::settings::UtilityToolKey::parse("theme-settings")
-        .expect("theme-settings is a stable utility size key");
-    let window_id = egui::Id::new("Theme settings");
-    let size_access = crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
-    let default_outer_size = egui::vec2(
-        980.0,
-        theme_window_initial_height(ctx.content_rect().height()),
-    );
-    let window = egui::Window::new("Theme settings")
-        .id(window_id)
-        .resizable(true)
-        .max_width(ctx.content_rect().width())
-        .max_height(ctx.content_rect().height())
-        .vscroll(false);
-    let _response = size_access.show_window(
-        ctx,
-        key,
-        window_id,
-        &mut keep_open,
-        default_outer_size,
-        egui::Vec2::splat(64.0),
-        window,
-        |ui| {
+#[derive(Default)]
+pub(super) struct ThemeHostActions {
+    navigation: Option<crate::settings_editor::render::SettingsNavigationFrameObserver>,
+    presentation: Option<super::utility_host::UtilityPresentation>,
+    action: Option<ThemeHostCommand>,
+    changed: bool,
+    #[cfg(test)]
+    test_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+pub(super) enum ThemeHostCommand {
+    Navigation(crate::settings_editor::render::SettingsNavigationFrameObserver),
+    Close,
+    Retired,
+    Reload,
+    Apply,
+    Save,
+    Preview,
+}
+
+impl super::utility_window_host::HostedUtilityDialog for ThemeSettingsDialogState {
+    const KEY: &'static str = "theme-settings";
+    const TITLE: &'static str = "Theme settings";
+    const SIZE: egui::Vec2 = egui::vec2(980.0, 700.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ThemeHostRuntime;
+    type Actions = ThemeHostActions;
+    type Checkpoint = Self;
+    type Command = ThemeHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("Theme settings"))
+    }
+    fn navigation_owner(_: u64) -> super::jump_mode::ui::NavigationOwner {
+        super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.host_open
+    }
+    fn session(&self) -> u64 {
+        self.host_epoch
+    }
+    fn parent_targets_allowed(&self, _: &ThemeHostRuntime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|l| l == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|l| {
+                l == binding.base_layer || Some(l) == popup || l == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId> {
+        self.combo_anchors.iter().copied().find_map(|anchor| {
+            (egui::ComboBox::is_open(ctx, anchor)
+                && ctx
+                    .read_response(anchor)
+                    .is_some_and(|response| response.enabled() && response.layer_id == parent))
+            .then(|| egui::LayerId::new(egui::Order::Foreground, anchor.with("popup")))
+        })
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::jump_mode::ui::JumpModeScope>,
+            Option<&super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &ThemeHostRuntime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> ThemeHostActions {
+        let navigation = runtime
+            .navigation
+            .as_ref()
+            .filter(|_| allowed && first && !ctx.will_discard());
+        let _navigation_scope = navigation.map(|observer| observer.install(ctx));
+        let mut result = ThemeHostActions::default();
+        result.navigation = navigation.cloned();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
             #[cfg(test)]
             {
                 let pass_state = (ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled());
-                state.last_window_pass_state = Some(pass_state);
-                state.saw_noninteractive_window_pass |=
+                self.last_window_pass_state = Some(pass_state);
+                self.saw_noninteractive_window_pass |=
                     pass_state.0 || !pass_state.1 || !pass_state.2;
             }
-            if !state.can_edit() {
-                if let Some(err) = &state.last_error {
-                    widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err));
-                    ui.separator();
-                }
-                ui.label(
-                    egui::RichText::new(
-                        "Theme settings could not be loaded. Retry before editing or saving.",
-                    )
-                    .text_style(text_style_for_role(TextRole::Body)),
-                );
-                ui.horizontal(|ui| {
-                    if chrome_icon_button(
-                        ui,
-                        ChromeIcon::Reset,
-                        "theme.retry-loading",
-                        "Retry loading",
-                    )
-                    .clicked()
-                    {
-                        reload_requested = true;
-                    }
-                    if chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel-load", "Cancel")
-                        .clicked()
-                    {
-                        *open = false;
-                    }
-                });
-                return;
-            }
-
-            let footer_layout = theme_footer_layout(ui);
-            let body_max_height =
-                theme_content_height(ui.available_height(), footer_layout.reserved_height);
-            let mut changed = false;
-            let _scroll_output = egui::ScrollArea::vertical()
-                .min_scrolled_height(0.0)
-                .max_height(body_max_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let (body_changed, body_reload_requested, _) =
-                        render_theme_body(ui, state, system_appearance(ctx));
-                    changed = body_changed;
-                    reload_requested = body_reload_requested;
-                });
+            let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
+            let (host, next) =
+                super::utility_host::presentation_button(ui, presentation, interactive);
             #[cfg(test)]
-            if state.test_scroll_area_history.len() < 16 {
-                state.test_scroll_area_history.push(format!(
-                    "id={:?} state={:?} content_size={:?} inner_rect={:?}",
-                    _scroll_output.id,
-                    _scroll_output.state,
-                    _scroll_output.content_size,
-                    _scroll_output.inner_rect,
-                ));
+            {
+                result.test_button = Some((host.rect, ui.clip_rect(), host.enabled()));
             }
-
-            if changed {
-                state.dirty = true;
-                draft_changed = true;
+            if first && !ctx.will_discard() && host.clicked() {
+                result.presentation = Some(next);
             }
-
-            let (footer_action, _) = render_theme_footer(ui, state, &footer_layout);
-            if footer_action == Some(ThemeFooterAction::Reset) {
-                reset_draft_preserving_saved_palettes(state);
-                draft_changed = true;
-            }
-            if footer_action == Some(ThemeFooterAction::Cancel) {
-                *open = false;
-            }
-            if footer_action == Some(ThemeFooterAction::Apply) {
-                match state.save_to_path(ctx, &app.settings_path) {
-                    Ok(_) => {
-                        if app.enable_toasts {
-                            app.add_toast(Toast {
-                                text: "Theme settings applied".into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(app.toast_duration as f64),
-
-                                style: Default::default(),
-                            });
-                        }
+            ui.add_enabled_ui(interactive, |ui| {
+                self.combo_anchors.clear();
+                if !self.can_edit() {
+                    if let Some(error) = &self.last_error {
+                        widgets::semantic_status(ui, StatusTone::Error, "Error", Some(error));
                     }
-                    Err(err) => {
-                        state.last_error = Some(err.clone());
-                        if app.enable_toasts {
-                            app.add_toast(Toast {
-                                text: err.into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(app.toast_duration as f64),
-
-                                style: Default::default(),
-                            });
-                        }
+                    ui.label("Theme settings could not be loaded. Retry before editing or saving.");
+                    if ui.button("Retry loading").clicked() {
+                        result.action = Some(ThemeHostCommand::Reload);
                     }
+                    if ui.button("Cancel").clicked() {
+                        result.action = Some(ThemeHostCommand::Close);
+                    }
+                    return;
                 }
-            }
-            if footer_action == Some(ThemeFooterAction::Save) {
-                match state.save_to_path(ctx, &app.settings_path) {
-                    Ok(_) => {
-                        if app.enable_toasts {
-                            app.add_toast(Toast {
-                                text: "Theme settings saved".into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(app.toast_duration as f64),
-
-                                style: Default::default(),
-                            });
-                        }
-                        *open = false;
-                    }
-                    Err(err) => {
-                        state.last_error = Some(err.clone());
-                        if app.enable_toasts {
-                            app.add_toast(Toast {
-                                text: err.into(),
-                                kind: ToastKind::Error,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(app.toast_duration as f64),
-
-                                style: Default::default(),
-                            });
-                        }
-                    }
+                let footer = theme_footer_layout(ui);
+                let available = ui
+                    .available_rect_before_wrap()
+                    .intersect(ui.clip_rect())
+                    .height()
+                    .max(0.0);
+                let height = theme_content_height(available, footer.reserved_height);
+                let scroll_output = egui::ScrollArea::vertical()
+                    .min_scrolled_height(0.0)
+                    .max_height(height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| render_theme_body(ui, self, system_appearance(ctx)));
+                #[cfg(test)]
+                { self.test_scroll_offset = Some(scroll_output.state.offset); }
+                #[cfg(test)]
+                if self.test_scroll_area_history.len() < 16 {
+                    self.test_scroll_area_history.push(format!("viewport={:?} id={:?} offset={:?} inner={:?} content={:?}", ctx.viewport_id(), scroll_output.id, scroll_output.state.offset, scroll_output.inner_rect, scroll_output.content_size));
                 }
-            }
-        },
-    );
-
-    *open = keep_open && *open;
-    if reload_requested {
-        state.reload_from_path(ctx, &settings_path);
-    } else if draft_changed && *open {
-        crate::gui::theme::publish_preview(ctx, &state.draft);
+                let (changed, reload, _) = scroll_output.inner;
+                if changed {
+                    self.dirty = true;
+                    result.changed = true;
+                }
+                if reload {
+                    result.action = Some(ThemeHostCommand::Reload);
+                }
+                let (action, _) = render_theme_footer(ui, self, &footer);
+                match action {
+                    Some(ThemeFooterAction::Reset) => {
+                        reset_draft_preserving_saved_palettes(self);
+                        result.changed = true;
+                    }
+                    Some(ThemeFooterAction::Cancel) => {
+                        result.action = Some(ThemeHostCommand::Close)
+                    }
+                    Some(ThemeFooterAction::Apply) => result.action = Some(ThemeHostCommand::Apply),
+                    Some(ThemeFooterAction::Save) => result.action = Some(ThemeHostCommand::Save),
+                    None => {}
+                }
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new("Theme settings");
+            egui::Window::new(Self::TITLE)
+                .id(id)
+                .resizable(true)
+                .default_size(Self::SIZE)
+                .show_utility(
+                    ctx,
+                    Self::KEY,
+                    id,
+                    Some(&mut open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(
+                        Self::SIZE.x,
+                        theme_window_initial_height(ctx.content_rect().height()),
+                    )),
+                    body,
+                );
+        }
+        if first && allowed && !ctx.will_discard() && !open {
+            result.action = Some(ThemeHostCommand::Close);
+        }
+        if !first || ctx.will_discard() {
+            result.action = None;
+            result.changed = false;
+            result.presentation = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &ThemeHostActions,
+    ) -> Option<super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> ThemeHostCommand {
+        ThemeHostCommand::Retired
+    }
+    fn command_closes(_: &ThemeHostCommand) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: ThemeHostActions,
+        _: Option<usize>,
+    ) -> Vec<ThemeHostCommand> {
+        let mut commands = Vec::new();
+        if let Some(action) = actions.action {
+            commands.push(action);
+        } else if actions.changed {
+            commands.push(ThemeHostCommand::Preview);
+        }
+        if let Some(observer) = actions.navigation {
+            commands.push(ThemeHostCommand::Navigation(observer));
+        }
+        commands
+    }
+    #[cfg(test)]
+    fn test_button(actions: &ThemeHostActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.test_button
     }
 }
 
@@ -647,6 +737,10 @@ fn render_theme_footer(
                     .inner
                 }
             };
+            #[cfg(test)]
+            if footer_action == ThemeFooterAction::Apply {
+                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test/theme-apply"), (response.rect, ui.clip_rect(), response.enabled())));
+            }
             action_rects[index] = response.rect;
             if response.clicked() {
                 action = Some(footer_action);
@@ -915,7 +1009,10 @@ fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
             crate::gui::jump_mode::TargetKind::ComboBox,
         );
         changed |= response.changed();
-        changed |= ui.selectable_value(mode, ThemeMode::Dark, "Dark").changed();
+        let dark = ui.selectable_value(mode, ThemeMode::Dark, "Dark");
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test/theme-dark"), (dark.rect, ui.clip_rect(), dark.enabled())));
+        changed |= dark.changed();
         changed |= ui
             .selectable_value(mode, ThemeMode::Light, "Light")
             .changed();
@@ -1020,6 +1117,7 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
                 changed |= state.select_saved_preset(&name);
             }
         });
+    state.combo_anchors.push(saved_palette.response.id);
     observe_theme_control(
         ui,
         &saved_palette.response,
@@ -1056,13 +1154,14 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
     });
 
     let mut selected_family = state.curated_family;
-    egui::ComboBox::from_label("Curated group")
+    let curated_group = egui::ComboBox::from_label("Curated group")
         .selected_text(selected_family.label())
         .show_ui(ui, |ui| {
             for family in PaletteFamily::ALL {
                 ui.selectable_value(&mut selected_family, family, family.label());
             }
         });
+    state.combo_anchors.push(curated_group.response.id);
     state.select_curated_family(selected_family);
 
     let family_presets: Vec<_> = curated_presets()

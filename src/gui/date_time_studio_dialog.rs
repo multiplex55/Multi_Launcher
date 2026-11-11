@@ -209,7 +209,7 @@ struct HostedFrame {
 pub(super) struct DateTimeStudioHostOutcome {
     pub(super) effect: Option<(
         DateTimeStudioEffect,
-        super::utility_host::UtilityPresentation,
+        super::utility_host::AcceptedParentOpen<u64>,
     )>,
     pub(super) copies: Vec<String>,
     pub(super) show_root: bool,
@@ -234,6 +234,7 @@ pub(crate) struct DateTimeStudioDialog {
     notice: Option<String>,
     host_close_requested: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_epoch: u64,
     host_pending: Option<HostedFrame>,
     host_os_close_pending: bool,
@@ -264,6 +265,7 @@ impl DateTimeStudioDialog {
     pub(crate) fn open(&mut self) {
         self.initialize_reference_if_needed();
         if !self.open {
+            self.presentation_prepared = false;
             self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
         }
         self.open = true;
@@ -274,9 +276,19 @@ impl DateTimeStudioDialog {
     pub(crate) fn ensure_open(&mut self) {
         self.initialize_reference_if_needed();
         if !self.open {
+            self.presentation_prepared = false;
             self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
         }
         self.open = true;
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("date-time-studio")
+                .expect("stable Date & Time Studio key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
     }
 
     pub(crate) fn request_close(&mut self) {
@@ -422,6 +434,13 @@ impl DateTimeStudioDialog {
             .map(|(effect, _)| effect)
     }
 
+    pub(super) fn accepts_calendar_origin(
+        &self,
+        receipt: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        self.open && receipt.is_current(self.host.identity(), &self.host_epoch)
+    }
+
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -478,6 +497,12 @@ impl DateTimeStudioDialog {
     }
 
     pub(super) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("date-time-studio")
+                .expect("stable Date & Time Studio key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+        self.presentation_prepared = false;
         self.retire_owned_popup(ctx);
         self.deferred_host_focus = None;
         if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
@@ -551,6 +576,7 @@ impl DateTimeStudioDialog {
         shortcut_allowed: bool,
     ) {
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        self.prepare_open_presentation(ctx);
         self.host_pending = None;
         self.close_retired_popups(ctx);
         #[cfg(test)]
@@ -925,6 +951,8 @@ impl DateTimeStudioDialog {
         let show_root = frame.request == Some(UtilityPresentation::Docked);
         if let Some(next) = frame.request {
             if self.host.transition(next) {
+                let key = crate::settings::UtilityToolKey::parse("date-time-studio").expect("stable Date & Time Studio key");
+                super::utility_host::remember_presentation(ctx, key, next);
                 self.retire_owned_popup(ctx);
                 self.deferred_host_focus = None;
                 self.focus_pending = true;
@@ -963,9 +991,12 @@ impl DateTimeStudioDialog {
         {
             ctx.request_repaint();
         }
+        let receipt = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, frame.host, frame.epoch, frame.root, frame.owner,
+        );
         DateTimeStudioHostOutcome {
             effect: if frame.request.is_none() {
-                frame.effect.map(|effect| (effect, origin))
+                frame.effect.zip(receipt)
             } else {
                 None
             },

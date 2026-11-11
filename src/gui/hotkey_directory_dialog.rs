@@ -31,15 +31,20 @@ struct SelectedEntry {
     id: EntryId,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct HotkeyDirectoryDialog {
     pub(crate) open: bool,
-    pending_open: bool,
+    epoch: u64,
+    sort_anchor: Option<egui::Id>,
     filter: String,
     sort: DirectorySort,
     selected: Option<SelectedEntry>,
     message: Option<String>,
     pending_edit: Option<HotkeyDirectoryEditRequest>,
+    #[cfg(test)]
+    test_sort_response: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_status_response: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     last_edit_response: Option<(Source, EntryId, egui::Id, egui::Rect)>,
     #[cfg(test)]
@@ -49,17 +54,19 @@ pub(crate) struct HotkeyDirectoryDialog {
 }
 
 impl HotkeyDirectoryDialog {
-    pub(crate) fn request_open(&mut self) {
-        self.pending_open = true;
-    }
-
-    pub(crate) fn take_open_request(&mut self) -> bool {
-        std::mem::take(&mut self.pending_open)
-    }
-
+    #[cfg(test)]
     pub(crate) fn take_edit_request(&mut self) -> Option<HotkeyDirectoryEditRequest> {
         self.pending_edit.take()
     }
+
+    #[cfg(test)]
+    pub(super) fn test_sort_response(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_sort_response }
+    #[cfg(test)]
+    pub(super) fn test_status_response(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_status_response }
+    #[cfg(test)]
+    pub(super) fn test_epoch(&self) -> u64 { self.epoch }
+    #[cfg(test)]
+    pub(super) fn test_status_sort_selected(&self) -> bool { self.sort == DirectorySort::Status }
 
     #[cfg(test)]
     pub(crate) fn test_last_edit_response(
@@ -104,33 +111,40 @@ impl HotkeyDirectoryDialog {
         self.last_rows_scroll
     }
 
+    #[cfg(test)]
     pub(crate) fn show(
-        &mut self,
-        ctx: &egui::Context,
-        snapshot: Option<&Snapshot>,
-        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
-        interaction_allowed: bool,
+        &mut self, ctx: &egui::Context, snapshot: Option<&Snapshot>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>, interaction_allowed: bool,
     ) {
+        let actions = self.show_host(ctx, snapshot, scope, interaction_allowed, true, None,
+            super::utility_host::UtilityPresentation::Docked, true);
+        if actions.close { self.open = false; }
+    }
+
+    pub(super) fn start_session(&mut self) {
         if !self.open {
-            return;
+            self.epoch = self.epoch.wrapping_add(1).max(1);
+            self.open = true;
         }
+    }
 
+    fn show_host(
+        &mut self, ctx: &egui::Context, snapshot: Option<&Snapshot>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>, interaction_allowed: bool,
+        first: bool, child_ui: Option<&mut egui::Ui>, presentation: super::utility_host::UtilityPresentation,
+        can_close: bool,
+    ) -> DirectoryHostActions {
         #[cfg(test)]
-        {
-            self.last_edit_response = None;
-            self.last_select_responses.clear();
-            self.last_rows_scroll = None;
-        }
-
+        { self.last_edit_response = None; self.last_select_responses.clear(); self.last_rows_scroll = None; self.test_sort_response = None; self.test_status_response = None; }
         let mut open = self.open;
         let mut visual_order = 0;
-        egui::Window::new("Hotkey Directory")
-            .id(egui::Id::new(Some("Hotkey Directory")))
-
-            .default_size((1060.0, 640.0))
-            .min_size((700.0, 380.0))
-            .resizable(true)
-            .show_utility(ctx, "hotkey-directory", egui::Id::new("Hotkey Directory"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((1060.0, 640.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from((700.0, 380.0))), |ui| {
+        let mut host_request = None;
+        #[cfg(test)]
+        let mut test_button = None;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) = super::utility_host::presentation_button(ui, presentation, interaction_allowed);
+            #[cfg(test)] { test_button = Some((button.rect, ui.clip_rect(), button.enabled())); }
+            if first && !ctx.will_discard() && button.clicked() { host_request = Some(next); }
                 ui.label("Browse configured shortcuts and their reported runtime status. Editing opens the owning settings editor; it does not run a shortcut.");
                 let filter = ui.add_enabled(
                     interaction_allowed,
@@ -155,7 +169,7 @@ impl HotkeyDirectoryDialog {
                     ui.label("Sort by");
                     let mut sort = self.sort;
                     ui.add_enabled_ui(interaction_allowed, |ui| {
-                        egui::ComboBox::from_id_salt("hotkey-directory/sort")
+                        let response = egui::ComboBox::from_id_salt("hotkey-directory/sort")
                             .selected_text(match sort {
                                 DirectorySort::Owner => "Owner",
                                 DirectorySort::Status => "Status",
@@ -163,13 +177,16 @@ impl HotkeyDirectoryDialog {
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut sort, DirectorySort::Owner, "Owner");
-                                ui.selectable_value(&mut sort, DirectorySort::Status, "Status");
+                                let _status = ui.selectable_value(&mut sort, DirectorySort::Status, "Status");
+                                #[cfg(test)] { self.test_status_response = Some((_status.rect, ui.clip_rect(), _status.enabled())); }
                                 ui.selectable_value(
                                     &mut sort,
                                     DirectorySort::Conflicts,
                                     "Conflicts first",
                                 );
                             });
+                        self.sort_anchor = Some(response.response.id);
+                        #[cfg(test)] { self.test_sort_response = Some((response.response.rect, ui.clip_rect(), response.response.enabled())); }
                     });
                     if interaction_allowed {
                         self.sort = sort;
@@ -312,7 +329,7 @@ impl HotkeyDirectoryDialog {
                                     } else {
                                         edit
                                     };
-                                    if edit.clicked() && interaction_allowed {
+                                    if edit.clicked() && interaction_allowed && first && !ctx.will_discard() {
                                         let Some(source_publication_revision) = snapshot
                                             .source_revision(entry.source)
                                         else {
@@ -349,8 +366,15 @@ impl HotkeyDirectoryDialog {
                 {
                     self.last_rows_scroll = Some((_rows_output.id, _rows_output.state.offset));
                 }
-            });
-        self.open = open;
+        };
+        if let Some(ui) = child_ui { body(ui); } else {
+            let id = egui::Id::new(Some("Hotkey Directory"));
+            egui::Window::new("Hotkey Directory").id(id).default_size((1060.0, 640.0))
+                .min_size((700.0, 380.0)).resizable(true)
+                .show_utility(ctx, "hotkey-directory", id, Some(&mut open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(1060.0, 640.0)), body);
+        }
+        DirectoryHostActions { host_request, close: can_close && !open, #[cfg(test)] test_button }
     }
 
     pub(crate) fn set_message(&mut self, message: impl Into<String>) {
@@ -359,6 +383,138 @@ impl HotkeyDirectoryDialog {
 
     pub(crate) fn clear_message(&mut self) {
         self.message = None;
+    }
+}
+
+pub(super) struct DirectoryHostRuntime {
+    pub snapshot: Option<std::sync::Arc<Snapshot>>,
+    pub can_close: bool,
+}
+
+#[derive(Default)]
+pub(super) struct DirectoryHostActions {
+    host_request: Option<super::utility_host::UtilityPresentation>,
+    close: bool,
+    #[cfg(test)]
+    test_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+pub(super) enum DirectoryHostCommand {
+    Close,
+    Edit(HotkeyDirectoryEditRequest),
+}
+
+impl super::utility_window_host::HostedUtilityDialog for HotkeyDirectoryDialog {
+    const KIND: Option<super::jump_mode::ui::NavigationDialogKind> =
+        Some(super::jump_mode::ui::NavigationDialogKind::HotkeyDirectory);
+    const KEY: &'static str = "hotkey-directory";
+    const TITLE: &'static str = "Hotkey Directory";
+    const SIZE: egui::Vec2 = egui::vec2(1060.0, 640.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(700.0, 380.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = DirectoryHostRuntime;
+    type Actions = DirectoryHostActions;
+    type Checkpoint = Self;
+    type Command = DirectoryHostCommand;
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        true
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|l| l == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|l| {
+                l == binding.base_layer || Some(l) == popup || l == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId> {
+        let anchor = self.sort_anchor?;
+        (egui::ComboBox::is_open(ctx, anchor)
+            && ctx
+                .read_response(anchor)
+                .is_some_and(|response| response.enabled() && response.layer_id == parent))
+        .then(|| egui::LayerId::new(egui::Order::Foreground, anchor.with("popup")))
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (
+            Option<&super::jump_mode::ui::JumpModeScope>,
+            Option<&super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> Self::Actions {
+        self.show_host(
+            ctx,
+            runtime.snapshot.as_deref(),
+            scopes.0,
+            allowed,
+            first,
+            child,
+            presentation,
+            runtime.can_close,
+        )
+    }
+    fn host_request(actions: &Self::Actions) -> Option<super::utility_host::UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        DirectoryHostCommand::Close
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, DirectoryHostCommand::Close)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![DirectoryHostCommand::Close]
+        } else {
+            self.pending_edit
+                .take()
+                .map(DirectoryHostCommand::Edit)
+                .into_iter()
+                .collect()
+        }
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.test_button
     }
 }
 

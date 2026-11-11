@@ -121,6 +121,7 @@ impl Drop for RevealRetirementReceipt {
 pub(crate) struct FileLockDialogState {
     pub(crate) open: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_epoch: u64,
     host_focus: bool,
     host_os_close_pending: bool,
@@ -156,6 +157,7 @@ impl FileLockDialogState {
         Self {
             open: false,
             host: super::utility_host::UtilityHostState::docked(),
+            presentation_prepared: false,
             host_epoch: 0,
             host_focus: false,
             host_os_close_pending: false,
@@ -201,6 +203,50 @@ impl FileLockDialogState {
             );
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_host_focus_pending(&self) -> bool { self.host_focus }
+
+    #[cfg(test)]
+    pub(super) fn test_stage_dock_with_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.ensure_open();
+        self.host
+            .transition(super::utility_host::UtilityPresentation::Popout);
+        self.apply_selected_path(path);
+        self.stage(
+            ctx,
+            vec![FileLockAction::Host(
+                super::utility_host::UtilityPresentation::Docked,
+            )],
+        );
+    }
+
+    pub(super) fn open_from_file_search(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        receipt: super::file_search_window_host::FileSearchOpenReceipt,
+    ) {
+        let was_open = self.open;
+        self.ensure_open();
+        self.prepare_open_presentation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host.presentation()),
+            remembered,
+            self.host.presentation(),
+            &super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        self.host.transition(desired);
+        self.request_host_focus();
+        if desired == super::utility_host::UtilityPresentation::Popout {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.apply_selected_path(path);
     }
 
     pub(super) fn stage_file_search_prefill(
@@ -488,6 +534,27 @@ impl FileLockDialogState {
         }
         (actions, !window_open && commit_allowed)
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key =
+                crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key =
+                crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -533,6 +600,7 @@ impl FileLockDialogState {
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
         self.host.retire_to_docked();
+        self.presentation_prepared = false;
         self.host_os_close_pending = false;
         self.host_focus = false;
         self.latest_pass = None;
@@ -564,6 +632,7 @@ impl FileLockDialogState {
         pinned: bool,
         shortcut_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::UtilityPresentation;
         self.poll_reveal_work();
         self.latest_pass = None;
@@ -822,6 +891,9 @@ impl FileLockDialogState {
                     match action {
                         FileLockAction::Host(next) => {
                             if self.host.transition(next) {
+                                let key =
+                                    crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
+                                super::utility_host::remember_presentation(ctx, key, next);
                                 self.latest_pass = None;
                                 if next == super::utility_host::UtilityPresentation::Docked {
                                     let identity = self.native_identity(pending.host);
@@ -952,6 +1024,7 @@ impl FileLockDialogState {
                             }
                         }
                         FileLockAction::Close => {
+                            self.remember_final_presentation(ctx);
                             self.retire_host(ctx);
                             self.external_pending = None;
                             self.close_current_selection();

@@ -110,7 +110,10 @@ struct CalendarFrame<D, A> {
 }
 pub(super) struct CalendarWindowHost<D, A> {
     host: UtilityHostState,
+    active: bool,
     pending: Option<CalendarFrame<D, A>>,
+    deferred_open: Option<(u64, UtilityPresentation)>,
+    deferred_show_root: bool,
     close_pending: bool,
     focus_pending: bool,
     epoch: Option<u64>,
@@ -122,7 +125,10 @@ impl<D, A> Default for CalendarWindowHost<D, A> {
     fn default() -> Self {
         Self {
             host: UtilityHostState::docked(),
+            active: false,
             pending: None,
+            deferred_open: None,
+            deferred_show_root: false,
             close_pending: false,
             focus_pending: false,
             epoch: None,
@@ -154,11 +160,122 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         self.focus_pending = true;
         self.host.request_focus();
     }
-    pub fn initialize(&mut self, presentation: UtilityPresentation) {
+    pub fn initialize(
+        &mut self,
+        ctx: &egui::Context,
+        spec: &CalendarHostSpec,
+        presentation: UtilityPresentation,
+    ) {
         self.host.transition(presentation);
+        if presentation == UtilityPresentation::Docked {
+            let key =
+                crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+        }
+        self.active = true;
         self.pending = None;
         self.close_pending = false;
         self.focus_pending = true;
+    }
+    pub fn accepts_origin(
+        &self,
+        open: bool,
+        epoch: u64,
+        receipt: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        open && !self.close_pending && receipt.is_current(self.host.identity(), &epoch)
+    }
+
+    pub fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        spec: &CalendarHostSpec,
+        was_open: bool,
+        epoch: u64,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        if !was_open {
+            self.initialize(ctx, spec, UtilityPresentation::Docked);
+        }
+        let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host.presentation()),
+            remembered,
+            self.host.presentation(),
+            origin,
+        );
+        if self.pending.is_some() {
+            if matches!(origin, super::utility_host::ChildOpenOrigin::Root) {
+                self.deferred_open = Some((epoch, desired));
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+            return None;
+        }
+        self.apply_open(
+            ctx,
+            spec,
+            desired,
+            matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_)),
+        );
+        Some(desired)
+    }
+
+    fn apply_open(
+        &mut self,
+        ctx: &egui::Context,
+        spec: &CalendarHostSpec,
+        desired: UtilityPresentation,
+        inherited: bool,
+    ) {
+        if self.host.transition(desired) {
+            close_bound_popup(ctx, self.owned_popup.take());
+            self.focus_pending = true;
+        }
+        if inherited && desired == UtilityPresentation::Popout {
+            let key =
+                crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.request_focus();
+    }
+
+    fn apply_deferred(
+        &mut self,
+        ctx: &egui::Context,
+        spec: &CalendarHostSpec,
+        open: bool,
+        epoch: u64,
+    ) {
+        if let Some((session, requested)) = self.deferred_open.take()
+            && open
+            && epoch == session
+            && !self.close_pending
+        {
+            let desired = super::utility_host::resolve_child_presentation(
+                Some(self.host.presentation()),
+                Some(requested),
+                requested,
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            self.apply_open(ctx, spec, desired, false);
+            self.deferred_show_root = desired == UtilityPresentation::Docked;
+        }
+    }
+
+    pub fn take_deferred_show_root(&mut self) -> bool {
+        std::mem::take(&mut self.deferred_show_root)
+            && self.host.presentation() == UtilityPresentation::Docked
+    }
+
+    pub fn remember_on_close(&self, ctx: &egui::Context, spec: &CalendarHostSpec) {
+        if self.active {
+            let key =
+                crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
     }
     fn identity(spec: &CalendarHostSpec, host: HostIdentity, epoch: u64) -> NativeViewportIdentity {
         NativeViewportIdentity {
@@ -176,9 +293,12 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             ctx.send_viewport_cmd_to(spec.viewport, egui::ViewportCommand::Close);
         }
         self.pending = None;
+        self.deferred_open = None;
+        self.deferred_show_root = false;
         self.close_pending = false;
         self.focus_pending = false;
         self.epoch = None;
+        self.active = false;
         #[cfg(test)]
         {
             self.test_controls = [None; 3];
@@ -387,7 +507,7 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         spec: &CalendarHostSpec,
         open: bool,
         epoch: u64,
-    ) -> Option<(A, UtilityPresentation, bool)> {
+    ) -> Option<(A, super::utility_host::AcceptedParentOpen<u64>, bool)> {
         let frame = self.pending.take()?;
         if !open
             || frame.epoch != epoch
@@ -398,6 +518,7 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             if open && frame.epoch == epoch {
                 *dialog = frame.draft;
             }
+            self.apply_deferred(ctx, spec, open, epoch);
             return None;
         }
         let identity = Self::identity(spec, frame.host, epoch);
@@ -429,6 +550,8 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
         let show_root = request == Some(UtilityPresentation::Docked);
         if let Some(next) = request {
             if self.host.transition(next) {
+                let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+                super::utility_host::remember_presentation(ctx, key, next);
                 close_bound_popup(ctx, self.owned_popup.take());
                 if next == UtilityPresentation::Docked {
                     super::utility_dialog_size::close_native_utility_geometry_viewport(
@@ -447,7 +570,15 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                 None,
             );
         }
-        Some((frame.actions, frame.host.host, show_root))
+        let receipt = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, frame.host, frame.epoch, frame.root, frame.owner,
+        )?;
+        if !frame.actions.is_closing() {
+            self.apply_deferred(ctx, spec, open, epoch);
+        } else {
+            self.deferred_open = None;
+        }
+        Some((frame.actions, receipt, show_root))
     }
 }
 fn close_bound_popup(ctx: &egui::Context, bound: Option<(egui::ViewportId, egui::Id)>) {

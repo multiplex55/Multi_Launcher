@@ -6,8 +6,8 @@ use gif::{Encoder, Frame};
 
 use super::output::{OutputStage, RecordingOutputError, publish_finalized};
 use super::{
-    CanvasSize, CaptureTerminal, ConsumerFrame, MAX_RECORDING_SECONDS, RecordingFormat,
-    RecordingSession, RecordingSessionError, TimedFrame,
+    CanvasSize, CaptureTerminal, ConsumerFrame, RecordingFormat, RecordingSession,
+    RecordingSessionError, TimedFrame,
 };
 
 const QUANTIZER_SPEED: i32 = 10;
@@ -16,8 +16,8 @@ const CENTISECOND_NANOS: u128 = 10_000_000;
 const HALF_CENTISECOND_NANOS: u128 = CENTISECOND_NANOS / 2;
 
 struct PendingFrame {
-    source_bucket: u16,
-    display_bucket: u16,
+    source_bucket: u64,
+    display_bucket: u64,
     frame: Frame<'static>,
 }
 
@@ -52,23 +52,41 @@ impl<W: Write> GifStream<W> {
         })
     }
 
-    fn write_timed_frame(&mut self, timed: &TimedFrame) -> Result<(), RecordingOutputError> {
-        self.write_frame_data(
+    fn write_timed_frame_with(
+        &mut self,
+        timed: &TimedFrame,
+        mut check: impl FnMut() -> Result<(), RecordingOutputError>,
+    ) -> Result<(), RecordingOutputError> {
+        self.write_frame_data_with(
             timed.elapsed(),
             timed.frame().size(),
             timed.frame().pixels(),
+            &mut check,
         )
     }
 
+    #[cfg(test)]
+    fn write_timed_frame(&mut self, timed: &TimedFrame) -> Result<(), RecordingOutputError> {
+        self.write_timed_frame_with(timed, || Ok(()))
+    }
+
+    #[cfg(test)]
     fn write_frame_data(
         &mut self,
         elapsed: Duration,
         size: CanvasSize,
         pixels: &[u8],
     ) -> Result<(), RecordingOutputError> {
-        if elapsed > Duration::from_secs(MAX_RECORDING_SECONDS) {
-            return Err(RecordingOutputError::ClipTooLong);
-        }
+        self.write_frame_data_with(elapsed, size, pixels, &mut || Ok(()))
+    }
+
+    fn write_frame_data_with(
+        &mut self,
+        elapsed: Duration,
+        size: CanvasSize,
+        pixels: &[u8],
+        check: &mut impl FnMut() -> Result<(), RecordingOutputError>,
+    ) -> Result<(), RecordingOutputError> {
         if self
             .last_input_elapsed
             .is_some_and(|last_elapsed| elapsed < last_elapsed)
@@ -90,9 +108,12 @@ impl<W: Write> GifStream<W> {
                 display_bucket
             }
             Some(pending) => {
-                let delay = bucket.saturating_sub(pending.display_bucket).max(1);
+                let delay = bucket
+                    .checked_sub(pending.display_bucket)
+                    .ok_or(RecordingOutputError::TimestampMovedBackwards)?
+                    .max(1);
                 self.pending = Some(pending);
-                self.flush_pending(delay)?;
+                self.flush_pending_with(delay, check)?;
                 bucket
             }
         };
@@ -129,26 +150,52 @@ impl<W: Write> GifStream<W> {
         });
 
         self.last_input_elapsed = Some(elapsed);
-        self.staged_inputs = self.staged_inputs.saturating_add(1);
+        self.staged_inputs = self
+            .staged_inputs
+            .checked_add(1)
+            .ok_or(RecordingOutputError::TimestampOverflow)?;
         Ok(())
     }
 
-    fn flush_pending(&mut self, delay: u16) -> Result<(), RecordingOutputError> {
+    #[cfg(test)]
+    fn flush_pending(&mut self, delay: u64) -> Result<(), RecordingOutputError> {
+        self.flush_pending_with(delay, &mut || Ok(()))
+    }
+
+    fn flush_pending_with(
+        &mut self,
+        mut delay: u64,
+        check: &mut impl FnMut() -> Result<(), RecordingOutputError>,
+    ) -> Result<(), RecordingOutputError> {
         let Some(mut pending) = self.pending.take() else {
             return Ok(());
         };
-        pending.frame.delay = delay;
-        self.encoder
-            .write_frame(&pending.frame)
-            .map_err(|error| RecordingOutputError::Encoding(error.to_string()))?;
-        self.encoded_images = self.encoded_images.saturating_add(1);
+        while delay > 0 {
+            check()?;
+            let chunk = delay.min(u64::from(u16::MAX));
+            pending.frame.delay = chunk as u16;
+            self.encoder
+                .write_frame(&pending.frame)
+                .map_err(|error| RecordingOutputError::Encoding(error.to_string()))?;
+            self.encoded_images = self
+                .encoded_images
+                .checked_add(1)
+                .ok_or(RecordingOutputError::TimestampOverflow)?;
+            delay -= chunk;
+        }
         Ok(())
     }
 
-    fn finish(mut self, terminal_elapsed: Duration) -> Result<(W, u64, u64), RecordingOutputError> {
-        if terminal_elapsed > Duration::from_secs(MAX_RECORDING_SECONDS) {
-            return Err(RecordingOutputError::ClipTooLong);
-        }
+    #[cfg(test)]
+    fn finish(self, terminal_elapsed: Duration) -> Result<(W, u64, u64), RecordingOutputError> {
+        self.finish_with(terminal_elapsed, || Ok(()))
+    }
+
+    fn finish_with(
+        mut self,
+        terminal_elapsed: Duration,
+        mut check: impl FnMut() -> Result<(), RecordingOutputError>,
+    ) -> Result<(W, u64, u64), RecordingOutputError> {
         if self.staged_inputs == 0 {
             return Err(RecordingOutputError::EmptyClip);
         }
@@ -167,12 +214,14 @@ impl<W: Write> GifStream<W> {
                 self.pending = None;
             } else {
                 let delay = terminal_bucket
-                    .saturating_sub(pending.display_bucket)
+                    .checked_sub(pending.display_bucket)
+                    .ok_or(RecordingOutputError::FrameAfterTerminal)?
                     .max(1);
-                self.flush_pending(delay)?;
+                self.flush_pending_with(delay, &mut check)?;
             }
         }
 
+        check()?;
         let writer = self
             .encoder
             .into_inner()
@@ -201,9 +250,13 @@ fn validate_frame_data(
     Ok(())
 }
 
-fn centisecond_bucket(elapsed: Duration) -> Result<u16, RecordingOutputError> {
-    let ticks = elapsed.as_nanos().saturating_add(HALF_CENTISECOND_NANOS) / CENTISECOND_NANOS;
-    u16::try_from(ticks).map_err(|_| RecordingOutputError::ClipTooLong)
+fn centisecond_bucket(elapsed: Duration) -> Result<u64, RecordingOutputError> {
+    let ticks = elapsed
+        .as_nanos()
+        .checked_add(HALF_CENTISECOND_NANOS)
+        .ok_or(RecordingOutputError::TimestampOverflow)?
+        / CENTISECOND_NANOS;
+    u64::try_from(ticks).map_err(|_| RecordingOutputError::TimestampOverflow)
 }
 
 /// A GIF recording bound to one session generation at creation.
@@ -260,21 +313,30 @@ impl GifRecording {
             )));
         }
 
+        let session = std::sync::Arc::clone(&self.session);
+        let generation = self.generation;
         let result = self
             .stream
             .as_mut()
             .ok_or(RecordingOutputError::InvalidTransition)
-            .and_then(|stream| stream.write_timed_frame(frame.frame()));
+            .and_then(|stream| {
+                stream.write_timed_frame_with(frame.frame(), || {
+                    ensure_output_current(&session, generation)
+                })
+            });
         if let Err(error) = result {
             drop(frame);
             return Err(self.fail_sink(error));
         }
 
         match frame.acknowledge_written() {
-            Ok(()) => {
-                self.acknowledged_inputs = self.acknowledged_inputs.saturating_add(1);
-                Ok(())
-            }
+            Ok(()) => match self.acknowledged_inputs.checked_add(1) {
+                Some(count) => {
+                    self.acknowledged_inputs = count;
+                    Ok(())
+                }
+                None => Err(self.fail_sink(RecordingOutputError::TimestampOverflow)),
+            },
             Err(error) => Err(self.fail_sink(RecordingOutputError::Session(error))),
         }
     }
@@ -332,7 +394,12 @@ impl GifRecording {
         let Some(stream) = self.stream.take() else {
             return Err(self.fail_sink(RecordingOutputError::InvalidTransition));
         };
-        let (buffered, staged_inputs, _encoded_images) = match stream.finish(terminal.elapsed()) {
+        let session = std::sync::Arc::clone(&self.session);
+        let generation = self.generation;
+        let (buffered, staged_inputs, _encoded_images) = match stream
+            .finish_with(terminal.elapsed(), || {
+                ensure_output_current(&session, generation)
+            }) {
             Ok(result) => result,
             Err(error) => return Err(self.fail_sink(error)),
         };
@@ -405,6 +472,27 @@ impl Drop for GifRecording {
             let _ = stage.discard();
         }
     }
+}
+
+fn ensure_output_current(
+    session: &RecordingSession,
+    generation: u64,
+) -> Result<(), RecordingOutputError> {
+    let view = session.view();
+    if view.generation() != generation {
+        return Err(RecordingOutputError::Session(
+            RecordingSessionError::StaleGeneration,
+        ));
+    }
+    if !matches!(
+        view.state(),
+        super::RecorderState::Recording { .. } | super::RecorderState::Finalizing { .. }
+    ) {
+        return Err(RecordingOutputError::Session(
+            RecordingSessionError::InvalidTransition,
+        ));
+    }
+    Ok(())
 }
 
 fn discard_stage(stage: OutputStage, error: RecordingOutputError) -> RecordingOutputError {
@@ -515,7 +603,7 @@ mod tests {
         let options = RecordingOptions::new(
             RecordingFormat::Gif,
             FrameRate::new(30).unwrap(),
-            Duration::from_secs(1),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(1)),
             false,
         )
         .unwrap();
@@ -543,6 +631,81 @@ mod tests {
             thread::yield_now();
         }
         (session, generation, recording)
+    }
+
+    #[test]
+    fn recording_gif_long_holds_stream_exact_delay_chunks_and_cancel() {
+        let mut stream = GifStream::new(Vec::new(), canvas()).unwrap();
+        stream
+            .write_frame_data(Duration::ZERO, canvas(), &vec![255; canvas().rgba_bytes()])
+            .unwrap();
+        stream
+            .write_frame_data(
+                Duration::from_millis(700_005),
+                canvas(),
+                &vec![0; canvas().rgba_bytes()],
+            )
+            .unwrap();
+        let (bytes, inputs, images) = stream.finish(Duration::from_millis(1_000_005)).unwrap();
+        assert_eq!(inputs, 2);
+        assert_eq!(images, 3);
+        let frames = decode(bytes);
+        let delay_ms: u64 = frames
+            .iter()
+            .map(|frame| {
+                let (numerator, denominator) = frame.delay().numer_denom_ms();
+                u64::from(numerator) / u64::from(denominator)
+            })
+            .sum();
+        assert_eq!(delay_ms, 1_000_010);
+        assert_eq!(frames[0].delay().numer_denom_ms(), (655_350, 1));
+        assert!(matches!(
+            centisecond_bucket(Duration::MAX),
+            Err(RecordingOutputError::TimestampOverflow)
+        ));
+        let mut cancelled = GifStream::new(Vec::new(), canvas()).unwrap();
+        cancelled
+            .write_frame_data(Duration::ZERO, canvas(), &vec![0; canvas().rgba_bytes()])
+            .unwrap();
+        let mut calls = 0;
+        let error = cancelled.write_frame_data_with(
+            Duration::from_secs(1_000),
+            canvas(),
+            &vec![0; canvas().rgba_bytes()],
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    Err(RecordingOutputError::InvalidTransition)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(
+            error,
+            Err(RecordingOutputError::InvalidTransition)
+        ));
+        assert_eq!(calls, 2);
+        let (writer, control) = ToggleWriter::new();
+        let mut failing = GifStream::new(writer, canvas()).unwrap();
+        failing
+            .write_frame_data(Duration::ZERO, canvas(), &vec![0; canvas().rgba_bytes()])
+            .unwrap();
+        let mut calls = 0;
+        let error = failing.write_frame_data_with(
+            Duration::from_secs(1_000),
+            canvas(),
+            &vec![0; canvas().rgba_bytes()],
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    control.fail_next.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+        );
+        assert!(matches!(error, Err(RecordingOutputError::Encoding(_))));
+        assert_eq!(calls, 2);
     }
 
     #[test]

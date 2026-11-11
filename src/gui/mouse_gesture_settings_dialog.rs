@@ -12,6 +12,19 @@ use eframe::egui;
 
 const WINDOW_PICKER_TITLE: &str = "Select window to ignore";
 
+#[cfg(test)]
+thread_local! {
+    static TEST_WINDOW_TITLES: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn window_titles() -> Result<Vec<String>, String> {
+    #[cfg(test)]
+    if let Some(titles) = TEST_WINDOW_TITLES.with(|titles| titles.borrow_mut().take()) {
+        return Ok(titles);
+    }
+    collect_visible_window_titles().map_err(|error| error.to_string())
+}
+
 fn register_mouse_gesture_settings_target(
     scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     ui: &egui::Ui,
@@ -67,6 +80,20 @@ pub(crate) fn window_picker_layer_id() -> egui::LayerId {
     )
 }
 
+#[derive(Clone, Default)]
+pub(super) struct GestureWindowPicker {
+    open: bool,
+    titles: Vec<String>,
+    error: Option<String>,
+    epoch: u64,
+    parent_session: u64,
+    ignore_basis: Vec<String>,
+    #[cfg(test)]
+    add_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    close_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
 struct MouseGestureSettingsUiLayout {
     scroll: egui::containers::scroll_area::ScrollAreaOutput<()>,
     body_clip_rect: egui::Rect,
@@ -89,9 +116,7 @@ pub struct MouseGestureSettingsDialog {
     settings: MouseGestureSettings,
     last_error: Option<String>,
     ignore_input: String,
-    window_picker_open: bool,
-    window_picker_titles: Vec<String>,
-    window_picker_error: Option<String>,
+    picker: GestureWindowPicker,
     ignore_row_revision: u64,
     next_ignore_row_token: u64,
     ignore_row_tokens: Vec<u64>,
@@ -101,6 +126,44 @@ pub struct MouseGestureSettingsDialog {
     last_scroll_max_offset_y: f32,
     #[cfg(test)]
     last_enable_checkbox_response: Option<egui::Response>,
+}
+
+pub(super) struct GestureSettingsMainCheckpoint {
+    open: bool,
+    needs_reload: bool,
+    dirty: bool,
+    settings: MouseGestureSettings,
+    last_error: Option<String>,
+    ignore_input: String,
+    ignore_row_revision: u64,
+    next_ignore_row_token: u64,
+    ignore_row_tokens: Vec<u64>,
+}
+impl GestureSettingsMainCheckpoint {
+    pub(super) fn capture(dialog: &MouseGestureSettingsDialog) -> Self {
+        Self {
+            open: dialog.open,
+            needs_reload: dialog.needs_reload,
+            dirty: dialog.dirty,
+            settings: dialog.settings.clone(),
+            last_error: dialog.last_error.clone(),
+            ignore_input: dialog.ignore_input.clone(),
+            ignore_row_revision: dialog.ignore_row_revision,
+            next_ignore_row_token: dialog.next_ignore_row_token,
+            ignore_row_tokens: dialog.ignore_row_tokens.clone(),
+        }
+    }
+    pub(super) fn restore(self, dialog: &mut MouseGestureSettingsDialog) {
+        dialog.open = self.open;
+        dialog.needs_reload = self.needs_reload;
+        dialog.dirty = self.dirty;
+        dialog.settings = self.settings;
+        dialog.last_error = self.last_error;
+        dialog.ignore_input = self.ignore_input;
+        dialog.ignore_row_revision = self.ignore_row_revision;
+        dialog.next_ignore_row_token = self.next_ignore_row_token;
+        dialog.ignore_row_tokens = self.ignore_row_tokens;
+    }
 }
 
 #[derive(Clone, Default)]
@@ -124,9 +187,84 @@ impl GestureSettingsUiActions {
     pub(crate) fn request_close(&mut self) {
         self.effects.push(GestureSettingsEffect::Close);
     }
+
+    pub(super) fn take_open_picker(&mut self) -> bool {
+        let present = self.effects.iter().any(|effect| matches!(effect, GestureSettingsEffect::OpenWindowPicker));
+        self.effects.retain(|effect| !matches!(effect, GestureSettingsEffect::OpenWindowPicker));
+        present
+    }
 }
 
 impl MouseGestureSettingsDialog {
+    pub(super) fn picker_mut(&mut self) -> &mut GestureWindowPicker {
+        &mut self.picker
+    }
+
+    pub(super) fn close_picker(&mut self) {
+        self.picker.open = false;
+        self.picker.titles.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_picker_add_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.picker.add_button
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_picker_close_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.picker.close_button
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_picker_epoch(&self) -> u64 {
+        self.picker.epoch
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_set_next_window_titles(titles: Vec<String>) {
+        TEST_WINDOW_TITLES.with(|next| *next.borrow_mut() = Some(titles));
+    }
+
+    pub(super) fn open_picker(&mut self, parent_session: u64) {
+        if self.picker.open {
+            return;
+        }
+        self.picker.epoch = self.picker.epoch.wrapping_add(1).max(1);
+        self.picker.parent_session = parent_session;
+        self.picker.ignore_basis = self.settings.ignore_window_titles.clone();
+        self.picker.error = None;
+        match window_titles() {
+            Ok(titles) => self.picker.titles = titles,
+            Err(error) => {
+                self.picker.titles.clear();
+                self.picker.error = Some(format!("Failed to enumerate windows: {error}"));
+            }
+        }
+        self.picker.open = true;
+    }
+
+    pub(super) fn accept_picker_title(&mut self, parent_session: u64, epoch: u64, title: &str) -> bool {
+        self.accept_picker_title_with(parent_session, epoch, title, apply_runtime_settings)
+    }
+
+    fn accept_picker_title_with(&mut self, parent_session: u64, epoch: u64, title: &str,
+        apply: impl FnOnce(MouseGestureSettings)) -> bool {
+        if !self.open || !self.picker.open || self.picker.epoch != epoch
+            || self.picker.parent_session != parent_session
+            || self.settings.ignore_window_titles != self.picker.ignore_basis
+            || !self.picker.titles.iter().any(|candidate| candidate == title)
+        {
+            return false;
+        }
+        if !add_ignore_window_title(&mut self.settings.ignore_window_titles, title) {
+            return false;
+        }
+        self.picker.ignore_basis = self.settings.ignore_window_titles.clone();
+        self.dirty = true;
+        self.renew_ignore_row_tokens();
+        apply(self.settings.clone());
+        true
+    }
     fn perform_or_stage(
         &mut self,
         app: &mut crate::gui::LauncherApp,
@@ -146,23 +284,12 @@ impl MouseGestureSettingsDialog {
             GestureSettingsEffect::ApplyRuntime(settings) if self.settings == settings => {
                 apply_runtime_settings(settings);
             }
-            GestureSettingsEffect::OpenWindowPicker => {
-                self.window_picker_error = None;
-                match collect_visible_window_titles() {
-                    Ok(titles) => self.window_picker_titles = titles,
-                    Err(error) => {
-                        self.window_picker_error =
-                            Some(format!("Failed to enumerate windows: {error}"));
-                        self.window_picker_titles.clear();
-                    }
-                }
-                self.window_picker_open = true;
-            }
+            GestureSettingsEffect::OpenWindowPicker => {}
             GestureSettingsEffect::Reload => self.needs_reload = true,
             GestureSettingsEffect::Close => {
                 self.open = false;
-                self.window_picker_open = false;
-                self.window_picker_titles.clear();
+                self.picker.open = false;
+                self.picker.titles.clear();
             }
             _ => {}
         }
@@ -179,7 +306,7 @@ impl MouseGestureSettingsDialog {
     }
 
     pub(crate) fn window_picker_is_open(&self) -> bool {
-        self.window_picker_open
+        self.picker.open
     }
 
     fn renew_ignore_row_tokens(&mut self) {
@@ -211,9 +338,9 @@ impl MouseGestureSettingsDialog {
 
     #[cfg(test)]
     pub(crate) fn test_seed_picker(&mut self) {
-        self.window_picker_open = true;
-        self.window_picker_titles.clear();
-        self.window_picker_error = None;
+        self.picker.open = true;
+        self.picker.titles.clear();
+        self.picker.error = None;
     }
 
     #[cfg(test)]
@@ -239,9 +366,9 @@ impl MouseGestureSettingsDialog {
     pub fn open(&mut self) {
         if !self.open {
             self.needs_reload = true;
-            self.window_picker_open = false;
-            self.window_picker_titles.clear();
-            self.window_picker_error = None;
+            self.picker.open = false;
+            self.picker.titles.clear();
+            self.picker.error = None;
         }
         self.open = true;
     }
@@ -408,7 +535,7 @@ impl MouseGestureSettingsDialog {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         dialog_instance: Option<u64>,
         native_ui_owner: bool,
-        native_picker_owner: bool,
+        _native_picker_owner: bool,
         first_ui_pass: bool,
         child_ui: Option<&mut egui::Ui>,
         host_presentation: Option<bool>,
@@ -418,7 +545,7 @@ impl MouseGestureSettingsDialog {
             return None;
         }
 
-        let scope = if native_ui_owner && !self.window_picker_open {
+        let scope = if native_ui_owner {
             scope
         } else {
             None
@@ -440,13 +567,10 @@ impl MouseGestureSettingsDialog {
         } else {
             Some((self.settings.clone(), self.ignore_input.clone(), self.dirty))
         };
-        let mut picker_state_before_pass: Option<(MouseGestureSettings, bool)> = None;
 
         let mut open = self.open;
         let mut close_requested = false;
         let mut authorized_main_pass = false;
-        let mut authorized_picker_pass = false;
-        let mut picker_changed = false;
         let mut ignore_rows_changed = false;
         let mut visual_order = 0;
         let mut draw_body = |ui: &mut egui::Ui| {
@@ -462,7 +586,7 @@ impl MouseGestureSettingsDialog {
             if authorized_main_pass {
                 self.ensure_ignore_row_tokens();
             }
-            ui.add_enabled_ui(native_ui_owner && !self.window_picker_open, |ui| {
+            ui.add_enabled_ui(native_ui_owner, |ui| {
                 if let Some(err) = self.last_error.as_ref() {
                     semantic_status(ui, StatusTone::Error, "Settings error", Some(err));
                     ui.separator();
@@ -856,63 +980,6 @@ impl MouseGestureSettingsDialog {
                     self.dirty = dirty;
                 }
 
-                if self.window_picker_open {
-                    let mut open_picker = self.window_picker_open;
-                    egui::Window::new(WINDOW_PICKER_TITLE)
-
-                        .resizable(true)
-                        .show_utility(ctx, "gesture-settings-window-picker", egui::Id::new(WINDOW_PICKER_TITLE), Some(&mut open_picker), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
-                            authorized_picker_pass = native_picker_owner
-                                && first_ui_pass
-                                && ui.is_visible()
-                                && !ui.is_sizing_pass();
-                            if !authorized_picker_pass {
-                                picker_state_before_pass = Some((
-                                    self.settings.clone(),
-                                    self.dirty,
-                                ));
-                            }
-                            ui.add_enabled_ui(authorized_picker_pass, |ui| {
-                            if let Some(err) = &self.window_picker_error {
-                                semantic_status(
-                                    ui,
-                                    StatusTone::Error,
-                                    "Window picker error",
-                                    Some(err),
-                                );
-                                ui.separator();
-                            }
-
-                            if self.window_picker_titles.is_empty() {
-                                ui.label("No windows found.");
-                            } else {
-                                let titles = &self.window_picker_titles;
-                                egui::ScrollArea::vertical()
-                                    .max_height(220.0)
-                                    .show(ui, |ui| {
-                                        for title in titles {
-                                            ui.horizontal(|ui| {
-                                                ui.label(title);
-                                                if ui.button("Add").clicked()
-                                                    && authorized_picker_pass
-                                                    && add_ignore_window_title(
-                                                        &mut self.settings.ignore_window_titles,
-                                                        title,
-                                                    ) {
-                                                        picker_changed = true;
-                                                        ignore_rows_changed = true;
-                                                    }
-                                            });
-                                        }
-                                    });
-                            }
-                            });
-                        });
-                    if authorized_picker_pass {
-                        self.window_picker_open = open_picker;
-                    }
-                }
-
                 if authorized_main_pass
                     && normalize_ignore_window_titles(&mut self.settings.ignore_window_titles)
                 {
@@ -930,12 +997,7 @@ impl MouseGestureSettingsDialog {
                     let settings = self.settings.clone();
                     self.perform_or_stage(app, actions, GestureSettingsEffect::ApplyRuntime(settings));
                 }
-                if picker_changed && authorized_picker_pass {
-                    self.dirty = true;
-                    let settings = self.settings.clone();
-                    self.perform_or_stage(app, actions, GestureSettingsEffect::ApplyRuntime(settings));
-                }
-                if ignore_rows_changed && (authorized_main_pass || authorized_picker_pass) {
+                if ignore_rows_changed && authorized_main_pass {
                     if let Some(row_scope) = &row_scope {
                         row_scope.discard_registered_namespace();
                     }
@@ -945,7 +1007,7 @@ impl MouseGestureSettingsDialog {
 
                 ui.separator();
 
-                let footer_scope = if self.window_picker_open { None } else { scope };
+                let footer_scope = scope;
                 let (reload_button, save_button, close_button) = ui.horizontal(|ui| {
                     let reload_button = ui.button("Reload");
                     register_mouse_gesture_settings_target(
@@ -983,7 +1045,7 @@ impl MouseGestureSettingsDialog {
                             super::utility_host::UtilityPresentation::Docked
                         };
                         let (response, requested) = super::utility_host::presentation_button(
-                            ui, current, authorized_main_pass && !self.window_picker_open,
+                            ui, current, authorized_main_pass,
                         );
                         if let Some(actions) = actions {
                             #[cfg(test)]
@@ -1056,17 +1118,11 @@ impl MouseGestureSettingsDialog {
         if native_ui_owner && first_ui_pass && !pinned && (!open || close_requested) {
             self.perform_or_stage(app, actions, GestureSettingsEffect::Close);
         }
-        if authorized_picker_pass {
-            self.window_picker_open = self.window_picker_open && self.open;
-        }
         if !self.open {
-            self.window_picker_open = false;
-            self.window_picker_titles.clear();
+            self.picker.open = false;
+            self.picker.titles.clear();
         }
-        if let Some((settings, dirty)) = picker_state_before_pass {
-            self.settings = settings;
-            self.dirty = dirty;
-        }
+
         #[cfg(test)]
         if let Some(layout) = &layout {
             self.last_scroll_area_id = Some(layout.scroll.id);
@@ -1136,9 +1192,250 @@ fn wheel_cycle_gate_label(value: crate::mouse_gestures::service::WheelCycleGate)
     }
 }
 
+
+#[derive(Default)]
+pub(super) struct PickerActions {
+    host_request: Option<super::utility_host::UtilityPresentation>,
+    title: Option<String>,
+    close: bool,
+}
+pub(super) enum PickerCommand {
+    Close,
+    Add(String, u64),
+}
+
+impl super::utility_window_host::HostedUtilityDialog for GestureWindowPicker {
+    const KEY: &'static str = "gesture-settings-window-picker";
+    const TITLE: &'static str = WINDOW_PICKER_TITLE;
+    const SIZE: egui::Vec2 = egui::vec2(480.0, 380.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(300.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = ();
+    type Actions = PickerActions;
+    type Checkpoint = GestureWindowPicker;
+    type Command = PickerCommand;
+    fn layer() -> egui::LayerId {
+        window_picker_layer_id()
+    }
+    fn navigation_owner(_: u64) -> super::jump_mode::ui::NavigationOwner {
+        super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self::Checkpoint {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::jump_mode::ui::JumpModeScope>,
+            Option<&super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> PickerActions {
+        let mut result = PickerActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
+            let (host, next) =
+                super::utility_host::presentation_button(ui, presentation, interactive);
+            if first && !ctx.will_discard() && host.clicked() {
+                result.host_request = Some(next);
+            }
+            if let Some(error) = &self.error {
+                semantic_status(ui, StatusTone::Error, "Window picker error", Some(error));
+            }
+            if self.titles.is_empty() {
+                ui.label("No windows found.");
+            }
+            ui.add_enabled_ui(interactive, |ui| {
+                let button_height = (ui.text_style_height(&egui::TextStyle::Button)
+                    + 2.0 * ui.spacing().button_padding.y)
+                    .max(ui.spacing().interact_size.y);
+                let footer_height = button_height + ui.spacing().item_spacing.y * 2.0;
+                let available_height = ui
+                    .available_rect_before_wrap()
+                    .intersect(ui.clip_rect())
+                    .height()
+                    .max(0.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height((available_height - footer_height).max(0.0))
+                    .show(ui, |ui| {
+                        for title in &self.titles {
+                            ui.horizontal(|ui| {
+                                let add = ui.button("Add");
+                                #[cfg(test)]
+                                {
+                                    self.add_button =
+                                        Some((add.rect, ui.clip_rect(), add.enabled()));
+                                }
+                                if add.clicked() && first && !ctx.will_discard() {
+                                    result.title = Some(title.clone());
+                                }
+                                ui.add(egui::Label::new(title).truncate())
+                                    .on_hover_text(title);
+                            });
+                        }
+                    });
+                let close = ui.button("Close");
+                #[cfg(test)]
+                {
+                    self.close_button = Some((close.rect, ui.clip_rect(), close.enabled()));
+                }
+                if close.clicked() && first && !ctx.will_discard() {
+                    result.close = true;
+                }
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = window_picker_layer_id().id;
+            egui::Window::new(Self::TITLE)
+                .id(id)
+                .collapsible(false)
+                .resizable(true)
+                .default_size(Self::SIZE)
+                .show_utility(
+                    ctx,
+                    Self::KEY,
+                    id,
+                    Some(&mut open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                    body,
+                );
+        }
+        if first && allowed && !ctx.will_discard() && !open {
+            result.close = true;
+        }
+        result
+    }
+    fn host_request(actions: &PickerActions) -> Option<super::utility_host::UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> PickerCommand {
+        PickerCommand::Close
+    }
+    fn command_closes(command: &PickerCommand) -> bool {
+        matches!(command, PickerCommand::Close)
+    }
+    fn complete_actions(&mut self, actions: PickerActions, _: Option<usize>) -> Vec<PickerCommand> {
+        if actions.close {
+            vec![PickerCommand::Close]
+        } else if let Some(title) = actions.title {
+            vec![PickerCommand::Add(title, self.epoch)]
+        } else {
+            Vec::new()
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &PickerActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_picker_checks_session_epoch_and_current_ignore_basis() {
+        let mut dialog = MouseGestureSettingsDialog::default();
+        dialog.open = true;
+        dialog.picker.open = true;
+        dialog.picker.epoch = 4;
+        dialog.picker.parent_session = 7;
+        dialog.picker.titles = vec!["Example".into()];
+        dialog.picker.ignore_basis = dialog.settings.ignore_window_titles.clone();
+        assert!(!dialog.accept_picker_title(8, 4, "Example"));
+        assert!(!dialog.accept_picker_title(7, 5, "Example"));
+        assert!(!dialog.accept_picker_title(7, 4, "missing"));
+        dialog.settings.ignore_window_titles.push("changed elsewhere".into());
+        assert!(!dialog.accept_picker_title(7, 4, "Example"));
+        assert!(!dialog.dirty);
+    }
+
+    #[test]
+    fn hosted_picker_adds_current_title_once_without_replacing_other_settings() {
+        let mut dialog = MouseGestureSettingsDialog::default();
+        dialog.open = true;
+        dialog.picker.open = true;
+        dialog.picker.epoch = 3;
+        dialog.picker.parent_session = 9;
+        dialog.picker.titles = vec!["Example".into()];
+        dialog.picker.ignore_basis = dialog.settings.ignore_window_titles.clone();
+        let prior_enabled = dialog.settings.enabled;
+        let mut applied = 0;
+        assert!(dialog.accept_picker_title_with(9, 3, "Example", |settings| {
+            applied += 1;
+            assert_eq!(settings.enabled, prior_enabled);
+            assert!(settings.ignore_window_titles.iter().any(|title| title == "Example"));
+        }));
+        assert!(!dialog.accept_picker_title_with(9, 3, "Example", |_| applied += 1));
+        assert_eq!(applied, 1);
+        assert!(dialog.dirty);
+    }
+
+    #[test]
+    fn gesture_settings_parent_checkpoint_keeps_picker_state() {
+        let mut dialog = MouseGestureSettingsDialog::default();
+        let checkpoint = GestureSettingsMainCheckpoint::capture(&dialog);
+        dialog.dirty = true;
+        dialog.picker.open = true;
+        dialog.picker.titles.push("kept".into());
+        checkpoint.restore(&mut dialog);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.picker.titles, ["kept"]);
+    }
     use crate::gui::{LauncherApp, Panel};
     use crate::plugin::PluginManager;
     use std::sync::{Arc, atomic::AtomicBool};

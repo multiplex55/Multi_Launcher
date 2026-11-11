@@ -3,6 +3,7 @@ pub mod io;
 pub mod model;
 pub mod store;
 pub mod utility_dialog_sizes;
+pub mod utility_presentations;
 
 pub use defaults::*;
 pub use io::{set_settings_path, settings_path};
@@ -12,6 +13,7 @@ pub use utility_dialog_sizes::{
     SavedWindowPosition, UtilityDialogSizes, UtilitySizeAcknowledgement, UtilitySizePreference,
     UtilitySizeRevision, UtilityToolKey,
 };
+pub use utility_presentations::{RememberedPresentation, UtilityPresentations};
 
 pub use crate::gui::jump_mode::config::{
     HintAlphabet, HintAlphabetError, JumpChordError, JumpModeChord,

@@ -1,11 +1,10 @@
 use eframe::egui;
 
 use super::file_search_dialog::{FileSearchHostActions, FileSearchHostCheckpoint};
-use super::file_search_preview_dialog::FileSearchPreviewHostActions;
 use super::jump_mode::SurfaceId;
 use super::jump_mode::ui::{
     JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
-    focused_response_layer, visible_top_middle_layer,
+    focused_response_layer,
 };
 use super::utility_dialog_size::{
     UtilityDialogSizeWindowExt, UtilityWindowSizeDefault, UtilityWindowSizeRecipe,
@@ -48,6 +47,7 @@ fn identity(instance: u64, host: HostIdentity) -> NativeViewportIdentity {
 #[derive(Default)]
 pub(super) struct FileSearchWindowHost {
     state: UtilityHostState,
+    presentation_prepared: bool,
     instance: u64,
     pending: Option<HostFrame>,
     close_pending: Option<ViewportPassProvenance>,
@@ -63,10 +63,8 @@ struct HostFrame {
     identity: HostIdentity,
     instance: u64,
     first: bool,
-    preview_only: bool,
     actions: Option<FileSearchHostActions>,
     checkpoint: Option<FileSearchHostCheckpoint>,
-    preview: Option<FileSearchPreviewHostActions>,
     close: bool,
     os_close: bool,
     native_info: Option<egui::ViewportInfo>,
@@ -84,14 +82,56 @@ pub(super) struct HostInput {
     pub close_shortcut: bool,
 }
 
+pub(super) type FileSearchOpenSession = (u64, Option<crate::file_search::model::SearchId>, u64);
+pub(super) type FileSearchOpenReceipt = super::utility_host::AcceptedParentOpen<FileSearchOpenSession>;
+
 pub(super) struct HostCompletion {
-    pub root_pass: ViewportPassProvenance,
+    pub origin: Option<FileSearchOpenReceipt>,
     pub commands: Vec<FileSearchUiCommand>,
     pub show_root: bool,
     pub closed: bool,
 }
 
 impl FileSearchWindowHost {
+    #[cfg(test)]
+    pub(super) fn test_transition(&mut self, presentation: UtilityPresentation) { self.state.transition(presentation); }
+
+    #[cfg(test)]
+    pub(super) fn test_stage_native_child_open(
+        &mut self,
+        ctx: &egui::Context,
+        command: FileSearchUiCommand,
+    ) {
+        self.state.transition(UtilityPresentation::Popout);
+        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        self.pending = Some(HostFrame {
+            root: pass,
+            owner: pass,
+            identity: self.state.identity(),
+            instance: self.instance,
+            first: true,
+            actions: Some(FileSearchHostActions::test_command(command)),
+            checkpoint: None,
+            close: false,
+            os_close: false,
+            native_info: None,
+            embedded_layer: None,
+            embedded_focus: None,
+            focus: false,
+        });
+    }
+
+    pub(super) fn accepts_child_open(
+        &self,
+        dialog: &FileSearchDialogState,
+        receipt: &FileSearchOpenReceipt,
+    ) -> bool {
+        let (search, revision) = dialog.child_open_revision();
+        dialog.open
+            && self.close_pending.is_none()
+            && receipt.is_current(self.state.identity(), &(self.instance, search, revision))
+    }
+
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
         if self.is_popped_out() {
             self.state.embedded_root_layer()
@@ -106,6 +146,19 @@ impl FileSearchWindowHost {
 
     pub(super) fn needs_root_ui_when_hidden(&self, open: bool) -> bool {
         (open && self.is_popped_out()) || self.state.bootstrap_pending() || self.pending.is_some()
+    }
+
+    pub(super) fn prepare_open(&mut self, ctx: &egui::Context, open: bool) {
+        if open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn remember_current(&self, ctx: &egui::Context) {
+        let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+        super::utility_host::remember_presentation(ctx, key, self.state.presentation());
     }
 
     pub(super) fn request_focus(&mut self) {
@@ -127,6 +180,7 @@ impl FileSearchWindowHost {
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.state.retire_to_docked();
+        self.presentation_prepared = false;
         self.pending = None;
         self.close_pending = None;
         self.cancel_jump();
@@ -183,15 +237,14 @@ impl FileSearchWindowHost {
         root_scopes: (Option<JumpModeScope>, Option<JumpModeScope>),
         os_close: bool,
     ) {
+        self.prepare_open(ctx, dialog.open);
         if !dialog.open && self.is_popped_out() {
             self.retire(ctx);
         }
         if !input.root_visible && !self.is_popped_out() {
             return;
         }
-        if !dialog.open && !dialog.preview_dialog.open {
-            return;
-        }
+        if !dialog.open { return; }
         self.instance = instance;
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let first = input.first && !ctx.will_discard();
@@ -201,10 +254,8 @@ impl FileSearchWindowHost {
             identity: self.state.identity(),
             instance,
             first,
-            preview_only: !dialog.open,
             actions: None,
             checkpoint: None,
-            preview: None,
             close: self.close_pending.take() == Some(root),
             os_close,
             native_info: None,
@@ -212,11 +263,6 @@ impl FileSearchWindowHost {
             embedded_focus: None,
             focus: false,
         };
-        if frame.preview_only {
-            frame.preview = draw_preview(ctx, dialog, first && input.root_input);
-            self.pending = Some(frame);
-            return;
-        }
         if !self.is_popped_out() {
             let mut open = true;
             let current = first && input.root_owner && !frame.close;
@@ -252,7 +298,6 @@ impl FileSearchWindowHost {
                     },
                 );
             frame.close |= current && !open;
-            frame.preview = draw_preview(ctx, dialog, first && input.root_input);
         } else {
             let viewport_id = viewport(instance);
             let builder = egui::ViewportBuilder::default()
@@ -367,11 +412,6 @@ impl FileSearchWindowHost {
                                 true,
                             ));
                         });
-                    frame.preview = draw_preview(
-                        &child_ctx,
-                        dialog,
-                        frame.first && input.native_input && !frame.os_close,
-                    );
                     self.native_jump.finish_ui_pass();
                     let owner = self.native_jump.update_navigation_owner_for_viewport(
                         &child_ctx,
@@ -414,11 +454,6 @@ impl FileSearchWindowHost {
                         current,
                         true,
                     ));
-                    frame.preview = draw_preview(
-                        &child_ctx,
-                        dialog,
-                        frame.first && input.root_input && visible,
-                    );
                 }
             });
         }
@@ -436,7 +471,7 @@ impl FileSearchWindowHost {
         coordinator: &mut SearchCoordinator,
     ) -> Option<HostCompletion> {
         let mut frame = self.pending.take()?;
-        let current = (dialog.open || (frame.preview_only && dialog.preview_dialog.open))
+        let current = dialog.open
             && frame.identity == self.state.identity()
             && frame.instance == self.instance;
         if frame.os_close {
@@ -454,12 +489,6 @@ impl FileSearchWindowHost {
                 ctx.request_repaint_of(frame.owner.viewport_id);
             }
             self.cancel_jump();
-            return None;
-        }
-        if frame.preview_only {
-            if let Some(preview) = frame.preview.take() {
-                dialog.preview_dialog.complete_host_actions(preview, None);
-            }
             return None;
         }
         self.state
@@ -493,14 +522,15 @@ impl FileSearchWindowHost {
             self.state.complete_focus(frame.identity);
         }
 
+        let (search, revision) = dialog.child_open_revision();
+        let origin = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, frame.identity, (frame.instance, search, revision), frame.root, frame.owner,
+        );
         let mut show_root = false;
         let mut commands = Vec::new();
         if close {
             dialog.open = false;
         } else {
-            if let Some(preview) = frame.preview.take() {
-                dialog.preview_dialog.complete_host_actions(preview, None);
-            }
             if let Some(actions) = frame.actions.take() {
                 let request = actions.host_request;
                 #[cfg(windows)]
@@ -520,6 +550,7 @@ impl FileSearchWindowHost {
                     } else {
                         UtilityPresentation::Docked
                     });
+                    self.remember_current(ctx);
                     self.cancel_jump();
                     show_root = !popout;
                     if show_root {
@@ -531,10 +562,11 @@ impl FileSearchWindowHost {
         }
         let closed = !dialog.open;
         if closed {
+            self.remember_current(ctx);
             self.retire(ctx);
         }
         Some(HostCompletion {
-            root_pass: frame.root,
+            origin,
             commands,
             show_root,
             closed,
@@ -573,27 +605,6 @@ fn surrender_search_focus(ctx: &egui::Context, layer: egui::LayerId) {
     }
 }
 
-fn draw_preview(
-    ctx: &egui::Context,
-    dialog: &mut FileSearchDialogState,
-    allowed: bool,
-) -> Option<FileSearchPreviewHostActions> {
-    let layer = egui::LayerId::new(
-        egui::Order::Middle,
-        egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
-    );
-    let allowed = allowed
-        && ctx.input(|input| input.focused)
-        && ctx.memory(|memory| memory.top_modal_layer().is_none())
-        && !egui::Popup::is_any_open(ctx)
-        && visible_top_middle_layer(ctx) == Some(layer)
-        && focused_response_layer(ctx)
-            .is_none_or(|focus| focus == layer || focus.order != egui::Order::Middle);
-    dialog
-        .preview_dialog
-        .ui_in_host(ctx, &dialog.settings, allowed)
-}
-
 fn capture(
     ctx: &egui::Context,
     dialog: &FileSearchDialogState,
@@ -611,4 +622,55 @@ fn capture(
                 .is_some_and(JumpModeScope::has_pending_focus_intent)
             || ctx.input(|input| input.pointer.any_down() || !input.events.is_empty())))
     .then(|| FileSearchHostCheckpoint::capture(dialog))
+}
+
+#[cfg(test)]
+mod child_open_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_file_search_origin_promotes_targets_and_rejects_new_search() {
+        let ctx = egui::Context::default();
+        let mut dialog = FileSearchDialogState::default();
+        dialog.open = true;
+        dialog.active_search_id = Some(crate::file_search::model::SearchId(1));
+        let mut host = FileSearchWindowHost::default();
+        host.state.transition(UtilityPresentation::Popout);
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let (search, revision) = dialog.child_open_revision();
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            host.state.identity(),
+            (host.instance, search, revision),
+            pass,
+            pass,
+        )
+        .unwrap();
+        assert!(host.accepts_child_open(&dialog, &receipt));
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file.txt");
+        std::fs::write(&file, "data").unwrap();
+        let mut folder = super::super::folder_size_dialog::FolderSizeDialogState::new(&ctx);
+        folder.open_from_file_search(&ctx, directory.path().to_owned(), receipt.clone());
+        assert!(folder.is_popped_out());
+        assert!(!folder.session_view_for_test().is_busy());
+        let mut lock = super::super::file_lock_dialog::FileLockDialogState::new(&ctx);
+        lock.open_from_file_search(&ctx, file, receipt.clone());
+        assert!(lock.is_popped_out());
+        assert!(!lock.session_view_for_test().is_busy());
+        let generation = lock.session_view_for_test().generation();
+        lock.open_from_file_search(&ctx, directory.path().join("file.txt"), receipt.clone());
+        assert_eq!(lock.session_view_for_test().generation(), generation);
+        assert!(lock.test_host_focus_pending());
+        assert!(folder.test_host_focus_pending());
+        dialog.active_search_id = Some(crate::file_search::model::SearchId(2));
+        assert!(!host.accepts_child_open(&dialog, &receipt));
+        dialog.active_search_id = search;
+        host.state.transition(UtilityPresentation::Docked);
+        assert!(!host.accepts_child_open(&dialog, &receipt));
+        dialog.open = false;
+        assert!(!host.accepts_child_open(&dialog, &receipt));
+        output.drop_without_applying_deltas();
+    }
 }

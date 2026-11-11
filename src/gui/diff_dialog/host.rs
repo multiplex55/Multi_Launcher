@@ -1,5 +1,5 @@
 use super::{
-    DiffDialogState, DiffUiAction, TextInputDraft, TextInputPurpose, effects::PickerOwner,
+    DiffDialogState, DiffUiAction, effects::PickerOwner,
 };
 use crate::activity::ActivityCenter;
 use crate::diff::model::{DiffView, FolderUiCheckpoint, TextUiCheckpoint};
@@ -19,6 +19,7 @@ const MINIMUM: egui::Vec2 = egui::vec2(520.0, 360.0);
 #[derive(Default)]
 pub(super) struct DiffWindowHost {
     state: UtilityHostState,
+    presentation_prepared: bool,
     pending: Option<DiffHostFrame>,
     native_workspace: Option<u64>,
     deferred_close: Option<(u64, HostIdentity)>,
@@ -45,9 +46,7 @@ struct DiffCheckpoint {
     left: String,
     right: String,
     focus_left: bool,
-    text_input: Option<TextInputDraft>,
     text: Option<TextUiCheckpoint>,
-    text_rules: Option<super::rules_dialog::RulesDialogState>,
     folder: Option<FolderUiCheckpoint>,
     binary_position: Option<(Option<usize>, u64, Option<u64>)>,
 }
@@ -73,9 +72,7 @@ impl DiffCheckpoint {
             left: dialog.workspace.left_visible.clone(),
             right: dialog.workspace.right_visible.clone(),
             focus_left: dialog.workspace.focus_left_requested,
-            text_input: dialog.text_input.clone(),
             text: dialog.text_views.get(&view).map(TextUiCheckpoint::capture),
-            text_rules: super::rules_dialog::state(ctx, dialog.workspace.workspace_id, view),
             folder: match &dialog.workspace.current_view.view {
                 DiffView::FolderCompare(state) => Some(FolderUiCheckpoint::capture(state)),
                 _ => None,
@@ -90,14 +87,13 @@ impl DiffCheckpoint {
         })
     }
 
-    fn restore(self, ctx: &egui::Context, dialog: &mut DiffDialogState) {
+    fn restore(self, _ctx: &egui::Context, dialog: &mut DiffDialogState) {
         if self.view != dialog.workspace.current_view.id {
             return;
         }
         dialog.workspace.left_visible = self.left;
         dialog.workspace.right_visible = self.right;
         dialog.workspace.focus_left_requested = self.focus_left;
-        dialog.text_input = self.text_input;
         if let Some(text) = self.text
             && let Some(model) = dialog.text_views.get_mut(&self.view)
         {
@@ -116,14 +112,6 @@ impl DiffCheckpoint {
             model.visible_byte_offset = offset;
             model.pending_scroll_offset = pending;
         }
-        let rules_id = super::rules_dialog::state_id(dialog.workspace.workspace_id, self.view);
-        ctx.data_mut(|data| {
-            if let Some(rules) = self.text_rules {
-                data.insert_temp(rules_id, rules);
-            } else {
-                data.remove::<super::rules_dialog::RulesDialogState>(rules_id);
-            }
-        });
     }
 }
 
@@ -152,19 +140,8 @@ pub(super) fn docked_layer(workspace: u64) -> egui::LayerId {
 }
 
 impl DiffDialogState {
-    fn rules_layer(&self, ctx: &egui::Context) -> Option<egui::Id> {
-        match &self.workspace.current_view.view {
-            DiffView::TextCompare(_) => {
-                let view = self.workspace.current_view.id;
-                super::rules_dialog::state(ctx, self.workspace.workspace_id, view)
-                    .filter(|draft| draft.open)
-                    .map(|_| super::rules_dialog::window_id(self.workspace.workspace_id, view))
-            }
-            DiffView::FolderCompare(state) if state.folder_rules_open => {
-                Some(super::folder_rules_dialog::window_id())
-            }
-            _ => None,
-        }
+    pub(crate) fn child_root_layers(&self) -> Vec<egui::LayerId> {
+        self.children.root_layers()
     }
 
     pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -187,16 +164,8 @@ impl DiffDialogState {
             layer == parent
                 || (self.close_prompt
                     && layer.id == egui::Id::new(("diff_close_prompt", workspace)))
-                || self.text_input.as_ref().is_some_and(|draft| {
-                    let id = match draft.purpose {
-                        TextInputPurpose::NewComparison => 0,
-                        TextInputPurpose::EditInputs { view_id } => view_id,
-                    };
-                    layer.id == egui::Id::new((workspace, "text_input", id))
-                })
                 || (self.operation_preview.is_some()
                     && layer.id == egui::Id::new(("folder-operation-preview", view)))
-                || self.rules_layer(ctx) == Some(layer.id)
         };
         ctx.viewport_id() == egui::ViewportId::ROOT
             && visible_top_middle_layer(ctx).is_some_and(owned)
@@ -211,9 +180,7 @@ impl DiffDialogState {
         hosted: bool,
     ) -> bool {
         !self.close_prompt
-            && self.text_input.is_none()
             && self.operation_preview.is_none()
-            && self.rules_layer(ctx).is_none()
             && (!hosted
                 || (visible_top_middle_layer(ctx).is_none_or(|top| top == layer)
                     && focused_response_layer(ctx)
@@ -222,8 +189,25 @@ impl DiffDialogState {
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
         (self.open && self.host.state.presentation() == UtilityPresentation::Popout)
+            || self.children.needs_root_ui_when_hidden()
             || self.host.state.bootstrap_pending()
             || self.host.pending.is_some()
+    }
+
+    pub(crate) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.host.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::restore_remembered_presentation(
+                ctx,
+                key,
+                &mut self.host.state,
+            );
+            self.host.presentation_prepared = true;
+        }
+    }
+
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host.state.presentation() == UtilityPresentation::Popout
     }
 
     pub(crate) fn request_host_focus(&mut self) {
@@ -242,7 +226,9 @@ impl DiffDialogState {
         root_visible: bool,
         root_input: bool,
         native_input: bool,
+        jump_active: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         let root_owned = root_input && self.owns_root_input(ctx);
         let mut host = std::mem::take(&mut self.host);
         host.show(
@@ -256,12 +242,25 @@ impl DiffDialogState {
             native_input,
         );
         self.host = host;
+        self.children
+            .show(ctx, first, root_visible, root_input, native_input, jump_active);
     }
 
     pub(crate) fn on_host_frame_complete(&mut self, ctx: &egui::Context) -> bool {
         let mut host = std::mem::take(&mut self.host);
-        let show_root = host.complete(ctx, self);
+        let mut show_root = host.complete(ctx, self);
         self.host = host;
+        let mut children = std::mem::take(&mut self.children);
+        let child_root_requests = children.complete(ctx, self);
+        for (request, origin) in std::mem::take(&mut self.pending_child_opens) {
+            show_root |= children.open(ctx, self, request, &origin)
+                == Some(UtilityPresentation::Docked);
+        }
+        if !self.open {
+            children.retire(ctx);
+        }
+        show_root |= children.has_requested_root(&child_root_requests);
+        self.children = children;
         show_root
     }
 
@@ -271,12 +270,48 @@ impl DiffDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_compare_text_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.compare_text_button
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reveal_header_control(&self, ctx: &egui::Context, target: egui::Rect) {
+        let (id, inner, content, offset) = self.header_scroll.expect("Diff header scroll area");
+        let mut state = egui::scroll_area::State::load(ctx, id).expect("Diff header scroll state");
+        state.offset.x = (offset.x + target.max.x - inner.max.x + 4.0).clamp(0.0, (content.x - inner.width()).max(0.0));
+        state.store(ctx, id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_input_child(&self) -> Option<(u64, bool, &str)> {
+        self.children.test_input()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_input_viewport(&self) -> Option<egui::ViewportId> {
+        self.children.test_input_viewport()
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_host_button(&self) -> (egui::Rect, egui::Rect, bool) {
         self.host_button.expect("Diff host button was rendered")
     }
 }
 
 impl DiffWindowHost {
+    #[cfg(test)]
+    pub(super) fn test_identity(&self) -> HostIdentity {
+        self.state.identity()
+    }
+    #[cfg(test)]
+    pub(super) fn test_transition(&mut self, presentation: UtilityPresentation) {
+        self.state.transition(presentation);
+    }
+
+    pub(super) fn accepts_child_origin(&self, origin: &crate::gui::utility_host::AcceptedParentOpen<(u64, u64)>, workspace: u64, view: u64) -> bool {
+        origin.is_current(self.state.identity(), &(workspace, view))
+    }
+
     fn show(
         &mut self,
         ctx: &egui::Context,
@@ -310,6 +345,7 @@ impl DiffWindowHost {
                 self.state.request_focus();
             } else {
                 self.state.retire_to_docked();
+                self.presentation_prepared = false;
             }
         }
         if !dialog.open || (!root_visible && host.host == UtilityPresentation::Docked) {
@@ -495,16 +531,66 @@ impl DiffWindowHost {
             let hwnd = crate::gui::utility_dialog_size::utility_picker_hwnd(ctx, native_identity);
             #[cfg(not(windows))]
             let hwnd = None;
-            dialog.apply_ui_actions(frame.actions, PickerOwner::Hosted(hwnd));
+            let view = dialog.workspace.current_view.id;
+            let origin = crate::gui::utility_host::AcceptedParentOpen::from_retained(
+                ctx,
+                frame.host,
+                (frame.workspace, view),
+                frame.root,
+                frame.owner,
+            );
+            let mut ordinary = Vec::new();
+            for action in frame.actions {
+                match action {
+                    DiffUiAction::BeginTextInput(purpose) => {
+                        if let (Some(origin), Some(request)) =
+                            (&origin, super::child_hosts::Open::input(dialog, purpose))
+                        {
+                            dialog.pending_child_opens.push((request, origin.clone()));
+                        }
+                    }
+                    DiffUiAction::Folder(view, super::folder_view::FolderViewAction::OpenRules) => {
+                        if let (Some(origin), Some(request)) =
+                            (&origin, super::child_hosts::Open::folder(dialog, view))
+                        {
+                            dialog.pending_child_opens.push((request, origin.clone()));
+                        }
+                    }
+                    DiffUiAction::ViewEffects(view, effects) => {
+                        let mut remaining = Vec::new();
+                        for effect in effects {
+                            if matches!(effect, super::effects::ViewEffect::OpenTextRules) {
+                                if let (Some(origin), Some(request)) =
+                                    (&origin, super::child_hosts::Open::rules(dialog, view))
+                                {
+                                    dialog.pending_child_opens.push((request, origin.clone()));
+                                }
+                            } else {
+                                remaining.push(effect);
+                            }
+                        }
+                        if !remaining.is_empty() {
+                            ordinary.push(DiffUiAction::ViewEffects(view, remaining));
+                        }
+                    }
+                    other => ordinary.push(other),
+                }
+            }
+            dialog.apply_ui_actions(ordinary, PickerOwner::Hosted(hwnd));
         }
         if !dialog.open {
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::remember_presentation(ctx, key, frame.host.host);
             self.close_viewport(ctx, frame.workspace);
             self.state.retire_to_docked();
+            self.presentation_prepared = false;
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
         {
             self.close_viewport(ctx, frame.workspace);
             self.state.transition(presentation);
+            let key = crate::settings::UtilityToolKey::parse("diff").expect("stable Diff key");
+            super::super::utility_host::remember_presentation(ctx, key, presentation);
             ctx.request_repaint_of(egui::ViewportId::ROOT);
             if presentation == UtilityPresentation::Docked {
                 ctx.move_to_top(docked_layer(frame.workspace));

@@ -20,6 +20,25 @@ use std::{collections::HashMap, sync::Arc};
 type NotificationPreview = Arc<dyn Fn(&ResolvedNotification) -> Result<(), String> + Send + Sync>;
 type SoundPreview = Arc<dyn Fn(&str) + Send + Sync>;
 
+fn editor_popup_observer_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::new(("mkmacro-editor-popup-observer", ctx.viewport_id()))
+}
+
+pub(super) fn record_editor_combo<R>(ctx: egui::Context, result: egui::InnerResponse<Option<R>>) -> egui::InnerResponse<Option<R>> {
+    record_editor_popup(&ctx, result.response.id.with("popup"));
+    result
+}
+
+fn record_editor_popup(ctx: &egui::Context, popup: egui::Id) {
+    let observer = editor_popup_observer_id(ctx);
+    ctx.data_mut(|data| {
+        if let Some(mut ids) = data.get_temp::<Vec<egui::Id>>(observer) {
+            if !ids.contains(&popup) { ids.push(popup); }
+            data.insert_temp(observer, ids);
+        }
+    });
+}
+
 /// Applies only the state transition associated with an egui text response.
 /// The text edit itself writes `query`; keeping compatibility removal here
 /// makes the important `changed()` distinction independently testable.
@@ -213,6 +232,8 @@ mod launcher_query_editor_tests {
 }
 
 pub struct ActionEditorState {
+    pub(super) host_epoch: u64,
+    popup_ids: Vec<egui::Id>,
     pub draft: Option<MkStep>,
     /// Stable transaction owner. Selection is presentation and may change while
     /// this modal is open; it is never authority for Apply.
@@ -223,6 +244,7 @@ pub struct ActionEditorState {
     /// Typed transient destination used by Recording Review. When present,
     /// Apply returns the cloned step to the review and must not touch the document.
     review_editing_id: Option<crate::mkmacro::ReviewStepId>,
+    review_epoch: Option<u64>,
     /// Captured when the editor opens, so applying cannot accidentally use a
     /// selection which changed underneath the modal.
     pub insertion: Option<InsertionIntent>,
@@ -295,7 +317,138 @@ pub struct ActionEditorState {
     test_apply_response: Option<(egui::Id, egui::Rect)>,
     #[cfg(test)]
     test_cancel_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    pub(super) test_error_combo: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_error_continue: Option<(egui::Rect, egui::Rect, bool)>,
 }
+
+/// Editable-only rollback; running jobs, native pickers and overlay ownership stay live.
+#[derive(Clone)]
+pub(in crate::gui) struct EditorCheckpoint {
+    popup_ids: Vec<egui::Id>,
+    draft: Option<MkStep>,
+    owner_macro_id: Option<u64>,
+    source_step: Option<MkStep>,
+    editing_id: Option<u64>,
+    review_editing_id: Option<crate::mkmacro::ReviewStepId>,
+    review_epoch: Option<u64>,
+    insertion: Option<InsertionIntent>,
+    capture_keys: bool,
+    capture_message: Option<String>,
+    key_picker_search: String,
+    raw_key_vk: String,
+    raw_key_scan: String,
+    raw_key_extended: bool,
+    capture_filename: String,
+    image_import_filename: String,
+    editor: Option<super::action_catalog::EditorKind>,
+    draft_generation: u64,
+    draft_changed: bool,
+    image_search: Option<super::image_search_editor::ImageSearchEditorState>,
+    add_smooth_move: bool,
+    add_activate_before: bool,
+    activate_before_region: Option<SearchRegion>,
+    ocr_condition_regions: HashMap<
+        super::condition_editor::ConditionPath,
+        super::image_search_controls::SearchRegionEditorState,
+    >,
+    ocr_preview: Option<super::ocr_test_job::OcrAuthoringPreview>,
+    ocr_preview_owner: Option<(
+        super::ocr_test_job::OcrDraftIdentity,
+        super::ocr_test_job::OcrTestConfiguration,
+    )>,
+    ocr_preview_texture: Option<egui::TextureHandle>,
+    ocr_message: Option<String>,
+    variable_consumer_index: usize,
+    variable_consumer_id: Option<u64>,
+    call_target_search: String,
+    pending_call_target: Option<u64>,
+}
+
+impl ActionEditorState {
+    pub(super) fn owner_macro_id(&self) -> Option<u64> {
+        self.owner_macro_id
+    }
+    pub(super) fn edits_source(&self, macro_id: Option<u64>, step: &MkStep) -> bool {
+        self.draft.is_some()
+            && self.owner_macro_id == macro_id
+            && self.source_step.as_ref() == Some(step)
+            && self.review_editing_id.is_none()
+    }
+    fn capture_editable(&self) -> EditorCheckpoint {
+        EditorCheckpoint {
+            popup_ids: self.popup_ids.clone(),
+            draft: self.draft.clone(),
+            owner_macro_id: self.owner_macro_id,
+            source_step: self.source_step.clone(),
+            editing_id: self.editing_id,
+            review_editing_id: self.review_editing_id,
+            review_epoch: self.review_epoch,
+            insertion: self.insertion.clone(),
+            capture_keys: self.capture_keys,
+            capture_message: self.capture_message.clone(),
+            key_picker_search: self.key_picker_search.clone(),
+            raw_key_vk: self.raw_key_vk.clone(),
+            raw_key_scan: self.raw_key_scan.clone(),
+            raw_key_extended: self.raw_key_extended,
+            capture_filename: self.capture_filename.clone(),
+            image_import_filename: self.image_import_filename.clone(),
+            editor: self.editor,
+            draft_generation: self.draft_generation,
+            draft_changed: self.draft_changed,
+            image_search: self.image_search.clone(),
+            add_smooth_move: self.add_smooth_move,
+            add_activate_before: self.add_activate_before,
+            activate_before_region: self.activate_before_region.clone(),
+            ocr_condition_regions: self.ocr_condition_regions.clone(),
+            ocr_preview: self.ocr_preview.clone(),
+            ocr_preview_owner: self.ocr_preview_owner.clone(),
+            ocr_preview_texture: self.ocr_preview_texture.clone(),
+            ocr_message: self.ocr_message.clone(),
+            variable_consumer_index: self.variable_consumer_index,
+            variable_consumer_id: self.variable_consumer_id,
+            call_target_search: self.call_target_search.clone(),
+            pending_call_target: self.pending_call_target,
+        }
+    }
+
+    fn restore_editable(&mut self, checkpoint: EditorCheckpoint) {
+        self.popup_ids = checkpoint.popup_ids;
+        self.draft = checkpoint.draft;
+        self.owner_macro_id = checkpoint.owner_macro_id;
+        self.source_step = checkpoint.source_step;
+        self.editing_id = checkpoint.editing_id;
+        self.review_editing_id = checkpoint.review_editing_id;
+        self.review_epoch = checkpoint.review_epoch;
+        self.insertion = checkpoint.insertion;
+        self.capture_keys = checkpoint.capture_keys;
+        self.capture_message = checkpoint.capture_message;
+        self.key_picker_search = checkpoint.key_picker_search;
+        self.raw_key_vk = checkpoint.raw_key_vk;
+        self.raw_key_scan = checkpoint.raw_key_scan;
+        self.raw_key_extended = checkpoint.raw_key_extended;
+        self.capture_filename = checkpoint.capture_filename;
+        self.image_import_filename = checkpoint.image_import_filename;
+        self.editor = checkpoint.editor;
+        self.draft_generation = checkpoint.draft_generation;
+        self.draft_changed = checkpoint.draft_changed;
+        self.image_search = checkpoint.image_search;
+        self.add_smooth_move = checkpoint.add_smooth_move;
+        self.add_activate_before = checkpoint.add_activate_before;
+        self.activate_before_region = checkpoint.activate_before_region;
+        self.ocr_condition_regions = checkpoint.ocr_condition_regions;
+        self.ocr_preview = checkpoint.ocr_preview;
+        self.ocr_preview_owner = checkpoint.ocr_preview_owner;
+        self.ocr_preview_texture = checkpoint.ocr_preview_texture;
+        self.ocr_message = checkpoint.ocr_message;
+        self.variable_consumer_index = checkpoint.variable_consumer_index;
+        self.variable_consumer_id = checkpoint.variable_consumer_id;
+        self.call_target_search = checkpoint.call_target_search;
+        self.pending_call_target = checkpoint.pending_call_target;
+    }
+}
+
 
 #[derive(Clone)]
 pub(super) enum NativeFilePickerKind {
@@ -592,6 +745,7 @@ impl ActionEditorState {
             source_step: None,
             editing_id: None,
             review_editing_id: None,
+            review_epoch: None,
             insertion: None,
             capture_keys: false,
             capture_message: None,
@@ -604,6 +758,8 @@ impl ActionEditorState {
             editor: None,
             position_capture: None,
             draft_generation: 0,
+            host_epoch: 0,
+            popup_ids: Vec::new(),
             draft_changed: false,
             image_search: None,
             add_smooth_move: false,
@@ -648,6 +804,10 @@ impl ActionEditorState {
             test_apply_response: None,
             #[cfg(test)]
             test_cancel_response: None,
+            #[cfg(test)]
+            test_error_combo: None,
+            #[cfg(test)]
+            test_error_continue: None,
         }
     }
 
@@ -1093,8 +1253,17 @@ impl ActionEditorState {
         };
         if applied {
             self.draft_changed = true;
+            self.draft_generation = self.draft_generation.wrapping_add(1);
         }
         applied
+    }
+
+    pub(super) fn crop_destination_is_current(&self, destination: &ImageCropDestination, current_macro_id: Option<u64>) -> bool {
+        if current_macro_id != Some(destination.macro_id()) || self.draft_generation != destination.draft_generation() || self.editing_id != destination.step_id() { return false; }
+        match destination {
+            ImageCropDestination::ImageActionReference { source, .. } => self.draft.as_ref().and_then(image_payload).is_some_and(|payload| payload.image == *source),
+            ImageCropDestination::ConditionImage { source, path, .. } => self.draft.as_ref().and_then(|step| match &step.action { MkAction::If(root) | MkAction::WhileStart { condition: root } | MkAction::WaitUntil { condition: root, .. } => Some(root), _ => None }).and_then(|root| super::condition_editor::resolve_condition(root, path)).is_some_and(|condition| matches!(condition, MkCondition::ImageSearch { search, .. } if search.image == *source)),
+        }
     }
 
     fn start_import_from_selected_path(
@@ -1303,6 +1472,19 @@ impl ActionEditorState {
         Ok(())
     }
 
+    pub(super) fn window_matcher_request_is_current(&self, request: &super::window_picker::MatcherEditRequest, current_macro_id: Option<u64>) -> bool {
+        let super::window_picker::MatcherDestination::Action { macro_id, draft_generation, step_id, path } = &request.destination else { return false; };
+        if Some(*macro_id) != current_macro_id || *draft_generation != self.draft_generation || *step_id != self.editing_id { return false; }
+        if matches!(path, super::window_picker::MatcherPath::VisualRegion) {
+            return self.image_search.as_ref().is_some_and(|image| match image.kind {
+                super::image_search_editor::SearchRegionKind::ClientArea => image.client_matcher == request.original,
+                super::image_search_editor::SearchRegionKind::Window => image.window_matcher == request.original,
+                _ => false,
+            });
+        }
+        self.draft.as_ref().cloned().and_then(|mut step| matcher_at_path(&mut step.action, path).cloned()).is_some_and(|matcher| matcher == request.original)
+    }
+
     pub fn apply_window_matcher(
         &mut self,
         request: &super::window_picker::MatcherEditRequest,
@@ -1344,15 +1526,20 @@ impl ActionEditorState {
             let Some(image) = self.image_search.as_mut() else {
                 return false;
             };
+            let mut changed = false;
             if image.kind == super::image_search_editor::SearchRegionKind::ClientArea {
+                if image.client_matcher != request.original { return false; }
                 if image.client_matcher != matcher {
                     image.client_matcher = matcher;
                     self.draft_changed = true;
+                    changed = true;
                 }
             } else if image.kind == super::image_search_editor::SearchRegionKind::Window {
+                if image.window_matcher != request.original { return false; }
                 if image.window_matcher != matcher {
                     image.window_matcher = matcher;
                     self.draft_changed = true;
+                    changed = true;
                 }
             } else {
                 return false;
@@ -1364,13 +1551,17 @@ impl ActionEditorState {
                 MkAction::OcrReadText(payload) => payload.region = region,
                 _ => {}
             }
+            if changed { self.draft_generation = self.draft_generation.wrapping_add(1); }
             return true;
         }
         let Some(target) = matcher_at_path(&mut step.action, path) else {
             return false;
         };
+        if *target != request.original { return false; }
         if *target != matcher {
             *target = matcher;
+            self.draft_changed = true;
+            self.draft_generation = self.draft_generation.wrapping_add(1);
         }
         true
     }
@@ -1386,6 +1577,8 @@ impl ActionEditorState {
         if self.draft.is_some() {
             return;
         }
+        self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        self.popup_ids.clear();
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
@@ -1398,6 +1591,7 @@ impl ActionEditorState {
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
         self.review_editing_id = None;
+        self.review_epoch = None;
         self.owner_macro_id = None;
         self.source_step = None;
         self.draft_changed = false;
@@ -1454,6 +1648,8 @@ impl ActionEditorState {
         self.begin_edit_in_macro(None, step);
     }
     pub fn begin_edit_in_macro(&mut self, owner_macro_id: Option<u64>, step: &MkStep) {
+        self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        self.popup_ids.clear();
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
@@ -1466,6 +1662,7 @@ impl ActionEditorState {
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
         self.review_editing_id = None;
+        self.review_epoch = None;
         self.owner_macro_id = owner_macro_id;
         self.source_step = Some(step.clone());
         self.draft_changed = false;
@@ -1514,6 +1711,8 @@ impl ActionEditorState {
     pub fn review_editing_id(&self) -> Option<crate::mkmacro::ReviewStepId> {
         self.review_editing_id
     }
+    pub(super) fn bind_review_epoch(&mut self, epoch: u64) { self.review_epoch = Some(epoch); }
+    pub(super) fn review_epoch(&self) -> Option<u64> { self.review_epoch }
     /// Completes an edit into its transient Review destination. This is kept
     /// separate from `apply`, whose destination is always the macro document.
     pub fn take_review_edited_step(&mut self) -> Option<(crate::mkmacro::ReviewStepId, MkStep)> {
@@ -1569,6 +1768,7 @@ impl ActionEditorState {
         self.source_step = None;
         self.editing_id = None;
         self.review_editing_id = None;
+        self.review_epoch = None;
         self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
@@ -2879,6 +3079,7 @@ pub(super) fn variable_picker_ui(
 ) {
     let model = VariablePickerModel::new(catalog, allowed);
     let popup_id = ui.make_persistent_id(("variable_picker_popup", id_source));
+    record_editor_popup(ui.ctx(), popup_id);
     let highlighted_id = popup_id.with("highlighted");
     let mut anchor = None;
     ui.horizontal(|ui| {
@@ -3115,7 +3316,7 @@ fn target_ui_with_variables(
     let assets = context.assets;
     let kind = coordinate_target_kind(target);
     let mut next = kind;
-    egui::ComboBox::from_label("Target")
+    record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Target")
         .selected_text(kind.label())
         .show_ui(ui, |ui| {
             for option in available_target_kinds(options.allow_current_position) {
@@ -3128,7 +3329,7 @@ fn target_ui_with_variables(
                     option_ui(ui);
                 }
             }
-        });
+        }));
     if next != kind {
         change_target_kind_for_kind(target, next, assets);
     }
@@ -3202,7 +3403,7 @@ fn target_ui_with_variables(
                     egui::Label::new("No image results are available in this context."),
                 );
             } else {
-                egui::ComboBox::from_label("Result from")
+                record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Result from")
                     .selected_text(image_asset_label(image, assets))
                     .show_ui(ui, |ui| {
                         for asset in assets {
@@ -3211,7 +3412,7 @@ fn target_ui_with_variables(
                                 select_image_asset(image, asset);
                             }
                         }
-                    });
+                    }));
             }
             ui.label("Reference/result image:");
             if image.filename().is_empty() {
@@ -3268,7 +3469,7 @@ pub(super) fn value_ui(ui: &mut egui::Ui, value: &mut MkValue) {
         MkValue::Null => 4,
     };
     let mut next = kind;
-    egui::ComboBox::from_label("Type")
+    record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Type")
         .selected_text(["String", "Number", "Boolean", "Point", "Null"][kind])
         .show_ui(ui, |ui| {
             for (index, label) in ["String", "Number", "Boolean", "Point", "Null"]
@@ -3277,7 +3478,7 @@ pub(super) fn value_ui(ui: &mut egui::Ui, value: &mut MkValue) {
             {
                 ui.selectable_value(&mut next, index, *label);
             }
-        });
+        }));
     if next != kind {
         *value = match next {
             0 => MkValue::String(String::new()),
@@ -3351,12 +3552,12 @@ fn ocr_optional_output(ui: &mut egui::Ui, label: &str, value: &mut Option<String
 }
 
 fn ocr_not_found_policy_ui(ui: &mut egui::Ui, policy: &mut MkImageNotFoundPolicy) {
-    egui::ComboBox::from_label("If not found")
+    record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("If not found")
         .selected_text(format!("{policy:?}"))
         .show_ui(ui, |ui| {
             ui.selectable_value(policy, MkImageNotFoundPolicy::Continue, "Continue");
             ui.selectable_value(policy, MkImageNotFoundPolicy::Fail, "Fail");
-        });
+        }));
 }
 
 fn key_picker_ui(
@@ -3570,7 +3771,7 @@ fn action_ui(
             }
             ui.label("Description");
             ui.add(egui::TextEdit::multiline(&mut p.description).desired_rows(4));
-            egui::ComboBox::from_id_salt(("notify_kind", draft_id, draft_generation))
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt(("notify_kind", draft_id, draft_generation))
                 .selected_text(p.kind.label())
                 .show_ui(ui, |ui| {
                     for (kind, label) in [
@@ -3581,8 +3782,8 @@ fn action_ui(
                     ] {
                         ui.selectable_value(&mut p.kind, kind, label);
                     }
-                });
-            egui::ComboBox::from_id_salt(("notify_duration", draft_id, draft_generation))
+                }));
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt(("notify_duration", draft_id, draft_generation))
                 .selected_text(match p.duration {
                     MkNotificationDuration::Short => "Short",
                     MkNotificationDuration::Long => "Long",
@@ -3590,7 +3791,7 @@ fn action_ui(
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut p.duration, MkNotificationDuration::Short, "Short");
                     ui.selectable_value(&mut p.duration, MkNotificationDuration::Long, "Long");
-                });
+                }));
             ui.checkbox(&mut p.show_symbol, "Show symbol");
             if ui.button("Preview Notification").clicked() {
                 preview_request = Some(PreviewRequest::Notification(ResolvedNotification {
@@ -3604,7 +3805,7 @@ fn action_ui(
         }
         MkAction::PlaySound(p) => {
             ui.heading("Play Sound");
-            egui::ComboBox::from_id_salt(("play_sound", draft_id, draft_generation))
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_id_salt(("play_sound", draft_id, draft_generation))
                 .selected_text(&p.sound)
                 .show_ui(ui, |ui| {
                     for name in crate::sound::SOUND_NAMES
@@ -3614,7 +3815,7 @@ fn action_ui(
                     {
                         ui.selectable_value(&mut p.sound, name.to_owned(), name);
                     }
-                });
+                }));
             if !play_sound_is_supported(&p.sound) {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
@@ -3695,7 +3896,7 @@ fn action_ui(
                     super::window_picker::CoordinateMatcherPath::DragTo,
                 ));
             }
-            egui::ComboBox::from_label("Button")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
                     for b in [
@@ -3707,7 +3908,7 @@ fn action_ui(
                     ] {
                         ui.selectable_value(&mut p.button, b.clone(), format!("{b:?}"));
                     }
-                });
+                }));
             ui.horizontal(|ui| {
                 ui.label("Duration (ms)");
                 ui.add(egui::DragValue::new(&mut p.duration_ms));
@@ -3733,7 +3934,7 @@ fn action_ui(
                     super::window_picker::CoordinateMatcherPath::ClickTarget,
                 ));
             }
-            egui::ComboBox::from_label("Button")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
                     for b in [
@@ -3745,7 +3946,7 @@ fn action_ui(
                     ] {
                         ui.selectable_value(&mut p.button, b.clone(), format!("{b:?}"));
                     }
-                });
+                }));
             ui.horizontal(|ui| {
                 ui.label("Click count");
                 ui.add(egui::DragValue::new(&mut p.clicks).range(1..=1_000_000));
@@ -3776,7 +3977,7 @@ fn action_ui(
             if let Some(error) = click_within_region_validation_error(p) {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
-            egui::ComboBox::from_label("Button")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
                     for b in [
@@ -3788,7 +3989,7 @@ fn action_ui(
                     ] {
                         ui.selectable_value(&mut p.button, b.clone(), format!("{b:?}"));
                     }
-                });
+                }));
             ui.horizontal(|ui| {
                 ui.label("Click count");
                 ui.add(egui::DragValue::new(&mut p.clicks).range(CLICK_REGION_CLICKS_RANGE));
@@ -3801,7 +4002,7 @@ fn action_ui(
             });
         }
         MkAction::MouseDown(button) | MkAction::MouseUp(button) => {
-            egui::ComboBox::from_label("Button")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Button")
                 .selected_text(format!("{button:?}"))
                 .show_ui(ui, |ui| {
                     for b in [
@@ -3813,7 +4014,7 @@ fn action_ui(
                     ] {
                         ui.selectable_value(button, b.clone(), format!("{b:?}"));
                     }
-                });
+                }));
         }
         MkAction::MouseScroll { axis, i32_delta } => {
             const WHEEL: i32 = 120;
@@ -3889,7 +4090,14 @@ fn action_ui(
                 if ui.button("Browse…").clicked() {
                     file_picker = Some(NativeFilePickerKind::ProcessProgram);
                 }
-                if ui.button("Choose From Launcher…").clicked() {
+                let choose_launcher = ui.button("Choose From Launcher…");
+                #[cfg(test)]
+                {
+                    let id = egui::Id::new(("mkmacro-test-launcher-button", ui.ctx().viewport_id()));
+                    let observation = (choose_launcher.rect, ui.clip_rect(), choose_launcher.enabled());
+                    ui.ctx().data_mut(|data| data.insert_temp(id, observation));
+                }
+                if choose_launcher.clicked() {
                     launcher_pick = Some(super::launcher_action_picker::PickerPurpose::Process);
                 }
             });
@@ -3983,13 +4191,13 @@ fn action_ui(
             if matcher_ui(ui, matcher).pick_window {
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
-            egui::ComboBox::from_label("Window state")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Window state")
                 .selected_text(format!("{state:?}"))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(state, MkWindowState::Minimize, "Minimize");
                     ui.selectable_value(state, MkWindowState::Maximize, "Maximize");
                     ui.selectable_value(state, MkWindowState::Restore, "Restore");
-                });
+                }));
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }) => {
             clamp_virtual_desktop_number(desktop);
@@ -4208,7 +4416,7 @@ fn action_ui(
             super::ocr_controls::search_match_ui(ui, &mut p.search);
             ocr_wait_ui(ui, &mut p.wait);
             ocr_not_found_policy_ui(ui, &mut p.not_found_policy);
-            egui::ComboBox::from_label("Button")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
                     for button in [
@@ -4220,7 +4428,7 @@ fn action_ui(
                     ] {
                         ui.selectable_value(&mut p.button, button.clone(), format!("{button:?}"));
                     }
-                });
+                }));
             ui.horizontal(|ui| {
                 ui.label("Clicks");
                 ui.add(egui::DragValue::new(&mut p.clicks).range(1..=1_000_000));
@@ -4267,7 +4475,7 @@ fn action_ui(
         }
         MkAction::CaptureScreenshot(p) => {
             ui.heading("Capture Screenshot");
-            egui::ComboBox::from_label("Destination")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Destination")
                 .selected_text(format!("{:?}", p.destination))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut p.destination, MkScreenshotDestination::File, "File");
@@ -4281,20 +4489,20 @@ fn action_ui(
                         MkScreenshotDestination::Both,
                         "File + Clipboard",
                     );
-                });
+                }));
             if p.destination.produces_file() {
                 ui.horizontal(|ui| {
                     ui.label("Path template");
                     ui.text_edit_singleline(p.path.get_or_insert_default());
                 });
-                egui::ComboBox::from_label("Format")
+                record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Format")
                     .selected_text(format!("{:?}", p.format))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut p.format, MkScreenshotFormat::Png, "PNG");
                         ui.selectable_value(&mut p.format, MkScreenshotFormat::Jpeg, "JPEG");
                         ui.selectable_value(&mut p.format, MkScreenshotFormat::Bmp, "BMP");
-                    });
-                egui::ComboBox::from_label("If file exists")
+                    }));
+                record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("If file exists")
                     .selected_text(format!("{:?}", p.collision))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut p.collision, MkFileCollisionPolicy::Error, "Fail");
@@ -4308,7 +4516,7 @@ fn action_ui(
                             MkFileCollisionPolicy::Unique,
                             "Create unique name",
                         );
-                    });
+                    }));
                 let mut enabled = p.path_output.is_some();
                 ui.checkbox(&mut enabled, "Store written path");
                 if enabled {
@@ -4373,7 +4581,7 @@ fn action_ui(
                 ui.label("Poll (ms)");
                 ui.add(egui::DragValue::new(&mut p.wait.poll_interval_ms).range(1..=86_400_000));
             });
-            egui::ComboBox::from_label("If missing")
+            record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("If missing")
                 .selected_text(match p.not_found_policy {
                     MkImageNotFoundPolicy::Continue => "Continue",
                     MkImageNotFoundPolicy::Fail => "Fail action",
@@ -4389,7 +4597,7 @@ fn action_ui(
                         MkImageNotFoundPolicy::Fail,
                         "Fail action",
                     );
-                });
+                }));
             super::image_search_controls::show_image_outputs_editor(ui, &mut p.outputs);
         }
         MkAction::PixelCheck {
@@ -4466,34 +4674,17 @@ fn play_sound_is_supported(sound: &str) -> bool {
     sound != "None" && crate::sound::SOUND_NAMES.contains(&sound)
 }
 
-fn queue_native_file_picker(
-    ctx: &egui::Context,
-    dialog: &mut MkMacroDialog,
-    picker: NativeFilePickerKind,
-) {
-    let Some(macro_id) = dialog
-        .action_editor
-        .owner_macro_id
-        .or(dialog.selected_macro_id)
-    else {
-        dialog.action_editor.capture_message =
-            Some("The macro target changed before the file picker could open.".into());
-        return;
+fn queue_native_file_picker_from_child(ctx: &egui::Context, dialog: &mut MkMacroDialog, picker: NativeFilePickerKind, hwnd: Option<usize>) {
+    let Some(macro_id) = dialog.action_editor.owner_macro_id.or(dialog.selected_macro_id) else {
+        dialog.action_editor.capture_message = Some("The macro target changed before the file picker could open.".into()); return;
     };
     let Some(step_id) = dialog.action_editor.editing_id else {
-        dialog.action_editor.capture_message =
-            Some("The action target changed before the file picker could open.".into());
-        return;
+        dialog.action_editor.capture_message = Some("The action target changed before the file picker could open.".into()); return;
     };
-    let intent = NativeFilePickerIntent {
-        macro_id,
-        step_id,
-        draft_generation: dialog.action_editor.draft_generation,
-        picker,
-    };
-    if dialog.defer_host_effects {
-        dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::ActionPicker(intent));
-    } else if let Err(error) = complete_native_file_picker(ctx, dialog, intent) {
+    let intent = NativeFilePickerIntent { macro_id, step_id, draft_generation: dialog.action_editor.draft_generation, picker };
+    let host = dialog.editor_host.identity();
+    let epoch = dialog.action_editor.host_epoch;
+    if let Err(error) = complete_native_file_picker(ctx, dialog, intent, hwnd, host, epoch) {
         dialog.action_editor.capture_message = Some(error.to_string());
     }
 }
@@ -4517,11 +4708,16 @@ pub(super) fn complete_native_file_picker(
     ctx: &egui::Context,
     dialog: &mut MkMacroDialog,
     intent: NativeFilePickerIntent,
+    hwnd: Option<usize>,
+    host: super::super::utility_host::HostIdentity,
+    epoch: u64,
 ) -> anyhow::Result<()> {
-    if !native_file_picker_is_current(dialog, &intent) {
+    if !dialog.open || dialog.close_prompt_open || !native_file_picker_is_current(dialog, &intent)
+        || dialog.action_editor.host_epoch != epoch || dialog.editor_host.identity() != host
+    {
         anyhow::bail!("The action changed before its file picker completed");
     }
-    let picker = owned_file_dialog(dialog)?;
+    let picker = owned_file_dialog(hwnd)?;
     let selected = match &intent.picker {
         NativeFilePickerKind::ProcessProgram => picker
             .add_filter("Executable", &["exe", "bat", "cmd", "com"])
@@ -4538,6 +4734,9 @@ pub(super) fn complete_native_file_picker(
     let Some(path) = selected else {
         return Ok(());
     };
+    if !dialog.open || dialog.close_prompt_open || !native_file_picker_is_current(dialog, &intent) || dialog.action_editor.host_epoch != epoch || dialog.editor_host.identity() != host {
+        anyhow::bail!("The action changed while choosing a file");
+    }
 
     match intent.picker {
         NativeFilePickerKind::ProcessProgram => {
@@ -4608,29 +4807,15 @@ pub(super) fn complete_native_file_picker(
     Ok(())
 }
 
-fn owned_file_dialog(dialog: &MkMacroDialog) -> anyhow::Result<rfd::FileDialog> {
+fn owned_file_dialog(hwnd: Option<usize>) -> anyhow::Result<rfd::FileDialog> {
     #[cfg(windows)]
     {
-        let Some((ctx, identity)) = dialog.picker_owner.as_ref() else {
-            anyhow::bail!(
-                "Could not identify the MkMacro window for the file dialog. Focus the editor and try again."
-            );
-        };
-        let hwnd = crate::gui::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
-            .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
-        let Some(hwnd) = hwnd else {
-            anyhow::bail!(
-                "The MkMacro window is not ready to own the file dialog. Focus the editor and try again."
-            );
-        };
-        Ok(rfd::FileDialog::new()
-            .set_parent(&crate::gui::add_action_dialog::NativeDialogParent(hwnd)))
+        let hwnd = hwnd.and_then(|value| std::num::NonZeroIsize::new(value as isize))
+            .ok_or_else(|| anyhow::anyhow!("The action editor is not ready to own a file dialog."))?;
+        Ok(rfd::FileDialog::new().set_parent(&crate::gui::add_action_dialog::NativeDialogParent(hwnd)))
     }
     #[cfg(not(windows))]
-    {
-        let _ = dialog;
-        Ok(rfd::FileDialog::new())
-    }
+    { let _ = hwnd; Ok(rfd::FileDialog::new()) }
 }
 
 fn dispatch_preview(state: &mut ActionEditorState, request: PreviewRequest) {
@@ -5428,7 +5613,7 @@ fn annotations_ui(ui: &mut egui::Ui, metadata: &mut crate::mkmacro::MkStepMetada
         (Purple, "Purple"),
         (Gray, "Gray"),
     ];
-    egui::ComboBox::from_label("Accent")
+    record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Accent")
         .selected_text(
             palette
                 .iter()
@@ -5442,7 +5627,7 @@ fn annotations_ui(ui: &mut egui::Ui, metadata: &mut crate::mkmacro::MkStepMetada
                     .map_or_else(|| text.clone(), |color| text.clone().color(color));
                 ui.selectable_value(&mut metadata.accent, accent, text);
             }
-        });
+        }));
 }
 
 fn apply_and_open_call_target(d: &mut MkMacroDialog, target: u64) -> bool {
@@ -5524,17 +5709,15 @@ fn action_editor_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f
     (footer_height * pixels_per_point).ceil() / pixels_per_point
 }
 
-pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
+pub(super) fn prepare_editor(ctx: &egui::Context, d: &mut MkMacroDialog) {
     reduce_image_search_test_completion(d);
     if d.action_editor.draft.is_none() {
         return;
     }
-    let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
     reduce_image_authoring_completion(d);
     let importing = d.action_editor.image_authoring.is_importing()
         || d.action_editor.pending_image_import.is_some();
-    let crop_open = d.image_crop_editor.is_open();
     let test_busy = d.action_editor.image_search_test_busy();
     if importing || test_busy {
         ctx.request_repaint();
@@ -5549,11 +5732,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .visual_capture
         .as_ref()
         .is_some_and(|w| w.active());
-    let cancel_label = if workflow_active {
-        "Cancel visual capture"
-    } else {
-        "Cancel"
-    };
     if workflow_active {
         ctx.request_repaint();
     }
@@ -5568,154 +5746,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     {
         d.action_editor.capture_filename = suggestion;
     }
-    if d.action_editor
-        .visual_capture
-        .as_ref()
-        .is_some_and(|workflow| {
-            matches!(
-                workflow.state(),
-                super::visual_capture_workflow::WorkflowState::Naming { .. }
-            )
-        })
-    {
-        egui::Window::new("Save captured reference image")
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                let state = &mut d.action_editor;
-                ui.label("Choose the shared PNG filename for this capture.");
-                let display_filename = normalize_image_filename(&state.capture_filename)
-                    .map(|image| image.filename().to_owned())
-                    .unwrap_or_else(|_| state.capture_filename.clone());
-                ui.label(format!("mkmacro_assets/{display_filename}"));
-                ui.text_edit_singleline(&mut state.capture_filename);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Replace Existing").clicked() {
-                        match normalize_image_filename(&state.capture_filename) {
-                            Ok(image) => {
-                                if let Some(workflow) = state.visual_capture.as_mut() {
-                                    match workflow
-                                        .confirm_filename(image, ImageImportChoice::ReplaceExisting)
-                                    {
-                                        Ok(ImageImportResult::Collision { image }) => {
-                                            state.capture_message = Some(format!(
-                                                "Reference image filename already exists: {}",
-                                                image.filename()
-                                            ))
-                                        }
-                                        Ok(ImageImportResult::Cancelled) => {
-                                            state.capture_message =
-                                                Some("Reference image capture cancelled".into())
-                                        }
-                                        Ok(ImageImportResult::Imported(_)) => {
-                                            state.capture_message = None
-                                        }
-                                        Err(error) => {
-                                            state.capture_message =
-                                                Some(format!("Reference image: {error}"))
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => state.capture_message = Some(error),
-                        }
-                    }
-                    if ui.button("Save As...").clicked() {
-                        match normalize_image_filename(&state.capture_filename) {
-                            Ok(image) => {
-                                if let Some(workflow) = state.visual_capture.as_mut() {
-                                    match workflow.confirm_filename(
-                                        image.clone(),
-                                        ImageImportChoice::SaveAs(image),
-                                    ) {
-                                        Ok(ImageImportResult::Collision { image }) => {
-                                            state.capture_message = Some(format!(
-                                                "Reference image filename already exists: {}",
-                                                image.filename()
-                                            ))
-                                        }
-                                        Ok(ImageImportResult::Cancelled) => {
-                                            state.capture_message =
-                                                Some("Reference image capture cancelled".into())
-                                        }
-                                        Ok(ImageImportResult::Imported(_)) => {
-                                            state.capture_message = None
-                                        }
-                                        Err(error) => {
-                                            state.capture_message =
-                                                Some(format!("Reference image: {error}"))
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => state.capture_message = Some(error),
-                        }
-                    }
-                    if ui.button("Cancel").clicked()
-                        && let Some(workflow) = state.visual_capture.as_mut()
-                    {
-                        workflow.cancel();
-                    }
-                });
-                if let Some(message) = &state.capture_message {
-                    semantic_status(ui, StatusTone::Warning, "Reference image", Some(message));
-                }
-            });
-    }
-    if d.action_editor.pending_image_import.is_some() {
-        egui::Window::new("Reference image already exists")
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                let state = &mut d.action_editor;
-                ui.label("A shared library image with this filename already exists.");
-                ui.label("Choose whether to replace it or save the imported bytes under another filename.");
-                ui.text_edit_singleline(&mut state.image_import_filename);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Replace Existing").clicked() {
-                        let result = state.resolve_pending_image_import(
-                            d.store.clone(),
-                            ImageImportChoice::ReplaceExisting,
-                            &super::image_authoring_job::ThreadExecutor,
-                        );
-                        if let Err(error) = result { state.capture_message = Some(error.to_string()); }
-                    }
-                    if ui.button("Save As...").clicked() {
-                        match normalize_image_filename(&state.image_import_filename) {
-                            Ok(image) => {
-                                let result = state.resolve_pending_image_import(
-                                    d.store.clone(),
-                                    ImageImportChoice::SaveAs(image),
-                                    &super::image_authoring_job::ThreadExecutor,
-                                );
-                                if let Err(error) = result { state.capture_message = Some(error.to_string()); }
-                            }
-                            Err(error) => state.capture_message = Some(error),
-                        }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        let _ = state.resolve_pending_image_import(
-                            d.store.clone(),
-                            ImageImportChoice::Cancel,
-                            &super::image_authoring_job::ThreadExecutor,
-                        );
-                    }
-                });
-            });
-    }
-    let mut apply = false;
-    let mut cancel = false;
-    let mut captured = None;
     let ocr_editor_open = d
         .action_editor
         .draft
         .as_ref()
         .is_some_and(|step| action_contains_ocr(&step.action));
-    let direct_ocr_editor_open = d
-        .action_editor
-        .draft
-        .as_ref()
-        .is_some_and(|step| direct_ocr_test_parts(&step.action).is_some());
     d.action_editor.poll_ocr_authoring();
     d.action_editor.discard_stale_ocr_preview();
     if ocr_editor_open
@@ -5727,9 +5762,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if d.action_editor.ocr_languages.active() || d.action_editor.ocr_test.active() {
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
-    let mut ocr_test_request = None;
-    let mut refresh_ocr_languages = false;
-    let mut show_ocr_debug_overlay = false;
     if d.action_editor.position_capture.is_some() {
         ctx.request_repaint();
         match d.action_editor.picker.poll_event() {
@@ -5741,26 +5773,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
         }
     }
-    let mut pick_request = None;
-    let mut image_request = None;
-    let mut wait_visual_region_request = false;
-    let mut screenshot_region_request = false;
-    let mut find_pixel_region_request = false;
-    let mut ocr_region_request = false;
-    let mut condition_image_request = None;
-    let mut condition_ocr_request = None;
-    let mut image_test_request: Option<Option<super::image_authoring_destination::ConditionPath>> =
-        None;
-    let mut preview_request = None;
-    let mut point_pick_request = None;
-    let mut open_call_target_request = None;
-    // Execute after egui releases the mutable draft borrow held by `step`.
-    let mut region_preview_request = None;
-    let mut identify_monitors_request = false;
-    let mut related_action_notice = None;
-    let mut related_action_request = None;
-    let mut native_file_picker = None;
-    // Opening an editor or explicitly refreshing assets invalidates this list.
     let generation = d.action_editor.draft_generation;
     if d.action_editor
         .image_refs_cache
@@ -5769,23 +5781,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     {
         d.action_editor.image_refs_cache = None;
     }
-    let image_refs = d
-        .action_editor
-        .image_refs_cache
-        .get_or_insert_with(|| {
-            (
-                generation,
-                Arc::new(d.store.image_refs().unwrap_or_default()),
-            )
-        })
-        .1
-        .clone();
+    d.action_editor.image_refs_cache.get_or_insert_with(|| {
+        (
+            generation,
+            Arc::new(d.store.image_refs().unwrap_or_default()),
+        )
+    });
     let catalog_owner = d.action_editor.owner_macro_id.or(d.selected_macro_id);
-    let catalog_key = (
-        d.draft_revision(),
-        catalog_owner,
-        d.action_editor.draft_generation,
-    );
+    let catalog_key = (d.draft_revision(), catalog_owner, generation);
     if d.action_editor.variable_catalog_key != Some(catalog_key) {
         let steps = d
             .draft
@@ -5798,21 +5801,639 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             .refresh_variable_catalog(steps, catalog_owner.map(|id| (&d.draft, id)));
         d.action_editor.variable_catalog_key = Some(catalog_key);
     }
-    egui::Window::new("Action Editor")
-        .enabled(d.host_child_input_allowed())
-        .collapsible(false)
-        .default_size(egui::vec2(640.0, 720.0))
-        .resizable(true)
-        .show_utility(ctx, "mkmacro-action-editor", egui::Id::new("Action Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(640.0, 720.0)), egui::Vec2::ZERO, [None, None]), |ui| {
-          let footer_height = action_editor_footer_reserved_height(ui, &["Apply", cancel_label]);
-          let body_max_height = (ui.available_height() - footer_height).max(0.0);
-          let mut apply_enabled = false;
-          let body_output = egui::ScrollArea::vertical()
+}
+
+pub(super) fn complete_editor_actions(
+    ctx: &egui::Context,
+    d: &mut MkMacroDialog,
+    actions: EditorUiActions,
+    hwnd: Option<usize>,
+    origin: Option<super::super::utility_host::AcceptedParentOpen<u64>>,
+) {
+    let EditorUiActions {
+        apply,
+        cancel,
+        captured,
+        confirmation,
+        ocr_test_request,
+        refresh_ocr_languages,
+        show_ocr_debug_overlay,
+        pick_request,
+        image_request,
+        wait_visual_region_request,
+        screenshot_region_request,
+        find_pixel_region_request,
+        ocr_region_request,
+        condition_image_request,
+        condition_ocr_request,
+        mut image_test_request,
+        preview_request,
+        point_pick_request,
+        open_call_target_request,
+        region_preview_request,
+        identify_monitors_request,
+        refresh_monitors,
+        related_action_notice,
+        mut native_file_picker,
+        window_request,
+        launcher_request,
+        workflow_active,
+        importing,
+        crop_open,
+        test_busy,
+        image_refs,
+    } = actions;
+    if let Some(confirmation) = confirmation {
+        match confirmation {
+            EditorConfirmation::CaptureReplace | EditorConfirmation::CaptureSaveAs => {
+                match normalize_image_filename(&d.action_editor.capture_filename) {
+                    Ok(image) => {
+                        if let Some(workflow) = d.action_editor.visual_capture.as_mut() {
+                            let choice =
+                                if matches!(confirmation, EditorConfirmation::CaptureReplace) {
+                                    ImageImportChoice::ReplaceExisting
+                                } else {
+                                    ImageImportChoice::SaveAs(image.clone())
+                                };
+                            match workflow.confirm_filename(image, choice) {
+                                Ok(ImageImportResult::Collision { image }) => {
+                                    d.action_editor.capture_message = Some(format!(
+                                        "Reference image filename already exists: {}",
+                                        image.filename()
+                                    ))
+                                }
+                                Ok(ImageImportResult::Cancelled) => {
+                                    d.action_editor.capture_message =
+                                        Some("Reference image capture cancelled".into())
+                                }
+                                Ok(ImageImportResult::Imported(_)) => {
+                                    d.action_editor.capture_message = None
+                                }
+                                Err(error) => {
+                                    d.action_editor.capture_message =
+                                        Some(format!("Reference image: {error}"))
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => d.action_editor.capture_message = Some(error),
+                }
+            }
+            EditorConfirmation::CaptureCancel => {
+                if let Some(workflow) = d.action_editor.visual_capture.as_mut() {
+                    workflow.cancel();
+                }
+            }
+            EditorConfirmation::ImportReplace
+            | EditorConfirmation::ImportSaveAs
+            | EditorConfirmation::ImportCancel => {
+                let choice = match confirmation {
+                    EditorConfirmation::ImportReplace => Some(ImageImportChoice::ReplaceExisting),
+                    EditorConfirmation::ImportCancel => Some(ImageImportChoice::Cancel),
+                    EditorConfirmation::ImportSaveAs => {
+                        match normalize_image_filename(&d.action_editor.image_import_filename) {
+                            Ok(image) => Some(ImageImportChoice::SaveAs(image)),
+                            Err(error) => {
+                                d.action_editor.capture_message = Some(error);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(choice) = choice
+                    && let Err(error) = d.action_editor.resolve_pending_image_import(
+                        d.store.clone(),
+                        choice,
+                        &super::image_authoring_job::ThreadExecutor,
+                    )
+                {
+                    d.action_editor.capture_message = Some(error.to_string());
+                }
+            }
+        }
+    }
+    if refresh_monitors && let Some(state) = d.action_editor.image_search.as_mut() {
+        state.refresh_monitors();
+    }
+    if let Some(request) = window_request && let Some(origin) = origin.clone() {
+        d.pending_window_picker_open = Some((request, super::PickerOpenOrigin::Editor(origin)));
+    }
+    if let Some(request) = launcher_request && let Some(origin) = origin.clone() {
+        d.pending_launcher_picker_open = Some((request, origin));
+    }
+    if let Some(picker) = native_file_picker.take() {
+        queue_native_file_picker_from_child(ctx, d, picker, hwnd);
+    }
+    if refresh_ocr_languages {
+        d.action_editor.ocr_language_cache = None;
+        d.action_editor.request_ocr_languages();
+        ctx.request_repaint();
+    }
+    if let Some(request) = ocr_test_request
+        && d.action_editor.start_ocr_test(request)
+    {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if show_ocr_debug_overlay {
+        d.action_editor.preview_ocr_debug_overlay();
+    }
+    if identify_monitors_request {
+        d.action_editor.identify_search_monitors();
+    }
+    if let Some(notice) = related_action_notice {
+        d.queue_ui_notice(notice);
+    }
+    if let Some(request) = condition_ocr_request {
+        use super::condition_editor::ConditionOcrOperation;
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        match request.operation {
+            ConditionOcrOperation::RefreshLanguages => {
+                d.action_editor.ocr_language_cache = None;
+                d.action_editor.request_ocr_languages();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            ConditionOcrOperation::TestOcr => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                    && d.action_editor.start_ocr_test(test)
+                {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+            ConditionOcrOperation::PreviewRegion => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                {
+                    d.action_editor.preview_region(test.region);
+                }
+            }
+            ConditionOcrOperation::IdentifyMonitors => {
+                d.action_editor.identify_condition_monitors(&request.path);
+            }
+            ConditionOcrOperation::PickRectangle => {
+                let destination = d.action_editor.condition_destination(
+                    macro_id,
+                    super::condition_editor::ConditionImageRequest {
+                        path: request.path,
+                        operation: super::condition_editor::ConditionImageOperation::PickRectangle,
+                    },
+                );
+                if let Err(error) = d.action_editor.request_rectangle_selection(
+                    macro_id,
+                    super::visual_overlay::RectanglePurpose::SearchRegion,
+                    VisualRegionDestination::ConditionSearchRegion(destination),
+                ) {
+                    d.action_editor.capture_message = Some(error.to_string());
+                }
+            }
+            ConditionOcrOperation::PickWindow => {
+                let indexes = request.path.indexes();
+                let path = super::window_picker::MatcherPath::Condition(indexes);
+                let original = d
+                    .action_editor
+                    .draft
+                    .as_mut()
+                    .and_then(|step| matcher_at_path(&mut step.action, &path))
+                    .cloned();
+                if let Some(original) = original && let Some(origin) = origin.clone() {
+                    d.pending_window_picker_open = Some((
+                        super::window_picker::MatcherEditRequest {
+                            destination: super::window_picker::MatcherDestination::Action {
+                                macro_id,
+                                draft_generation: d.action_editor.draft_generation,
+                                step_id: d.action_editor.editing_id,
+                                path,
+                            },
+                            original,
+                        },
+                        super::PickerOpenOrigin::Editor(origin),
+                    ));
+                }
+            }
+            ConditionOcrOperation::AddActivateWindowBefore => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                {
+                    d.action_editor.add_activate_before = true;
+                    d.action_editor.activate_before_region = Some(test.region);
+                    d.queue_ui_notice(
+                        "Queued: Activate Window will be added when this action is applied.",
+                    );
+                }
+            }
+        }
+    }
+    if let Some(request) = condition_image_request.as_ref()
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::TestImage
+        )
+    {
+        image_test_request = Some(Some(request.path.clone()));
+    }
+    if let Some(request) = preview_request {
+        dispatch_preview(&mut d.action_editor, request);
+    }
+    if let Some(destination) = point_pick_request {
+        d.action_editor
+            .request_point_pick(d.selected_macro_id.unwrap_or(0), destination);
+    }
+    if let Some(target) = open_call_target_request {
+        complete_finish(d, ActionEditorFinish::OpenCallTarget(target));
+    }
+    if let Some(region) = region_preview_request {
+        d.action_editor.preview_region(region);
+    }
+    if (workflow_active || importing || crop_open) && image_request.is_some() {
+        d.action_editor.capture_message = Some(
+            if importing {
+                "Wait for the active reference image import to finish"
+            } else if crop_open {
+                "Finish or cancel the active image crop first"
+            } else {
+                "Finish or cancel the active visual capture first"
+            }
+            .into(),
+        );
+    } else if let Some(request) = image_request {
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        let result = match request {
+            ImageAuthoringRequest::Import => {
+                queue_native_file_picker_from_child(
+                    ctx,
+                    d,
+                    NativeFilePickerKind::ImportReferenceImage,
+                    hwnd,
+                );
+                Ok(())
+            }
+            ImageAuthoringRequest::CropImage => {
+                match d.action_editor.image_crop_destination(macro_id) {
+                    Ok(destination) if !image_refs.contains(destination.source()) => {
+                        Err(anyhow::anyhow!(
+                            "Select an existing managed reference image before cropping"
+                        ))
+                    }
+                    Ok(destination) => {
+                        if let Some(origin) = origin.clone() { d.pending_crop_open = Some((destination, origin)); }
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            request @ (ImageAuthoringRequest::CaptureRectangle
+            | ImageAuthoringRequest::PickRectangle
+            | ImageAuthoringRequest::PickClickWithinRegion) => {
+                let destination = if wait_visual_region_request {
+                    VisualRegionDestination::WaitForVisualChangeRegion
+                } else if screenshot_region_request {
+                    VisualRegionDestination::CaptureScreenshotRegion
+                } else if find_pixel_region_request {
+                    VisualRegionDestination::FindPixelSearchRegion
+                } else if ocr_region_request {
+                    VisualRegionDestination::OcrActionSearchRegion
+                } else if matches!(request, ImageAuthoringRequest::PickClickWithinRegion) {
+                    VisualRegionDestination::ClickWithinRegion
+                } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
+                    VisualRegionDestination::ImageActionReferenceAsset
+                } else {
+                    VisualRegionDestination::ImageActionSearchRegion
+                };
+                d.action_editor.request_rectangle_selection(
+                    macro_id,
+                    request
+                        .rectangle_purpose()
+                        .expect("rectangle request has a purpose"),
+                    destination,
+                )
+            }
+        };
+        if let Err(error) = result {
+            d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
+        }
+    }
+    if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::ImportPng
+        )
+    {
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            queue_native_file_picker_from_child(
+                ctx,
+                d,
+                NativeFilePickerKind::ImportConditionImage(request.clone()),
+                hwnd,
+            );
+        }
+    }
+    if let Some(condition_path) = image_test_request {
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else if test_busy {
+            d.action_editor.capture_message =
+                Some("Wait for the active image search test to finish".into());
+        } else if let Err(error) = d.action_editor.start_image_search_test(
+            d.image_search_backend.clone(),
+            d.selected_macro_id.unwrap_or(0),
+            condition_path,
+        ) {
+            d.action_editor.capture_message = Some(format!("Image search test: {error:#}"));
+        } else {
+            ctx.request_repaint();
+        }
+    }
+    if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::CropImage
+        )
+    {
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            let macro_id = d.selected_macro_id.unwrap_or(0);
+            let result = d
+                .action_editor
+                .condition_crop_destination(macro_id, request.clone())
+                .and_then(|destination| {
+                    if !image_refs.contains(destination.source()) {
+                        Err(anyhow::anyhow!(
+                            "Select an existing managed reference image before cropping"
+                        ))
+                    } else {
+                        if let Some(origin) = origin.clone() { d.pending_crop_open = Some((destination, origin)); }
+                        Ok(())
+                    }
+                });
+            if let Err(error) = result {
+                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
+        }
+    }
+    if let Some(ref request) = condition_image_request
+        && let Some(purpose) = request.operation.rectangle_purpose()
+    {
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            let destination = d
+                .action_editor
+                .condition_destination(macro_id, request.clone());
+            if let Err(error) = d.action_editor.request_rectangle_selection(
+                macro_id,
+                purpose,
+                VisualRegionDestination::ConditionSearchRegion(destination),
+            ) {
+                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
+        }
+    }
+    if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::PreviewRectangle
+                | super::condition_editor::ConditionImageOperation::HighlightMonitor
+                | super::condition_editor::ConditionImageOperation::HighlightWindow
+        )
+    {
+        let region = d
+            .action_editor
+            .draft
+            .as_ref()
+            .and_then(|step| match &step.action {
+                MkAction::If(c)
+                | MkAction::WhileStart { condition: c }
+                | MkAction::WaitUntil { condition: c, .. } => {
+                    super::condition_editor::resolve_condition(c, &request.path)
+                }
+                _ => None,
+            })
+            .and_then(|condition| match condition {
+                MkCondition::ImageSearch { search, .. } => Some(search.region.clone()),
+                _ => None,
+            });
+        match region {
+            Some(region) => d.action_editor.preview_region(region),
+            None => {
+                d.action_editor.capture_message =
+                    Some("Image-search condition is no longer available".into())
+            }
+        }
+    }
+    if let Some(slot) = pick_request
+        && let Err(error) = d.action_editor.start_position_capture(slot)
+    {
+        d.action_editor.capture_message = Some(error);
+    }
+    if let Some(keys) = captured {
+        d.action_editor.set_captured_keys(keys);
+    }
+    if apply {
+        complete_finish(d, ActionEditorFinish::Apply);
+    } else if cancel {
+        complete_finish(d, ActionEditorFinish::Cancel);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
+    if d.action_editor.draft.is_none() {
+        return;
+    }
+    prepare_editor(ctx, d);
+    let mut editor = d.take_action_editor();
+    let mut effects = None;
+    let mut open = true;
+    let id = egui::Id::new("Action Editor");
+    egui::Window::new("Action Editor").id(id).show_utility(
+        ctx,
+        "mkmacro-action-editor",
+        id,
+        Some(&mut open),
+        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(640.0, 720.0)),
+        |ui| effects = Some(render_editor_contents(ui, &mut editor, d, true)),
+    );
+    d.action_editor = editor;
+    if !open {
+        d.action_editor.cancel();
+    }
+    if let Some(effects) = effects {
+        complete_editor_actions(ctx, d, effects, None, None);
+    }
+}
+
+#[derive(Default)]
+pub(in crate::gui) struct EditorUiActions {
+    apply: bool,
+    cancel: bool,
+    captured: Option<Vec<MkKey>>,
+    confirmation: Option<EditorConfirmation>,
+    ocr_test_request: Option<super::ocr_test_job::OcrTestRequest>,
+    refresh_ocr_languages: bool,
+    show_ocr_debug_overlay: bool,
+    pick_request: Option<PositionCaptureSlot>,
+    image_request: Option<ImageAuthoringRequest>,
+    wait_visual_region_request: bool,
+    screenshot_region_request: bool,
+    find_pixel_region_request: bool,
+    ocr_region_request: bool,
+    condition_image_request: Option<super::condition_editor::ConditionImageRequest>,
+    condition_ocr_request: Option<super::condition_editor::ConditionOcrRequest>,
+    image_test_request: Option<Option<super::image_authoring_destination::ConditionPath>>,
+    preview_request: Option<PreviewRequest>,
+    point_pick_request: Option<super::visual_overlay::VisualPointDestination>,
+    open_call_target_request: Option<u64>,
+    region_preview_request: Option<SearchRegion>,
+    identify_monitors_request: bool,
+    refresh_monitors: bool,
+    related_action_notice: Option<&'static str>,
+    native_file_picker: Option<NativeFilePickerKind>,
+    window_request: Option<super::window_picker::MatcherEditRequest>,
+    launcher_request: Option<super::launcher_action_picker::LauncherActionRequest>,
+    workflow_active: bool,
+    importing: bool,
+    crop_open: bool,
+    test_busy: bool,
+    image_refs: Arc<Vec<MkImageRef>>,
+}
+
+#[derive(Clone, Copy)]
+enum EditorConfirmation {
+    CaptureReplace,
+    CaptureSaveAs,
+    CaptureCancel,
+    ImportReplace,
+    ImportSaveAs,
+    ImportCancel,
+}
+
+fn render_editor_contents(
+    ui: &mut egui::Ui,
+    editor: &mut ActionEditorState,
+    parent: &MkMacroDialog,
+    confirmation_allowed: bool,
+) -> EditorUiActions {
+    let importing = editor.image_authoring.is_importing() || editor.pending_image_import.is_some();
+    let crop_open = parent.image_crop_editor.is_open();
+    let test_busy = editor.image_search_test_busy();
+    let workflow_active = editor.visual_capture.as_ref().is_some_and(|w| w.active());
+    let cancel_label = if workflow_active {
+        "Cancel visual capture"
+    } else {
+        "Cancel"
+    };
+    let image_refs = editor
+        .image_refs_cache
+        .as_ref()
+        .map(|(_, refs)| refs.clone())
+        .unwrap_or_default();
+    let ocr_editor_open = editor
+        .draft
+        .as_ref()
+        .is_some_and(|step| action_contains_ocr(&step.action));
+    let direct_ocr_editor_open = editor
+        .draft
+        .as_ref()
+        .is_some_and(|step| direct_ocr_test_parts(&step.action).is_some());
+    let mut apply = false;
+    let mut cancel = false;
+    let mut captured = None;
+    let mut confirmation = None;
+    if editor.visual_capture.as_ref().is_some_and(|workflow| {
+        matches!(
+            workflow.state(),
+            super::visual_capture_workflow::WorkflowState::Naming { .. }
+        )
+    }) {
+        egui::Window::new("Save captured reference image")
+            .id(editor_confirmation_id(editor.host_epoch, true))
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.add_enabled_ui(confirmation_allowed, |ui| {
+                    ui.label("Choose the shared PNG filename for this capture.");
+                    ui.text_edit_singleline(&mut editor.capture_filename);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Replace Existing").clicked() {
+                            confirmation = Some(EditorConfirmation::CaptureReplace);
+                        }
+                        if ui.button("Save As...").clicked() {
+                            confirmation = Some(EditorConfirmation::CaptureSaveAs);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            confirmation = Some(EditorConfirmation::CaptureCancel);
+                        }
+                    });
+                    if let Some(message) = &editor.capture_message {
+                        semantic_status(ui, StatusTone::Warning, "Reference image", Some(message));
+                    }
+                });
+            });
+    }
+    if editor.pending_image_import.is_some() {
+        egui::Window::new("Reference image already exists").id(editor_confirmation_id(editor.host_epoch, false)).collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+            ui.add_enabled_ui(confirmation_allowed, |ui| {
+                ui.label("A shared library image with this filename already exists.");
+                ui.label("Choose whether to replace it or save the imported bytes under another filename.");
+                ui.text_edit_singleline(&mut editor.image_import_filename);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Replace Existing").clicked() { confirmation = Some(EditorConfirmation::ImportReplace); }
+                    if ui.button("Save As...").clicked() { confirmation = Some(EditorConfirmation::ImportSaveAs); }
+                    if ui.button("Cancel").clicked() { confirmation = Some(EditorConfirmation::ImportCancel); }
+                });
+            });
+        });
+    }
+    let mut ocr_test_request = None;
+    let mut refresh_ocr_languages = false;
+    let mut show_ocr_debug_overlay = false;
+    let mut pick_request = None;
+    let mut image_request = None;
+    let mut wait_visual_region_request = false;
+    let mut screenshot_region_request = false;
+    let mut find_pixel_region_request = false;
+    let mut ocr_region_request = false;
+    let mut condition_image_request = None;
+    let mut condition_ocr_request = None;
+    let mut image_test_request = None;
+    let mut preview_request = None;
+    let mut point_pick_request = None;
+    let mut open_call_target_request = None;
+    let mut region_preview_request = None;
+    let mut identify_monitors_request = false;
+    let mut refresh_monitors = false;
+    let mut related_action_notice = None;
+    let mut related_action_request = None;
+    let mut native_file_picker = None;
+    let mut window_request = None;
+    let mut launcher_request = None;
+
+    let footer_height = action_editor_footer_reserved_height(ui, &["Apply", cancel_label]);
+    let body_max_height = (ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .height()
+        - footer_height)
+        .max(0.0);
+    let mut apply_enabled = false;
+    let body_output = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
             .max_height(body_max_height)
             .show(ui, |ui| {
-            let state = &mut d.action_editor;
+            let state = &mut *editor;
             #[cfg(test)]
             {
                 state.test_body_clip = Some(ui.clip_rect());
@@ -5825,10 +6446,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
             let action_before = step.action.clone();
             let image_context = super::image_asset_picker::ImageAssetUiContext {
-                store: &d.store,
+                store: &parent.store,
                 assets: &image_refs,
             };
-            let caller_id = state.owner_macro_id.or(d.selected_macro_id).unwrap_or(0);
+            let caller_id = state.owner_macro_id.or(parent.selected_macro_id).unwrap_or(0);
             let installed_languages = if state.ocr_languages.active() {
                 super::ocr_controls::OcrLanguageCapability::Loading
             } else {
@@ -5852,7 +6473,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 point_pick_active,
                 workflow_active || importing || crop_open,
                 test_busy || state.ocr_test.active(),
-                &d.draft,
+                &parent.draft,
                 caller_id,
                 &mut state.call_target_search,
                 &mut state.pending_call_target,
@@ -6016,7 +6637,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             }
                         }
                         R::PickWindow => window = Some(super::window_picker::MatcherPath::VisualRegion),
-                        R::RefreshMonitors => region_state.refresh_monitors(),
+                        R::RefreshMonitors => refresh_monitors = true,
                         R::IdentifyMonitors => identify_monitors_request = true,
                         R::PreviewRegion => {
                             region_preview_request = Some(region_state.selected_region());
@@ -6043,7 +6664,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     &payload.image,
                     &image_refs,
                 );
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, &image_refs, (d.selected_macro_id.unwrap_or(0), draft_generation), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &parent.store, &image_refs, (parent.selected_macro_id.unwrap_or(0), draft_generation), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -6070,17 +6691,17 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     let image=state.image_search.as_ref().expect("image picker requires image state");
                     if image.kind == super::image_search_editor::SearchRegionKind::ClientArea { image.client_matcher.clone() } else { image.window_matcher.clone() }
                 } else { matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone() };
-                let macro_id=d.selected_macro_id.unwrap_or(0);
-                d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, step_id: state.editing_id, path }, original });
+                let macro_id=parent.selected_macro_id.unwrap_or(0);
+                window_request = Some(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, step_id: state.editing_id, path }, original });
             }
             if let Some(purpose) = launcher {
                 let request = super::launcher_action_picker::LauncherActionRequest {
                     purpose,
-                    macro_id: d.selected_macro_id.unwrap_or(0),
+                    macro_id: parent.selected_macro_id.unwrap_or(0),
                     step_id: state.editing_id,
                     draft_generation: state.draft_generation,
                 };
-                d.launcher_action_picker.open(request);
+                launcher_request = Some(request);
             }
             if state.position_capture.is_some() {
                 semantic_status(
@@ -6117,7 +6738,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 ui.label("Delay after (ms)");
                 ui.add(egui::DragValue::new(&mut step.delay_after_ms).range(0..=86_400_000));
             });
-            egui::ComboBox::from_label("On error")
+            let on_error = record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("On error")
                 .selected_text(match step.on_error {
                     MkErrorPolicy::Stop => "Stop",
                     MkErrorPolicy::Continue => "Continue",
@@ -6130,13 +6751,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     {
                         step.on_error = MkErrorPolicy::Stop
                     }
-                    if ui
+                    let continue_response = ui
                         .selectable_label(
                             matches!(step.on_error, MkErrorPolicy::Continue),
                             "Continue",
-                        )
-                        .clicked()
-                    {
+                        );
+                    #[cfg(test)]
+                    { state.test_error_continue = Some((continue_response.rect, ui.clip_rect(), continue_response.enabled())); }
+                    if continue_response.clicked() {
                         step.on_error = MkErrorPolicy::Continue
                     }
                     if ui
@@ -6148,7 +6770,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             delay_ms: 100,
                         })
                     }
-                });
+                }));
+            let popup = on_error.response.id.with("popup");
+            if !state.popup_ids.contains(&popup) { state.popup_ids.push(popup); }
+            #[cfg(test)]
+            { state.test_error_combo = Some((on_error.response.rect, ui.clip_rect(), on_error.response.enabled())); }
             ui.separator();
             apply_enabled =
                 draft_apply_valid(step, state.image_search.as_ref(), &state.variable_catalog)
@@ -6156,387 +6782,302 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     && !importing
                     && !crop_open;
           });
-          #[cfg(test)]
-          {
-              d.action_editor.test_body_scroll = Some((
-                  body_output.inner_rect,
-                  body_output.content_size,
-                  body_output.state.offset,
-              ));
-          }
-          #[cfg(not(test))]
-          let _ = body_output;
-          ui.separator();
-          #[cfg(test)]
-          {
-              d.action_editor.test_footer_clip = Some(ui.clip_rect());
-          }
-          ui.horizontal_wrapped(|ui| {
-              let apply_response =
-                  ui.add_enabled(apply_enabled, egui::Button::new("Apply"));
-              apply = apply_response.clicked();
-              #[cfg(test)]
-              {
-                  d.action_editor.test_apply_response =
-                      Some((apply_response.id, apply_response.rect));
-              }
-              let cancel_response = ui
-                  .button(cancel_label)
-                  .on_hover_text("Cancel editing; during playback Cancel stops the macro");
-              cancel = cancel_response.clicked();
-              #[cfg(test)]
-              {
-                  d.action_editor.test_cancel_response =
-                      Some((cancel_response.id, cancel_response.rect));
-              }
-          });
-          if let Some(request) = related_action_request.take() {
-              related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
-          }
-        });
-    if let Some(picker) = native_file_picker.take() {
-        queue_native_file_picker(ctx, d, picker);
-    }
-    if refresh_ocr_languages {
-        d.action_editor.ocr_language_cache = None;
-        d.action_editor.request_ocr_languages();
-        ctx.request_repaint();
-    }
-    if let Some(request) = ocr_test_request
-        && d.action_editor.start_ocr_test(request)
+    #[cfg(test)]
     {
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        editor.test_body_scroll = Some((
+            body_output.inner_rect,
+            body_output.content_size,
+            body_output.state.offset,
+        ));
     }
-    if show_ocr_debug_overlay {
-        d.action_editor.preview_ocr_debug_overlay();
-    }
-    if identify_monitors_request {
-        d.action_editor.identify_search_monitors();
-    }
-    if let Some(notice) = related_action_notice {
-        d.queue_ui_notice(notice);
-    }
-    if let Some(request) = condition_ocr_request {
-        use super::condition_editor::ConditionOcrOperation;
-        let macro_id = d.selected_macro_id.unwrap_or(0);
-        match request.operation {
-            ConditionOcrOperation::RefreshLanguages => {
-                d.action_editor.ocr_language_cache = None;
-                d.action_editor.request_ocr_languages();
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            }
-            ConditionOcrOperation::TestOcr => {
-                if let Some(test) = d
-                    .action_editor
-                    .ocr_condition_test_request(macro_id, &request.path)
-                    && d.action_editor.start_ocr_test(test)
-                {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
-                }
-            }
-            ConditionOcrOperation::PreviewRegion => {
-                if let Some(test) = d
-                    .action_editor
-                    .ocr_condition_test_request(macro_id, &request.path)
-                {
-                    d.action_editor.preview_region(test.region);
-                }
-            }
-            ConditionOcrOperation::IdentifyMonitors => {
-                d.action_editor.identify_condition_monitors(&request.path);
-            }
-            ConditionOcrOperation::PickRectangle => {
-                let destination = d.action_editor.condition_destination(
-                    macro_id,
-                    super::condition_editor::ConditionImageRequest {
-                        path: request.path,
-                        operation: super::condition_editor::ConditionImageOperation::PickRectangle,
-                    },
-                );
-                if let Err(error) = d.action_editor.request_rectangle_selection(
-                    macro_id,
-                    super::visual_overlay::RectanglePurpose::SearchRegion,
-                    VisualRegionDestination::ConditionSearchRegion(destination),
-                ) {
-                    d.action_editor.capture_message = Some(error.to_string());
-                }
-            }
-            ConditionOcrOperation::PickWindow => {
-                let indexes = request.path.indexes();
-                let path = super::window_picker::MatcherPath::Condition(indexes);
-                let original = d
-                    .action_editor
-                    .draft
-                    .as_mut()
-                    .and_then(|step| matcher_at_path(&mut step.action, &path))
-                    .cloned();
-                if let Some(original) = original {
-                    d.window_picker
-                        .open(super::window_picker::MatcherEditRequest {
-                            destination: super::window_picker::MatcherDestination::Action {
-                                macro_id,
-                                draft_generation: d.action_editor.draft_generation,
-                                step_id: d.action_editor.editing_id,
-                                path,
-                            },
-                            original,
-                        });
-                }
-            }
-            ConditionOcrOperation::AddActivateWindowBefore => {
-                if let Some(test) = d
-                    .action_editor
-                    .ocr_condition_test_request(macro_id, &request.path)
-                {
-                    d.action_editor.add_activate_before = true;
-                    d.action_editor.activate_before_region = Some(test.region);
-                    d.queue_ui_notice(
-                        "Queued: Activate Window will be added when this action is applied.",
-                    );
-                }
-            }
-        }
-    }
-    if let Some(request) = condition_image_request.as_ref()
-        && matches!(
-            request.operation,
-            super::condition_editor::ConditionImageOperation::TestImage
-        )
+    #[cfg(not(test))]
+    let _ = body_output;
+    ui.separator();
+    #[cfg(test)]
     {
-        image_test_request = Some(Some(request.path.clone()));
+        editor.test_footer_clip = Some(ui.clip_rect());
     }
-    if let Some(request) = preview_request {
-        dispatch_preview(&mut d.action_editor, request);
-    }
-    if let Some(destination) = point_pick_request {
-        d.action_editor
-            .request_point_pick(d.selected_macro_id.unwrap_or(0), destination);
-    }
-    if let Some(target) = open_call_target_request {
-        request_finish(d, ActionEditorFinish::OpenCallTarget(target));
-    }
-    if let Some(region) = region_preview_request {
-        d.action_editor.preview_region(region);
-    }
-    if (workflow_active || importing || crop_open) && image_request.is_some() {
-        d.action_editor.capture_message = Some(
-            if importing {
-                "Wait for the active reference image import to finish"
-            } else if crop_open {
-                "Finish or cancel the active image crop first"
-            } else {
-                "Finish or cancel the active visual capture first"
-            }
-            .into(),
-        );
-    } else if let Some(request) = image_request {
-        let macro_id = d.selected_macro_id.unwrap_or(0);
-        let result = match request {
-            ImageAuthoringRequest::Import if d.defer_host_effects => {
-                queue_native_file_picker(ctx, d, NativeFilePickerKind::ImportReferenceImage);
-                Ok(())
-            }
-            ImageAuthoringRequest::Import => rfd::FileDialog::new()
-                .set_directory(d.store.asset_root())
-                .add_filter("PNG image", &["png"])
-                .pick_file()
-                .map(|path| {
-                    d.action_editor
-                        .start_import_from_selected_path(d.store.clone(), macro_id, path)
-                })
-                .transpose()
-                .map(|_| ()),
-            ImageAuthoringRequest::CropImage => {
-                match d.action_editor.image_crop_destination(macro_id) {
-                    Ok(destination) if !image_refs.contains(destination.source()) => {
-                        Err(anyhow::anyhow!(
-                            "Select an existing managed reference image before cropping"
-                        ))
-                    }
-                    Ok(destination) => d
-                        .image_crop_editor
-                        .open(d.store.clone(), destination)
-                        .map_err(anyhow::Error::msg),
-                    Err(error) => Err(error),
-                }
-            }
-            request @ (ImageAuthoringRequest::CaptureRectangle
-            | ImageAuthoringRequest::PickRectangle
-            | ImageAuthoringRequest::PickClickWithinRegion) => {
-                let destination = if wait_visual_region_request {
-                    VisualRegionDestination::WaitForVisualChangeRegion
-                } else if screenshot_region_request {
-                    VisualRegionDestination::CaptureScreenshotRegion
-                } else if find_pixel_region_request {
-                    VisualRegionDestination::FindPixelSearchRegion
-                } else if ocr_region_request {
-                    VisualRegionDestination::OcrActionSearchRegion
-                } else if matches!(request, ImageAuthoringRequest::PickClickWithinRegion) {
-                    VisualRegionDestination::ClickWithinRegion
-                } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
-                    VisualRegionDestination::ImageActionReferenceAsset
-                } else {
-                    VisualRegionDestination::ImageActionSearchRegion
-                };
-                d.action_editor.request_rectangle_selection(
-                    macro_id,
-                    request
-                        .rectangle_purpose()
-                        .expect("rectangle request has a purpose"),
-                    destination,
-                )
-            }
-        };
-        if let Err(error) = result {
-            d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
+    ui.horizontal_wrapped(|ui| {
+        let apply_response = ui.add_enabled(apply_enabled, egui::Button::new("Apply"));
+        apply = apply_response.clicked();
+        #[cfg(test)]
+        {
+            editor.test_apply_response = Some((apply_response.id, apply_response.rect));
         }
-    }
-    if let Some(ref request) = condition_image_request
-        && matches!(
-            request.operation,
-            super::condition_editor::ConditionImageOperation::ImportPng
-        )
-    {
-        if workflow_active || importing || crop_open {
-            d.action_editor.capture_message =
-                Some("Finish or cancel the active authoring operation first".into());
-        } else if d.defer_host_effects {
-            queue_native_file_picker(
-                ctx,
-                d,
-                NativeFilePickerKind::ImportConditionImage(request.clone()),
-            );
-        } else {
-            let destination = d
-                .action_editor
-                .condition_destination(d.selected_macro_id.unwrap_or(0), request.clone());
-            if let Some(path) = rfd::FileDialog::new()
-                .set_directory(d.store.asset_root())
-                .add_filter("PNG image", &["png"])
-                .pick_file()
-                && let Err(error) = d.action_editor.start_condition_import_from_selected_path(
-                    d.store.clone(),
-                    destination,
-                    path,
-                )
-            {
-                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
-            }
+        let cancel_response = ui
+            .button(cancel_label)
+            .on_hover_text("Cancel editing; during playback Cancel stops the macro");
+        cancel = cancel_response.clicked();
+        #[cfg(test)]
+        {
+            editor.test_cancel_response = Some((cancel_response.id, cancel_response.rect));
         }
+    });
+    if let Some(request) = related_action_request.take() {
+        related_action_notice = reduce_related_action_request(&mut *editor, request);
     }
-    if let Some(condition_path) = image_test_request {
-        if workflow_active || importing || crop_open {
-            d.action_editor.capture_message =
-                Some("Finish or cancel the active authoring operation first".into());
-        } else if test_busy {
-            d.action_editor.capture_message =
-                Some("Wait for the active image search test to finish".into());
-        } else if let Err(error) = d.action_editor.start_image_search_test(
-            d.image_search_backend.clone(),
-            d.selected_macro_id.unwrap_or(0),
-            condition_path,
-        ) {
-            d.action_editor.capture_message = Some(format!("Image search test: {error:#}"));
-        } else {
-            ctx.request_repaint();
-        }
-    }
-    if let Some(ref request) = condition_image_request
-        && matches!(
-            request.operation,
-            super::condition_editor::ConditionImageOperation::CropImage
-        )
-    {
-        if workflow_active || importing || crop_open {
-            d.action_editor.capture_message =
-                Some("Finish or cancel the active authoring operation first".into());
-        } else {
-            let macro_id = d.selected_macro_id.unwrap_or(0);
-            let result = d
-                .action_editor
-                .condition_crop_destination(macro_id, request.clone())
-                .and_then(|destination| {
-                    if !image_refs.contains(destination.source()) {
-                        Err(anyhow::anyhow!(
-                            "Select an existing managed reference image before cropping"
-                        ))
-                    } else {
-                        d.image_crop_editor
-                            .open(d.store.clone(), destination)
-                            .map_err(anyhow::Error::msg)
-                    }
-                });
-            if let Err(error) = result {
-                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
-            }
-        }
-    }
-    if let Some(ref request) = condition_image_request
-        && let Some(purpose) = request.operation.rectangle_purpose()
-    {
-        let macro_id = d.selected_macro_id.unwrap_or(0);
-        if workflow_active || importing || crop_open {
-            d.action_editor.capture_message =
-                Some("Finish or cancel the active authoring operation first".into());
-        } else {
-            let destination = d
-                .action_editor
-                .condition_destination(macro_id, request.clone());
-            if let Err(error) = d.action_editor.request_rectangle_selection(
-                macro_id,
-                purpose,
-                VisualRegionDestination::ConditionSearchRegion(destination),
-            ) {
-                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
-            }
-        }
-    }
-    if let Some(ref request) = condition_image_request
-        && matches!(
-            request.operation,
-            super::condition_editor::ConditionImageOperation::PreviewRectangle
-                | super::condition_editor::ConditionImageOperation::HighlightMonitor
-                | super::condition_editor::ConditionImageOperation::HighlightWindow
-        )
-    {
-        let region = d
-            .action_editor
-            .draft
-            .as_ref()
-            .and_then(|step| match &step.action {
-                MkAction::If(c)
-                | MkAction::WhileStart { condition: c }
-                | MkAction::WaitUntil { condition: c, .. } => {
-                    super::condition_editor::resolve_condition(c, &request.path)
-                }
-                _ => None,
-            })
-            .and_then(|condition| match condition {
-                MkCondition::ImageSearch { search, .. } => Some(search.region.clone()),
-                _ => None,
-            });
-        match region {
-            Some(region) => d.action_editor.preview_region(region),
-            None => {
-                d.action_editor.capture_message =
-                    Some("Image-search condition is no longer available".into())
-            }
-        }
-    }
-    if let Some(slot) = pick_request
-        && let Err(error) = d.action_editor.start_position_capture(slot)
-    {
-        d.action_editor.capture_message = Some(error);
-    }
-    if let Some(keys) = captured {
-        d.action_editor.set_captured_keys(keys);
-    }
-    if apply {
-        request_finish(d, ActionEditorFinish::Apply);
-    } else if cancel || !open {
-        request_finish(d, ActionEditorFinish::Cancel);
+    EditorUiActions {
+        apply,
+        cancel,
+        captured,
+        confirmation,
+        ocr_test_request,
+        refresh_ocr_languages,
+        show_ocr_debug_overlay,
+        pick_request,
+        image_request,
+        wait_visual_region_request,
+        screenshot_region_request,
+        find_pixel_region_request,
+        ocr_region_request,
+        condition_image_request,
+        condition_ocr_request,
+        image_test_request,
+        preview_request,
+        point_pick_request,
+        open_call_target_request,
+        region_preview_request,
+        identify_monitors_request,
+        refresh_monitors,
+        related_action_notice,
+        native_file_picker,
+        window_request,
+        launcher_request,
+        workflow_active,
+        importing,
+        crop_open,
+        test_busy,
+        image_refs,
     }
 }
+
+#[derive(Default)]
+pub(in crate::gui) struct EditorHostActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    effects: Option<EditorUiActions>,
+    owner_instance: u64,
+}
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded inline effects avoid an extra allocation on each active editor frame."
+)]
+pub(in crate::gui) enum EditorCommand {
+    Effects {
+        effects: EditorUiActions,
+        hwnd: Option<usize>,
+        epoch: u64,
+        generation: u64,
+        owner: u64,
+        owner_instance: u64,
+    },
+    Retired,
+}
+fn editor_confirmation_id(epoch: u64, capture: bool) -> egui::Id {
+    egui::Id::new(("mkmacro-editor-confirmation", epoch, capture))
+}
+impl super::super::utility_window_host::HostedUtilityDialog for ActionEditorState {
+    const KEY: &'static str = "mkmacro-action-editor";
+    const TITLE: &'static str = "Action Editor";
+    const SIZE: egui::Vec2 = egui::vec2(640.0, 720.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 260.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = MkMacroDialog;
+    type Actions = EditorHostActions;
+    type Checkpoint = EditorCheckpoint;
+    type Command = EditorCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Self::KEY))
+    }
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.draft.is_some()
+    }
+    fn session(&self) -> u64 {
+        self.host_epoch
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        self.popup_ids
+            .iter()
+            .copied()
+            .find(|id| egui::Popup::is_id_open(ctx, *id))
+            .map(|id| egui::LayerId::new(egui::Order::Foreground, id))
+    }
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        let capture = self.visual_capture.as_ref().is_some_and(|workflow| {
+            matches!(
+                workflow.state(),
+                super::visual_capture_workflow::WorkflowState::Naming { .. }
+            )
+        });
+        if !capture && self.pending_image_import.is_none() {
+            return None;
+        }
+        Some(super::super::jump_mode::ui::NavigationViewportBinding {
+            viewport,
+            base_layer: egui::LayerId::new(
+                egui::Order::Middle,
+                editor_confirmation_id(instance, capture),
+            ),
+            owner: super::super::jump_mode::ui::NavigationOwner::MkMacro { instance },
+        })
+    }
+    fn capture(&self) -> EditorCheckpoint {
+        self.capture_editable()
+    }
+    fn restore(&mut self, checkpoint: EditorCheckpoint) {
+        self.restore_editable(checkpoint);
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        child_owner: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        parent: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> EditorHostActions {
+        let mut result = EditorHostActions {
+            owner_instance: parent.owner_instance,
+            ..Default::default()
+        };
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            let observer = editor_popup_observer_id(ctx);
+            let observe = allowed
+                && first
+                && !ctx.will_discard()
+                && ui.is_enabled()
+                && ui.is_visible()
+                && !ui.is_sizing_pass();
+            if observe {
+                ctx.data_mut(|data| data.insert_temp(observer, Vec::<egui::Id>::new()));
+            }
+            let confirm_allowed =
+                allowed || child_owner != super::super::jump_mode::ui::NavigationOwner::Blocked;
+            let effects = ui
+                .add_enabled_ui(allowed, |ui| {
+                    render_editor_contents(ui, self, parent, confirm_allowed)
+                })
+                .inner;
+            let ids = if observe {
+                ctx.data_mut(|data| data.remove_temp::<Vec<egui::Id>>(observer))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            for id in ids {
+                if !self.popup_ids.contains(&id) {
+                    self.popup_ids.push(id);
+                }
+            }
+            if first && !ctx.will_discard() {
+                result.effects = Some(effects);
+            }
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new(Self::KEY);
+            egui::Window::new(Self::TITLE)
+                .id(id)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    Self::KEY,
+                    id,
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                    body,
+                );
+        }
+        if !open && first && !ctx.will_discard() {
+            let mut effects = EditorUiActions::default();
+            effects.cancel = true;
+            result.effects = Some(effects);
+        }
+        if !first || ctx.will_discard() {
+            result.presentation = None;
+            result.effects = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &EditorHostActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> EditorCommand {
+        EditorCommand::Retired
+    }
+    fn command_closes(_: &EditorCommand) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: EditorHostActions,
+        hwnd: Option<usize>,
+    ) -> Vec<EditorCommand> {
+        actions
+            .effects
+            .map(|effects| EditorCommand::Effects {
+                effects,
+                hwnd,
+                epoch: self.host_epoch,
+                generation: self.draft_generation,
+                owner: self.owner_macro_id.unwrap_or(0),
+                owner_instance: actions.owner_instance,
+            })
+            .into_iter()
+            .collect()
+    }
+    #[cfg(test)]
+    fn test_button(_: &EditorHostActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 
 #[derive(Clone, Copy)]
 pub(super) enum ActionEditorFinish {
@@ -6545,19 +7086,6 @@ pub(super) enum ActionEditorFinish {
     OpenCallTarget(u64),
 }
 
-fn request_finish(d: &mut MkMacroDialog, action: ActionEditorFinish) {
-    if !d.host_child_input_allowed() {
-        return;
-    }
-    if d.defer_host_effects {
-        d.stage_host_action(super::MkMacroHostActionKind::FinishActionEditor {
-            generation: d.action_editor.draft_generation,
-            action,
-        });
-    } else {
-        complete_finish(d, action);
-    }
-}
 
 #[cfg(test)]
 pub(super) fn finish_button_geometry(

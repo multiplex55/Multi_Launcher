@@ -6,13 +6,47 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Default)]
+pub(crate) struct PluginHostRuntime {
+    pub pending: bool,
+    pub can_close: bool,
+    pub catalog_revision: u64,
+    pub catalog: Option<Arc<crate::plugin::PluginCatalogSnapshot>>,
+    pub navigation: Option<crate::settings_editor::render::SettingsNavigationFrameObserver>,
+}
+
+pub(crate) struct PluginHostActions {
+    pub presentation_request: Option<crate::gui::utility_host::UtilityPresentation>,
+    pub changed: bool,
+    pub close: bool,
+    pub catalog_revision: u64,
+    pub before: PluginSelection,
+    pub candidate: PluginSelection,
+    pub selection_revision: u64,
+    pub filter_before: String,
+    pub filter_after: String,
+    #[cfg(test)]
+    pub test_button: Option<(egui::Rect, egui::Rect, bool)>,
+    pub navigation: Option<crate::settings_editor::render::SettingsNavigationFrameObserver>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PluginSelection {
+    enabled_plugins: Vec<String>,
+    enabled_capabilities: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Default)]
 
 pub struct PluginEditor {
+    pub(crate) host_open: bool,
+    host_epoch: u64,
+    selection_revision: u64,
     enabled_plugins: Vec<String>,
     enabled_capabilities: HashMap<String, Vec<String>>,
     available: Vec<(String, String, Vec<String>)>,
     filter: String,
+    #[cfg(test)]
+    test_plugin_checkbox: Option<(String, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_filter_response: Option<(egui::Id, egui::Rect)>,
 }
@@ -48,14 +82,22 @@ impl PluginEditor {
         };
 
         Self {
+            host_open: false,
+            host_epoch: 0,
+            selection_revision: 0,
             enabled_plugins,
             enabled_capabilities,
             available: info,
             filter: String::new(),
             #[cfg(test)]
+            test_plugin_checkbox: None,
+            #[cfg(test)]
             test_filter_response: None,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_plugin_checkbox(&self) -> Option<(String, egui::Rect, egui::Rect, bool)> { self.test_plugin_checkbox.clone() }
 
     #[cfg(test)]
     pub(crate) fn test_filter_response(&self) -> Option<(egui::Id, egui::Rect)> {
@@ -78,8 +120,14 @@ impl PluginEditor {
         available: Vec<(String, String, Vec<String>)>,
     ) {
         let filter = std::mem::take(&mut self.filter);
+        let host_open = self.host_open;
+        let host_epoch = self.host_epoch;
+        let selection_revision = self.selection_revision.wrapping_add(1);
         *self = Self::with_available(settings, available);
+        self.selection_revision = selection_revision;
         self.filter = filter;
+        self.host_open = host_open;
+        self.host_epoch = host_epoch;
     }
 
     fn gather_available(plugin_dirs: &[String]) -> Vec<(String, String, Vec<String>)> {
@@ -95,7 +143,7 @@ impl PluginEditor {
         pm.plugin_infos()
     }
 
-    fn save_settings(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    pub(crate) fn save_settings(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if app.settings_save_pending() {
             return;
         }
@@ -143,23 +191,55 @@ impl PluginEditor {
         );
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        let mut open = app.show_plugins;
+    pub(crate) fn start_host(&mut self) {
+        if !self.host_open { self.host_epoch = self.host_epoch.wrapping_add(1).max(1); self.host_open = true; }
+    }
+
+    pub(crate) fn host_session(&self) -> u64 { self.host_epoch }
+
+    pub(crate) fn selection_is_current(&self, revision: u64, selection: &PluginSelection) -> bool {
+        self.selection_revision == revision && self.selection() == *selection
+    }
+
+    fn selection(&self) -> PluginSelection {
+        PluginSelection { enabled_plugins: self.enabled_plugins.clone(), enabled_capabilities: self.enabled_capabilities.clone() }
+    }
+
+    pub(crate) fn apply_host_filter(&mut self, before: &str, after: String) {
+        if self.filter == before { self.filter = after; }
+    }
+
+    pub(crate) fn restore_selection(&mut self, selection: PluginSelection) {
+        self.enabled_plugins = selection.enabled_plugins;
+        self.enabled_capabilities = selection.enabled_capabilities;
+    }
+
+    pub(crate) fn render_host(&mut self, ctx: &egui::Context, runtime: &PluginHostRuntime,
+        allowed: bool, first: bool, child: Option<&mut egui::Ui>, presentation: crate::gui::utility_host::UtilityPresentation) -> PluginHostActions {
+        let navigation = runtime.navigation.as_ref().filter(|_| allowed && first && !ctx.will_discard());
+        let _navigation_scope = navigation.map(|observer| observer.install(ctx));
+        let mut open = self.host_open;
         let mut changed = false;
-        let pending = app.settings_save_pending();
+        #[cfg(test)]
+        let mut test_button = None;
+        let pending = runtime.pending;
+        let filter_before = self.filter.clone();
+        let mut filter_after = filter_before.clone();
+        let before = self.selection();
+        let selection_revision = self.selection_revision;
         let navigation_request =
             crate::settings_editor::render::scoped_settings_navigation_request(ctx).filter(
                 |request| {
                     request.section
                         == crate::settings_editor::catalog::SettingsSection::PluginEditor
-                        && request.catalog_revision == app.plugins.settings_catalog_revision()
+                        && request.catalog_revision == runtime.catalog_revision
                 },
             );
         let navigation_highlight_only =
             crate::settings_editor::render::scoped_settings_navigation_is_highlight_only(ctx);
         let catalog_snapshot = navigation_request
             .as_ref()
-            .and_then(|_| app.plugins.settings_catalog_snapshot_if_changed(None));
+            .and_then(|_| runtime.catalog.clone());
         let requested_filter_row = navigation_request
             .as_ref()
             .zip(catalog_snapshot.as_ref())
@@ -173,12 +253,12 @@ impl PluginEditor {
             })
             .map(|(name, description, _)| (name.to_owned(), description.to_owned()));
         if !navigation_highlight_only && let Some((name, description)) = requested_filter_row {
-            let filter = self.filter.trim().to_lowercase();
+            let filter = filter_after.trim().to_lowercase();
             if !filter.is_empty()
                 && !name.to_lowercase().contains(&filter)
                 && !description.to_lowercase().contains(&filter)
             {
-                self.filter.clear();
+                filter_after.clear();
             }
         }
         let navigation_control =
@@ -214,15 +294,18 @@ impl PluginEditor {
         {
             self.test_filter_response = None;
         }
-        egui::Window::new("Plugin Settings")
-
-            .show_utility(ctx, "plugin-settings", egui::Id::new("Plugin Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
-                ui.add_enabled_ui(!pending, |ui| {
+        let mut presentation_request = None;
+        let mut body = |ui: &mut egui::Ui| {
+            let interactive = allowed && ui.is_visible() && !ui.is_sizing_pass();
+            let (host, next) = crate::gui::utility_host::presentation_button(ui, presentation, interactive);
+            #[cfg(test)] { test_button = Some((host.rect, ui.clip_rect(), host.enabled())); }
+            if first && !ctx.will_discard() && host.clicked() { presentation_request = Some(next); }
+                ui.add_enabled_ui(interactive && !pending, |ui| {
                     ui.separator();
                     ui.label("Plugins:");
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
-                        let response = ui.text_edit_singleline(&mut self.filter);
+                        let response = ui.text_edit_singleline(&mut filter_after);
                         crate::settings_editor::render::observe_scoped_settings_navigation_response(
                             ui,
                             &response,
@@ -238,15 +321,19 @@ impl PluginEditor {
                         .max_height(200.0)
                         .show(ui, |ui| {
                             for (name, desc, caps) in &self.available {
-                                if !self.filter.is_empty()
-                                    && !name.to_lowercase().contains(&self.filter.to_lowercase())
-                                    && !desc.to_lowercase().contains(&self.filter.to_lowercase())
+                                if !filter_after.is_empty()
+                                    && !name.to_lowercase().contains(&filter_after.to_lowercase())
+                                    && !desc.to_lowercase().contains(&filter_after.to_lowercase())
                                 {
                                     continue;
                                 }
                                 let mut enabled = self.enabled_plugins.contains(name);
                                 ui.horizontal(|ui| {
                                     let response = ui.checkbox(&mut enabled, name);
+                                    #[cfg(test)]
+                                    if name == "cross_owner_probe" {
+                                        self.test_plugin_checkbox = Some((name.clone(), response.rect, ui.clip_rect(), response.enabled()));
+                                    }
                                     if let Some(control_id) = navigation_control(name, None, caps) {
                                         crate::settings_editor::render::observe_scoped_settings_navigation_response(
                                             ui,
@@ -313,15 +400,15 @@ impl PluginEditor {
                 if pending {
                     ui.label("Saving plugin settings…");
                 }
-            });
-        app.show_plugins = open;
-        if !open {
-            app.settings_editor.retire_plugin_settings_navigation();
+        };
+        if let Some(ui) = child { body(ui); } else {
+            let id = egui::Id::new("Plugin Settings");
+            egui::Window::new("Plugin Settings").id(id).show_utility(ctx, "plugin-settings", id, Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(egui::vec2(540.0, 440.0)), body);
         }
-        if changed {
-            self.save_settings(ctx, app);
-        }
+        PluginHostActions { presentation_request, changed: first && !ctx.will_discard() && changed, close: runtime.can_close && first && allowed && !ctx.will_discard() && !open, catalog_revision: runtime.catalog_revision, before, candidate: self.selection(), selection_revision, filter_before, filter_after, navigation: navigation.cloned(), #[cfg(test)] test_button }
     }
+
 }
 
 fn plugin_editor_control_id(
@@ -384,4 +471,24 @@ fn validated_navigation_plugin_row<'a>(
                 .is_some_and(|control_id| request_control_id == control_id)
         });
     target_is_current.then_some(row)
+}
+
+#[cfg(test)]
+mod hosted_selection_tests {
+    use super::*;
+
+    #[test]
+    fn newer_committed_plugin_selection_invalidates_staged_candidate() {
+        let available = vec![("example".to_owned(), "Example".to_owned(), vec![])];
+        let settings = Settings::default();
+        let mut editor = PluginEditor::with_available(&settings, available.clone());
+        let before = editor.selection();
+        editor.enabled_plugins.clear();
+        let candidate = editor.selection();
+        let revision = editor.selection_revision;
+        assert!(editor.selection_is_current(revision, &candidate));
+        editor.sync_committed_settings(&settings, available);
+        assert!(!editor.selection_is_current(revision, &candidate));
+        assert_eq!(editor.selection().enabled_plugins, before.enabled_plugins);
+    }
 }

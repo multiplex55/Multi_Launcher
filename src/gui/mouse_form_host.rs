@@ -8,7 +8,7 @@ use super::jump_mode::ui::{
     visible_top_middle_layer,
 };
 use super::utility_host::{
-    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+    AcceptedParentOpen, HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 
@@ -54,6 +54,9 @@ pub(super) const MOUSE_GESTURES: MouseFormSpec = MouseFormSpec {
 };
 
 pub(super) trait MouseFormDraft: Clone {
+    type Checkpoint;
+    fn checkpoint(&self) -> Self::Checkpoint;
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint);
     fn child_owner(&self, _instance: u64) -> Option<NavigationOwner> {
         None
     }
@@ -73,12 +76,36 @@ pub(super) trait MouseFormDraft: Clone {
     fn reconcile_canvas(&mut self, _ctx: &egui::Context, _owner_has_input: bool) {}
 }
 
-impl MouseFormDraft for super::MouseSettingsDialog {}
-impl MouseFormDraft for super::MouseGestureSettingsDialog {}
+impl MouseFormDraft for super::MouseSettingsDialog {
+    type Checkpoint = Self;
+    fn checkpoint(&self) -> Self {
+        self.clone()
+    }
+    fn restore_checkpoint(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+}
+impl MouseFormDraft for super::MouseGestureSettingsDialog {
+    type Checkpoint = super::mouse_gesture_settings_dialog::GestureSettingsMainCheckpoint;
+    fn checkpoint(&self) -> Self::Checkpoint {
+        Self::Checkpoint::capture(self)
+    }
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+}
 
 impl MouseFormDraft for super::MgGesturesDialog {
+    type Checkpoint = super::mouse_gestures_dialog::MouseGesturesMainCheckpoint;
+    fn checkpoint(&self) -> Self::Checkpoint {
+        Self::Checkpoint::capture(self)
+    }
+    fn restore_checkpoint(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
     fn child_owner(&self, instance: u64) -> Option<NavigationOwner> {
         self.jump_mode_child_owner(instance)
+            .filter(|owner| !matches!(owner, NavigationOwner::MouseGestureBinding { .. }))
     }
 
     fn target_generation(&self, _instance: u64) -> TargetGeneration {
@@ -234,10 +261,13 @@ impl MouseFormSpec {
     }
 }
 
-pub(super) struct MouseFormHost<D, A> {
+pub(super) struct MouseFormHost<D: MouseFormDraft, A> {
     state: UtilityHostState,
+    presentation_prepared: bool,
     instance: u64,
     pending: Option<FormFrame<D, A>>,
+    accepted_origin: Option<AcceptedParentOpen<u64>>,
+    docked_focus_pending: bool,
     close_pending: Option<ViewportPassProvenance>,
     native_jump: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -245,12 +275,15 @@ pub(super) struct MouseFormHost<D, A> {
     test_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
-impl<D, A> Default for MouseFormHost<D, A> {
+impl<D: MouseFormDraft, A> Default for MouseFormHost<D, A> {
     fn default() -> Self {
         Self {
             state: Default::default(),
+            presentation_prepared: false,
             instance: 0,
             pending: None,
+            accepted_origin: None,
+            docked_focus_pending: false,
             close_pending: None,
             native_jump: Default::default(),
             native_jump_frame: None,
@@ -260,14 +293,14 @@ impl<D, A> Default for MouseFormHost<D, A> {
     }
 }
 
-struct FormFrame<D, A> {
+struct FormFrame<D: MouseFormDraft, A> {
     root: ViewportPassProvenance,
     owner: Option<ViewportPassProvenance>,
     host: HostIdentity,
     instance: u64,
     authorized: bool,
     actions: Option<A>,
-    checkpoint: Option<D>,
+    checkpoint: Option<D::Checkpoint>,
     os_close: bool,
     close: bool,
     focus: bool,
@@ -299,6 +332,18 @@ pub(super) struct FormUi<'a> {
 }
 
 impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
+    pub fn take_accepted_origin(&mut self) -> Option<AcceptedParentOpen<u64>> {
+        self.accepted_origin.take()
+    }
+
+    pub fn accepts_origin(&self, open: bool, origin: &AcceptedParentOpen<u64>) -> bool {
+        open && origin.is_current(self.state.identity(), &self.instance)
+    }
+
+    pub fn session(&self) -> u64 {
+        self.instance
+    }
+
     #[cfg(test)]
     pub fn record_test_button(
         &mut self,
@@ -361,8 +406,61 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
         (open && self.is_popped_out()) || self.state.bootstrap_pending() || self.pending.is_some()
     }
 
+    pub fn prepare_open(&mut self, ctx: &egui::Context, spec: MouseFormSpec, open: bool) {
+        if open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(spec.key)
+                .expect("registered mouse form key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        spec: MouseFormSpec,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        self.prepare_open(ctx, spec, true);
+        let key =
+            crate::settings::UtilityToolKey::parse(spec.key).expect("registered mouse form key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.state.presentation()),
+            remembered,
+            self.state.presentation(),
+            origin,
+        );
+        if self.pending.is_some() {
+            return None;
+        }
+        if self.state.transition(desired) {
+            self.clear_jump();
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.request_focus();
+        Some(desired)
+    }
+
+    pub fn remember_current(&self, ctx: &egui::Context, spec: MouseFormSpec) {
+        let key =
+            crate::settings::UtilityToolKey::parse(spec.key).expect("registered mouse form key");
+        super::utility_host::remember_presentation(ctx, key, self.state.presentation());
+    }
+
     pub fn request_focus(&mut self) {
-        self.state.request_focus();
+        if self.is_popped_out() {
+            self.state.request_focus();
+        } else {
+            self.docked_focus_pending = true;
+        }
     }
 
     pub fn request_close(&mut self, ctx: &egui::Context) {
@@ -379,7 +477,9 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
     pub fn retire(&mut self, ctx: &egui::Context, spec: MouseFormSpec) {
         self.close_viewport(ctx, spec);
         self.state.retire_to_docked();
+        self.presentation_prepared = false;
         self.pending = None;
+        self.docked_focus_pending = false;
         self.close_pending = None;
         self.clear_jump();
     }
@@ -414,7 +514,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
             && previous.host == host
         {
             if let Some(checkpoint) = previous.checkpoint {
-                *draft = checkpoint;
+                draft.restore_checkpoint(checkpoint);
             }
             os_close = previous.os_close;
         }
@@ -437,6 +537,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
             embedded_focus: None,
         };
         if host.host == UtilityPresentation::Docked {
+            frame.focus = self.docked_focus_pending && input.root_input;
             if root_first && input.root_owner && !input.root_jump_active && !frame.close {
                 frame.close = close_shortcut(ctx, input.close_shortcut);
             }
@@ -475,7 +576,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
                 let child_first = child.current_pass_index() == 0;
                 if native && !child_first {
                     if let Some(checkpoint) = frame.checkpoint.take() {
-                        *draft = checkpoint;
+                        draft.restore_checkpoint(checkpoint);
                     }
                     frame.close = launcher_close;
                 }
@@ -581,7 +682,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
                             .as_ref()
                             .is_some_and(JumpModeScope::has_pending_focus_intent)
                     {
-                        frame.checkpoint = Some(draft.clone());
+                        frame.checkpoint = Some(draft.checkpoint());
                     }
                     egui::CentralPanel::default().show(child, |ui| {
                         frame.actions = Some(show(
@@ -662,6 +763,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
         draft: &mut D,
         open: bool,
     ) -> Option<(A, bool)> {
+        self.accepted_origin = None;
         let mut frame = self.pending.take()?;
         let current =
             open && frame.instance == self.instance && frame.host == self.state.identity();
@@ -676,7 +778,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
         }
         if !current || !retained {
             if current && let Some(checkpoint) = frame.checkpoint.take() {
-                *draft = checkpoint;
+                draft.restore_checkpoint(checkpoint);
             }
             self.clear_jump();
             if current && let Some(owner) = frame.owner {
@@ -686,6 +788,9 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
             }
             return None;
         }
+        self.accepted_origin = frame.owner.and_then(|owner| {
+            AcceptedParentOpen::from_retained(ctx, frame.host, frame.instance, frame.root, owner)
+        });
         self.state
             .complete_bootstrap(frame.host, frame.embedded_layer, frame.embedded_focus);
         let close = frame.close || (frame.os_close && frame.close_allowed);
@@ -697,8 +802,13 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
                 );
             } else if let Some(layer) = frame.embedded_layer {
                 ctx.move_to_top(layer);
+            } else if frame.host.host == UtilityPresentation::Docked
+                && let Some(layer) = spec.kind.layer_id()
+            {
+                ctx.move_to_top(layer);
             }
             self.state.complete_focus(frame.host);
+            self.docked_focus_pending = false;
         }
         if !close
             && let (Some(identity), Some(info)) = (
@@ -733,6 +843,7 @@ impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
         } else {
             UtilityPresentation::Docked
         });
+        self.remember_current(ctx, spec);
         self.clear_jump();
         if !popout && let Some(layer) = spec.kind.layer_id() {
             ctx.move_to_top(layer);
@@ -747,7 +858,7 @@ fn snapshot<D: MouseFormDraft>(
     draft: &D,
     allowed: bool,
     scope: Option<&JumpModeScope>,
-) -> Option<D> {
+) -> Option<D::Checkpoint> {
     (allowed
         && (draft.canvas_active()
             || scope.is_some_and(JumpModeScope::has_pending_focus_intent)
@@ -762,7 +873,7 @@ fn snapshot<D: MouseFormDraft>(
                         )
                     })
             })))
-    .then(|| draft.clone())
+    .then(|| draft.checkpoint())
 }
 
 fn close_shortcut(ctx: &egui::Context, allowed: bool) -> bool {
@@ -771,4 +882,32 @@ fn close_shortcut(ctx: &egui::Context, allowed: bool) -> bool {
             input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                 || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_open_receipt_rejects_parent_close_host_move_and_reopen() {
+        let ctx = egui::Context::default();
+        let mut host = MouseGesturesHost::default();
+        host.instance = 7;
+        host.state.transition(UtilityPresentation::Popout);
+        let root = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        assert!(
+            AcceptedParentOpen::from_retained(&ctx, host.state.identity(), 7, root, root).is_none()
+        );
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let receipt =
+            AcceptedParentOpen::from_retained(&ctx, host.state.identity(), 7, root, root).unwrap();
+        assert!(host.accepts_origin(true, &receipt));
+        assert!(!host.accepts_origin(false, &receipt));
+        host.state.transition(UtilityPresentation::Docked);
+        assert!(!host.accepts_origin(true, &receipt));
+        host.state.transition(UtilityPresentation::Popout);
+        host.instance = 8;
+        assert!(!host.accepts_origin(true, &receipt));
+    }
 }

@@ -34,6 +34,7 @@ fn identity(host: HostIdentity, instance: u64) -> Option<NativeViewportIdentity>
 #[derive(Default)]
 pub(super) struct SettingsWindowHost {
     state: UtilityHostState,
+    presentation_prepared: bool,
     instance: u64,
     pending: Option<SettingsHostFrame>,
     close_pending: Option<ViewportPassProvenance>,
@@ -41,6 +42,23 @@ pub(super) struct SettingsWindowHost {
     native_jump_frame: Option<u64>,
     #[cfg(test)]
     test_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsOpenOrigin(pub(super) super::utility_host::AcceptedParentOpen<u64>);
+
+#[cfg(test)]
+impl SettingsOpenOrigin {
+    pub(crate) fn test_native(ctx: &egui::Context) -> Self {
+        let host = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx, host.identity(), 1, pass, pass,
+        ).unwrap();
+        output.drop_without_applying_deltas();
+        Self(receipt)
+    }
 }
 
 struct SettingsHostFrame {
@@ -71,6 +89,10 @@ impl SettingsWindowHost {
         viewport(self.instance)
     }
 
+    pub(super) fn accepts_origin(&self, open: bool, origin: &SettingsOpenOrigin) -> bool {
+        open && self.close_pending.is_none() && origin.0.is_current(self.state.identity(), &self.instance)
+    }
+
     pub(super) fn is_popped_out(&self) -> bool {
         self.state.presentation() == UtilityPresentation::Popout
     }
@@ -89,6 +111,19 @@ impl SettingsWindowHost {
             || self.pending.is_some()
     }
 
+    pub(super) fn prepare_open(&mut self, ctx: &egui::Context, open: bool) {
+        if open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn remember_current(&self, ctx: &egui::Context) {
+        let key = crate::settings::UtilityToolKey::parse(KEY).expect("registered utility key");
+        super::utility_host::remember_presentation(ctx, key, self.state.presentation());
+    }
+
     pub(super) fn request_focus(&mut self) {
         self.state.request_focus();
     }
@@ -100,6 +135,7 @@ impl SettingsWindowHost {
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
         self.retire_native_viewport(ctx);
         self.state.retire_to_docked();
+        self.presentation_prepared = false;
         self.pending = None;
         self.close_pending = None;
         self.native_jump.cancel_all();
@@ -130,6 +166,7 @@ impl SettingsWindowHost {
             self.retire(ctx);
             return;
         }
+        self.prepare_open(ctx, app.show_settings);
         let host = self.state.identity();
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let mut editor = std::mem::take(&mut app.settings_editor);
@@ -396,8 +433,15 @@ impl SettingsWindowHost {
             actions.request_close();
         }
         let requested = actions.host_request;
+        let origin = if requested.is_none() && !frame.close && !frame.os_close {
+            frame.owner.and_then(|owner| super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, frame.host, frame.instance, frame.root, owner,
+            )).map(SettingsOpenOrigin)
+        } else {
+            None
+        };
         let mut editor = std::mem::take(&mut app.settings_editor);
-        let show_root = editor.complete_host_actions(ctx, app, actions);
+        let show_root = editor.complete_host_actions_from_origin(ctx, app, actions, origin);
         app.settings_editor = editor;
         if show_root {
             app.request_launcher_visibility(true);
@@ -406,6 +450,7 @@ impl SettingsWindowHost {
             app.settings_editor.retire_all_settings_navigation();
             app.panel_states.settings = false;
             app.panel_stack.retain(|panel| *panel != Panel::Settings);
+            self.remember_current(ctx);
             self.retire(ctx);
         } else if let Some(popout) = requested {
             let next = if popout {
@@ -418,6 +463,7 @@ impl SettingsWindowHost {
                     self.retire_native_viewport(ctx);
                 }
                 self.state.transition(next);
+                self.remember_current(ctx);
                 self.native_jump.cancel_all();
                 self.native_jump_frame = None;
                 if !popout {

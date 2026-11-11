@@ -217,10 +217,25 @@ pub(super) fn show_with_jump_mode(
     visual_order: &mut u64,
 ) {
     process_recorder_hotkey_capture(ui.ctx(), dialog);
-    if dialog.recording_annotation_open {
-        show_host_presentation(ui, dialog);
-        show_recording_annotation(ui.ctx(), dialog);
-        return;
+    if dialog.recording_review.is_some() {
+        ui.horizontal_wrapped(|ui| {
+            if dialog.review_open_blocked {
+                ui.label("A completed recording is ready for review.");
+            }
+            let response = ui.button("Open Recording Review");
+            #[cfg(test)]
+            {
+                dialog.test_review_button =
+                    Some((response.rect, ui.clip_rect(), response.enabled()));
+            }
+            if response.clicked()
+                && let Some(review) = dialog.recording_review.as_ref()
+            {
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::OpenReview {
+                    epoch: review.epoch,
+                });
+            }
+        });
     }
     let state = state(dialog);
     ui.horizontal_wrapped(|ui| {
@@ -307,6 +322,8 @@ pub(super) fn show_with_jump_mode(
             dialog.selected_macro().is_some(),
             eframe::egui::Button::new("+ Action"),
         );
+        #[cfg(test)]
+        { dialog.test_add_action = Some((add_action.rect, ui.clip_rect(), add_action.enabled())); }
         super::jump_mode::register_target(
             ui,
             jump_mode_scope,
@@ -317,7 +334,11 @@ pub(super) fn show_with_jump_mode(
             visual_order,
         );
         if add_action.clicked() {
-            dialog.action_catalog_visible = true;
+            if dialog.defer_host_effects {
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::OpenCatalog);
+            } else {
+                dialog.catalog.open = true;
+            }
         }
         if !state.command_enabled(ToolbarCommand::Run) {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))
@@ -614,12 +635,13 @@ pub(super) fn show_with_jump_mode(
                     );
                 }
             }
-            if ui
-                .add_enabled(controls.annotate, eframe::egui::Button::new("Annotate"))
-                .clicked()
-            {
+            let annotation_button = ui
+                .add_enabled(controls.annotate || (dialog.annotation.open && matches!(recorder_state, RecorderRuntimeState::Recording | RecorderRuntimeState::Paused)), eframe::egui::Button::new("Annotate"))
+                ;
+            #[cfg(test)] { dialog.test_annotation_button = Some((annotation_button.rect, ui.clip_rect(), annotation_button.enabled())); }
+            if annotation_button.clicked() {
                 if dialog.defer_host_effects {
-                    dialog.stage_host_annotation_begin(recorder_state, rec.macro_id);
+                    dialog.stage_host_annotation_begin(recorder_state, rec.macro_id, rec.recording_id);
                 } else {
                     let result = dialog.begin_recording_annotation();
                     report(dialog, result);
@@ -668,76 +690,6 @@ pub(super) fn show_with_jump_mode(
                 run.total_steps
             )),
         );
-    }
-    show_recording_annotation(ui.ctx(), dialog);
-}
-
-fn show_recording_annotation(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
-    if !dialog.recording_annotation_open {
-        return;
-    }
-    let recorder_snapshot = crate::mkmacro::runtime::recorder_snapshot();
-    let recorder_state = recorder_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.state)
-        .unwrap_or(RecorderRuntimeState::Idle);
-    if matches!(
-        recorder_state,
-        RecorderRuntimeState::Idle | RecorderRuntimeState::Stopping
-    ) {
-        if dialog.defer_host_effects {
-            dialog.stage_host_annotation_finish(
-                false,
-                dialog.recording_annotation_text.clone(),
-                recorder_state,
-                dialog.recording_annotation_target,
-            );
-        } else {
-            let _ = dialog.finish_recording_annotation(false);
-        }
-        return;
-    }
-    let mut open = true;
-    let mut save = false;
-    let mut cancel = false;
-    let input_allowed = dialog.host_child_input_allowed();
-    eframe::egui::Window::new("Recording annotation")
-        .id(super::mkmacro_recording_annotation_id(
-            dialog.owner_instance,
-        ))
-        .enabled(input_allowed)
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label("Add a note at the current recording position.");
-            ui.text_edit_singleline(&mut dialog.recording_annotation_text)
-                .request_focus();
-            ui.horizontal(|ui| {
-                save = ui
-                    .add_enabled(
-                        !dialog.recording_annotation_text.trim().is_empty(),
-                        eframe::egui::Button::new("Add note"),
-                    )
-                    .clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
-    if input_allowed && (save || cancel || !open) {
-        if dialog.defer_host_effects {
-            dialog.stage_host_annotation_finish(
-                save,
-                dialog.recording_annotation_text.clone(),
-                recorder_state,
-                recorder_snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.macro_id)
-                    .or(dialog.recording_annotation_target),
-            );
-        } else {
-            let result = dialog.finish_recording_annotation(save);
-            report(dialog, result);
-        }
     }
 }
 

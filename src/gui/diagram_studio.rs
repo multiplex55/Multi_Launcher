@@ -7,7 +7,7 @@ use super::utility_host::{
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 use crate::diagram::{
-    CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
+    CanvasConnectorEnd, CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
     CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument, DiagramFamily,
     DiagramDocumentController, DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot,
     DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene, DiagramSession,
@@ -30,7 +30,7 @@ use crate::diagram::{
     is_generic_preview_candidate, mermaid_visual_copy, preview_visual_transforms,
     project_visual_scene, publish_drawio_export, publish_visual_document_copy,
     read_drawio_xml_source, visual_canvas_align_selection, visual_canvas_distribute_selection,
-    visual_canvas_hit_test, visual_canvas_marquee_selection, visual_canvas_minimap_layout,
+    visual_canvas_hit_test, visual_canvas_connector_target_hit_test, visual_canvas_marquee_selection, visual_canvas_minimap_layout,
     visual_canvas_selection_bounds, visual_canvas_selection_handles,
     visual_canvas_snap_translation_delta,
 };
@@ -817,10 +817,31 @@ enum VisualGestureMode {
     Transform(VisualTransformMode),
     Marquee { extend: bool },
     ConnectorPoint { object_id: VisualObjectId, index: usize },
+    ConnectorEndpoint { object_id: VisualObjectId, end: CanvasConnectorEnd },
+}
+
+#[derive(Clone)]
+struct VisualConnectorTool {
+    host: HostIdentity,
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    viewport_id: egui::ViewportId,
+    mapping: CanvasMapping,
+    source: Option<VisualConnectorEndpoint>,
+}
+
+#[derive(Clone)]
+struct VisualConnectorFocus {
+    host: HostIdentity,
+    document: RenderDocumentIdentity,
+    revision: u64,
+    object: VisualObjectId,
 }
 
 #[derive(Clone)]
 struct VisualGesture {
+    host: HostIdentity,
     document: RenderDocumentIdentity,
     revision: u64,
     owner_generation: u64,
@@ -898,6 +919,7 @@ enum PendingMutation {
         expected_revision: u64,
     },
     VisualGestureTransaction {
+        host: HostIdentity,
         operations: Vec<VisualOperation>,
         expected_document: RenderDocumentIdentity,
         expected_revision: u64,
@@ -1015,6 +1037,10 @@ struct DrawBodyEffects {
     recent_panel: Option<RecentPanelEffects>,
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
+    visual_inspector_open: Option<bool>,
+    visual_inspector_ratio: Option<f32>,
+    visual_connector_tool: Option<Option<VisualConnectorTool>>,
+    visual_connector_focus: Option<Option<VisualConnectorFocus>>,
     visual_middle_capture: Option<VisualMiddleCapture>,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
@@ -1088,6 +1114,10 @@ struct PendingRootEffects {
     recent_panel: Option<RecentPanelEffects>,
     visual_camera_reset: Option<VisualCameraChange>,
     visual_canvas_ratio: Option<f32>,
+    visual_inspector_open: Option<bool>,
+    visual_inspector_ratio: Option<f32>,
+    visual_connector_tool: Option<Option<VisualConnectorTool>>,
+    visual_connector_focus: Option<Option<VisualConnectorFocus>>,
     visual_middle_capture: Option<VisualMiddleCapture>,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset_requested: Option<Option<crate::diagram::MermaidTheme>>,
@@ -1252,6 +1282,8 @@ pub(crate) struct DiagramStudioDialog {
     pub(crate) open: bool,
     owner_host: UtilityHostState,
     viewer_host: UtilityHostState,
+    owner_presentation_prepared: bool,
+    viewer_presentation_prepared: bool,
     show_root_after_host_change: bool,
     #[cfg(all(windows, not(test)))]
     picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
@@ -1310,6 +1342,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_viewer_middle_capture: VisualMiddleCapture,
     visual_editor_middle_capture: VisualMiddleCapture,
     visual_canvas_height_ratio: f32,
+    visual_inspector_open: bool,
+    visual_inspector_ratio: f32,
     mermaid_color_draft: Option<MermaidColorDraft>,
     template_preset: Option<crate::diagram::MermaidTheme>,
     visual_viewer_minimap_drag: Option<MinimapDrag>,
@@ -1331,6 +1365,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_property_draft: Option<VisualPropertyDraft>,
     visual_inline_label: Option<VisualInlineLabelDraft>,
     visual_gesture: Option<VisualGesture>,
+    visual_connector_tool: Option<VisualConnectorTool>,
+    visual_connector_focus: Option<VisualConnectorFocus>,
     visual_canvas_press_authorized: Option<bool>,
     drag: Option<DragState>,
     message: Option<StudioNotice>,
@@ -1474,6 +1510,8 @@ impl DiagramStudioDialog {
             owner_generation: 0,
             owner_host: UtilityHostState::popped_out(),
             viewer_host: UtilityHostState::popped_out(),
+            owner_presentation_prepared: false,
+            viewer_presentation_prepared: false,
             show_root_after_host_change: false,
             #[cfg(all(windows, not(test)))]
             picker_owner: None,
@@ -1531,6 +1569,8 @@ impl DiagramStudioDialog {
             visual_viewer_middle_capture: VisualMiddleCapture::default(),
             visual_editor_middle_capture: VisualMiddleCapture::default(),
             visual_canvas_height_ratio: 1.0,
+            visual_inspector_open: true,
+            visual_inspector_ratio: 0.66,
             mermaid_color_draft: None,
             template_preset: None,
             visual_viewer_minimap_drag: None,
@@ -1552,6 +1592,8 @@ impl DiagramStudioDialog {
             visual_property_draft: None,
             visual_inline_label: None,
             visual_gesture: None,
+            visual_connector_tool: None,
+            visual_connector_focus: None,
             visual_canvas_press_authorized: None,
             drag: None,
             message: None,
@@ -1670,6 +1712,8 @@ impl DiagramStudioDialog {
             return;
         }
         if !self.open {
+            self.owner_host = UtilityHostState::popped_out();
+            self.owner_presentation_prepared = false;
             self.owner_generation = self.owner_generation.wrapping_add(1);
             self.viewport_bootstrap_pending = true;
         }
@@ -1694,10 +1738,31 @@ impl DiagramStudioDialog {
             return;
         }
         if !self.open {
+            self.owner_host = UtilityHostState::popped_out();
+            self.owner_presentation_prepared = false;
             self.owner_generation = self.owner_generation.wrapping_add(1);
             self.viewport_bootstrap_pending = true;
         }
         self.open = true;
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.owner_presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio")
+                .expect("stable Diagram Studio key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.owner_host);
+            self.owner_presentation_prepared = true;
+        }
+        if self.viewer_open && !self.viewer_presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("diagram-viewer")
+                .expect("stable Diagram Viewer key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.viewer_host);
+            self.viewer_presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn owner_is_popped_out(&self) -> bool {
+        self.owner_host.presentation() == UtilityPresentation::Popout
     }
 
     pub(super) fn take_show_root_after_host_change(&mut self) -> bool {
@@ -1802,6 +1867,38 @@ impl DiagramStudioDialog {
         }
     }
 
+    pub(super) fn open_source_copy_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        source: DiagramSourceCopy,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<TransitionOutcome> {
+        let was_open = self.open;
+        let outcome = self.open_source_copy(source)?;
+        self.prepare_open_presentation(ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio")
+            .expect("stable Diagram Studio key");
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.owner_host.presentation()),
+            remembered,
+            self.owner_host.presentation(),
+            origin,
+        );
+        if self.owner_host.transition(desired) {
+            self.viewport_bootstrap_pending = desired == UtilityPresentation::Popout;
+            self.focus_viewport = true;
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        Some(outcome)
+    }
+
     pub(crate) fn take_markdown_source_handoff(&mut self) -> Option<DiagramMarkdownSource> {
         self.pending_markdown_source.take()
     }
@@ -1843,9 +1940,11 @@ impl DiagramStudioDialog {
             .complete_bootstrap(self.owner_host.identity(), None, None);
         self.owner_generation = self.owner_generation.wrapping_add(1);
         self.open = false;
+        self.owner_presentation_prepared = false;
         self.close_pending = false;
         self.viewport_bootstrap_pending = false;
         self.viewer_open = false;
+        self.viewer_presentation_prepared = false;
         self.viewer_bootstrap_pending = false;
         self.viewer_focus_pending = false;
         self.viewer_generation = self.viewer_generation.wrapping_add(1);
@@ -1897,6 +1996,7 @@ impl DiagramStudioDialog {
         root_visible: bool,
         root_input_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.show_impl(
             ctx,
@@ -1960,6 +2060,8 @@ impl DiagramStudioDialog {
         self.poll_visual_asset_work();
         self.release_retired_drawio_slot();
         if !self.open {
+            self.visual_connector_tool = None;
+            self.visual_connector_focus = None;
             self.pending_root_effects = None;
             return;
         }
@@ -1990,6 +2092,10 @@ impl DiagramStudioDialog {
         let mut recent_panel = None;
         let mut visual_camera_reset = None;
         let mut visual_canvas_ratio = None;
+        let mut visual_inspector_open = None;
+        let mut visual_inspector_ratio = None;
+        let mut visual_connector_tool = None;
+        let mut visual_connector_focus = None;
         let mut visual_middle_capture = None;
         let mut mermaid_color_draft = None;
         let mut template_preset_requested = None;
@@ -2095,7 +2201,9 @@ impl DiagramStudioDialog {
                     let gesture_active = self.visual_gesture.take().is_some();
                     let press_authorized =
                         self.visual_canvas_press_authorized.take().unwrap_or(false);
-                    let owned_gesture = gesture_active || press_authorized;
+                    let connector_active = self.visual_connector_tool.is_some();
+                    if connector_active { visual_connector_tool = Some(None); }
+                    let owned_gesture = gesture_active || press_authorized || connector_active;
                     !owned_gesture
                 } else {
                     close_shortcut
@@ -2188,6 +2296,10 @@ impl DiagramStudioDialog {
                     visual_middle_capture = effects.visual_middle_capture;
                     visual_camera_reset = effects.visual_camera_reset;
                     visual_canvas_ratio = effects.visual_canvas_ratio;
+                    visual_inspector_open = effects.visual_inspector_open;
+                    visual_inspector_ratio = effects.visual_inspector_ratio;
+                    if effects.visual_connector_tool.is_some() { visual_connector_tool = effects.visual_connector_tool; }
+                    visual_connector_focus = effects.visual_connector_focus;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -2228,6 +2340,10 @@ impl DiagramStudioDialog {
                 visual_middle_capture = effects.visual_middle_capture;
                 visual_camera_reset = effects.visual_camera_reset;
                 visual_canvas_ratio = effects.visual_canvas_ratio;
+                visual_inspector_open = effects.visual_inspector_open;
+                visual_inspector_ratio = effects.visual_inspector_ratio;
+                if effects.visual_connector_tool.is_some() { visual_connector_tool = effects.visual_connector_tool; }
+                visual_connector_focus = effects.visual_connector_focus;
             }
             if body_rendered
                 && pass_authorized
@@ -2459,6 +2575,14 @@ impl DiagramStudioDialog {
                     .then_some(visual_camera_reset).flatten(),
                 visual_canvas_ratio: (child_pass_accepted && body_rendered && !close_requested)
                     .then_some(visual_canvas_ratio).flatten(),
+                visual_inspector_open: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_inspector_open).flatten(),
+                visual_inspector_ratio: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_inspector_ratio).flatten(),
+                visual_connector_tool: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_connector_tool).flatten(),
+                visual_connector_focus: (child_pass_accepted && body_rendered && !close_requested)
+                    .then_some(visual_connector_focus).flatten(),
             });
         }
         #[cfg(test)]
@@ -3233,6 +3357,7 @@ impl DiagramStudioDialog {
         };
         let retained_pass = effects.root_pass.was_retained(ctx);
         if !retained_pass {
+            self.visual_connector_tool = None;
             self.visual_viewer_pan_authorized = false;
             self.visual_viewer_middle_capture = VisualMiddleCapture::default();
             self.visual_editor_middle_capture = VisualMiddleCapture::default();
@@ -3310,6 +3435,12 @@ impl DiagramStudioDialog {
             }
             if let Some(ratio) = effects.visual_canvas_ratio {
                 self.visual_canvas_height_ratio = ratio;
+            }
+            if let Some(open) = effects.visual_inspector_open {
+                self.visual_inspector_open = open;
+            }
+            if let Some(ratio) = effects.visual_inspector_ratio {
+                self.visual_inspector_ratio = ratio;
             }
         }
         else {
@@ -3431,11 +3562,26 @@ impl DiagramStudioDialog {
             }
         }
         self.process_visual_asset_picker_request(ctx, &effects, owner_pass_current);
+        if !owner_pass_current || effects.change_host || effects.close_dialog || effects.close_viewport
+            || effects.os_close_requested || effects.document_intent.is_some()
+            || !effects.visual_structural_editing_allowed
+        {
+            self.visual_connector_tool = None;
+        } else if let Some(tool) = effects.visual_connector_tool.as_ref() {
+            self.visual_connector_tool = tool.clone();
+        }
+        if effects.change_host || effects.close_dialog || effects.close_viewport || effects.os_close_requested {
+            self.visual_connector_focus = None;
+        }
+        if owner_pass_current && !effects.change_host && let Some(focus) = effects.visual_connector_focus.as_ref() {
+            self.visual_connector_focus = focus.clone();
+        }
         let mut cancel_visual_gesture = false;
         if let Some(gesture) = self.visual_gesture.as_mut() {
             let document_current = gesture.document == self.render_document
                 && Some(gesture.revision) == self.documents.visual_revision();
-            let owner_current = gesture.owner_generation == self.owner_generation
+            let owner_current = gesture.host == self.owner_host.identity()
+                && gesture.owner_generation == self.owner_generation
                 && gesture.owner_viewport_id == effects.owner_viewport_id;
             let start_pass_matches = if gesture.owner_viewport_id == egui::ViewportId::ROOT {
                 gesture.start_pass == effects.root_pass
@@ -3594,12 +3740,14 @@ impl DiagramStudioDialog {
         let mutation_succeeded = effects.mutation.is_none_or(|mutation| {
             let gesture_capture_is_current = match &mutation {
                 PendingMutation::VisualGestureTransaction {
+                    host,
                     owner_generation,
                     owner_viewport_id,
                     start_pass_accepted,
                     ..
                 } => {
-                    *owner_generation == self.owner_generation
+                    *host == self.owner_host.identity()
+                        && *owner_generation == self.owner_generation
                         && *owner_viewport_id == effects.owner_viewport_id
                         && *start_pass_accepted
                 }
@@ -3675,6 +3823,14 @@ impl DiagramStudioDialog {
                     owner_pass_current,
                 )
             });
+        if accepted_close {
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio").expect("stable Diagram Studio key");
+            super::utility_host::remember_presentation(ctx, key, effects.host.host);
+            if viewer_was_open {
+                let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                super::utility_host::remember_presentation(ctx, key, self.viewer_host.presentation());
+            }
+        }
         self.publish_completed_visual_export(ctx, completion_pass, effects.close_dialog || effects.os_close_requested, accepted_close, effects.visual_export_cancel_pointer_down);
         self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
         #[cfg(all(windows, not(test)))]
@@ -3698,6 +3854,8 @@ impl DiagramStudioDialog {
         {
             self.show_root_after_host_change |=
                 transition_diagram_host(ctx, &mut self.owner_host, viewport_id());
+            let key = crate::settings::UtilityToolKey::parse("diagram-studio").expect("stable Diagram Studio key");
+            super::utility_host::remember_presentation(ctx, key, self.owner_host.presentation());
             self.viewport_bootstrap_pending =
                 self.owner_host.presentation() == UtilityPresentation::Popout;
             self.focus_viewport = true;
@@ -3722,21 +3880,15 @@ impl DiagramStudioDialog {
                 ctx.request_repaint_of(viewer_viewport_id());
             }
         }
-        let owner_viewer_request_is_current =
-            effects.open_viewer_requested && self.open && owner_pass_current;
-        if owner_viewer_request_is_current {
-            if !self.viewer_open {
-                self.viewer_generation = self.viewer_generation.wrapping_add(1);
-                self.viewer_embedded_root_focused_id = None;
-                self.viewer_open = true;
-                self.visual_viewer_fit_follow = true;
-                self.visual_viewer_fit_size = None;
-                self.visual_viewer_minimap_drag = None;
-            }
-            self.viewer_focus_pending = true;
-            self.viewer_bootstrap_pending = true;
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
-        }
+        let viewer_open_origin = if effects.open_viewer_requested && self.open && owner_pass_current {
+            super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, effects.host, effects.owner_generation, effects.root_pass,
+                effects.owner_pass.unwrap_or(effects.root_pass),
+            )
+        } else {
+            None
+        };
+        let root_before_viewer_completion = self.show_root_after_host_change;
         if effects.close_viewport && accepted_close {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
         } else if effects.os_close_requested && !accepted_close {
@@ -3812,7 +3964,10 @@ impl DiagramStudioDialog {
                         Some((viewer_effects.callback_viewport_id, id));
                 }
                 if viewer_effects.close_requested {
+                    let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                    super::utility_host::remember_presentation(ctx, key, viewer_effects.host.host);
                     self.viewer_open = false;
+                    self.viewer_presentation_prepared = false;
                     self.viewer_generation = self.viewer_generation.wrapping_add(1);
                     self.viewer_bootstrap_pending = false;
                     self.viewer_focus_pending = false;
@@ -3823,6 +3978,8 @@ impl DiagramStudioDialog {
                 } else if viewer_effects.change_host {
                     self.show_root_after_host_change |=
                         transition_diagram_host(ctx, &mut self.viewer_host, viewer_viewport_id());
+                    let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+                    super::utility_host::remember_presentation(ctx, key, self.viewer_host.presentation());
                     self.viewer_bootstrap_pending =
                         self.viewer_host.presentation() == UtilityPresentation::Popout;
                     self.viewer_focus_pending = true;
@@ -3859,6 +4016,44 @@ impl DiagramStudioDialog {
             } else if viewer_effects.native_close_requested {
                 ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::CancelClose);
             }
+        }
+        if let Some(receipt) = viewer_open_origin
+            && self.open && receipt.is_current(self.owner_host.identity(), &self.owner_generation)
+        {
+            let was_open = self.viewer_open;
+            if !was_open {
+                self.viewer_host = UtilityHostState::popped_out();
+                self.viewer_presentation_prepared = false;
+                self.viewer_generation = self.viewer_generation.wrapping_add(1);
+                self.viewer_embedded_root_focused_id = None;
+                self.viewer_open = true;
+                self.visual_viewer_fit_follow = true;
+                self.visual_viewer_fit_size = None;
+                self.visual_viewer_minimap_drag = None;
+                self.prepare_open_presentation(ctx);
+            }
+            let key = crate::settings::UtilityToolKey::parse("diagram-viewer").expect("stable Diagram Viewer key");
+            let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                .and_then(|manager| manager.preference(key)).map(Into::into);
+            let desired = super::utility_host::resolve_child_presentation(
+                was_open.then(|| self.viewer_host.presentation()), remembered,
+                self.viewer_host.presentation(), &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            );
+            let promoted = self.viewer_host.transition(desired);
+            if desired == UtilityPresentation::Popout {
+                super::utility_host::remember_presentation(ctx, key, desired);
+                self.show_root_after_host_change = root_before_viewer_completion;
+            } else {
+                self.show_root_after_host_change = true;
+            }
+            if promoted {
+                self.viewer_embedded_root_layer = None;
+                self.viewer_embedded_root_focused_id = None;
+                self.deferred_viewer_canvas_focus = None;
+            }
+            self.viewer_focus_pending = true;
+            self.viewer_bootstrap_pending |= promoted || !was_open;
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         if effects.close_dialog {
             self.close_pending = false;
@@ -6319,6 +6514,12 @@ impl DiagramStudioDialog {
         {
             self.visual_selected_preset = None;
         }
+        if self.visual_connector_tool.as_ref().is_some_and(|tool| {
+            tool.document != self.render_document || Some(tool.revision) != self.documents.visual_revision()
+                || tool.host != self.owner_host.identity() || tool.owner_generation != self.owner_generation
+        }) {
+            self.visual_connector_tool = None;
+        }
         if self.visual_gesture.as_ref().is_some_and(|gesture| {
             gesture.document != self.render_document
                 || Some(gesture.revision) != self.documents.visual_revision()
@@ -6802,6 +7003,7 @@ impl DiagramStudioDialog {
                 false
             }
             PendingMutation::VisualGestureTransaction {
+                host,
                 operations,
                 expected_document,
                 expected_revision,
@@ -6811,6 +7013,7 @@ impl DiagramStudioDialog {
                 start_pass_accepted,
             } => {
                 if !self.visual_intent_is_current(&expected_document, expected_revision)
+                    || host != self.owner_host.identity()
                     || owner_generation != self.owner_generation
                     || owner_viewport_id != start_pass.viewport_id
                     || !start_pass_accepted
@@ -7451,32 +7654,9 @@ impl DiagramStudioDialog {
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.heading("Diagram Studio");
-                    let viewer_button = ui.add_enabled(
-                        document_actions_allowed,
-                        egui::Button::new(if *viewer_open {
-                            "Focus viewer"
-                        } else {
-                            "Open viewer"
-                        }),
-                    );
-                    #[cfg(test)]
-                    test_action_rects.push((
-                        "open_viewer".into(),
-                        viewer_button.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    test_action_enabled.push((
-                        "open_viewer".into(),
-                        viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
-                    ));
-                    if viewer_button.clicked() {
-                        draw_effects.open_viewer_requested = true;
-                    }
-                    ui.separator();
                     let mut file_item_ids = Vec::new();
                     let mut file_sizing = false;
-                    let file_menu = ui.menu_button("File", |menu_ui| {
+                    let file_menu = ui.menu_button("File ▾", |menu_ui| {
                         file_sizing = menu_ui.is_sizing_pass();
                         egui::ScrollArea::vertical()
                             .max_height((menu_ui.ctx().content_rect().height() - 80.0).max(120.0))
@@ -7634,7 +7814,7 @@ impl DiagramStudioDialog {
                     }
                     let mut template_item_ids = Vec::new();
                     let mut templates_sizing_pass = false;
-                    let _templates_menu = ui.menu_button("Templates", |menu_ui| {
+                    let _templates_menu = ui.menu_button("Templates ▾", |menu_ui| {
                         templates_sizing_pass = menu_ui.is_sizing_pass();
                         for template in DiagramTemplate::ALL {
                             let response = menu_ui.add_enabled(
@@ -7699,22 +7879,9 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
                     }
-                    if let Some(path) = document_path.as_deref() {
-                        ui.weak(
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("diagram.mld"),
-                        );
-                    } else {
-                        ui.weak("Untitled");
-                    }
-                    if document_dirty {
-                        ui.weak("Modified");
-                    }
-                    ui.separator();
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
-                    let view = ui.menu_button("View", |menu_ui| {
+                    let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
                         let source = menu_ui.add_enabled(
                             menu_actions_allowed,
@@ -7783,7 +7950,7 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
-                    let edit = ui.menu_button("Edit", |menu_ui| {
+                    let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
                         for (label, enabled, mutation) in [
                             ("Undo", can_undo, PendingMutation::Undo),
@@ -7814,6 +7981,43 @@ impl DiagramStudioDialog {
                             sizing_pass: edit_sizing,
                         });
                     }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let viewer_button = ui.add_enabled(
+                        document_actions_allowed,
+                        egui::Button::new(if *viewer_open {
+                            "Focus viewer"
+                        } else {
+                            "Open viewer"
+                        }),
+                    );
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "open_viewer".into(),
+                        viewer_button.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_enabled.push((
+                        "open_viewer".into(),
+                        viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
+                    ));
+                    if viewer_button.clicked() {
+                        draw_effects.open_viewer_requested = true;
+                    }
+                    if let Some(path) = document_path.as_deref() {
+                        ui.weak(
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("diagram.mld"),
+                        );
+                    } else {
+                        ui.weak("Untitled");
+                    }
+                    if document_dirty {
+                        ui.weak("Modified");
+                    }
+                    ui.separator();
                     let background_actions_allowed = base_editing_allowed && active_menu_scope.is_none();
 
                     let zoom_out =
@@ -8075,57 +8279,78 @@ impl DiagramStudioDialog {
                 ui.separator();
 
                 match *view_mode {
-                    ViewMode::Source { .. } => source_editor(
-                        ui,
-                        session,
-                        render_document,
-                        source_edit_allowed,
-                        pending,
-                        *focus_source && source_focus_allowed,
-                        source_focus_requested,
-                        #[cfg(test)]
-                        test_source_editor_id,
-                        #[cfg(test)]
-                        test_source_editor_rect,
-                        #[cfg(test)]
-                        test_source_editor_enabled,
-                        #[cfg(test)]
-                        test_action_rects,
-                        #[cfg(test)]
-                        test_action_focus_ids,
-                    ),
-                    ViewMode::Visual => preview_workspace(
-                        ui,
-                        generic_family.is_some(),
-                        generic_texture,
-                        generic_canvas_placeholder,
-                        graph,
-                        cache.scene.as_ref(),
-                        native_editable,
-                        revision,
-                        camera,
-                        inspector_canvas_split_ratio,
-                        selection,
-                        selected_nodes,
-                        property_draft,
-                        drag,
-                        editing_allowed,
-                        pending,
-                        message,
-                        canvas_focus_requested,
-                        #[cfg(test)]
-                        test_canvas_rect,
-                        #[cfg(test)]
-                        test_canvas_id,
-                        #[cfg(test)]
-                        test_action_rects,
-                        #[cfg(test)]
-                        test_generic_preview_drawn,
-                        #[cfg(test)]
-                        test_native_inspector_visible,
-                        #[cfg(test)]
-                        test_generic_canvas_placeholder,
-                    ),
+                    ViewMode::Source { .. } => {
+                        draw_effects.mermaid_color_draft = source_editor(
+                            ui,
+                            session,
+                            render_document,
+                            source_edit_allowed,
+                            pending,
+                            *focus_source && source_focus_allowed,
+                            source_focus_requested,
+                            generic_family,
+                            mermaid_color_draft,
+                            base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            #[cfg(test)]
+                            test_source_editor_id,
+                            #[cfg(test)]
+                            test_source_editor_rect,
+                            #[cfg(test)]
+                            test_source_editor_enabled,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_action_focus_ids,
+                        );
+                    }
+                    ViewMode::Visual => {
+                        draw_effects.mermaid_color_draft = draw_mermaid_colors(
+                            ui,
+                            session.draft(),
+                            render_document,
+                            revision,
+                            generic_family,
+                            mermaid_color_draft,
+                            base_editing_allowed && draw_effects.active_menu_scope.is_none(),
+                            pending,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_action_focus_ids,
+                        );
+                        preview_workspace(
+                            ui,
+                            generic_family.is_some(),
+                            generic_texture,
+                            generic_canvas_placeholder,
+                            graph,
+                            cache.scene.as_ref(),
+                            native_editable,
+                            revision,
+                            camera,
+                            inspector_canvas_split_ratio,
+                            selection,
+                            selected_nodes,
+                            property_draft,
+                            drag,
+                            editing_allowed,
+                            pending,
+                            message,
+                            canvas_focus_requested,
+                            #[cfg(test)]
+                            test_canvas_rect,
+                            #[cfg(test)]
+                            test_canvas_id,
+                            #[cfg(test)]
+                            test_action_rects,
+                            #[cfg(test)]
+                            test_generic_preview_drawn,
+                            #[cfg(test)]
+                            test_native_inspector_visible,
+                            #[cfg(test)]
+                            test_generic_canvas_placeholder,
+                        );
+                    }
                     ViewMode::Split => {
                         #[cfg(test)]
                         let mut source_id = None;
@@ -8136,7 +8361,7 @@ impl DiagramStudioDialog {
                         #[cfg(test)]
                         let mut canvas_id = None;
                         if ui.available_width() < SPLIT_TWO_COLUMN_MIN_WIDTH {
-                            source_editor(
+                            draw_effects.mermaid_color_draft = source_editor(
                                 ui,
                                 session,
                                 render_document,
@@ -8144,6 +8369,9 @@ impl DiagramStudioDialog {
                                 pending,
                                 *focus_source && source_focus_allowed,
                                 source_focus_requested,
+                                generic_family,
+                                mermaid_color_draft,
+                                base_editing_allowed && draw_effects.active_menu_scope.is_none(),
                                 #[cfg(test)]
                                 &mut source_id,
                                 #[cfg(test)]
@@ -8212,7 +8440,7 @@ impl DiagramStudioDialog {
                                     egui::vec2(source_width, available_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        source_editor(
+                                        draw_effects.mermaid_color_draft = source_editor(
                                             ui,
                                             session,
                                             render_document,
@@ -8220,6 +8448,10 @@ impl DiagramStudioDialog {
                                             pending,
                                             *focus_source && source_focus_allowed,
                                             source_focus_requested,
+                                            generic_family,
+                                            mermaid_color_draft,
+                                            base_editing_allowed
+                                                && draw_effects.active_menu_scope.is_none(),
                                             #[cfg(test)]
                                             &mut source_id,
                                             #[cfg(test)]
@@ -8312,7 +8544,6 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
-                draw_effects.mermaid_color_draft = draw_mermaid_colors(ui, session.draft(), render_document, revision, generic_family, mermaid_color_draft, base_editing_allowed && draw_effects.active_menu_scope.is_none(), pending, #[cfg(test)] test_action_rects, #[cfg(test)] test_action_focus_ids);
                 if let Some(notice) = message.as_ref() {
                     match notice {
                         StudioNotice::Info(_) => { ui.label(notice.text()); }
@@ -8449,44 +8680,26 @@ impl DiagramStudioDialog {
         let mut inline_commit = None;
         let mut inline_error = None;
         let mut editor_reset = None;
+        let mut connector_mapping = None;
         let _visual_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
                 let content_top = ui.cursor().top();
-                ui.horizontal_wrapped(|ui| {
-                    ui.heading("Diagram Studio");
-                    ui.strong("Visual document");
-                    ui.separator();
-                    let viewer = ui.add_enabled(
-                        document_actions_allowed,
-                        egui::Button::new(if self.viewer_open {
-                            "Focus viewer"
-                        } else {
-                            "Open viewer"
-                        }),
-                    );
-                    #[cfg(test)]
-                    self.test_action_rects.push((
-                        "open_viewer".into(),
-                        viewer.rect,
-                        ui.clip_rect(),
-                    ));
-                    #[cfg(test)]
-                    self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
-                    if viewer.clicked() {
-                        effects.open_viewer_requested = true;
-                    }
-                    let export_busy = self.visual_asset_work.is_some()
+                let export_busy = self.visual_asset_work.is_some()
                         || self.completed_visual_asset_import.is_some()
                         || self.completed_visual_export.is_some()
                         || self.drawio_work.is_some()
                         || self.drawio_review.is_some();
-                    let file_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
-                    let export_allowed = file_allowed && pending.is_none() && !visual_draft_active;
-                    let drawio_allowed = export_allowed && !export_busy;
+                let file_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
+                let export_allowed = file_allowed && pending.is_none() && !visual_draft_active;
+                let drawio_allowed = export_allowed && !export_busy;
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading("Diagram Studio");
+                    ui.strong("Visual document");
+                    ui.separator();
                     let mut file_items = Vec::new();
                     let mut file_sizing = false;
-                    let (file_response, _) = egui::containers::menu::MenuButton::new("File")
+                    let (file_response, _) = egui::containers::menu::MenuButton::new("File ▾")
                         .config(
                             egui::containers::menu::MenuConfig::new()
                                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
@@ -8698,7 +8911,7 @@ impl DiagramStudioDialog {
                     }
                     let mut edit_items = Vec::new();
                     let mut edit_sizing = false;
-                    let edit = ui.menu_button("Edit", |menu_ui| {
+                    let edit = ui.menu_button("Edit ▾", |menu_ui| {
                         edit_sizing = menu_ui.is_sizing_pass();
                         let allowed =
                             file_allowed && pending.is_none() && !visual_draft_active && inline_label.is_none();
@@ -8740,7 +8953,7 @@ impl DiagramStudioDialog {
                     }
                     let mut view_items = Vec::new();
                     let mut view_sizing = false;
-                    let view = ui.menu_button("View", |menu_ui| {
+                    let view = ui.menu_button("View ▾", |menu_ui| {
                         view_sizing = menu_ui.is_sizing_pass();
                         let response = menu_ui.add_enabled(
                             file_allowed,
@@ -8778,7 +8991,7 @@ impl DiagramStudioDialog {
                     let template_allowed = actions_allowed && !closing_requested && pending_transition.is_none() && pending.is_none() && !visual_draft_active;
                     let mut template_item_ids = Vec::new();
                     let mut template_sizing_pass = false;
-                    let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates", |menu_ui| {
+                    let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates ▾", |menu_ui| {
                         template_sizing_pass = menu_ui.is_sizing_pass();
                         for template in crate::diagram::VisualAuthoringTemplate::ALL {
                             let response = menu_ui.add_enabled(template_allowed, egui::Button::new(template.name()));
@@ -8811,6 +9024,27 @@ impl DiagramStudioDialog {
                     let help_popup = egui::Popup::default_response_id(&help);
                     if egui::Popup::is_id_open(ui.ctx(), help_popup) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: help_popup, trigger_id: help.id, item_ids: help_items, sizing_pass: help_sizing });
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let viewer = ui.add_enabled(
+                        document_actions_allowed,
+                        egui::Button::new(if self.viewer_open {
+                            "Focus viewer"
+                        } else {
+                            "Open viewer"
+                        }),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "open_viewer".into(),
+                        viewer.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
+                    if viewer.clicked() {
+                        effects.open_viewer_requested = true;
                     }
                     let export_cancellable = self.completed_visual_export.is_some()
                         || self.visual_asset_work.as_ref().is_some_and(|work| {
@@ -8979,6 +9213,130 @@ impl DiagramStudioDialog {
                         camera.fit_next = false;
                     }
                 });
+                let base_projection = projection
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(Arc::as_ref);
+                let base_painted_prefix = base_projection.map_or(0, visual_painted_item_prefix);
+                let resolved_layout_selection = scene_snapshot.as_deref().and_then(|scene| {
+                    crate::diagram::visual_canvas_resolve_membership(
+                        scene,
+                        &selection_state.objects,
+                    )
+                });
+                let transformable_selection_count = resolved_layout_selection
+                    .as_ref()
+                    .map_or(0, |selection| selection.roots.len());
+                let layout_owner_available = scene_snapshot
+                    .as_deref()
+                    .zip(base_projection)
+                    .is_some_and(|(scene, projection)| {
+                        resolved_layout_selection.is_some()
+                            && visual_canvas_selection_bounds(
+                                scene,
+                                projection,
+                                &selection_state.objects,
+                                base_painted_prefix,
+                            )
+                            .is_some()
+                    });
+                let layout_actions_allowed = visual_canvas_editing_allowed
+                    && document_intent.is_none()
+                    && self.visual_gesture.is_none()
+                    && layout_owner_available;
+                let align_enabled = layout_actions_allowed && transformable_selection_count >= 2;
+                let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("Align");
+                    for (_name, label, alignment) in [
+                        ("visual_align_left", "Left", VisualAlign::Left),
+                        ("visual_align_center_x", "Center X", VisualAlign::HorizontalCenter),
+                        ("visual_align_right", "Right", VisualAlign::Right),
+                        ("visual_align_top", "Top", VisualAlign::Top),
+                        ("visual_align_center_y", "Center Y", VisualAlign::VerticalCenter),
+                        ("visual_align_bottom", "Bottom", VisualAlign::Bottom),
+                    ] {
+                        let response = ui.add_enabled(align_enabled, egui::Button::new(label));
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
+                                (scene_snapshot.as_deref(), base_projection)
+                        {
+                            match visual_canvas_align_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                alignment,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ui.weak("Distribute");
+                    for (_name, label, distribution) in [
+                        ("visual_distribute_horizontal", "Horizontal", VisualDistribution::Horizontal),
+                        ("visual_distribute_vertical", "Vertical", VisualDistribution::Vertical),
+                    ] {
+                        let response = ui.add_enabled(
+                            distribute_enabled,
+                            egui::Button::new(label),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
+                                (scene_snapshot.as_deref(), base_projection)
+                        {
+                            match visual_canvas_distribute_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                distribution,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+
+                ui.label(match &self.visual_connector_tool {
+                    Some(tool) if tool.source.is_some() => "Choose destination (Esc cancels)",
+                    Some(_) => "Choose source (Esc cancels)",
+                    None => "Connect objects with Add connector",
+                });
                 let mut canvas_ratio = self.visual_canvas_height_ratio;
                 let size_control = ui.add_enabled(
                     navigation_controls_allowed,
@@ -8987,10 +9345,52 @@ impl DiagramStudioDialog {
                 #[cfg(test)]
                 self.test_action_rects.push(("visual_canvas_size".into(), size_control.rect, ui.clip_rect()));
                 if size_control.changed() { effects.visual_canvas_ratio = Some(canvas_ratio); }
+                let inspector_toggle = ui.add_enabled(
+                    navigation_controls_allowed,
+                    egui::Button::new(if self.visual_inspector_open {
+                        "Hide properties ▸"
+                    } else {
+                        "Show properties ◂"
+                    }),
+                );
+                #[cfg(test)]
+                self.test_action_rects.push((
+                    "visual_inspector_toggle".into(), inspector_toggle.rect, ui.clip_rect(),
+                ));
+                if inspector_toggle.clicked() {
+                    effects.visual_inspector_open = Some(!self.visual_inspector_open);
+                }
                 let header_height = (ui.cursor().top() - content_top).max(0.0);
-                let remaining = (ui.clip_rect().height() - header_height - 8.0).max(240.0);
-                let canvas_height = if remaining.is_finite() { (remaining * canvas_ratio).max(240.0) } else { 340.0 };
-                let canvas_size = egui::vec2(ui.available_width().max(240.0), canvas_height);
+                let remaining = (ui.clip_rect().height() - header_height - 8.0).max(180.0);
+                let canvas_height = if remaining.is_finite() {
+                    (remaining * canvas_ratio).max(180.0)
+                } else {
+                    340.0
+                };
+                let total_width = ui
+                    .available_width()
+                    .min((ui.clip_rect().right() - ui.cursor().left()).max(0.0));
+                let min_canvas = (total_width - SPLITTER_WIDTH - 340.0).max(120.0);
+                let (canvas_width, sidebar_width) = if self.visual_inspector_open {
+                    split_pane_widths(
+                        total_width, self.visual_inspector_ratio, min_canvas, 240.0, 0.66,
+                    )
+                } else {
+                    (total_width, 0.0)
+                };
+                let (body_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(total_width, canvas_height), egui::Sense::hover(),
+                );
+                let canvas_area = egui::Rect::from_min_size(
+                    body_rect.min, egui::vec2(canvas_width, canvas_height),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(canvas_area)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(canvas_area));
+                let canvas_size = egui::vec2(ui.available_width(), canvas_height);
                 let focused_widget_before_canvas = ui.memory(|memory| memory.focused());
                 let (canvas_response, canvas_painter) = ui.allocate_painter(
                     canvas_size,
@@ -9004,10 +9404,6 @@ impl DiagramStudioDialog {
                     egui::Color32::from_gray(249),
                 );
                 let canvas_painter = canvas_painter.with_clip_rect(canvas_mapping_rect(canvas_mapping));
-                let base_projection = projection
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .map(Arc::as_ref);
                 let canvas_bounds = base_projection.and_then(|projection| projection.bounds);
                 if camera.fit_next {
                     fit_visual_camera(&mut camera, canvas_bounds, canvas_rect.shrink(12.0));
@@ -9056,7 +9452,6 @@ impl DiagramStudioDialog {
                     viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
                 }
 
-                let base_painted_prefix = base_projection.map_or(0, visual_painted_item_prefix);
                 let widget_focus_allows_canvas = ui
                     .memory(|memory| memory.focused())
                     .is_none_or(|focused| focused == canvas_response.id);
@@ -9090,6 +9485,27 @@ impl DiagramStudioDialog {
                 mapping.clip = canvas_rect_to_scene_rect(
                     canvas_painter.clip_rect().intersect(canvas_rect.shrink(12.0)),
                 );
+                connector_mapping = Some(mapping);
+                let connector_tool = self.visual_connector_tool.as_ref().filter(|tool| {
+                    tool.host == self.owner_host.identity()
+                        && tool.document == visual_identity
+                        && tool.revision == visual_revision
+                        && tool.owner_generation == self.owner_generation
+                        && tool.viewport_id == ui.ctx().viewport_id()
+                        && tool.mapping == mapping
+                        && tool.source.is_none_or(|source| {
+                            base_projection.is_some_and(|projection| {
+                                projection
+                                    .items
+                                    .iter()
+                                    .take(base_painted_prefix)
+                                    .any(|item| item.object_id == source.object_id)
+                            })
+                        })
+                });
+                if self.visual_connector_tool.is_some() && connector_tool.is_none() {
+                    effects.visual_connector_tool = Some(None);
+                }
                 let (primary_pressed, pointer_position) = ui.ctx().input(|input| {
                     (
                         input.pointer.button_pressed(egui::PointerButton::Primary),
@@ -9134,6 +9550,7 @@ impl DiagramStudioDialog {
 
                 if visual_edits_allowed
                     && canvas_editing_allowed
+                    && connector_tool.is_none()
                     && canvas_response.drag_started_by(egui::PointerButton::Primary)
                     && let Some(pointer_start) = ui.ctx().input(|input| input.pointer.press_origin())
                     && mapping.contains_screen_point(scene_point_from_screen(pointer_start))
@@ -9176,7 +9593,8 @@ impl DiagramStudioDialog {
                             .iter()
                             .filter(|object| {
                                 match mode {
-                                    VisualGestureMode::ConnectorPoint { object_id, .. } => object.id == object_id,
+                                    VisualGestureMode::ConnectorPoint { object_id, .. }
+                                    | VisualGestureMode::ConnectorEndpoint { object_id, .. } => object.id == object_id,
                                     _ => transformable_ids.contains(&object.id)
                                         && !matches!(&object.kind, VisualObjectKind::Connector { .. }),
                                 }
@@ -9186,6 +9604,7 @@ impl DiagramStudioDialog {
                         if !matches!(mode, VisualGestureMode::Transform(_)) || !initial_objects.is_empty() {
                             pointer_selection = Some(next_selection.clone());
                             start_gesture = Some(VisualGesture {
+                                host: self.owner_host.identity(),
                                 document: visual_identity.clone(),
                                 revision: visual_revision,
                                 owner_generation: self.owner_generation,
@@ -9220,7 +9639,7 @@ impl DiagramStudioDialog {
                     && !minimap_rect.is_some_and(|mini| mini.contains(pointer))
                 {
                     *canvas_focus_requested = Some(canvas_response.id);
-                    if canvas_editing_allowed
+                    if canvas_editing_allowed && connector_tool.is_none()
                     && let (Some(_scene), Some(projected)) =
                         (current_scene_for_hit, current_projection_for_hit)
                     {
@@ -9243,6 +9662,7 @@ impl DiagramStudioDialog {
                     }
                 }
                 if visual_canvas_editing_allowed
+                    && connector_tool.is_none()
                     && widget_focus_allows_canvas
                     && pointer_press_authorized
                     && gesture.as_ref().is_none_or(|active| !active.did_move)
@@ -9298,6 +9718,155 @@ impl DiagramStudioDialog {
                     *canvas_focus_requested = None;
                 }
 
+                if visual_canvas_editing_allowed
+                    && connector_tool.is_none()
+                    && widget_focus_allows_canvas
+                    && canvas_response.double_clicked_by(egui::PointerButton::Primary)
+                    && let (Some(projected), Some(pointer)) =
+                        (base_projection, canvas_response.interact_pointer_pos())
+                    && let CanvasHit::Object(id) = visual_canvas_hit_test(
+                        projected,
+                        base_painted_prefix,
+                        &[],
+                        mapping,
+                        scene_point_from_screen(pointer),
+                        9.0,
+                    )
+                    && scene_snapshot.as_ref().is_some_and(|scene| {
+                        scene.objects.iter().any(|object| {
+                            object.id == id && matches!(object.kind, VisualObjectKind::Connector { .. })
+                        })
+                    })
+                {
+                    pointer_selection = Some(VisualSelectionState {
+                        objects: [id].into_iter().collect(),
+                        primary: Some(id),
+                    });
+                    effects.visual_connector_focus = Some(Some(VisualConnectorFocus {
+                        host: self.owner_host.identity(),
+                        document: visual_identity.clone(),
+                        revision: visual_revision,
+                        object: id,
+                    }));
+                    gesture = None;
+                    start_gesture = None;
+                    self.visual_canvas_press_authorized = None;
+                }
+
+                if let Some(tool) = connector_tool
+                    && visual_canvas_editing_allowed
+                    && widget_focus_allows_canvas
+                    && let (Some(scene), Some(projected)) = (scene_snapshot.as_deref(), base_projection)
+                {
+                    let batched_click = ui.ctx().input(|input| {
+                        let mut pressed = None;
+                        let mut completed = None;
+                        for event in &input.events {
+                            if let egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed: down,
+                                ..
+                            } = event
+                            {
+                                if *down {
+                                    pressed = Some(*pos);
+                                } else if let Some(start) = pressed.take()
+                                    && start.distance(*pos) <= 3.0
+                                {
+                                    completed = Some(*pos);
+                                }
+                            }
+                        }
+                        completed
+                    });
+                    let click = if canvas_response.clicked_by(egui::PointerButton::Primary) {
+                        canvas_response.interact_pointer_pos()
+                    } else {
+                        batched_click
+                    };
+                    if let Some(pointer) = click
+                        && ui.ctx().layer_id_at(pointer) == Some(ui.layer_id())
+                        && !minimap_rect.is_some_and(|rect| rect.contains(pointer))
+                        && let Some(target) =
+                            visual_connector_target(scene, projected, base_painted_prefix, mapping, pointer)
+                    {
+                        if let Some(source) = tool.source {
+                            staged_operations = Some((vec![visual_connector_draft(source, target)], None));
+                            effects.visual_connector_tool = Some(None);
+                        } else {
+                            let mut next = tool.clone();
+                            next.source = Some(target);
+                            effects.visual_connector_tool = Some(Some(next));
+                        }
+                        *canvas_focus_requested = Some(canvas_response.id);
+                    }
+                    if let Some(pointer) = ui.ctx().pointer_hover_pos()
+                        && let Some(target) =
+                            visual_connector_target(scene, projected, base_painted_prefix, mapping, pointer)
+                    {
+                        paint_visual_connector_target(&canvas_painter, scene, projected, mapping, target);
+                    }
+                }
+
+                if gesture.is_none()
+                    && start_gesture.is_none()
+                    && connector_tool.is_none()
+                    && visual_canvas_editing_allowed
+                    && widget_focus_allows_canvas
+                    && let (Some(scene), Some(projected)) = (scene_snapshot.as_deref(), base_projection)
+                {
+                    let batch = ui.ctx().input(|input| {
+                        let mut start = None;
+                        let mut result = None;
+                        for event in &input.events {
+                            if let egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                ..
+                            } = event
+                            {
+                                if *pressed {
+                                    start = Some(*pos);
+                                } else if let Some(down) = start.take() {
+                                    result = Some((down, *pos));
+                                }
+                            }
+                        }
+                        result
+                    });
+                    if let Some((start, end)) = batch
+                        && start.distance(end) > 1.5
+                        && ui.ctx().layer_id_at(start) == Some(ui.layer_id())
+                        && !minimap_rect.is_some_and(|rect| rect.contains(start) || rect.contains(end))
+                        && let CanvasHit::Handle(CanvasHandleKind::ConnectorEndpoint {
+                            object_id,
+                            end: endpoint_end,
+                        }) = visual_canvas_hit_test(
+                            projected,
+                            base_painted_prefix,
+                            &handles,
+                            mapping,
+                            scene_point_from_screen(start),
+                            9.0,
+                        )
+                        && let Some(target) =
+                            visual_connector_target(scene, projected, base_painted_prefix, mapping, end)
+                        && let Some(original) = scene.objects.iter().find(|object| object.id == object_id)
+                    {
+                        let mut edited = original.clone();
+                        if let VisualObjectKind::Connector { connector } = &mut edited.kind {
+                            match endpoint_end {
+                                CanvasConnectorEnd::From => connector.from = target,
+                                CanvasConnectorEnd::To => connector.to = target,
+                            }
+                            if edited != *original {
+                                staged_operations = Some((vec![VisualOperation::ReplaceObject(edited)], None));
+                            }
+                        }
+                    }
+                }
                 if let Some(next_selection) = pointer_selection {
                     selection_state = next_selection;
                     selected_object = selection_state.primary;
@@ -9321,10 +9890,8 @@ impl DiagramStudioDialog {
                             input.pointer.button_released(egui::PointerButton::Primary),
                         )
                     });
-                    let pointer = clamp_canvas_screen_point(
-                        active.mapping,
-                        pointer.unwrap_or(active.last_pointer),
-                    );
+                    let raw_pointer = pointer.unwrap_or(active.last_pointer);
+                    let pointer = clamp_canvas_screen_point(active.mapping, raw_pointer);
                     let moved = pointer.distance(active.pointer_start) > 1.5;
                     active.did_move |= moved;
                     let pointer_changed = pointer != active.last_pointer;
@@ -9381,6 +9948,30 @@ impl DiagramStudioDialog {
                                                 active.preview_projection = None;
                                                 active.preview_objects = active.initial_objects.clone();
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                            VisualGestureMode::ConnectorEndpoint { object_id, end } => {
+                                let candidate = scene_snapshot.as_deref().zip(base_projection).and_then(|(scene, projection)| {
+                                    visual_connector_target(scene, projection, base_painted_prefix, active.mapping, raw_pointer)
+                                });
+                                active.preview_objects = active.initial_objects.clone();
+                                active.preview_scene = None;
+                                active.preview_projection = None;
+                                if let (Some(target), Some(original), Some(scene), Some(projected)) = (candidate, active.initial_objects.first(), scene_snapshot.as_deref(), base_projection) {
+                                    paint_visual_connector_target(&canvas_painter, scene, projected, active.mapping, target);
+                                    let mut edited = original.clone();
+                                    if let VisualObjectKind::Connector { connector } = &mut edited.kind {
+                                        match end { CanvasConnectorEnd::From => connector.from = target, CanvasConnectorEnd::To => connector.to = target }
+                                        let mut preview = scene.clone();
+                                        if let Some(saved) = preview.objects.iter_mut().find(|object| object.id == object_id) {
+                                            *saved = edited.clone();
+                                        }
+                                        if let Ok(projected) = project_visual_scene(&preview) {
+                                            active.preview_scene = Some(Arc::new(preview));
+                                            active.preview_projection = Some(Arc::new(projected));
+                                            active.preview_objects = vec![edited];
                                         }
                                     }
                                 }
@@ -9470,7 +10061,7 @@ impl DiagramStudioDialog {
                                         working_object = None;
                                     }
                                 }
-                                VisualGestureMode::Transform(_) | VisualGestureMode::ConnectorPoint { .. } => {
+                                VisualGestureMode::Transform(_) | VisualGestureMode::ConnectorPoint { .. } | VisualGestureMode::ConnectorEndpoint { .. } => {
                                     let operations = active
                                         .preview_objects
                                         .iter()
@@ -9483,6 +10074,7 @@ impl DiagramStudioDialog {
                                     {
                                         *pending = Some(PendingMutation::VisualGestureTransaction {
                                             operations,
+                                            host: active.host,
                                             expected_document: active.document,
                                             expected_revision: active.revision,
                                             owner_generation: active.owner_generation,
@@ -9756,120 +10348,56 @@ impl DiagramStudioDialog {
                     ));
                 }
 
-                let resolved_layout_selection = scene_snapshot.as_deref().and_then(|scene| {
-                    crate::diagram::visual_canvas_resolve_membership(
-                        scene,
-                        &selection_state.objects,
-                    )
                 });
-                let transformable_selection_count = resolved_layout_selection
-                    .as_ref()
-                    .map_or(0, |selection| selection.roots.len());
-                let layout_owner_available = scene_snapshot
-                    .as_deref()
-                    .zip(base_projection)
-                    .is_some_and(|(scene, projection)| {
-                        resolved_layout_selection.is_some()
-                            && visual_canvas_selection_bounds(
-                                scene,
-                                projection,
-                                &selection_state.objects,
-                                base_painted_prefix,
-                            )
-                            .is_some()
-                    });
-                let layout_actions_allowed = visual_canvas_editing_allowed
-                    && document_intent.is_none()
-                    && self.visual_gesture.is_none()
-                    && layout_owner_available;
-                let align_enabled = layout_actions_allowed && transformable_selection_count >= 2;
-                let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak("Align");
-                    for (_name, label, alignment) in [
-                        ("visual_align_left", "Left", VisualAlign::Left),
-                        ("visual_align_center_x", "Center X", VisualAlign::HorizontalCenter),
-                        ("visual_align_right", "Right", VisualAlign::Right),
-                        ("visual_align_top", "Top", VisualAlign::Top),
-                        ("visual_align_center_y", "Center Y", VisualAlign::VerticalCenter),
-                        ("visual_align_bottom", "Bottom", VisualAlign::Bottom),
-                    ] {
-                        let response = ui.add_enabled(align_enabled, egui::Button::new(label));
-                        #[cfg(test)]
-                        self.test_action_rects
-                            .push((_name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked()
-                            && pending.is_none()
-                            && let (Some(scene), Some(projected)) =
-                                (scene_snapshot.as_deref(), base_projection)
-                        {
-                            match visual_canvas_align_selection(
-                                scene,
-                                projected,
-                                &selection_state.objects,
-                                projected.items.len(),
-                                alignment,
-                            ) {
-                                Some(operations) if operations.is_empty() => {}
-                                Some(operations)
-                                    if operations.len()
-                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                {
-                                    staged_operations = Some((operations, None));
-                                }
-                                _ => {
-                                    *pending = Some(PendingMutation::VisualLayoutFailure {
-                                        message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                        expected_document: visual_identity.clone(),
-                                        expected_revision: visual_revision,
-                                    });
-                                }
-                            }
-                        }
+                if self.visual_inspector_open {
+                    let splitter_rect = egui::Rect::from_min_size(
+                        egui::pos2(body_rect.left() + canvas_width, body_rect.top()),
+                        egui::vec2(SPLITTER_WIDTH, canvas_height),
+                    );
+                    let splitter = ui.interact(
+                        splitter_rect,
+                        ui.make_persistent_id(("diagram-studio-splitter", "visual-properties")),
+                        if navigation_controls_allowed {
+                            egui::Sense::drag()
+                        } else {
+                            egui::Sense::hover()
+                        },
+                    );
+                    ui.painter().rect_filled(
+                        splitter_rect, 2.0, ui.visuals().widgets.inactive.bg_fill,
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_inspector_splitter".into(), splitter_rect, ui.clip_rect(),
+                    ));
+                    if splitter.dragged_by(egui::PointerButton::Primary)
+                        && let Some(pointer) = splitter.interact_pointer_pos()
+                    {
+                        effects.visual_inspector_ratio = Some(validated_split_ratio(
+                            split_ratio_from_pointer(
+                                pointer.x, splitter_rect.left(), canvas_width, total_width,
+                            ),
+                            total_width, SPLITTER_WIDTH, min_canvas, 240.0, 0.66,
+                        ));
                     }
-                    ui.weak("Distribute");
-                    for (_name, label, distribution) in [
-                        ("visual_distribute_horizontal", "Horizontal", VisualDistribution::Horizontal),
-                        ("visual_distribute_vertical", "Vertical", VisualDistribution::Vertical),
-                    ] {
-                        let response = ui.add_enabled(
-                            distribute_enabled,
-                            egui::Button::new(label),
-                        );
-                        #[cfg(test)]
-                        self.test_action_rects
-                            .push((_name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked()
-                            && pending.is_none()
-                            && let (Some(scene), Some(projected)) =
-                                (scene_snapshot.as_deref(), base_projection)
-                        {
-                            match visual_canvas_distribute_selection(
-                                scene,
-                                projected,
-                                &selection_state.objects,
-                                projected.items.len(),
-                                distribution,
-                            ) {
-                                Some(operations) if operations.is_empty() => {}
-                                Some(operations)
-                                    if operations.len()
-                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                {
-                                    staged_operations = Some((operations, None));
-                                }
-                                _ => {
-                                    *pending = Some(PendingMutation::VisualLayoutFailure {
-                                        message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                        expected_document: visual_identity.clone(),
-                                        expected_revision: visual_revision,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                });
-
+                    let sidebar_area = egui::Rect::from_min_size(
+                        egui::pos2(body_rect.right() - sidebar_width, body_rect.top()),
+                        egui::vec2(sidebar_width, canvas_height),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(sidebar_area)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                        |ui| {
+                        ui.set_clip_rect(ui.clip_rect().intersect(sidebar_area));
+                        ui.set_max_width(sidebar_width);
+                        ui.spacing_mut().slider_width = (sidebar_width - 24.0).max(60.0);
+                        let _inspector_scroll = egui::ScrollArea::both()
+                            .id_salt("visual-properties-scroll")
+                            .auto_shrink([false, false])
+                            .max_width(sidebar_width)
+                            .max_height(canvas_height)
+                            .show(ui, |ui| {
                 ui.separator();
                 ui.add_enabled_ui(visual_edits_allowed && !visual_draft_active, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -10081,20 +10609,14 @@ impl DiagramStudioDialog {
                                 .objects
                                 .iter()
                                 .filter(|object| {
-                                    !matches!(
-                                        &object.kind,
-                                        VisualObjectKind::Connector { .. }
-                                    )
+                                    selection_state.objects.contains(&object.id)
+                                        && !matches!(object.kind, VisualObjectKind::Connector { .. })
                                 })
-                                .take(2)
-                                .cloned()
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    let add_connector = ui.add_enabled(
-                        structural_edits_allowed && connector_endpoints.len() == 2,
-                        egui::Button::new("Add connector"),
-                    );
+                    let add_connector =
+                        ui.add_enabled(structural_edits_allowed, egui::Button::new("Add connector"));
                     #[cfg(test)]
                     self.test_action_rects.push((
                         "visual_add_connector".into(),
@@ -10102,40 +10624,41 @@ impl DiagramStudioDialog {
                         ui.clip_rect(),
                     ));
                     if add_connector.clicked() && document_intent.is_none() {
-                        let source = &connector_endpoints[0];
-                        let target = &connector_endpoints[1];
-                        let source_point = ScenePoint {
-                            x: source.transform.x,
-                            y: source.transform.y,
-                        };
-                        let target_point = ScenePoint {
-                            x: target.transform.x,
-                            y: target.transform.y,
-                        };
-                        staged_operations = Some((
-                            vec![VisualOperation::AddObject(VisualObjectDraft {
-                                layer_id: DEFAULT_LAYER_ID,
-                                transform: VisualTransform::default(),
-                                style: VisualStyle::default(),
-                                kind: VisualObjectKind::Connector {
-                                    connector: VisualConnector {
-                                        manual_route: None,
-                                        from: VisualConnectorEndpoint {
-                                            object_id: source.id,
-                                            anchor: nearest_visual_anchor(source, target_point),
-                                        },
-                                        to: VisualConnectorEndpoint {
-                                            object_id: target.id,
-                                            anchor: nearest_visual_anchor(target, source_point),
-                                        },
-                                        route: VisualConnectorRoute::Elbow,
-                                        direction: VisualConnectorDirection::Forward,
-                                        label: String::new(),
+                        if connector_endpoints.len() == 2 && selection_state.objects.len() == 2 {
+                            let source = connector_endpoints[0];
+                            let target = connector_endpoints[1];
+                            let source_point = ScenePoint {
+                                x: source.transform.x,
+                                y: source.transform.y,
+                            };
+                            let target_point = ScenePoint {
+                                x: target.transform.x,
+                                y: target.transform.y,
+                            };
+                            staged_operations = Some((
+                                vec![visual_connector_draft(
+                                    VisualConnectorEndpoint {
+                                        object_id: source.id,
+                                        anchor: nearest_visual_anchor(source, target_point),
                                     },
-                                },
-                            })],
-                            None,
-                        ));
+                                    VisualConnectorEndpoint {
+                                        object_id: target.id,
+                                        anchor: nearest_visual_anchor(target, source_point),
+                                    },
+                                )],
+                                None,
+                            ));
+                        } else if let Some(mapping) = connector_mapping {
+                            effects.visual_connector_tool = Some(Some(VisualConnectorTool {
+                                host: self.owner_host.identity(),
+                                document: visual_identity.clone(),
+                                revision: visual_revision,
+                                owner_generation: self.owner_generation,
+                                viewport_id: ui.ctx().viewport_id(),
+                                mapping,
+                                source: None,
+                            }));
+                        }
                     }
                     let add_layer = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add layer"));
                     #[cfg(test)]
@@ -10568,14 +11091,14 @@ impl DiagramStudioDialog {
                                 ui.weak("Image assets are not loaded in this checkpoint.");
                             }
                             VisualObjectKind::PresetInstance { .. } => {
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     ui.label("Preset instance opacity");
                                     ui.add(egui::DragValue::new(&mut object.style.opacity).range(0.0..=1.0).speed(0.02));
                                 });
                                 ui.weak("Primitive styles are defined in the preset.");
                             }
                             VisualObjectKind::Connector { connector } => {
-                                visual_connector_endpoint_editor(
+                                let from_id = visual_connector_endpoint_editor(
                                     ui,
                                     "From",
                                     "diagram-visual-connector-from",
@@ -10583,7 +11106,9 @@ impl DiagramStudioDialog {
                                     &mut connector.from,
                                     selected_id,
                                     &scene.objects,
-                                    |option_id, action, rect, clip| {
+                                    |option_id, action, caption, rect, clip| {
+                                        #[cfg(test)]
+                                        let _ = caption;
                                         #[cfg(test)]
                                         self.test_action_rects.push((
                                             option_id.map_or_else(
@@ -10594,9 +11119,18 @@ impl DiagramStudioDialog {
                                             clip,
                                         ));
                                         #[cfg(not(test))]
-                                        let _ = (option_id, action, rect, clip);
+                                        let _ = (option_id, action, caption, rect, clip);
                                     },
                                 );
+                                #[cfg(test)]
+                                self.test_action_focus_ids.push(("visual_connector_from".into(), from_id));
+                                if self.visual_connector_focus.as_ref().is_some_and(|focus| {
+                                    focus.host == self.owner_host.identity() && focus.document == visual_identity
+                                        && focus.revision == visual_revision && focus.object == selected_id
+                                }) {
+                                    *canvas_focus_requested = Some(from_id);
+                                    effects.visual_connector_focus = Some(None);
+                                }
                                 visual_connector_endpoint_editor(
                                     ui,
                                     "To",
@@ -10605,7 +11139,9 @@ impl DiagramStudioDialog {
                                     &mut connector.to,
                                     selected_id,
                                     &scene.objects,
-                                    |option_id, action, rect, clip| {
+                                    |option_id, action, caption, rect, clip| {
+                                        #[cfg(test)]
+                                        let _ = caption;
                                         #[cfg(test)]
                                         self.test_action_rects.push((
                                             option_id.map_or_else(
@@ -10616,7 +11152,7 @@ impl DiagramStudioDialog {
                                             clip,
                                         ));
                                         #[cfg(not(test))]
-                                        let _ = (option_id, action, rect, clip);
+                                        let _ = (option_id, action, caption, rect, clip);
                                     },
                                 );
                                 ui.horizontal_wrapped(|ui| {
@@ -10823,7 +11359,7 @@ impl DiagramStudioDialog {
                             .checked_sub(1)
                             .and_then(|position| same_layer_indices.get(position).copied());
                         let forward_target = same_layer_indices.get(layer_position + 1).copied();
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let back = ui.add_enabled(structural_edits_allowed && back_target.is_some(), egui::Button::new("Send back"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_send_back".into(), back.rect, ui.clip_rect()));
@@ -10853,7 +11389,10 @@ impl DiagramStudioDialog {
                             let changed = scene.objects.iter().find(|candidate| candidate.id == selected_id).is_some_and(|saved| *saved != *object);
                             let apply = ui.add_enabled(visual_edits_allowed && changed, egui::Button::new("Apply properties"));
                             #[cfg(test)]
-                            self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
+                            {
+                                self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
+                                self.test_action_enabled.push(("visual_apply_properties".into(), apply.enabled()));
+                            }
                             if apply.clicked() && pending.is_none() && document_intent.is_none() {
                                 if let Some(operations) = crate::diagram::visual_canvas_property_transform_operations(scene, object) {
                                     staged_operations = Some((operations, Some(selected_id)));
@@ -10869,6 +11408,15 @@ impl DiagramStudioDialog {
                             }
                         });
                     });
+                    });
+                }
+
+                            ui.add_space(4.0);
+                            });
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "visual_inspector_scroll".into(), _inspector_scroll.inner_rect, ui.clip_rect(),
+                        ));
                     });
                 }
 
@@ -11716,6 +12264,11 @@ fn canvas_gesture_mode(
         return None;
     }
     match hit {
+        CanvasHit::Handle(CanvasHandleKind::ConnectorEndpoint { object_id, end })
+            if selection.objects.len() == 1 && selection.objects.contains(&object_id) =>
+        {
+            Some(VisualGestureMode::ConnectorEndpoint { object_id, end })
+        }
         CanvasHit::Handle(CanvasHandleKind::ConnectorPoint { object_id, index })
             if selection.objects.len() == 1 && selection.objects.contains(&object_id) =>
         {
@@ -11793,6 +12346,14 @@ fn paint_visual_canvas_handles(
         let center = mapping.world_to_screen(handle.center);
         let position = egui::pos2(center.x as f32, center.y as f32);
         match handle.kind {
+            CanvasHandleKind::ConnectorEndpoint { end, .. } => {
+                let color = if end == CanvasConnectorEnd::From { egui::Color32::from_rgb(38, 145, 85) } else { egui::Color32::from_rgb(220, 112, 34) };
+                painter.circle_filled(position, 7.0, color);
+                painter.circle_stroke(position, 7.0, stroke);
+                painter.text(position, egui::Align2::CENTER_CENTER,
+                    if end == CanvasConnectorEnd::From { "F" } else { "T" },
+                    egui::FontId::proportional(9.0), egui::Color32::WHITE);
+            }
             CanvasHandleKind::ConnectorPoint { .. } => {
                 painter.circle_filled(position, 5.0, fill);
                 painter.circle_stroke(position, 5.0, stroke);
@@ -12195,36 +12756,64 @@ const fn visual_shape_label(shape: VisualPrimitiveShape) -> &'static str {
     }
 }
 
-fn visual_object_label(object: &VisualObject) -> String {
-    let label = match &object.kind {
-        VisualObjectKind::Primitive { shape } => visual_shape_label(*shape),
-        VisualObjectKind::Text { text } if object.id == crate::diagram::TITLE_OBJECT_ID => {
-            return format!("Title — {}", text.chars().take(32).collect::<String>());
+fn visual_object_owned_text(object: &VisualObject) -> Option<&str> {
+    match &object.kind {
+        VisualObjectKind::Primitive { .. } => {
+            object.owned_label.as_ref().map(|label| label.text.as_str())
         }
+        VisualObjectKind::Text { text } => Some(text),
+        VisualObjectKind::Container { label } | VisualObjectKind::Swimlane { label, .. } => {
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
+fn visual_object_label(object: &VisualObject) -> String {
+    let kind = match &object.kind {
+        VisualObjectKind::Primitive { shape } => visual_shape_label(*shape),
+        VisualObjectKind::Text { .. } if object.id == crate::diagram::TITLE_OBJECT_ID => "Title",
         VisualObjectKind::Text { .. } => "Text",
         VisualObjectKind::PresetInstance { .. } => "Preset instance",
         VisualObjectKind::ImageReference { .. } => "Image reference",
         VisualObjectKind::Connector { .. } => "Connector",
-        VisualObjectKind::Container { label } => {
-            return format!(
-                "Container — {} #{}",
-                label.chars().take(24).collect::<String>(),
-                object.id.get()
-            );
-        }
-        VisualObjectKind::Swimlane { orientation, label } => {
-            let orientation = match orientation {
-                VisualSwimlaneOrientation::Horizontal => "Horizontal lane",
-                VisualSwimlaneOrientation::Vertical => "Vertical lane",
-            };
-            return format!(
-                "{orientation} — {} #{}",
-                label.chars().take(24).collect::<String>(),
-                object.id.get()
-            );
-        }
+        VisualObjectKind::Container { .. } => "Container",
+        VisualObjectKind::Swimlane { orientation, .. } => match orientation {
+            VisualSwimlaneOrientation::Horizontal => "Horizontal lane",
+            VisualSwimlaneOrientation::Vertical => "Vertical lane",
+        },
     };
-    format!("{label} #{}", object.id.get())
+    let mut seen_text = false;
+    let mut pending_space = false;
+    let mut chars = visual_object_owned_text(object)
+        .unwrap_or_default()
+        .chars()
+        .flat_map(|character| {
+            if character.is_whitespace() {
+                pending_space |= seen_text;
+                [None, None]
+            } else {
+                let separator = pending_space.then_some(' ');
+                seen_text = true;
+                pending_space = false;
+                [separator, Some(character)]
+            }
+            .into_iter()
+            .flatten()
+        });
+    let excerpt: String = chars.by_ref().take(32).collect();
+    if excerpt.is_empty() {
+        return format!("{kind} #{}", object.id.get());
+    }
+    let ellipsis = if chars.next().is_some() { "…" } else { "" };
+    format!("{kind} — {excerpt}{ellipsis} #{}", object.id.get())
+}
+
+fn visual_endpoint_label(objects: &[VisualObject], id: VisualObjectId) -> String {
+    objects
+        .iter()
+        .find(|object| object.id == id)
+        .map_or_else(|| format!("Missing #{}", id.get()), visual_object_label)
 }
 
 fn visual_group_roots(
@@ -12283,37 +12872,51 @@ fn visual_connector_endpoint_editor(
     endpoint: &mut VisualConnectorEndpoint,
     connector_id: VisualObjectId,
     objects: &[VisualObject],
-    mut record_action: impl FnMut(Option<VisualObjectId>, &str, egui::Rect, egui::Rect),
-) {
+    mut record_action: impl FnMut(Option<VisualObjectId>, &str, &str, egui::Rect, egui::Rect),
+) -> egui::Id {
     ui.horizontal_wrapped(|ui| {
         ui.label(label);
         let endpoint_object = objects
             .iter()
             .find(|object| object.id == endpoint.object_id);
+        let selected_caption = visual_endpoint_label(objects, endpoint.object_id);
         let object_combo = egui::ComboBox::from_id_salt((id_salt, "object"))
-            .selected_text(endpoint_object.map_or_else(
-                || format!("Missing #{}", endpoint.object_id.get()),
-                visual_object_label,
-            ))
+            .selected_text(&selected_caption)
             .show_ui(ui, |ui| {
                 for object in objects.iter().filter(|object| {
                     object.id != connector_id
                         && !matches!(&object.kind, VisualObjectKind::Connector { .. })
                 }) {
-                    let response = ui.selectable_value(
-                        &mut endpoint.object_id,
-                        object.id,
-                        visual_object_label(object),
+                    let caption = visual_object_label(object);
+                    let response =
+                        ui.selectable_value(&mut endpoint.object_id, object.id, &caption);
+                    let response = if let Some(text) = visual_object_owned_text(object) {
+                        response.on_hover_text(text)
+                    } else {
+                        response
+                    };
+                    record_action(
+                        Some(object.id),
+                        action_name,
+                        &caption,
+                        response.rect,
+                        ui.clip_rect(),
                     );
-                    record_action(Some(object.id), action_name, response.rect, ui.clip_rect());
                 }
             });
+        let response = if let Some(text) = endpoint_object.and_then(visual_object_owned_text) {
+            object_combo.response.on_hover_text(text)
+        } else {
+            object_combo.response
+        };
         record_action(
             None,
             action_name,
-            object_combo.response.rect,
+            &selected_caption,
+            response.rect,
             ui.clip_rect(),
         );
+        let object_id = response.id;
         egui::ComboBox::from_id_salt((id_salt, "anchor"))
             .selected_text(visual_anchor_label(endpoint.anchor))
             .show_ui(ui, |ui| {
@@ -12330,7 +12933,8 @@ fn visual_connector_endpoint_editor(
                     ui.selectable_value(&mut endpoint.anchor, anchor, visual_anchor_label(anchor));
                 }
             });
-    });
+        object_id
+    }).inner
 }
 
 const fn visual_anchor_label(anchor: VisualAnchor) -> &'static str {
@@ -12361,6 +12965,81 @@ const fn visual_connector_direction_label(direction: VisualConnectorDirection) -
         VisualConnectorDirection::Reverse => "Reverse",
         VisualConnectorDirection::Both => "Both ends",
     }
+}
+
+fn visual_connector_draft(
+    from: VisualConnectorEndpoint,
+    to: VisualConnectorEndpoint,
+) -> VisualOperation {
+    VisualOperation::AddObject(VisualObjectDraft {
+        layer_id: DEFAULT_LAYER_ID,
+        transform: VisualTransform::default(),
+        style: VisualStyle::default(),
+        kind: VisualObjectKind::Connector {
+            connector: VisualConnector {
+                from,
+                to,
+                manual_route: None,
+                route: VisualConnectorRoute::Elbow,
+                direction: VisualConnectorDirection::Forward,
+                label: String::new(),
+            },
+        },
+    })
+}
+
+fn paint_visual_connector_target(
+    painter: &egui::Painter,
+    scene: &VisualScene,
+    projection: &VisualSceneProjection,
+    mapping: CanvasMapping,
+    target: VisualConnectorEndpoint,
+) {
+    let Some(object) = scene
+        .objects
+        .iter()
+        .find(|object| object.id == target.object_id)
+    else {
+        return;
+    };
+    let Some(point) =
+        crate::diagram::visual_connector_attachment(projection, object, target.anchor)
+    else {
+        return;
+    };
+    let screen = mapping.world_to_screen(point);
+    let position = egui::pos2(screen.x as f32, screen.y as f32);
+    let color = egui::Color32::from_rgb(38, 145, 85);
+    painter.circle_stroke(position, 9.0, egui::Stroke::new(2.0, color));
+    painter.text(
+        position + egui::vec2(12.0, -12.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("{:?}", target.anchor),
+        egui::FontId::proportional(12.0),
+        color,
+    );
+}
+
+fn visual_connector_target(
+    scene: &VisualScene,
+    projection: &VisualSceneProjection,
+    painted_prefix: usize,
+    mapping: CanvasMapping,
+    pointer: egui::Pos2,
+) -> Option<VisualConnectorEndpoint> {
+    let screen = scene_point_from_screen(pointer);
+    let CanvasHit::Object(id) =
+        visual_canvas_connector_target_hit_test(projection, painted_prefix, mapping, screen, 9.0)
+    else {
+        return None;
+    };
+    let object = scene.objects.iter().find(|object| {
+        object.id == id && !matches!(object.kind, VisualObjectKind::Connector { .. })
+    })?;
+    Some(VisualConnectorEndpoint {
+        object_id: id,
+        anchor: nearest_visual_anchor(object, mapping.screen_to_world(screen)),
+    })
 }
 
 fn nearest_visual_anchor(object: &VisualObject, target: ScenePoint) -> VisualAnchor {
@@ -12530,12 +13209,15 @@ fn source_editor(
     pending: &mut Option<PendingMutation>,
     focus_source: bool,
     source_focus_requested: &mut Option<egui::Id>,
+    family: Option<DiagramFamily>,
+    color_draft: &Option<MermaidColorDraft>,
+    color_enabled: bool,
     #[cfg(test)] test_editor_id: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_editor_enabled: &mut bool,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
-) {
+) -> Option<MermaidColorDraft> {
     ui.label("Mermaid source (raw text is retained exactly)");
     let editor_id = ui.make_persistent_id("diagram-studio-source-editor");
     if focus_source {
@@ -12624,7 +13306,22 @@ fn source_editor(
     if source_changed && pending.is_none() {
         *pending = Some(PendingMutation::ReplaceSource(source));
     }
+    let colors = draw_mermaid_colors(
+        ui,
+        session.draft(),
+        render_document,
+        session.revision(),
+        family,
+        color_draft,
+        color_enabled,
+        pending,
+        #[cfg(test)]
+        test_action_rects,
+        #[cfg(test)]
+        test_action_focus_ids,
+    );
     ui.small("Supported syntax is documented in the Diagram Studio help section.");
+    colors
 }
 
 fn clear_text_edit_undoer(ctx: &egui::Context, id: egui::Id) {
@@ -12699,22 +13396,43 @@ fn apply_color_field(style: &mut crate::diagram::MermaidStyle, field: MermaidCol
 }
 
 fn draw_mermaid_colors(
-    ui: &mut egui::Ui, source: &str, document: &RenderDocumentIdentity, revision: u64,
-    family: Option<DiagramFamily>, prior: &Option<MermaidColorDraft>, enabled: bool,
+    ui: &mut egui::Ui,
+    source: &str,
+    document: &RenderDocumentIdentity,
+    revision: u64,
+    family: Option<DiagramFamily>,
+    prior: &Option<MermaidColorDraft>,
+    enabled: bool,
     pending: &mut Option<PendingMutation>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
     #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
 ) -> Option<MermaidColorDraft> {
     use MermaidColorField as Field;
-    let mut draft = match prior.as_ref().filter(|d| d.document == *document && d.family == family).cloned() {
+    let mut draft = match prior
+        .as_ref()
+        .filter(|d| d.document == *document && d.family == family)
+        .cloned()
+    {
         Some(draft) => draft,
         None => match color_draft_for(source, document, revision, family) {
             Ok(draft) => draft,
-            Err(error) => { ui.collapsing("Colors", |ui| { ui.colored_label(egui::Color32::from_rgb(190, 65, 45), format!("Resolve source configuration first: {error}")); }); return None; }
+            Err(error) => {
+                ui.collapsing("Colors", |ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(190, 65, 45),
+                        format!("Resolve source configuration first: {error}"),
+                    );
+                });
+                return None;
+            }
         },
     };
     let stale = draft.revision != revision;
     let _panel = ui.collapsing("Colors", |ui| {
+        let _color_scroll = egui::ScrollArea::vertical()
+            .id_salt("mermaid-colors-scroll")
+            .max_height(180.0)
+            .show(ui, |ui| {
         if stale {
             ui.label("Source changed. Reload colors before applying.");
             match color_draft_for(source, document, revision, family) {
@@ -12768,9 +13486,18 @@ fn draw_mermaid_colors(
                 }
             });
         });
+        ui.add_space(4.0);
+            });
+        #[cfg(test)]
+        test_action_rects.push(("mermaid_colors_scroll".into(), _color_scroll.inner_rect, ui.clip_rect()));
     });
-    #[cfg(test)] {
-        test_action_rects.push(("mermaid_colors".into(), _panel.header_response.rect, ui.clip_rect()));
+    #[cfg(test)]
+    {
+        test_action_rects.push((
+            "mermaid_colors".into(),
+            _panel.header_response.rect,
+            ui.clip_rect(),
+        ));
         test_action_focus_ids.push(("mermaid_colors".into(), _panel.header_response.id));
     }
     Some(draft)
@@ -14391,13 +15118,16 @@ fn studio_help_menu(
 ) -> (egui::Response, Vec<egui::Id>, bool) {
     let mut items = Vec::new();
     let mut sizing = false;
-    let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help", |ui| {
+    let menu = ui.add_enabled_ui(enabled, |ui| ui.menu_button("Help ▾", |ui| {
         sizing = ui.is_sizing_pass();
         let help_scroll = egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 100.0).max(160.0)).show(ui, |ui| {
             ui.set_max_width(480.0);
             ui.strong("Diagram Studio — Mermaid guide");
             ui.label("Flowcharts are editable on the canvas. Other supported families render from source. Source remains authoritative.");
             ui.label("Tab indents; Shift+Tab removes indentation. Ctrl+Z and Ctrl+Y use document history.");
+            ui.label("File, Edit, View, Templates and Help are in the menu strip; mode, tools and zoom are in the action strip. Colors sits below Suggestions in Source and Split; use View to restore source.");
+            ui.label("In Visual documents, Align and Distribute are above the canvas. Show properties or Hide properties controls the independently scrolling sidebar.");
+            ui.label("From and To show an object's own text and ID. Add connector connects two selected objects, or lets you choose source then destination; Escape cancels. Drag a connector endpoint handle to reconnect it. Double-click a connector for properties or a primitive to edit its label.");
             ui.label("Use File for New, Open, Save and Export. A stale preview shows the last successful result until the new source renders.");
             ui.label("Sources are limited to 65,536 bytes, 4,096 lines and 8,192 bytes per line. Unsupported CSS, frontmatter and configuration remain in the draft with a diagnostic.");
             ui.label("Colors accepts #RGB or #RRGGBB. Presets and overrides use a bounded Mermaid JSON init directive; native nodes support style ID fill, stroke and color.");
@@ -17030,6 +17760,7 @@ mod tests {
                 .iter()
                 .all(|top| (top - aligned_tops[0]).abs() < 1e-8)
         );
+        assert!(dialog.visual_property_draft.is_none(), "alignment must not create a property draft");
         click_action(&mut dialog, &ctx, "visual_undo");
         assert_eq!(
             dialog.documents.visual_revision(),
@@ -18093,7 +18824,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {name} while scrolling"));
             if clip.contains_rect(*rect) { return; }
             let direction = if rect.bottom() > clip.bottom() { -150.0 } else { 150.0 };
-            let scroll = if name.starts_with("mermaid_color") || name.starts_with("menu_") {
+            let scroll = if name.starts_with("mermaid_color_") {
+                let body = dialog.test_body_scroll_rect.unwrap_or(*clip);
+                let inner = dialog.test_action_rect("mermaid_colors_scroll")
+                    .map(|(rect, owner_clip)| rect.intersect(owner_clip).intersect(body))
+                    .unwrap_or(egui::Rect::NOTHING);
+                if inner.is_positive() { inner } else { body }
+            } else if name == "mermaid_colors" || name.starts_with("menu_") {
                 dialog.test_body_scroll_rect.unwrap_or(*clip)
             } else if name.starts_with("help_") {
                 dialog.test_action_rects.iter().find(|(action, _, _)| action == "help_scroll").map_or(*clip, |(_, rect, _)| rect.intersect(*clip))
@@ -18136,8 +18873,9 @@ mod tests {
                 120.0
             };
             let scroll = dialog
-                .test_visual_scroll_rect
-                .expect("visual owner scroll rect");
+                .test_action_rect("visual_inspector_scroll")
+                .map(|(rect, clip)| rect.intersect(clip))
+                .expect("visual inspector scroll rect");
             let pos = egui::pos2(
                 scroll.right() - 4.0,
                 if direction < 0.0 {
@@ -18184,6 +18922,13 @@ mod tests {
         }
         if matches!(name, "visual_undo" | "visual_redo") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
             click_action(dialog, ctx, "menu_edit");
+            let mut previous = None;
+            for _ in 0..8 {
+                frame(dialog, ctx);
+                let current = dialog.test_action_rect(name);
+                if current.is_some() && current == previous { break; }
+                previous = current;
+            }
         }
         if (name.starts_with("view_") || name == "show_preview") && !dialog.test_action_rects.iter().any(|(action, _, _)| action == name) {
             click_action(dialog, ctx, "menu_view");
@@ -18967,6 +19712,20 @@ mod tests {
         let undo_depth = dialog.test_session().undo_depth();
         let redo_depth = dialog.test_session().redo_depth();
         let ctx = egui::Context::default();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Popout);
         for _ in 0..3 {
             frame(&mut dialog, &ctx);
         }
@@ -19017,6 +19776,11 @@ mod tests {
         click_action(&mut dialog, &ctx, "decision_cancel");
         assert!(dialog.open);
         assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        workers.join_all();
         assert_eq!(dialog.test_session().draft(), source);
         assert_eq!(dialog.test_session().revision(), revision);
         assert_eq!(dialog.test_session().undo_depth(), undo_depth);
@@ -20371,6 +21135,248 @@ mod tests {
     }
 
     #[test]
+    fn m4a_colors_follow_suggestions_in_each_source_layout() {
+        fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, size: egui::Vec2) {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        for (mode, width, scale) in [
+            (
+                ViewMode::Source {
+                    restore: PreviewMode::Split,
+                },
+                1200.0,
+                1.0,
+            ),
+            (ViewMode::Split, 1200.0, 1.0),
+            (ViewMode::Split, 620.0, 1.35),
+        ] {
+            let mut dialog = initialized_dialog();
+            dialog.view_mode = mode;
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                for font in style.text_styles.values_mut() {
+                    font.size *= scale;
+                }
+            });
+            for _ in 0..3 {
+                draw(&mut dialog, &ctx, egui::vec2(width, 1000.0));
+            }
+            let (suggestions, source_clip) =
+                dialog.test_action_rect("mermaid_assist_menu").unwrap();
+            let (colors, colors_clip) = dialog.test_action_rect("mermaid_colors").unwrap();
+            assert_eq!(
+                source_clip, colors_clip,
+                "both controls belong to the same source pane"
+            );
+            assert!(colors.top() >= suggestions.bottom());
+            assert!(
+                colors.top() - suggestions.bottom() <= 12.0,
+                "suggestions={suggestions:?}, colors={colors:?}"
+            );
+            assert_eq!(
+                dialog
+                    .test_action_rects
+                    .iter()
+                    .filter(|(name, _, _)| name == "mermaid_colors")
+                    .count(),
+                1
+            );
+        }
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Visual;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, egui::vec2(1200.0, 900.0));
+        }
+        assert!(dialog.test_action_rect("mermaid_assist_menu").is_none());
+        assert!(
+            dialog.test_action_rect("mermaid_colors").is_some(),
+            "source-hidden view retains Colors"
+        );
+    }
+
+    #[test]
+    fn m4a_expanded_colors_footer_scrolls_inside_short_host() {
+        fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, events: Vec<egui::Event>) {
+            dialog.test_begin_frame();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100.0, 720.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut pending = None;
+                    let mut intent = None;
+                    let mut canvas = None;
+                    let mut source = None;
+                    dialog.draw_body(
+                        ui,
+                        true,
+                        true,
+                        false,
+                        &mut pending,
+                        &mut intent,
+                        &mut canvas,
+                        &mut source,
+                        true,
+                    );
+                    assert!(pending.is_none());
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        let mut dialog = initialized_dialog();
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        let original = dialog.test_session().draft().to_owned();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, Vec::new());
+        }
+        let id = dialog
+            .test_action_focus_ids
+            .iter()
+            .find(|(name, _)| name == "mermaid_colors")
+            .unwrap()
+            .1;
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, id, false);
+        state.set_open(true);
+        state.store(&ctx);
+        for _ in 0..3 {
+            draw(&mut dialog, &ctx, Vec::new());
+        }
+        let (_, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+        assert!(
+            clip.height() <= 180.0 + 1.0,
+            "Colors body is bounded: {clip:?}"
+        );
+        for _ in 0..12 {
+            let (footer, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+            if clip.contains_rect(footer) {
+                break;
+            }
+            let point = clip.center();
+            draw(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -120.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let (footer, clip) = dialog.test_action_rect("mermaid_color_apply").unwrap();
+        assert!(
+            clip.contains_rect(footer),
+            "footer={footer:?}, clip={clip:?}"
+        );
+        assert_eq!(dialog.test_session().draft(), original);
+    }
+
+    #[test]
+    fn m4a_menus_and_direct_controls_occupy_separate_strips() {
+        for visual in [false, true] {
+            for (width, scale) in [(1200.0, 1.0), (620.0, 1.35)] {
+                let mut dialog = if visual {
+                    initialized_visual_dialog()
+                } else {
+                    initialized_dialog()
+                };
+                let ctx = egui::Context::default();
+                ctx.all_styles_mut(|style| {
+                    for font in style.text_styles.values_mut() {
+                        font.size *= scale;
+                    }
+                });
+                for _ in 0..4 {
+                    frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+                }
+                let menus = [
+                    "menu_file",
+                    "menu_edit",
+                    "menu_view",
+                    "menu_help",
+                    if visual {
+                        "menu_visual_templates"
+                    } else {
+                        "menu_templates"
+                    },
+                ];
+                let bottom = menus
+                    .into_iter()
+                    .map(|name| {
+                        let (rect, clip) = dialog
+                            .test_action_rect(name)
+                            .unwrap_or_else(|| panic!("missing {name}"));
+                        assert!(
+                            rect.intersects(clip),
+                            "{name} must be reachable: {rect:?} / {clip:?}"
+                        );
+                        rect.bottom()
+                    })
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let ids: Vec<_> = dialog
+                    .test_action_focus_ids
+                    .iter()
+                    .filter(|(name, _)| menus.contains(&name.as_str()))
+                    .cloned()
+                    .collect();
+                let (viewer, clip) = dialog.test_action_rect("open_viewer").unwrap();
+                assert!(viewer.intersects(clip));
+                assert!(
+                    viewer.top() >= bottom,
+                    "viewer={viewer:?}, menu bottom={bottom}"
+                );
+                frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+                let next_ids: Vec<_> = dialog
+                    .test_action_focus_ids
+                    .iter()
+                    .filter(|(name, _)| menus.contains(&name.as_str()))
+                    .cloned()
+                    .collect();
+                assert_eq!(ids, next_ids, "menu widget identities remain stable");
+            }
+        }
+    }
+
+    #[test]
     fn diagram_studio_source_position_stays_stable_across_preview_status() {
         fn draw(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) -> egui::Rect {
             dialog.test_begin_frame();
@@ -20444,6 +21450,365 @@ mod tests {
     }
 
     #[test]
+    fn m4b_visual_arrangement_and_inspector_follow_canvas_layout() {
+        for (width, font_scale) in [(1200.0, 1.0), (620.0, 1.35)] {
+            let mut dialog = initialized_visual_dialog();
+            let revision = dialog.documents.visual_revision();
+            let dirty = dialog.documents.is_dirty();
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| {
+                for font in style.text_styles.values_mut() {
+                    font.size *= font_scale;
+                }
+            });
+            for _ in 0..3 {
+                frame_with_size(&mut dialog, &ctx, egui::vec2(width, 900.0));
+            }
+            let (canvas, _) = dialog.test_action_rect("visual_canvas").unwrap();
+            let (align, _) = dialog.test_action_rect("visual_align_left").unwrap();
+            let (inspector, clip) = dialog.test_action_rect("visual_inspector_scroll").unwrap();
+            assert!(align.bottom() <= canvas.top());
+            assert!(inspector.left() >= canvas.right());
+            assert!(
+                inspector.right() <= clip.right(),
+                "inspector={inspector:?} clip={clip:?}"
+            );
+            assert!(canvas.width() >= 120.0);
+            if width == 1200.0 {
+                let splitter = dialog
+                    .test_action_rect("visual_inspector_splitter")
+                    .unwrap()
+                    .0
+                    .center();
+                let end = splitter + egui::vec2(45.0, 0.0);
+                let button = |pos, pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame_with_child_events(
+                    &mut dialog,
+                    &ctx,
+                    vec![egui::Event::PointerMoved(splitter), button(splitter, true)],
+                );
+                frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+                frame_with_child_events(
+                    &mut dialog,
+                    &ctx,
+                    vec![egui::Event::PointerMoved(end), button(end, false)],
+                );
+                frame(&mut dialog, &ctx);
+                assert!(dialog.test_visual_canvas_rect.unwrap().width() > canvas.width());
+            }
+            click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+            assert!(!dialog.visual_inspector_open);
+            frame(&mut dialog, &ctx);
+            assert!(dialog.test_action_rect("visual_inspector_scroll").is_none());
+            click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+            assert!(dialog.visual_inspector_open);
+            frame(&mut dialog, &ctx);
+            assert!(dialog.test_action_rect("visual_inspector_scroll").is_some());
+            assert_eq!(dialog.documents.visual_revision(), revision);
+            assert_eq!(dialog.documents.is_dirty(), dirty);
+        }
+    }
+
+    #[test]
+    fn m4b_inspector_preserves_draft_and_scrolls_independently() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.35;
+            }
+        });
+        let mut edited = dialog.documents.visual_scene().unwrap().objects[0].clone();
+        edited.transform.x += 20.0;
+        let revision = dialog.documents.visual_revision().unwrap();
+        let scene = dialog.documents.visual_scene().unwrap().clone();
+        let dirty = dialog.documents.is_dirty();
+        dialog.visual_selection = Some(edited.id);
+        dialog.visual_selected_objects.insert(edited.id);
+        dialog.visual_property_draft = Some(VisualPropertyDraft {
+            document: dialog.render_document.clone(),
+            basis_revision: revision,
+            object: edited.clone(),
+        });
+        super::super::render::with_immediate_viewport_test_size(
+            viewport_id(),
+            egui::vec2(620.0, 700.0),
+            || {
+                for _ in 0..3 {
+                    frame(&mut dialog, &ctx);
+                }
+                let canvas = dialog.test_visual_canvas_rect.unwrap();
+                let camera = dialog.camera;
+                let (inspector, clip) = dialog.test_action_rect("visual_inspector_scroll").unwrap();
+                assert!(
+                    inspector.right() <= clip.right(),
+                    "inspector={inspector:?} clip={clip:?}"
+                );
+                reveal_visual_action(&mut dialog, &ctx, "visual_apply_properties");
+                let (apply, clip) = dialog.test_action_rect("visual_apply_properties").unwrap();
+                assert!(clip.contains_rect(apply), "apply={apply:?} clip={clip:?}");
+                assert_eq!(
+                    dialog.test_action_enabled("visual_apply_properties"),
+                    Some(true)
+                );
+                assert_eq!(dialog.test_visual_canvas_rect, Some(canvas));
+                assert_eq!(dialog.camera.center, camera.center);
+                assert_eq!(dialog.camera.zoom, camera.zoom);
+                click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+                click_action(&mut dialog, &ctx, "visual_inspector_toggle");
+                assert_eq!(
+                    dialog
+                        .visual_property_draft
+                        .as_ref()
+                        .map(|draft| &draft.object),
+                    Some(&edited)
+                );
+                dialog.owner_host.transition(UtilityPresentation::Docked);
+                frame(&mut dialog, &ctx);
+                assert_eq!(
+                    dialog
+                        .visual_property_draft
+                        .as_ref()
+                        .map(|draft| &draft.object),
+                    Some(&edited)
+                );
+                assert_eq!(dialog.documents.visual_scene().unwrap(), &scene);
+                assert_eq!(dialog.documents.visual_revision(), Some(revision));
+                assert_eq!(dialog.documents.is_dirty(), dirty);
+            },
+        );
+    }
+
+    #[test]
+    fn m4c_object_captions_use_owned_text_and_stable_ids() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let scene = dialog.documents.visual_scene().unwrap();
+        let mut rectangle = scene
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        rectangle.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "  Alpha\n  βeta   ".into(),
+            style: VisualStyle::default(),
+        });
+        assert_eq!(
+            visual_object_label(&rectangle),
+            format!("Rectangle — Alpha βeta #{}", ids[0].get())
+        );
+        let mut ellipse = rectangle.clone();
+        ellipse.id = ids[1];
+        ellipse.kind = VisualObjectKind::Primitive {
+            shape: VisualPrimitiveShape::Ellipse,
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse — Alpha βeta #{}", ids[1].get())
+        );
+        assert_ne!(
+            visual_object_label(&rectangle),
+            visual_object_label(&ellipse)
+        );
+        let mut duplicate = rectangle.clone();
+        duplicate.id = ids[2];
+        assert_ne!(
+            visual_object_label(&rectangle),
+            visual_object_label(&duplicate)
+        );
+        ellipse.owned_label.as_mut().unwrap().text = "  \n".into();
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse #{}", ids[1].get())
+        );
+        ellipse.owned_label = None;
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Ellipse #{}", ids[1].get())
+        );
+        rectangle.owned_label.as_mut().unwrap().text = "界".repeat(40);
+        assert_eq!(
+            visual_object_label(&rectangle),
+            format!("Rectangle — {}… #{}", "界".repeat(32), ids[0].get())
+        );
+        assert_eq!(
+            visual_object_owned_text(&rectangle).unwrap(),
+            "界".repeat(40)
+        );
+        ellipse.kind = VisualObjectKind::Text {
+            text: "Free\ntext".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Text — Free text #{}", ids[1].get())
+        );
+        ellipse.kind = VisualObjectKind::Container {
+            label: "Group\n A".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Container — Group A #{}", ids[1].get())
+        );
+        ellipse.kind = VisualObjectKind::Swimlane {
+            orientation: VisualSwimlaneOrientation::Horizontal,
+            label: "Lane A".into(),
+        };
+        assert_eq!(
+            visual_object_label(&ellipse),
+            format!("Horizontal lane — Lane A #{}", ids[1].get())
+        );
+        assert_eq!(
+            visual_endpoint_label(&[rectangle], ids[1]),
+            format!("Missing #{}", ids[1].get())
+        );
+    }
+
+    #[test]
+    fn m4c_endpoint_editor_shares_captions_and_tracks_renames() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let mut objects: Vec<_> = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|object| ids.contains(&object.id))
+            .cloned()
+            .collect();
+        for object in &mut objects {
+            object.owned_label = Some(crate::diagram::VisualOwnedLabel {
+                text: "Same label".into(),
+                style: VisualStyle::default(),
+            });
+        }
+        let mut endpoint = VisualConnectorEndpoint {
+            object_id: ids[0],
+            anchor: VisualAnchor::East,
+        };
+        let ctx = egui::Context::default();
+        fn draw(
+            ctx: &egui::Context,
+            endpoint: &mut VisualConnectorEndpoint,
+            objects: &[VisualObject],
+            events: Vec<egui::Event>,
+        ) -> Vec<(Option<VisualObjectId>, String, egui::Rect)> {
+            let mut observed = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    visual_connector_endpoint_editor(
+                        ui,
+                        "From",
+                        "m4c-endpoint",
+                        "endpoint",
+                        endpoint,
+                        crate::diagram::TITLE_OBJECT_ID,
+                        objects,
+                        |id, _, caption, rect, _| observed.push((id, caption.to_owned(), rect)),
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            observed
+        }
+        let initial = draw(&ctx, &mut endpoint, &objects, vec![]);
+        let selected = initial.iter().find(|(id, _, _)| id.is_none()).unwrap();
+        assert_eq!(selected.1, visual_object_label(&objects[0]));
+        let click = selected.2.center();
+        for pressed in [true, false] {
+            draw(
+                &ctx,
+                &mut endpoint,
+                &objects,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let choices = draw(&ctx, &mut endpoint, &objects, vec![]);
+        for object in &objects {
+            let choice = choices
+                .iter()
+                .find(|(id, _, _)| *id == Some(object.id))
+                .unwrap();
+            assert_eq!(choice.1, visual_object_label(object));
+        }
+        let target = choices
+            .iter()
+            .find(|(id, _, _)| *id == Some(ids[1]))
+            .unwrap()
+            .2
+            .center();
+        for pressed in [true, false] {
+            draw(
+                &ctx,
+                &mut endpoint,
+                &objects,
+                vec![
+                    egui::Event::PointerMoved(target),
+                    egui::Event::PointerButton {
+                        pos: target,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(endpoint.object_id, ids[1]);
+        assert_eq!(endpoint.anchor, VisualAnchor::East);
+        let mut renamed_object = objects
+            .iter()
+            .find(|object| object.id == ids[1])
+            .unwrap()
+            .clone();
+        renamed_object.owned_label.as_mut().unwrap().text = "Renamed".into();
+        let previous_revision = dialog.documents.visual_revision().unwrap();
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::ReplaceObject(renamed_object)])
+            .unwrap();
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(previous_revision + 1)
+        );
+        objects = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|object| ids.contains(&object.id))
+            .cloned()
+            .collect();
+        let renamed = draw(&ctx, &mut endpoint, &objects, vec![]);
+        let selected = renamed.iter().find(|(id, _, _)| id.is_none()).unwrap();
+        assert_eq!(selected.1, format!("Rectangle — Renamed #{}", ids[1].get()));
+        assert_eq!(endpoint.object_id, ids[1]);
+    }
+
+    #[test]
     fn visual_editor_canvas_scales_with_host_and_height_control() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
@@ -20461,7 +21826,20 @@ mod tests {
         };
         let small = draw(&mut dialog, egui::vec2(900.0, 800.0));
         let large = draw(&mut dialog, egui::vec2(1800.0, 1400.0));
-        assert!(large.width() > 1400.0 && large.height() > small.height() && large.height() > 340.0);
+        assert!(large.width() > small.width() && large.width() < 1800.0 && large.height() > small.height() && large.height() > 340.0);
+        let scene = dialog.documents.visual_scene().unwrap();
+        let projection = project_visual_scene(scene).unwrap();
+        let item = projection.items.iter().find(|item| item.object_id == crate::diagram::TITLE_OBJECT_ID).unwrap();
+        let world = ScenePoint {
+            x: (item.bounds.min.x + item.bounds.max.x) / 2.0,
+            y: (item.bounds.min.y + item.bounds.max.y) / 2.0,
+        };
+        let mapping = pure_canvas_mapping(large.shrink(12.0), dialog.camera);
+        let screen = scene_point_from_screen(world_to_screen(world, large.shrink(12.0), dialog.camera));
+        assert_eq!(
+            visual_canvas_hit_test(&projection, visual_painted_item_prefix(&projection), &[], mapping, screen, 9.0),
+            CanvasHit::Object(crate::diagram::TITLE_OBJECT_ID)
+        );
         dialog.visual_canvas_height_ratio = 0.5;
         let adjusted = draw(&mut dialog, egui::vec2(1800.0, 1400.0));
         assert!(adjusted.height() < large.height());
@@ -21877,6 +23255,20 @@ mod tests {
     fn studio_usability_diagram_viewer_discard_close_and_reopen_are_generation_scoped() {
         let mut dialog = initialized_dialog();
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-viewer").unwrap();
         frame(&mut dialog, &ctx);
         click_action_with_child_discard(&mut dialog, &ctx, "open_viewer");
         assert!(
@@ -21917,10 +23309,18 @@ mod tests {
             "a discarded viewer child cannot retire the viewer"
         );
 
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         let _ = viewer_close_request_commands_with_root_discard(&mut dialog, &ctx);
         assert!(
             dialog.viewer_open,
             "a discarded ROOT pass cannot retire the viewer"
+        );
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
         );
 
         let _ = viewer_close_request_commands(&mut dialog, &ctx);
@@ -21929,6 +23329,10 @@ mod tests {
             "an accepted viewer X closes only that window"
         );
         assert!(dialog.open, "the owning editor remains open");
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         assert_eq!(
             dialog.test_session().revision(),
             original_key.accepted_revision
@@ -21950,6 +23354,7 @@ mod tests {
             dialog.documents.session().unwrap().revision(),
             original_key.accepted_revision
         );
+        workers.join_all();
     }
 
     #[test]
@@ -22162,9 +23567,162 @@ mod tests {
     }
 
     #[test]
+    fn inherited_source_open_keeps_dirty_diagram_decision() {
+        let ctx = egui::Context::default();
+        let mut dialog = initialized_dialog();
+        dialog.owner_host.transition(UtilityPresentation::Docked);
+        let original = dialog.documents.session().unwrap().draft().to_owned();
+        let source = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            source.identity(),
+            1_u64,
+            pass,
+            pass,
+        )
+        .unwrap();
+        let copy = crate::diagram::DiagramSourceCopy::new("flowchart LR\nA --> B")
+            .unwrap()
+            .with_origin(crate::diagram::DiagramSourceCopyOrigin::fresh());
+        assert!(
+            dialog
+                .open_source_copy_from_origin(
+                    &ctx,
+                    copy,
+                    &super::super::utility_host::ChildOpenOrigin::Parent(receipt),
+                )
+                .is_some()
+        );
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(dialog.documents.session().unwrap().draft(), original);
+        assert!(dialog.documents.pending_source_copy_origin().is_some());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn native_diagram_owner_inherits_viewer_over_saved_docked() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default().save(&path).unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = crate::gui::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-viewer").unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
+        let mut dialog = initialized_dialog();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        open_viewer(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.viewer_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        assert!(!dialog.take_show_root_after_host_change());
+        workers.join_all();
+    }
+
+    #[test]
+    fn diagram_owner_and_viewer_restore_independent_saved_presentations() {
+        use crate::gui::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{
+            RememberedPresentation, Settings, UtilityPresentations, UtilityToolKey,
+        };
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let manager =
+            UtilityPresentationManager::new(path, workers.clone(), UtilityPresentations::default());
+        manager.install_in_context(&ctx);
+        let owner = UtilityToolKey::parse("diagram-studio").unwrap();
+        let viewer = UtilityToolKey::parse("diagram-viewer").unwrap();
+        let mut default = DiagramStudioDialog::default();
+        assert!(!default.open);
+        default.open();
+        default.prepare_open_presentation(&ctx);
+        assert_eq!(
+            default.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        manager.remember(&ctx, owner, RememberedPresentation::Docked);
+        manager.remember(&ctx, viewer, RememberedPresentation::Docked);
+        default.prepare_open_presentation(&ctx);
+        assert_eq!(
+            default.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        let mut restored = DiagramStudioDialog::default();
+        restored.open();
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        restored.viewer_open = true;
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.viewer_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        manager.remember(&ctx, owner, RememberedPresentation::Popout);
+        manager.remember(&ctx, viewer, RememberedPresentation::Popout);
+        restored.prepare_open_presentation(&ctx);
+        assert_eq!(
+            restored.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(
+            restored.viewer_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        workers.join_all();
+    }
+
+    #[test]
     fn diagram_visual_host_discards_unretained_dock_click() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("diagram-studio").unwrap();
 
         click_action_with_root_discard(&mut dialog, &ctx, "owner_presentation");
         assert_eq!(
@@ -22172,6 +23730,7 @@ mod tests {
             UtilityPresentation::Popout
         );
         assert!(!dialog.take_show_root_after_host_change());
+        assert_eq!(manager.preference(key), None);
 
         click_action(&mut dialog, &ctx, "owner_presentation");
         assert_eq!(
@@ -22179,6 +23738,18 @@ mod tests {
             UtilityPresentation::Docked
         );
         assert!(dialog.take_show_root_after_host_change());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        workers.join_all();
+        assert_eq!(
+            crate::settings::Settings::load(&path)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
         assert_eq!(
             dialog.documents.authoring_kind(),
             Some(crate::diagram::DiagramAuthoringKind::Visual),
@@ -23280,6 +24851,660 @@ mod tests {
     }
 
     #[test]
+    fn m4d_connector_target_respects_rotated_anchor_and_clip() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let scene = dialog.documents.visual_scene().unwrap().clone();
+        let projection = project_visual_scene(&scene).unwrap();
+        let object = scene
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap();
+        let radians = object.transform.rotation_degrees.to_radians();
+        let world = ScenePoint {
+            x: object.transform.x + radians.cos() * 4.0,
+            y: object.transform.y + radians.sin() * 4.0,
+        };
+        assert_eq!(nearest_visual_anchor(object, world), VisualAnchor::East);
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 500.0));
+        let camera = Camera {
+            center: ScenePoint { x: 45.0, y: 0.0 },
+            zoom: 1.0,
+            fit_next: false,
+        };
+        let mapping = pure_canvas_mapping(canvas, camera);
+        let screen = world_to_screen(world, canvas, camera);
+        assert_eq!(
+            visual_connector_target(&scene, &projection, projection.items.len(), mapping, screen)
+                .map(|endpoint| endpoint.object_id),
+            Some(ids[0])
+        );
+        assert!(visual_connector_target(&scene, &projection, 0, mapping, screen).is_none());
+        assert!(
+            visual_connector_target(
+                &scene,
+                &projection,
+                projection.items.len(),
+                mapping,
+                egui::pos2(-5.0, -5.0)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn m4d_coincident_self_loop_handles_are_independently_hittable() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let endpoint = VisualConnectorEndpoint {
+            object_id: ids[0],
+            anchor: VisualAnchor::East,
+        };
+        let id = dialog
+            .documents
+            .apply_visual_transaction(&[visual_connector_draft(endpoint, endpoint)])
+            .unwrap()
+            .created_objects[0];
+        let scene = dialog.documents.visual_scene().unwrap();
+        let projection = project_visual_scene(scene).unwrap();
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 500.0));
+        let mapping = pure_canvas_mapping(
+            canvas,
+            Camera {
+                center: ScenePoint { x: 45.0, y: 0.0 },
+                zoom: 1.0,
+                fit_next: false,
+            },
+        );
+        let route = &projection.items.iter().find(|item| item.object_id == id).unwrap().open_paths[0];
+        assert_eq!(route.first(), route.last(), "fixture must use coincident attachments");
+        let handles = visual_canvas_selection_handles(
+            scene,
+            &projection,
+            &[id].into_iter().collect(),
+            projection.items.len(),
+            mapping,
+        );
+        for end in [CanvasConnectorEnd::From, CanvasConnectorEnd::To] {
+            let handle = handles.iter().find(|handle| matches!(handle.kind, CanvasHandleKind::ConnectorEndpoint { end: actual, .. } if actual == end)).unwrap();
+            let screen = mapping.world_to_screen(handle.center);
+            assert_eq!(
+                visual_canvas_hit_test(
+                    &projection,
+                    projection.items.len(),
+                    &handles,
+                    mapping,
+                    screen,
+                    9.0
+                ),
+                CanvasHit::Handle(CanvasHandleKind::ConnectorEndpoint { object_id: id, end })
+            );
+        }
+    }
+
+    #[test]
+    fn m4d_connector_tool_creates_from_canvas_and_escape_cancels() {
+        let mut dialog = initialized_visual_dialog();
+        let objects = add_visual_layout_objects(&mut dialog);
+        dialog.visual_selected_objects.clear();
+        dialog.visual_selection = None;
+        dialog.camera.center = ScenePoint { x: 45.0, y: 0.0 };
+        dialog.camera.zoom = 1.0;
+        dialog.camera.fit_next = false;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        reveal_visual_action(&mut dialog, &ctx, "visual_add_connector");
+        let revision = dialog.documents.visual_revision().unwrap();
+        click_action(&mut dialog, &ctx, "visual_add_connector");
+        assert!(dialog.visual_connector_tool.is_some());
+        frame(&mut dialog, &ctx);
+        let positions: Vec<_> = [0, 1]
+            .into_iter()
+            .map(|index| {
+                let object = dialog
+                    .documents
+                    .visual_scene()
+                    .unwrap()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == objects[index])
+                    .unwrap();
+                visual_canvas_world_point(
+                    &dialog,
+                    ScenePoint {
+                        x: object.transform.x,
+                        y: object.transform.y,
+                    },
+                )
+            })
+            .collect();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for pos in positions {
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    button(pos, true),
+                    button(pos, false),
+                ],
+            );
+        }
+        assert!(dialog.visual_connector_tool.is_none());
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        let connector = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find_map(|object| match &object.kind {
+                VisualObjectKind::Connector { connector } => Some(connector),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(connector.from.object_id, objects[0]);
+        assert_eq!(connector.to.object_id, objects[1]);
+        reveal_visual_action(&mut dialog, &ctx, "visual_add_connector");
+        click_action(&mut dialog, &ctx, "visual_add_connector");
+        assert!(dialog.visual_connector_tool.is_some());
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(dialog.visual_connector_tool.is_none());
+        assert!(dialog.open);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+    }
+
+    #[test]
+    fn m4d_connector_tool_rejects_discarded_and_stale_sources() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        dialog.visual_selected_objects.clear();
+        dialog.visual_selection = None;
+        dialog.camera.center = ScenePoint { x: 45.0, y: 0.0 };
+        dialog.camera.fit_next = false;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        reveal_visual_action(&mut dialog, &ctx, "visual_add_connector");
+        click_action(&mut dialog, &ctx, "visual_add_connector");
+        frame(&mut dialog, &ctx);
+        let point = visual_canvas_world_point(&dialog, ScenePoint { x: 0.0, y: -10.0 });
+        let button = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.test_request_child_discard();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                button(true),
+                button(false),
+            ],
+        );
+        assert!(dialog.visual_connector_tool.is_none());
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        reveal_visual_action(&mut dialog, &ctx, "visual_add_connector");
+        click_action(&mut dialog, &ctx, "visual_add_connector");
+        frame(&mut dialog, &ctx);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                button(true),
+                button(false),
+            ],
+        );
+        assert_eq!(
+            dialog
+                .visual_connector_tool
+                .as_ref()
+                .and_then(|tool| tool.source)
+                .map(|source| source.object_id),
+            Some(ids[0])
+        );
+        dialog
+            .documents
+            .replace_visual_label("changed source document")
+            .unwrap();
+        let changed_revision = dialog.documents.visual_revision().unwrap();
+        frame(&mut dialog, &ctx);
+        assert!(dialog.visual_connector_tool.is_none());
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                button(true),
+                button(false),
+            ],
+        );
+        assert_eq!(dialog.documents.visual_revision(), Some(changed_revision));
+    }
+
+    #[test]
+    fn m4d_connector_double_click_focuses_endpoint_editor() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let from = VisualConnectorEndpoint {
+            object_id: ids[0],
+            anchor: VisualAnchor::East,
+        };
+        let to = VisualConnectorEndpoint {
+            object_id: ids[1],
+            anchor: VisualAnchor::West,
+        };
+        let id = dialog
+            .documents
+            .apply_visual_transaction(&[visual_connector_draft(from, to)])
+            .unwrap()
+            .created_objects[0];
+        dialog.visual_selection = None;
+        dialog.visual_selected_objects.clear();
+        dialog.camera.center = ScenePoint { x: 45.0, y: 0.0 };
+        dialog.camera.fit_next = false;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let path = &projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id)
+            .unwrap()
+            .open_paths[0];
+        let midpoint = ScenePoint {
+            x: (path[0].x + path[1].x) / 2.0,
+            y: (path[0].y + path[1].y) / 2.0,
+        };
+        let point = visual_canvas_world_point(&dialog, midpoint);
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert_eq!(dialog.visual_selection, Some(id));
+        frame(&mut dialog, &ctx);
+        let focus_id = dialog
+            .test_action_focus_ids
+            .iter()
+            .find(|(name, _)| name == "visual_connector_from")
+            .unwrap()
+            .1;
+        assert_eq!(
+            super::super::render::immediate_viewport_test_focused_id(),
+            Some((viewport_id(), Some(focus_id)))
+        );
+    }
+
+    #[test]
+    fn m4d_endpoint_handles_reconnect_and_reject_retired_host() {
+        for end in [CanvasConnectorEnd::From, CanvasConnectorEnd::To] {
+            let mut dialog = initialized_visual_dialog();
+            let ids = add_visual_layout_objects(&mut dialog);
+            let from = VisualConnectorEndpoint {
+                object_id: ids[0],
+                anchor: VisualAnchor::East,
+            };
+            let to = VisualConnectorEndpoint {
+                object_id: ids[1],
+                anchor: VisualAnchor::West,
+            };
+            let connector_id = dialog
+                .documents
+                .apply_visual_transaction(&[visual_connector_draft(from, to)])
+                .unwrap()
+                .created_objects[0];
+            let mut connector_object = dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == connector_id)
+                .unwrap()
+                .clone();
+            if let VisualObjectKind::Connector { connector } = &mut connector_object.kind {
+                connector.label = "Keep label".into();
+                connector.direction = VisualConnectorDirection::Both;
+                connector.manual_route = Some(crate::diagram::VisualManualRoute::Polyline {
+                    points: vec![crate::diagram::VisualRoutePoint { x: 20.0, y: 30.0 }],
+                });
+            }
+            dialog
+                .documents
+                .apply_visual_transaction(&[VisualOperation::ReplaceObject(
+                    connector_object.clone(),
+                )])
+                .unwrap();
+            dialog.visual_selection = Some(connector_id);
+            dialog.visual_selected_objects = [connector_id].into_iter().collect();
+            dialog.camera.center = ScenePoint { x: 45.0, y: 0.0 };
+            dialog.camera.zoom = 1.0;
+            dialog.camera.fit_next = false;
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                frame(&mut dialog, &ctx);
+            }
+            let revision = dialog.documents.visual_revision().unwrap();
+            let scene = dialog.documents.visual_scene().unwrap();
+            let projection = project_visual_scene(scene).unwrap();
+            let mapping = pure_canvas_mapping(
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            let handles = visual_canvas_selection_handles(
+                scene,
+                &projection,
+                &dialog.visual_selected_objects,
+                projection.items.len(),
+                mapping,
+            );
+            let handle = handles.iter().find(|handle| matches!(handle.kind, CanvasHandleKind::ConnectorEndpoint { end: actual, .. } if actual == end)).unwrap();
+            let start = world_to_screen(
+                handle.center,
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            assert!(
+                matches!(visual_canvas_hit_test(&projection, projection.items.len(), &handles, mapping, scene_point_from_screen(start), 9.0), CanvasHit::Handle(CanvasHandleKind::ConnectorEndpoint { end: actual, .. }) if actual == end)
+            );
+            let overlap = [
+                CanvasHandle {
+                    kind: CanvasHandleKind::ConnectorPoint {
+                        object_id: connector_id,
+                        index: 0,
+                    },
+                    center: handle.center,
+                },
+                *handle,
+            ];
+            assert!(
+                matches!(visual_canvas_hit_test(&projection, projection.items.len(), &overlap, mapping, scene_point_from_screen(start), 9.0), CanvasHit::Handle(CanvasHandleKind::ConnectorEndpoint { end: actual, .. }) if actual == end)
+            );
+            let target = scene
+                .objects
+                .iter()
+                .find(|object| object.id == ids[2])
+                .unwrap();
+            let destination = visual_canvas_world_point(
+                &dialog,
+                ScenePoint {
+                    x: target.transform.x,
+                    y: target.transform.y,
+                },
+            );
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let original_id = match end {
+                CanvasConnectorEnd::From => from.object_id,
+                CanvasConnectorEnd::To => to.object_id,
+            };
+            let original_target = scene
+                .objects
+                .iter()
+                .find(|object| object.id == original_id)
+                .unwrap();
+            let direction = if end == CanvasConnectorEnd::From {
+                1.0
+            } else {
+                -1.0
+            };
+            let angle = original_target.transform.rotation_degrees.to_radians();
+            let offset = direction * (original_target.transform.width / 2.0 - 3.0);
+            let same = visual_canvas_world_point(
+                &dialog,
+                ScenePoint {
+                    x: original_target.transform.x + offset * angle.cos(),
+                    y: original_target.transform.y + offset * angle.sin(),
+                },
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(same)]);
+            frame_with_child_events(&mut dialog, &ctx, vec![button(same, false)]);
+            assert_eq!(
+                dialog.documents.visual_revision(),
+                Some(revision),
+                "same endpoint is a no-op"
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            dialog.test_request_child_discard();
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(destination)],
+            );
+            frame_with_child_events(&mut dialog, &ctx, vec![button(destination, false)]);
+            assert!(dialog.visual_gesture.is_none());
+            assert_eq!(
+                dialog.documents.visual_revision(),
+                Some(revision),
+                "discarded start cannot commit"
+            );
+            let blank = egui::pos2(
+                mapping.clip.min.x as f32 + 8.0,
+                mapping.clip.max.y as f32 - 8.0,
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(blank)]);
+            frame_with_child_events(&mut dialog, &ctx, vec![button(blank, false)]);
+            assert_eq!(dialog.documents.visual_revision(), Some(revision));
+            assert_eq!(
+                dialog
+                    .documents
+                    .visual_scene()
+                    .unwrap()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == connector_id)
+                    .unwrap(),
+                &connector_object
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(destination)],
+            );
+            send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+            frame_with_child_events(&mut dialog, &ctx, vec![button(destination, false)]);
+            assert_eq!(dialog.documents.visual_revision(), Some(revision));
+            assert_eq!(
+                dialog
+                    .documents
+                    .visual_scene()
+                    .unwrap()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == connector_id)
+                    .unwrap(),
+                &connector_object
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(destination)],
+            );
+            assert_eq!(dialog.documents.visual_revision(), Some(revision));
+            assert!(
+                dialog
+                    .visual_gesture
+                    .as_ref()
+                    .is_some_and(|gesture| gesture.preview_projection.is_some())
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(destination),
+                    button(destination, false),
+                ],
+            );
+            assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+            let changed = dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == connector_id)
+                .unwrap();
+            let VisualObjectKind::Connector { connector } = &changed.kind else {
+                panic!("connector expected")
+            };
+            let VisualObjectKind::Connector {
+                connector: original,
+            } = &connector_object.kind
+            else {
+                unreachable!()
+            };
+            assert_eq!(connector.label, original.label);
+            assert_eq!(connector.direction, original.direction);
+            assert_eq!(connector.manual_route, original.manual_route);
+            assert_eq!(changed.style, connector_object.style);
+            match end {
+                CanvasConnectorEnd::From => {
+                    assert_eq!(connector.from.object_id, ids[2]);
+                    assert_eq!(connector.to, original.to);
+                }
+                CanvasConnectorEnd::To => {
+                    assert_eq!(connector.to.object_id, ids[2]);
+                    assert_eq!(connector.from, original.from);
+                }
+            }
+            dialog.documents.undo().unwrap();
+            assert_eq!(
+                dialog
+                    .documents
+                    .visual_scene()
+                    .unwrap()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == connector_id)
+                    .unwrap(),
+                &connector_object
+            );
+            dialog.documents.redo().unwrap();
+            assert_eq!(dialog.documents.visual_revision(), Some(revision + 3));
+            frame(&mut dialog, &ctx);
+            let scene = dialog.documents.visual_scene().unwrap();
+            let projection = project_visual_scene(scene).unwrap();
+            let mapping = pure_canvas_mapping(
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            let handles = visual_canvas_selection_handles(
+                scene,
+                &projection,
+                &dialog.visual_selected_objects,
+                projection.items.len(),
+                mapping,
+            );
+            let handle = handles.iter().find(|handle| matches!(handle.kind, CanvasHandleKind::ConnectorEndpoint { end: actual, .. } if actual == end)).unwrap();
+            let start = world_to_screen(
+                handle.center,
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            let target = scene
+                .objects
+                .iter()
+                .find(|object| object.id == ids[0])
+                .unwrap();
+            let destination = visual_canvas_world_point(
+                &dialog,
+                ScenePoint {
+                    x: target.transform.x,
+                    y: target.transform.y,
+                },
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    button(start, true),
+                    egui::Event::PointerMoved(destination),
+                    button(destination, false),
+                ],
+            );
+            assert_eq!(dialog.documents.visual_revision(), Some(revision + 4));
+            let before_stale = dialog.documents.visual_scene().unwrap().clone();
+            frame(&mut dialog, &ctx);
+            let projection = project_visual_scene(&before_stale).unwrap();
+            let mapping = pure_canvas_mapping(
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            let handles = visual_canvas_selection_handles(
+                &before_stale,
+                &projection,
+                &dialog.visual_selected_objects,
+                projection.items.len(),
+                mapping,
+            );
+            let handle = handles.iter().find(|handle| matches!(handle.kind, CanvasHandleKind::ConnectorEndpoint { end: actual, .. } if actual == end)).unwrap();
+            let start = world_to_screen(
+                handle.center,
+                dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+                dialog.camera,
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), button(start, true)],
+            );
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![egui::Event::PointerMoved(
+                    destination + egui::vec2(20.0, 0.0),
+                )],
+            );
+            dialog.owner_host.transition(UtilityPresentation::Docked);
+            dialog.owner_host.transition(UtilityPresentation::Popout);
+            frame_with_child_events(&mut dialog, &ctx, vec![button(destination, false)]);
+            assert_eq!(dialog.documents.visual_scene().unwrap(), &before_stale);
+        }
+    }
+
+    #[test]
     fn diagram_studio_visual_connector_controls_create_edit_select_and_delete() {
         let mut dialog = initialized_visual_dialog();
         let endpoints = dialog
@@ -23316,6 +25541,8 @@ mod tests {
             ])
             .unwrap()
             .created_objects;
+        dialog.visual_selected_objects = endpoints.iter().copied().collect();
+        dialog.visual_selection = endpoints.first().copied();
         let ctx = egui::Context::default();
         frame(&mut dialog, &ctx);
         let before_create = dialog.documents.visual_revision().unwrap();

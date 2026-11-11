@@ -357,6 +357,40 @@ fn hotkey_directory_binding_id(
     ))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DIRECTORY_RUNTIME: std::cell::RefCell<Option<MouseGestureRuntime>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_install_directory_runtime(db: GestureDb, revision: u64) -> crate::hotkey::directory::SourceSnapshot {
+    let runtime = MouseGestureRuntime {
+        settings: MouseGestureSettings::default(),
+        plugin_enabled: true,
+        db: Arc::new(Mutex::new(db)),
+        directory_revision: revision,
+        watcher: None,
+    };
+    let source = hotkey_directory_source_from_runtime(&runtime);
+    TEST_DIRECTORY_RUNTIME.with(|slot| *slot.borrow_mut() = Some(runtime));
+    source
+}
+
+#[cfg(test)]
+pub(crate) struct TestDirectoryRuntimeGuard;
+
+#[cfg(test)]
+impl Drop for TestDirectoryRuntimeGuard {
+    fn drop(&mut self) {
+        TEST_DIRECTORY_RUNTIME.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_directory_runtime_guard() -> TestDirectoryRuntimeGuard {
+    TestDirectoryRuntimeGuard
+}
+
 /// Confirms a directory request against the exact current gesture publication
 /// and owner database before the editor reloads or reveals a positional row.
 pub(crate) fn hotkey_directory_binding_matches_committed(
@@ -366,6 +400,10 @@ pub(crate) fn hotkey_directory_binding_matches_committed(
     binding_index: usize,
     committed_database: &GestureDb,
 ) -> bool {
+    #[cfg(test)]
+    if let Some(result) = TEST_DIRECTORY_RUNTIME.with(|slot| slot.borrow().as_ref().map(|runtime| {
+        runtime.hotkey_directory_binding_matches_committed(publication, entry_id, gesture_index, binding_index, committed_database)
+    })) { return result; }
     let mut matches = false;
     with_service(|runtime| {
         matches = runtime.hotkey_directory_binding_matches_committed(
@@ -445,6 +483,10 @@ pub fn publish_committed_gesture_db(committed: GestureDb) {
 /// remain inside the gesture owner; stable identities are scoped to this
 /// immutable database publication.
 pub fn hotkey_directory_source() -> crate::hotkey::directory::SourceSnapshot {
+    #[cfg(test)]
+    if let Some(source) = TEST_DIRECTORY_RUNTIME.with(|slot| slot.borrow().as_ref().map(hotkey_directory_source_from_runtime)) {
+        return source;
+    }
     let mut snapshot = None;
     with_service(|service| {
         snapshot = Some(hotkey_directory_source_from_runtime(service));

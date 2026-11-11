@@ -854,6 +854,8 @@ fn update_filtered_projection(
 pub struct NotesDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
+    open_epoch: u64,
     show_root_after_host_change: bool,
     native_jump_mode: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -877,11 +879,17 @@ pub struct NotesDialog {
     edit_idx: Option<usize>,
     text: String,
     search: String,
-    template_manager: TemplateManagerState,
+    pub(super) template_manager: TemplateManagerState,
     #[cfg(test)]
     last_rendered_indices: Vec<usize>,
     #[cfg(test)]
     last_rendered_row_rects: Vec<(usize, RenderedNoteRowRects)>,
+    #[cfg(test)]
+    test_open_row: Vec<(String, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_menu_open: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_aux_controls: Vec<(String, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     last_rendered_header_ids: Vec<(String, egui::Id)>,
     #[cfg(test)]
@@ -963,6 +971,7 @@ enum PendingNoteSave {
 }
 
 struct NotesFrameEffects {
+    open_epoch: u64,
     root_pass: ViewportPassProvenance,
     host: HostIdentity,
     owner_pass: Option<ViewportPassProvenance>,
@@ -986,11 +995,11 @@ struct NotesFrameEffects {
     wrap_links_slug: Option<String>,
     open_note_panels: Vec<String>,
     open_unused_assets: bool,
+    open_templates: bool,
     activations: Vec<Action>,
     external_open_paths: Vec<std::path::PathBuf>,
     clipboard_texts: Vec<String>,
     notices: Vec<String>,
-    template_actions: Vec<TemplateManagerAction>,
     draft_checkpoint: Option<NotesDraftCheckpoint>,
 }
 
@@ -1000,10 +1009,10 @@ struct NotesDraftCheckpoint {
     text: String,
     search: String,
     editor_context_menu_open: bool,
-    template_manager: TemplateManagerState,
 }
 
-enum TemplateManagerAction {
+pub(super) enum TemplateManagerAction {
+    Refresh,
     Save { name: String, content: String },
     Delete { name: String },
     Open { name: String },
@@ -1013,26 +1022,95 @@ pub(crate) struct NotesFrameCompletion {
     pub(crate) closed: bool,
     pub(crate) show_root: bool,
     pub(crate) open_note_panels: Vec<String>,
+    pub(super) note_open_origin: Option<super::utility_host::AcceptedParentOpen<u64>>,
     pub(crate) open_unused_assets: bool,
+    pub(crate) open_templates: bool,
     pub(crate) activations: Vec<Action>,
     pub(crate) external_open_paths: Vec<std::path::PathBuf>,
     pub(crate) clipboard_texts: Vec<String>,
 }
 
 #[derive(Clone, Default)]
-struct TemplateManagerState {
+pub(super) struct TemplateManagerState {
     open: bool,
     templates: Vec<String>,
     selected: Option<String>,
     name: String,
     content: String,
     pending_delete: Option<String>,
+    epoch: u64,
+    #[cfg(test)]
+    test_controls: Vec<(String, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_external_opens: usize,
+}
+
+pub(super) struct TemplateHostActions {
+    pub(super) host_request: Option<UtilityPresentation>,
+    pub(super) close: bool,
+    epoch: u64,
+    draft: TemplateManagerState,
+    actions: Vec<TemplateManagerAction>,
 }
 
 impl TemplateManagerState {
-    fn open(&mut self) {
-        self.open = true;
-        self.refresh();
+    pub(super) fn open(&mut self) {
+        if !self.open {
+            self.epoch = self.epoch.wrapping_add(1);
+            self.open = true;
+            self.refresh();
+        }
+    }
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_draft(&mut self, name: &str, content: &str) {
+        self.name = name.to_owned();
+        self.content = content.to_owned();
+        self.pending_delete = Some("pending".to_owned());
+    }
+    #[cfg(test)]
+    pub(super) fn test_draft(&self) -> (&str, &str, Option<&str>) {
+        (&self.name, &self.content, self.pending_delete.as_deref())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_controls
+            .iter()
+            .find(|(key, ..)| key == name)
+            .map(|(_, rect, clip, enabled)| (*rect, *clip, *enabled))
+    }
+    #[cfg(test)]
+    pub(super) fn test_prepare_edit(&mut self, name: &str, content: &str) {
+        self.name = name.into();
+        self.content = content.into();
+        self.pending_delete = None;
+    }
+    #[cfg(test)]
+    pub(super) fn test_actions(
+        &self,
+        epoch: u64,
+        actions: Vec<TemplateManagerAction>,
+    ) -> TemplateHostActions {
+        TemplateHostActions {
+            host_request: None,
+            close: false,
+            epoch,
+            draft: self.clone(),
+            actions,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_external_opens(&self) -> usize {
+        self.test_external_opens
+    }
+    pub(super) fn is_open(&self) -> bool {
+        self.open
+    }
+    pub(super) fn close(&mut self) {
+        self.open = false;
     }
 
     fn refresh(&mut self) {
@@ -1059,107 +1137,141 @@ impl TemplateManagerState {
         self.content = get_template(name).unwrap_or_default();
     }
 
-    fn ui(&mut self, ctx: &egui::Context, input_allowed: bool) -> Vec<TemplateManagerAction> {
-        if !self.open {
-            return Vec::new();
-        }
-
-        let mut refresh = false;
+    pub(super) fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        input_allowed: bool,
+        first: bool,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> TemplateHostActions {
+        let mut draft = self.clone();
         let mut open = self.open;
         let mut actions = Vec::new();
-        egui::Window::new("Note Templates")
-            .enabled(input_allowed)
-            .resizable(true)
-            .default_size((520.0, 360.0))
-            .min_width(320.0)
-            .min_height(220.0)
-            .show_utility(
-                ctx,
-                "note-templates",
-                egui::Id::new("Note Templates"),
-                Some(&mut open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from((520.0, 360.0)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::vec2(320.0, 220.0)),
-                |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("New Template").clicked() {
-                            self.clear_editor();
-                        }
-                        if ui.button("Refresh").clicked() {
-                            refresh = true;
+        let mut host_request = None;
+        #[cfg(test)]
+        let mut test_controls = Vec::new();
+        let mut body = |ui: &mut egui::Ui| {
+            let interactive = input_allowed && ui.is_visible() && !ui.is_sizing_pass();
+            let (host, next) =
+                super::utility_host::presentation_button(ui, presentation, interactive);
+            #[cfg(test)]
+            test_controls.push(("host".into(), host.rect, ui.clip_rect(), host.enabled()));
+            if first && !ctx.will_discard() && host.clicked() {
+                host_request = Some(next);
+            }
+            ui.add_enabled_ui(interactive, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("New Template").clicked() {
+                        draft.clear_editor();
+                    }
+                    if ui.button("Refresh").clicked() {
+                        actions.push(TemplateManagerAction::Refresh);
+                    }
+                });
+                ui.separator();
+                ui.columns(2, |columns| {
+                    widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
+                    egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+                        for name in draft.templates.clone() {
+                            ui.horizontal(|ui| {
+                                let selected = draft.selected.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, &name).clicked() {
+                                    draft.load_for_edit(&name);
+                                }
+                                if ui.small_button("Open").clicked() {
+                                    actions
+                                        .push(TemplateManagerAction::Open { name: name.clone() });
+                                }
+                                if ui.small_button("Delete").clicked() {
+                                    draft.pending_delete = Some(name.clone());
+                                }
+                            });
                         }
                     });
-                    ui.separator();
-                    ui.columns(2, |columns| {
-                        widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
-                        egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
-                            for name in self.templates.clone() {
-                                ui.horizontal(|ui| {
-                                    let selected = self.selected.as_deref() == Some(name.as_str());
-                                    if ui.selectable_label(selected, &name).clicked() {
-                                        self.load_for_edit(&name);
-                                    }
-                                    if ui.small_button("Open").clicked() {
-                                        actions.push(TemplateManagerAction::Open {
-                                            name: name.clone(),
-                                        });
-                                    }
-                                    if ui.small_button("Delete").clicked() {
-                                        self.pending_delete = Some(name.clone());
-                                    }
-                                });
-                            }
-                        });
 
-                        widgets::compact_section_heading(
-                            &mut columns[1],
-                            if self.selected.is_some() {
-                                "Edit template"
-                            } else {
-                                "Create template"
-                            },
-                            None,
-                        );
-                        widgets::secondary_help(&mut columns[1], "Name");
-                        columns[1].add(
-                            egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY),
-                        );
-                        widgets::secondary_help(&mut columns[1], "Content");
-                        columns[1].add(
-                            egui::TextEdit::multiline(&mut self.content)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(10),
-                        );
-                        columns[1].horizontal(|ui| {
-                            let save_template_button = ui.button("Save Template");
-                            if widgets::with_button_emphasis(
-                                ui,
-                                save_template_button,
-                                ButtonEmphasis::Primary,
-                            )
-                            .clicked()
-                            {
-                                actions.push(TemplateManagerAction::Save {
-                                    name: self.name.clone(),
-                                    content: self.content.clone(),
-                                });
-                            }
-                            if ui.button("Clear").clicked() {
-                                self.clear_editor();
-                            }
-                        });
+                    widgets::compact_section_heading(
+                        &mut columns[1],
+                        if draft.selected.is_some() {
+                            "Edit template"
+                        } else {
+                            "Create template"
+                        },
+                        None,
+                    );
+                    widgets::secondary_help(&mut columns[1], "Name");
+                    let name_edit = columns[1].add(
+                        egui::TextEdit::singleline(&mut draft.name).desired_width(f32::INFINITY),
+                    );
+                    #[cfg(test)]
+                    test_controls.push((
+                        "name".into(),
+                        name_edit.rect,
+                        columns[1].clip_rect(),
+                        name_edit.enabled(),
+                    ));
+                    #[cfg(not(test))]
+                    let _ = name_edit;
+                    widgets::secondary_help(&mut columns[1], "Content");
+                    columns[1].add(
+                        egui::TextEdit::multiline(&mut draft.content)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(6),
+                    );
+                    columns[1].horizontal(|ui| {
+                        let save_template_button = ui.button("Save Template");
+                        #[cfg(test)]
+                        test_controls.push((
+                            "save".into(),
+                            save_template_button.rect,
+                            ui.clip_rect(),
+                            save_template_button.enabled(),
+                        ));
+                        if widgets::with_button_emphasis(
+                            ui,
+                            save_template_button,
+                            ButtonEmphasis::Primary,
+                        )
+                        .clicked()
+                        {
+                            actions.push(TemplateManagerAction::Save {
+                                name: draft.name.clone(),
+                                content: draft.content.clone(),
+                            });
+                        }
+                        if ui.button("Clear").clicked() {
+                            draft.clear_editor();
+                        }
                     });
-                },
-            );
-        self.open = open;
-
-        if let Some(name) = self.pending_delete.clone() {
+                });
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            egui::Window::new("Note Templates")
+                .vscroll(true)
+                .resizable(true)
+                .default_size((520.0, 360.0))
+                .min_width(320.0)
+                .min_height(220.0)
+                .show_utility(
+                    ctx,
+                    "note-templates",
+                    egui::Id::new("Note Templates"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(520.0, 360.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(320.0, 220.0)),
+                    |ui| body(ui),
+                );
+        }
+        if let Some(name) = draft.pending_delete.clone() {
             let mut confirm_open = true;
             egui::Window::new("Delete Template?")
                 .open(&mut confirm_open)
@@ -1180,22 +1292,53 @@ impl TemplateManagerState {
                             actions.push(TemplateManagerAction::Delete { name: name.clone() });
                         }
                         if ui.button("Cancel").clicked() {
-                            self.pending_delete = None;
+                            draft.pending_delete = None;
                         }
                     });
                 });
             if !confirm_open {
-                self.pending_delete = None;
+                draft.pending_delete = None;
             }
         }
 
-        if refresh {
-            self.refresh();
+        #[cfg(test)]
+        {
+            self.test_controls = test_controls;
         }
-        actions
+        TemplateHostActions {
+            host_request,
+            close: !open,
+            epoch: self.epoch,
+            draft,
+            actions: if first && input_allowed && !ctx.will_discard() {
+                actions
+            } else {
+                Vec::new()
+            },
+        }
     }
 
-    fn owns_input(&self, ctx: &egui::Context) -> bool {
+    pub(super) fn apply_host_actions(
+        &mut self,
+        actions: TemplateHostActions,
+        app: &mut LauncherApp,
+    ) {
+        if !self.open || self.epoch != actions.epoch {
+            return;
+        }
+        #[cfg(test)]
+        let test_controls = std::mem::take(&mut self.test_controls);
+        *self = actions.draft;
+        #[cfg(test)]
+        {
+            self.test_controls = test_controls;
+        }
+        for action in actions.actions {
+            self.apply_action(action, app);
+        }
+    }
+
+    pub(super) fn owns_input(&self, ctx: &egui::Context) -> bool {
         let template_layer = egui::LayerId::new(
             egui::Order::Middle,
             egui::Id::new(Some("Note Templates")),
@@ -1219,6 +1362,7 @@ impl TemplateManagerState {
 
     fn apply_action(&mut self, action: TemplateManagerAction, app: &mut LauncherApp) {
         match action {
+            TemplateManagerAction::Refresh => self.refresh(),
             TemplateManagerAction::Save { name, content } => {
                 match validate_template_name(&name)
                     .and_then(|name| save_template(name, &content).map(|_| name.to_string()))
@@ -1248,15 +1392,16 @@ impl TemplateManagerState {
                     format!("Failed to delete template: {error}"),
                 ),
             },
-            TemplateManagerAction::Open { name } => match template_path(&name)
-                .and_then(|path| open::that(path).map_err(Into::into))
-            {
-                Ok(()) => {}
-                Err(error) => app.report_error_message(
-                    "ui operation",
-                    format!("Failed to open template: {error}"),
-                ),
-            },
+            TemplateManagerAction::Open { name } => {
+                #[cfg(test)]
+                let result = template_path(&name).map(|_| { self.test_external_opens += 1; });
+                #[cfg(not(test))]
+                let result = template_path(&name).and_then(|path| open::that(path).map_err(Into::into));
+                if let Err(error) = result {
+                    app.report_error_message("ui operation", format!("Failed to open template: {error}"));
+                }
+            }
+
         }
     }
 }
@@ -1286,12 +1431,38 @@ impl NotesDialog {
 
     pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
         self.open
-            && (self.template_manager.open
-                || self.editor_context_menu_open
+            && (self.editor_context_menu_open
                 || self
                     .menu_owner
                     .as_ref()
                     .is_some_and(|owner| owner.response.context_menu_opened()))
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("quick-notes")
+                .expect("Quick Notes has a registered tool key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn accepts_note_open(
+        &self,
+        receipt: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
+        self.open
+            && receipt.is_current(self.host_state.identity(), &self.open_epoch)
+    }
+
+    pub(super) fn close_from_app(&mut self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("quick-notes")
+                .expect("Quick Notes has a registered tool key");
+            super::utility_host::remember_presentation(ctx, key, self.host_state.presentation());
+            self.open = false;
+            self.presentation_prepared = false;
+        }
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
@@ -1320,28 +1491,102 @@ impl NotesDialog {
         let Some(layer) = self.host_layer_if_root() else {
             return false;
         };
-        let template_owner = self.template_manager.owns_input(ctx);
         let popup_owner = self.editor_context_menu_open
             || self
                 .menu_owner
                 .as_ref()
                 .is_some_and(|owner| owner.response.context_menu_opened());
-        let modal_owner = template_owner
-            && ctx.memory(|memory| memory.top_modal_layer().is_some());
         ctx.viewport_id() == egui::ViewportId::ROOT
             && ctx.input(|input| input.focused)
-            && (ctx.memory(|memory| memory.top_modal_layer().is_none()) || modal_owner)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
             && (crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-                || template_owner
                 || popup_owner)
             && crate::gui::jump_mode::ui::focused_response_layer(ctx)
                 .is_none_or(|focused_layer| {
-                    focused_layer == layer || template_owner || popup_owner
+                    focused_layer == layer || popup_owner
                 })
     }
 
     pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
         std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_popout(&mut self) {
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_stage_auxiliary_open(
+        &mut self,
+        ctx: &egui::Context,
+        templates: bool,
+        assets: bool,
+        host_request: Option<UtilityPresentation>,
+    ) {
+        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        self.pending_effects = Some(NotesFrameEffects {
+            open_epoch: self.open_epoch,
+            root_pass: pass,
+            host: self.host_state.identity(),
+            owner_pass: None,
+            owner_viewport_id: egui::ViewportId::ROOT,
+            owner_pass_accepted: true,
+            owner_instance: 0,
+            callback_observed: true,
+            callback_class: egui::ViewportClass::Root,
+            native_viewport: None,
+            embedded_root_layer: None,
+            embedded_root_focused_id: None,
+            host_request,
+            focus_host: false,
+            close_requested: false,
+            os_close_requested: false,
+            note_to_save: None,
+            save_edit: false,
+            remove_note_index: None,
+            refresh_entries: false,
+            rebuild_index: false,
+            wrap_links_slug: None,
+            open_note_panels: Vec::new(),
+            open_unused_assets: assets,
+            open_templates: templates,
+            activations: Vec::new(),
+            external_open_paths: Vec::new(),
+            clipboard_texts: Vec::new(),
+            notices: Vec::new(),
+            draft_checkpoint: None,
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_open_receipt(
+        &self,
+        ctx: &egui::Context,
+        pass: ViewportPassProvenance,
+    ) -> Option<super::utility_host::AcceptedParentOpen<u64>> {
+        super::utility_host::AcceptedParentOpen::from_retained(
+            ctx,
+            self.host_state.identity(),
+            self.open_epoch,
+            pass,
+            pass,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_note_open_controls(
+        &self,
+    ) -> (
+        Vec<(String, egui::Rect, egui::Rect, bool)>,
+        Option<(egui::Rect, egui::Rect, bool)>,
+    ) {
+        (self.test_open_row.clone(), self.test_menu_open)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_aux_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_aux_controls.iter().find(|(key, ..)| key == name).map(|(_, rect, clip, enabled)| (*rect, *clip, *enabled))
     }
 
     #[cfg(test)]
@@ -1826,7 +2071,20 @@ impl NotesDialog {
         }
     }
 
+    fn begin_open_session(&mut self) {
+        if !self.open {
+            self.presentation_prepared = false;
+            self.open_epoch = self.open_epoch.wrapping_add(1);
+        }
+    }
+
+    pub(super) fn ensure_open(&mut self) {
+        self.begin_open_session();
+        self.open = true;
+    }
+
     pub fn open(&mut self) {
+        self.begin_open_session();
         if self.host_state.presentation() == UtilityPresentation::Popout {
             if self.open {
                 self.host_state.request_focus();
@@ -1837,18 +2095,12 @@ impl NotesDialog {
             self.text.clear();
             self.search.clear();
             self.host_state.request_focus();
-            if self.template_manager.open {
-                self.template_manager.refresh();
-            }
             return;
         }
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
         self.search.clear();
-        if self.template_manager.open {
-            self.template_manager.refresh();
-        }
     }
 
     pub(crate) fn refresh_entries_from_notes(&mut self) {
@@ -1943,15 +2195,18 @@ impl NotesDialog {
         application_input_allowed: bool,
         root_visible: bool,
         root_input_allowed: bool,
-        root_template_input_allowed: bool,
+        _root_template_input_allowed: bool,
         owner_instance: u64,
         jump_mode_enabled: bool,
         defer_effects: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         #[cfg(test)]
         self.last_rendered_indices.clear();
         #[cfg(test)]
         self.last_rendered_row_rects.clear();
+        #[cfg(test)]
+        { self.test_open_row.clear(); self.test_menu_open = None; self.test_aux_controls.clear(); }
         #[cfg(test)]
         self.last_rendered_header_ids.clear();
         #[cfg(test)]
@@ -2006,6 +2261,7 @@ impl NotesDialog {
                 );
                 if callback_observed {
                     self.pending_effects = Some(NotesFrameEffects {
+                        open_epoch: self.open_epoch,
                         root_pass,
                         host,
                         owner_pass,
@@ -2029,11 +2285,11 @@ impl NotesDialog {
                         wrap_links_slug: None,
                         open_note_panels: Vec::new(),
                         open_unused_assets: false,
+                        open_templates: false,
                         activations: Vec::new(),
                         external_open_paths: Vec::new(),
                         clipboard_texts: Vec::new(),
                         notices: Vec::new(),
-                        template_actions: Vec::new(),
                         draft_checkpoint: None,
                     });
                 }
@@ -2071,7 +2327,6 @@ impl NotesDialog {
                     text: self.text.clone(),
                     search: self.search.clone(),
                     editor_context_menu_open: self.editor_context_menu_open,
-                    template_manager: self.template_manager.clone(),
                 })
             });
             if pass > checkpoint_pass {
@@ -2079,7 +2334,6 @@ impl NotesDialog {
                 self.text = checkpoint.text.clone();
                 self.search = checkpoint.search.clone();
                 self.editor_context_menu_open = checkpoint.editor_context_menu_open;
-                self.template_manager = checkpoint.template_manager.clone();
             }
             self.retained_draft_checkpoint = Some((frame, checkpoint_pass, checkpoint.clone()));
             Some(checkpoint)
@@ -2090,11 +2344,11 @@ impl NotesDialog {
         let mut host_request = None;
         let mut open_note_panels = Vec::new();
         let mut open_unused_assets = false;
+        let mut open_templates = false;
         let mut activations = Vec::new();
         let mut external_open_paths = Vec::new();
         let mut clipboard_texts = Vec::new();
         let mut notices = Vec::new();
-        let mut template_actions = Vec::new();
         let mut native_jump_mode = std::mem::take(&mut self.native_jump_mode);
         let mut native_jump_frame = self.native_jump_frame.take();
         let mut owner_viewport_id = egui::ViewportId::ROOT;
@@ -2120,7 +2374,6 @@ impl NotesDialog {
                                  body_scope: Option<&JumpModeScope>,
                                  body_input_allowed: bool,
                                  host_control_allowed: bool,
-                                 template_input_allowed: bool,
                                  popup_input_allowed: bool| {
             let ctx = body_ctx;
             let jump_scope = body_scope;
@@ -2283,6 +2536,8 @@ impl NotesDialog {
                             this.text.clear();
                         }
                         let unused_assets = ui.button("Unused Assets");
+                        #[cfg(test)]
+                        this.test_aux_controls.push(("assets".into(), unused_assets.rect, ui.clip_rect(), unused_assets.enabled()));
                         register_jump_mode_target(
                             jump_scope,
                             ui,
@@ -2297,6 +2552,8 @@ impl NotesDialog {
                         }
                         if app.note_settings.templates_enabled {
                             let templates = ui.button("Templates");
+                            #[cfg(test)]
+                            this.test_aux_controls.push(("templates".into(), templates.rect, ui.clip_rect(), templates.enabled()));
                             register_jump_mode_target(
                                 jump_scope,
                                 ui,
@@ -2307,7 +2564,7 @@ impl NotesDialog {
                                 &mut jump_visual_order,
                             );
                             if templates.clicked() {
-                                this.template_manager.open();
+                                open_templates = true;
                             }
                         }
                         let close_button = ui.button("Close");
@@ -2511,6 +2768,10 @@ impl NotesDialog {
                                                     &mut jump_visual_order,
                                                 );
                                             }
+                                            #[cfg(test)]
+                                            {
+                                                this.test_open_row.push((entry.slug.clone(), header_response.rect, ui.clip_rect(), header_response.enabled()));
+                                            }
                                             let activate_note = jump_scope.is_some()
                                                 && !entry.slug.is_empty()
                                                 && header_response.has_focus()
@@ -2552,7 +2813,10 @@ impl NotesDialog {
                                             let idx_copy = idx;
                                             response.clone().context_menu(|ui| {
                                                 ui.add_enabled_ui(popup_input_allowed, |ui| {
-                                                    if ui.button("Open").clicked() {
+                                                    let open = ui.button("Open");
+                                                    #[cfg(test)]
+                                                    { this.test_menu_open = Some((open.rect, ui.clip_rect(), open.enabled())); }
+                                                    if open.clicked() {
                                                         open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
@@ -2743,11 +3007,6 @@ impl NotesDialog {
                     });
                 },
             );
-            if app.note_settings.templates_enabled {
-                template_actions.extend(this.template_manager.ui(ctx, template_input_allowed));
-            } else {
-                this.template_manager.open = false;
-            }
         };
         match host.host {
             UtilityPresentation::Docked => {
@@ -2831,8 +3090,6 @@ impl NotesDialog {
                                         .menu_owner
                                         .as_ref()
                                         .is_some_and(|owner| owner.response.context_menu_opened());
-                                let template_owner_current =
-                                    self.template_manager.owns_input(ui.ctx());
                                 owner_pass_accepted = owner_pass_is_current;
                                 let body_ctx = ui.ctx().clone();
                                 draw_contents(
@@ -2842,9 +3099,6 @@ impl NotesDialog {
                                     root_jump_scope.as_ref(),
                                     body_allowed,
                                     body_allowed,
-                                    pass_authorized
-                                        && root_template_input_allowed
-                                        && template_owner_current,
                                     pass_authorized
                                         && root_input_allowed
                                         && visible_body
@@ -3009,8 +3263,6 @@ impl NotesDialog {
                                     .menu_owner
                                     .as_ref()
                                     .is_some_and(|owner| owner.response.context_menu_opened());
-                            let template_owner_current =
-                                self.template_manager.owns_input(&child_ctx);
                             egui::CentralPanel::default().show(child, |ui| {
                                 draw_contents(
                                     self,
@@ -3025,11 +3277,6 @@ impl NotesDialog {
                                         && native_owner_current
                                         && visible_body
                                         && !close,
-                                    pass_authorized
-                                        && application_input_allowed
-                                        && focused
-                                        && visible_body
-                                        && template_owner_current,
                                     pass_authorized
                                         && application_input_allowed
                                         && focused
@@ -3076,8 +3323,6 @@ impl NotesDialog {
                                     .menu_owner
                                     .as_ref()
                                     .is_some_and(|owner| owner.response.context_menu_opened());
-                            let template_owner_current =
-                                self.template_manager.owns_input(&child_ctx);
                             let body_allowed = pass_authorized
                                 && root_input_allowed
                                 && focused
@@ -3092,9 +3337,6 @@ impl NotesDialog {
                                 root_jump_scope.as_ref(),
                                 body_allowed,
                                 body_allowed,
-                                pass_authorized
-                                    && root_template_input_allowed
-                                    && template_owner_current,
                                 pass_authorized
                                     && root_input_allowed
                                     && visible_body
@@ -3117,14 +3359,12 @@ impl NotesDialog {
         }
 
         drop(draw_contents);
-        if !app.note_settings.templates_enabled {
-            self.template_manager.open = false;
-        }
         close |= body_close || close_by_title || os_close_requested;
 
         if defer_effects {
             if callback_observed {
                 self.pending_effects = Some(NotesFrameEffects {
+                    open_epoch: self.open_epoch,
                     root_pass,
                     host,
                     owner_pass,
@@ -3148,11 +3388,11 @@ impl NotesDialog {
                     wrap_links_slug,
                     open_note_panels,
                     open_unused_assets,
+                    open_templates,
                     activations,
                     external_open_paths,
                     clipboard_texts,
                     notices,
-                    template_actions,
                     draft_checkpoint,
                 });
             }
@@ -3202,16 +3442,16 @@ impl NotesDialog {
                 app.open_note_panel(&slug, None);
             }
             if open_unused_assets {
-                app.unused_assets_dialog.open();
+                app.open_unused_assets_from_origin(&super::utility_host::ChildOpenOrigin::<()>::Root);
+            }
+            if open_templates {
+                app.open_note_templates_from_origin(&super::utility_host::ChildOpenOrigin::<()>::Root);
             }
             if let Some(slug) = wrap_links_slug {
                 activations.push(wrap_links_note_action(&slug));
             }
             for action in activations {
                 app.activate_action(action, None, ActivationSource::Click);
-            }
-            for action in template_actions {
-                self.template_manager.apply_action(action, app);
             }
             if close {
                 self.open = false;
@@ -3241,7 +3481,9 @@ impl NotesDialog {
                 closed: false,
                 show_root: self.take_show_root_after_host_change(),
                 open_note_panels: Vec::new(),
+                note_open_origin: None,
                 open_unused_assets: false,
+                open_templates: false,
                 activations: Vec::new(),
                 external_open_paths: Vec::new(),
                 clipboard_texts: Vec::new(),
@@ -3260,6 +3502,7 @@ impl NotesDialog {
             };
         if !effects.root_pass.was_retained(ctx)
             || effects.host != self.host_state.identity()
+            || effects.open_epoch != self.open_epoch
             || !owner_pass_retained
         {
             if let Some(checkpoint) = effects.draft_checkpoint {
@@ -3267,7 +3510,6 @@ impl NotesDialog {
                 self.text = checkpoint.text.clone();
                 self.search = checkpoint.search.clone();
                 self.editor_context_menu_open = checkpoint.editor_context_menu_open;
-                self.template_manager = checkpoint.template_manager.clone();
                 self.retained_draft_checkpoint = None;
             }
             if effects.os_close_requested {
@@ -3280,7 +3522,9 @@ impl NotesDialog {
                 closed: false,
                 show_root: false,
                 open_note_panels: Vec::new(),
+                note_open_origin: None,
                 open_unused_assets: false,
+                open_templates: false,
                 activations: Vec::new(),
                 external_open_paths: Vec::new(),
                 clipboard_texts: Vec::new(),
@@ -3362,16 +3606,27 @@ impl NotesDialog {
             self.text.clear();
             self.refresh_entries_from_notes();
         }
-        for action in effects.template_actions {
-            self.template_manager.apply_action(action, app);
-        }
         let mut activations = effects.activations;
         if let Some(slug) = effects.wrap_links_slug {
             activations.push(wrap_links_note_action(&slug));
         }
+        let note_open_origin = super::utility_host::AcceptedParentOpen::from_retained(
+            ctx,
+            effects.host,
+            effects.open_epoch,
+            effects.root_pass,
+            effects.owner_pass.unwrap_or(effects.root_pass),
+        );
         let closed = effects.close_requested || effects.os_close_requested;
         if closed {
+            super::utility_host::remember_presentation(
+                ctx,
+                crate::settings::UtilityToolKey::parse("quick-notes")
+                    .expect("registered Quick Notes key"),
+                effects.host.host,
+            );
             self.open = false;
+            self.presentation_prepared = false;
             self.close_menu_owner();
             if let Some(identity) = native_identity.take() {
                 super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -3393,6 +3648,12 @@ impl NotesDialog {
                 ctx.send_viewport_cmd_to(quick_notes_viewport_id(), egui::ViewportCommand::Close);
             }
             if self.host_state.transition(requested) {
+                super::utility_host::remember_presentation(
+                    ctx,
+                    crate::settings::UtilityToolKey::parse("quick-notes")
+                        .expect("registered Quick Notes key"),
+                    requested,
+                );
                 self.native_jump_mode.cancel_all();
                 self.native_jump_frame = None;
                 if requested == UtilityPresentation::Docked {
@@ -3409,11 +3670,11 @@ impl NotesDialog {
         }
         NotesFrameCompletion {
             closed,
-            show_root: self.take_show_root_after_host_change()
-                || !effects.open_note_panels.is_empty()
-                || effects.open_unused_assets,
+            show_root: self.take_show_root_after_host_change(),
             open_note_panels: effects.open_note_panels,
+            note_open_origin,
             open_unused_assets: effects.open_unused_assets,
+            open_templates: effects.open_templates,
             activations,
             external_open_paths: effects.external_open_paths,
             clipboard_texts: effects.clipboard_texts,
@@ -3470,6 +3731,36 @@ mod tests {
     use eframe::egui;
     use once_cell::sync::Lazy;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+    #[test]
+    fn note_open_receipt_rejects_closed_reopened_and_docked_list() {
+        let ctx = egui::Context::default();
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        let pass =
+            crate::gui::utility_host::ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = crate::gui::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            dialog.host_state.identity(),
+            dialog.open_epoch,
+            pass,
+            pass,
+        )
+        .unwrap();
+        assert!(dialog.accepts_note_open(&receipt));
+        dialog.template_manager.open = true;
+        assert!(dialog.accepts_note_open(&receipt));
+        dialog.template_manager.open = false;
+        dialog
+            .host_state
+            .transition(crate::gui::utility_host::UtilityPresentation::Popout);
+        assert!(!dialog.accepts_note_open(&receipt));
+        dialog.open = false;
+        dialog.open();
+        assert!(!dialog.accepts_note_open(&receipt));
+        output.drop_without_applying_deltas();
+    }
 
     #[derive(Debug)]
     struct EagerNoteRowRects {

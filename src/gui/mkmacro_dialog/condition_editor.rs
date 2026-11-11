@@ -250,7 +250,7 @@ pub(super) fn condition_ui_with_assets(
     ui.group(|ui| {
         let kind = condition_kind(condition);
         let mut next = kind;
-        egui::ComboBox::from_label("Condition type")
+        super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Condition type")
             .selected_text(kind_label(kind))
             .show_ui(ui, |ui| {
                 for k in [
@@ -267,7 +267,7 @@ pub(super) fn condition_ui_with_assets(
                 ] {
                     ui.selectable_value(&mut next, k, kind_label(k));
                 }
-            });
+            }));
         if next != kind {
             replace_condition(condition, next);
         }
@@ -277,7 +277,7 @@ pub(super) fn condition_ui_with_assets(
                 ui.add(
                     egui::TextEdit::singleline(name).desired_width(ui.available_width().max(1.0)),
                 );
-                egui::ComboBox::from_label("Comparison")
+                super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Comparison")
                     .selected_text(op_label(op))
                     .show_ui(ui, |ui| {
                         for candidate in [
@@ -295,7 +295,7 @@ pub(super) fn condition_ui_with_assets(
                             let label = op_label(&candidate);
                             ui.selectable_value(op, candidate, label);
                         }
-                    });
+                    }));
                 value_ui(ui, value);
             }
             MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
@@ -335,12 +335,12 @@ pub(super) fn condition_ui_with_assets(
                         operation,
                     }));
                 }
-                egui::ComboBox::from_label("Expected")
+                super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Expected")
                     .selected_text(if *found { "Found" } else { "Not Found" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
-                    });
+                    }));
             }
             MkCondition::OcrTextSearch { search, found } => {
                 super::ocr_controls::search_match_ui(ui, &mut search.search);
@@ -386,12 +386,12 @@ pub(super) fn condition_ui_with_assets(
                         }));
                     }
                 });
-                egui::ComboBox::from_label("Expected")
+                super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Expected")
                     .selected_text(if *found { "Found" } else { "Not found" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
-                    });
+                    }));
             }
             MkCondition::PreviousImageResult { image, found } => {
                 let mut specific = image.is_some();
@@ -402,7 +402,7 @@ pub(super) fn condition_ui_with_assets(
                     *image = specific.then(|| assets.first().cloned().unwrap_or_default());
                 }
                 if let Some(image) = image {
-                    egui::ComboBox::from_label("Reference image")
+                    super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Reference image")
                         .selected_text(super::action_editor::image_asset_label(image, assets))
                         .show_ui(ui, |ui| {
                             for asset in assets {
@@ -412,14 +412,14 @@ pub(super) fn condition_ui_with_assets(
                                     super::action_editor::image_asset_label(asset, &[]),
                                 );
                             }
-                        });
+                        }));
                 }
-                egui::ComboBox::from_label("Result")
+                super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Result")
                     .selected_text(if *found { "Found" } else { "Not found" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
-                    });
+                    }));
             }
             MkCondition::PixelResult {
                 target,
@@ -586,12 +586,12 @@ fn condition_ui_context_at(
                     }));
                 }
             });
-            egui::ComboBox::from_label("Expected")
+            super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Expected")
                 .selected_text(if *found { "Found" } else { "Not found" })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(found, true, "Found");
                     ui.selectable_value(found, false, "Not found");
-                });
+                }));
         });
         return requested;
     }
@@ -604,7 +604,7 @@ fn condition_ui_context_at(
         };
         let mut requested = None;
         ui.group(|ui| {
-            egui::ComboBox::from_label("Condition type")
+            super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Condition type")
                 .selected_text(kind_label(ConditionKind::ImageSearch))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -612,7 +612,7 @@ fn condition_ui_context_at(
                         ConditionKind::ImageSearch,
                         kind_label(ConditionKind::ImageSearch),
                     );
-                });
+                }));
             super::image_asset_picker::show(ui, path.indexes(), context, &mut search.image);
             let assets = context.assets;
             if let Some(operation) = super::image_search_controls::show_shared_fields(
@@ -644,12 +644,12 @@ fn condition_ui_context_at(
                     operation,
                 }));
             }
-            egui::ComboBox::from_label("Expected")
+            super::action_editor::record_editor_combo(ui.ctx().clone(), egui::ComboBox::from_label("Expected")
                 .selected_text(if *found { "Found" } else { "Not Found" })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(found, true, "Found");
                     ui.selectable_value(found, false, "Not found");
-                });
+                }));
         });
         return requested;
     }

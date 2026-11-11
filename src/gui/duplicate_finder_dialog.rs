@@ -193,6 +193,7 @@ pub(super) struct DuplicateFinderHostOutcome {
 pub struct DuplicateFinderDialogState {
     pub open: bool,
     host: super::utility_host::UtilityHostState,
+    presentation_prepared: bool,
     host_epoch: u64,
     host_pending: Option<FinderHostFrame>,
     host_os_close_pending: bool,
@@ -263,6 +264,7 @@ impl DuplicateFinderDialogState {
         Self {
             open: false,
             host: super::utility_host::UtilityHostState::docked(),
+            presentation_prepared: false,
             host_epoch: 0,
             host_pending: None,
             host_os_close_pending: false,
@@ -663,6 +665,27 @@ impl DuplicateFinderDialogState {
             .layer_id()
             .expect("duplicate finder layer")
     }
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("duplicate-finder")
+                .expect("stable utility key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host);
+            self.presentation_prepared = true;
+        }
+    }
+
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+
+    pub(super) fn remember_final_presentation(&self, ctx: &egui::Context) {
+        if self.open {
+            let key = crate::settings::UtilityToolKey::parse("duplicate-finder")
+                .expect("stable utility key");
+            super::utility_host::remember_presentation(ctx, key, self.host.presentation());
+        }
+    }
+
     pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
         (self.open
             && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
@@ -698,12 +721,14 @@ impl DuplicateFinderDialogState {
         }
     }
     pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        self.remember_final_presentation(ctx);
         if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
             let identity = self.native_identity(self.host.identity());
             super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
         self.host.retire_to_docked();
+        self.presentation_prepared = false;
         self.host_jump.cancel_all();
         self.host_jump_frame = None;
         self.host_focus = false;
@@ -1027,6 +1052,7 @@ impl DuplicateFinderDialogState {
         pinned: bool,
         root_shortcut_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         use crate::gui::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
@@ -1197,6 +1223,9 @@ impl DuplicateFinderDialogState {
         let show_root = frame.request == Some(UtilityPresentation::Docked);
         if let Some(next) = frame.request {
             if self.host.transition(next) {
+                let key =
+                    crate::settings::UtilityToolKey::parse("duplicate-finder").expect("stable utility key");
+                super::utility_host::remember_presentation(ctx, key, next);
                 self.host_jump.cancel_all();
                 self.host_jump_frame = None;
                 if next == UtilityPresentation::Docked {

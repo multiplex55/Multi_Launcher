@@ -35,15 +35,23 @@ enum PreviewAction {
     MissingMatch,
 }
 
-pub(crate) struct FileSearchPreviewHostActions {
+pub(super) struct FileSearchPreviewHostActions {
+    pub(super) host_request: Option<super::utility_host::UtilityPresentation>,
+    #[cfg(test)] pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    epoch: u64,
+    request_generation: u64,
     request: Option<PreviewRequest>,
-    close: bool,
+    pub(crate) close: bool,
     consumed_auto_scroll: bool,
     actions: Vec<PreviewAction>,
 }
 
 pub struct FileSearchPreviewDialogState {
     pub open: bool,
+    epoch: u64,
+    session_active: bool,
+    request_generation: u64,
+    close_requested: bool,
     pub current_request: Option<PreviewRequest>,
     pub loaded_preview: Option<FilePreview>,
     pub selected_match: Option<ContentMatch>,
@@ -76,6 +84,10 @@ impl Clone for FileSearchPreviewDialogState {
     fn clone(&self) -> Self {
         Self {
             open: self.open,
+            epoch: self.epoch,
+            session_active: self.session_active,
+            request_generation: self.request_generation,
+            close_requested: self.close_requested,
             current_request: self.current_request.clone(),
             loaded_preview: self.loaded_preview.clone(),
             selected_match: self.selected_match.clone(),
@@ -108,6 +120,10 @@ impl Default for FileSearchPreviewDialogState {
     fn default() -> Self {
         Self {
             open: false,
+            epoch: 0,
+            session_active: false,
+            request_generation: 0,
+            close_requested: false,
             current_request: None,
             loaded_preview: None,
             selected_match: None,
@@ -157,6 +173,7 @@ impl FileSearchPreviewDialogState {
         }
 
         self.open = true;
+        self.close_requested = false;
         self.current_request = Some(request.clone());
         self.selected_match = Some(content_match);
         self.loaded_preview = None;
@@ -173,6 +190,8 @@ impl FileSearchPreviewDialogState {
     }
 
     pub fn start_loading_current_preview(&mut self) {
+        if !self.session_active { self.epoch = self.epoch.wrapping_add(1); self.session_active = true; }
+        self.request_generation = self.request_generation.wrapping_add(1);
         let Some(request) = self.current_request.clone() else {
             self.loaded_preview = None;
             self.loading = false;
@@ -198,7 +217,7 @@ impl FileSearchPreviewDialogState {
         });
     }
 
-    fn poll_preview_result(&mut self) {
+    pub(crate) fn poll_preview_result(&mut self) {
         let Some(rx) = self.preview_result_rx.take() else {
             return;
         };
@@ -227,64 +246,111 @@ impl FileSearchPreviewDialogState {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, settings: &FileSearchSettings) {
-        if let Some(actions) = self.ui_in_host(ctx, settings, true) {
-            self.complete_host_actions(actions, Some(ctx));
-        }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
-    pub(crate) fn ui_in_host(
+    #[cfg(test)]
+    pub(crate) fn test_request_generation(&self) -> u64 {
+        self.request_generation
+    }
+    pub(crate) fn request_close(&mut self) {
+        self.close_requested = true;
+    }
+    pub(crate) fn cancel_close_request(&mut self) {
+        self.close_requested = false;
+    }
+
+    pub(crate) fn retire(&mut self) {
+        let epoch = self.epoch.wrapping_add(1);
+        *self = Self::default();
+        self.epoch = epoch;
+    }
+
+    pub(super) fn render_host(
         &mut self,
         ctx: &egui::Context,
         settings: &FileSearchSettings,
         input_allowed: bool,
-    ) -> Option<FileSearchPreviewHostActions> {
-        if !self.open {
-            return None;
-        }
-        self.poll_preview_result();
-        if self.load_state.is_loading() {
-            ctx.request_repaint();
-        }
+        first: bool,
+        child: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> FileSearchPreviewHostActions {
         let mut open = self.open;
         let pending_auto_scroll = self.pending_auto_scroll;
+        let reset_horizontal_scroll = self.reset_horizontal_scroll;
         let mut actions = Vec::new();
-        let key = crate::settings::UtilityToolKey::parse("file-preview")
-            .expect("file-preview is a stable utility size key");
-        let window_id = egui::Id::new(preview_window_id_source());
-        let size_access =
-            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
-        let window = egui::Window::new("File preview")
-            .id(window_id)
-            .resizable(true);
-        size_access.show_window(
-            ctx,
-            key,
-            window_id,
-            &mut open,
-            DEFAULT_PREVIEW_WINDOW_SIZE,
-            egui::Vec2::splat(64.0),
-            window,
-            |ui| {
-                self.render_contents(ui, settings, &mut actions);
-            },
-        );
+        let mut host_request = None;
+        #[cfg(test)]
+        let mut host_button = None;
+        let mut body = |ui: &mut egui::Ui| {
+            let active = input_allowed
+                && first
+                && ui.is_visible()
+                && !ui.is_sizing_pass()
+                && !ctx.will_discard();
+            let (button, next) = super::utility_host::presentation_button(ui, presentation, active);
+            #[cfg(test)]
+            {
+                host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+            }
+            if active && button.clicked() {
+                host_request = Some(next);
+            }
+            ui.add_enabled_ui(active, |ui| {
+                self.render_contents(ui, settings, &mut actions)
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+            egui::Window::new("File preview")
+                .id(egui::Id::new(preview_window_id_source()))
+                .resizable(true)
+                .default_size(DEFAULT_PREVIEW_WINDOW_SIZE)
+                .min_size([320.0, 240.0])
+                .show_utility(
+                    ctx,
+                    "file-preview",
+                    egui::Id::new(preview_window_id_source()),
+                    Some(&mut open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        super::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            DEFAULT_PREVIEW_WINDOW_SIZE,
+                        ),
+                        egui::vec2(320.0, 240.0),
+                        [None, None],
+                    ),
+                    |ui| body(ui),
+                );
+        }
         let consumed_auto_scroll = pending_auto_scroll && !self.pending_auto_scroll;
         self.pending_auto_scroll = pending_auto_scroll;
-        input_allowed.then(|| FileSearchPreviewHostActions {
+        self.reset_horizontal_scroll = reset_horizontal_scroll;
+        FileSearchPreviewHostActions {
+            host_request,
+            #[cfg(test)]
+            host_button,
+            epoch: self.epoch,
+            request_generation: self.request_generation,
             request: self.current_request.clone(),
-            close: !open,
+            close: !open || self.close_requested,
             consumed_auto_scroll,
-            actions,
-        })
+            actions: if first && input_allowed && !ctx.will_discard() {
+                actions
+            } else {
+                Vec::new()
+            },
+        }
     }
 
-    pub(crate) fn complete_host_actions(
+    pub(super) fn complete_host_actions(
         &mut self,
         pending: FileSearchPreviewHostActions,
         immediate_ctx: Option<&egui::Context>,
     ) {
-        if !self.open || self.current_request != pending.request {
+        if !self.open || self.epoch != pending.epoch || self.request_generation != pending.request_generation || self.current_request != pending.request {
             return;
         }
         self.open = !pending.close;
@@ -579,6 +645,33 @@ fn human_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::file_search::preview::PreviewLine;
+
+    #[test]
+    fn preview_host_rejects_same_request_from_retired_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preview.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+        let mut state = FileSearchPreviewDialogState::default();
+        state.open = true;
+        state.current_request = Some(PreviewRequest::new(&path));
+        state.load_current_preview();
+        let stale = FileSearchPreviewHostActions {
+            host_request: None,
+            host_button: None,
+            epoch: state.epoch,
+            request_generation: state.request_generation,
+            request: state.current_request.clone(),
+            close: false,
+            consumed_auto_scroll: true,
+            actions: vec![PreviewAction::Copy("stale".into())],
+        };
+        state.load_current_preview();
+        state.pending_auto_scroll = true;
+        let ctx = egui::Context::default();
+        state.complete_host_actions(stale, Some(&ctx));
+        assert!(state.pending_auto_scroll);
+        assert!(ctx.output(|output| output.commands.is_empty()));
+    }
 
     #[test]
     fn opening_first_match_sets_open_current_request_and_match() {

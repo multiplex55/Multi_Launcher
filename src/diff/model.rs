@@ -122,6 +122,47 @@ impl Default for FolderRulesDraft {
     }
 }
 
+impl FolderRulesDraft {
+    fn lines(value: &str) -> Vec<String> {
+        value
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn validated_scan_rules(&self) -> Result<ScanRules, String> {
+        ScanRules::validated(
+            Self::lines(&self.include_rules),
+            Self::lines(&self.exclude_rules),
+        )
+    }
+
+    pub fn validated_tolerance(&self) -> Result<Duration, String> {
+        const MAX_SECONDS: f64 = 86_400.0;
+        let value: f64 = self
+            .timestamp_tolerance_seconds
+            .trim()
+            .parse()
+            .map_err(|_| "Timestamp tolerance must be a number".to_owned())?;
+        if !value.is_finite() {
+            return Err("Timestamp tolerance must be finite".into());
+        }
+        if value < 0.0 {
+            return Err("Timestamp tolerance cannot be negative".into());
+        }
+        if value > MAX_SECONDS {
+            return Err("Timestamp tolerance cannot exceed 24 hours".into());
+        }
+        Ok(Duration::from_secs_f64(value))
+    }
+
+    pub fn validate(&self) -> Result<(ScanRules, Duration), String> {
+        Ok((self.validated_scan_rules()?, self.validated_tolerance()?))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderCompareState {
     pub left_root: PathBuf,
@@ -145,8 +186,6 @@ pub struct FolderCompareState {
     pub compare_file_size: bool,
     pub compare_modified_timestamps: bool,
     pub use_text_compare_rules: bool,
-    pub folder_rules_open: bool,
-    pub folder_rules_cancel_snapshot: Option<FolderRulesDraft>,
     pub left_scan_complete: bool,
     pub right_scan_complete: bool,
     /// Children changed by an editor and awaiting a targeted metadata refresh.
@@ -180,8 +219,6 @@ impl Default for FolderCompareState {
             compare_file_size: true,
             compare_modified_timestamps: true,
             use_text_compare_rules: true,
-            folder_rules_open: false,
-            folder_rules_cancel_snapshot: None,
             left_scan_complete: false,
             right_scan_complete: false,
             stale_paths: BTreeSet::new(),
@@ -199,47 +236,16 @@ impl FolderCompareState {
         };
         self.column_widths = settings.folder_column_widths.validated();
     }
-    fn draft_lines(value: &str) -> Vec<String> {
-        value
-            .lines()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-            .collect()
-    }
-
     pub fn validated_draft_scan_rules(&self) -> Result<ScanRules, String> {
-        ScanRules::validated(
-            Self::draft_lines(&self.draft_rules.include_rules),
-            Self::draft_lines(&self.draft_rules.exclude_rules),
-        )
+        self.draft_rules.validated_scan_rules()
     }
 
     pub fn validated_draft_tolerance(&self) -> Result<Duration, String> {
-        const MAX_SECONDS: f64 = 86_400.0;
-        let value: f64 = self
-            .draft_rules
-            .timestamp_tolerance_seconds
-            .trim()
-            .parse()
-            .map_err(|_| "Timestamp tolerance must be a number".to_owned())?;
-        if !value.is_finite() {
-            return Err("Timestamp tolerance must be finite".into());
-        }
-        if value < 0.0 {
-            return Err("Timestamp tolerance cannot be negative".into());
-        }
-        if value > MAX_SECONDS {
-            return Err("Timestamp tolerance cannot exceed 24 hours".into());
-        }
-        Ok(Duration::from_secs_f64(value))
+        self.draft_rules.validated_tolerance()
     }
 
     pub fn validate_draft(&self) -> Result<(ScanRules, Duration), String> {
-        Ok((
-            self.validated_draft_scan_rules()?,
-            self.validated_draft_tolerance()?,
-        ))
+        self.draft_rules.validate()
     }
 
     pub fn apply_draft(&mut self) -> Result<(), String> {
@@ -1385,8 +1391,6 @@ view_ui_checkpoint! { FolderUiCheckpoint for FolderCompareState {
     sort: FolderSortState,
     column_widths: FolderColumnWidthsV1,
     draft_rules: FolderRulesDraft,
-    folder_rules_open: bool,
-    folder_rules_cancel_snapshot: Option<FolderRulesDraft>,
     alignment_overrides: Vec<FolderAlignmentOverride>,
     pending_alignment: Option<(bool, PathBuf)>,
 }}

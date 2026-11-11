@@ -264,6 +264,7 @@ fn roots_match_global_search_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_search::coordinator::SearchCoordinator;
     use crate::file_search::model::{ContentMatchMode, FileTypeFilter};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -463,6 +464,36 @@ mod tests {
             },
         );
         assert_eq!(plan.candidates, vec![SearchBackend::WalkDir]);
+    }
+
+    #[test]
+    fn global_filename_contains_reports_walkdir_even_when_everything_is_enabled() {
+        let mut req = request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+        );
+        let settings = FileSearchSettings {
+            everything_enabled: true,
+            global_search_roots: Vec::new(),
+            ..FileSearchSettings::default()
+        };
+        assert_eq!(
+            FileSearchExecutor::plan_for_request(&req, &settings).candidates,
+            vec![SearchBackend::Everything, SearchBackend::WalkDir]
+        );
+        req.filename_match_mode = FilenameMatchMode::FilenameContains;
+        assert_eq!(
+            FileSearchExecutor::plan_for_request(&req, &settings).candidates,
+            vec![SearchBackend::WalkDir]
+        );
+        assert_eq!(
+            SearchCoordinator::select_backend_with_settings(&req, Some(&settings)),
+            SearchBackend::WalkDir
+        );
+        assert_eq!(
+            SearchCoordinator::select_backend(&req),
+            SearchBackend::WalkDir
+        );
     }
 
     #[test]

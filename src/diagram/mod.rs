@@ -69,11 +69,12 @@ pub use visual::{
     VisualTransform,
 };
 pub use visual_canvas::{
-    CanvasAnchor, CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit,
+    CanvasAnchor, CanvasConnectorEnd, CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit,
     CanvasMapping, CanvasMinimap, ResolvedVisualMembership, SnappedTranslation,
     VISUAL_GUIDE_TOLERANCE_SCREEN_POINTS, VISUAL_LAYOUT_GRID_SPACING, VisualAlign,
     VisualDistribution, VisualTransformMode, align_selection as visual_canvas_align_selection,
     distribute_selection as visual_canvas_distribute_selection, hit_test as visual_canvas_hit_test,
+    connector_target_hit_test as visual_canvas_connector_target_hit_test,
     marquee_selection as visual_canvas_marquee_selection,
     minimap_layout as visual_canvas_minimap_layout,
     preview_transforms as preview_visual_transforms,
@@ -143,3 +144,5 @@ pub(crate) use persistence::{
     ResolvedExportDestination, StagedUnoccupiedFile, resolve_export_destination,
     stage_export_unoccupied,
 };
+
+pub(crate) use visual_scene::connector_attachment as visual_connector_attachment;

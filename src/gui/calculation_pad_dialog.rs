@@ -59,11 +59,14 @@ pub(crate) struct CalculationPadDialog {
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
+    dependency_navigation: Option<(PadHostIdentity, super::calculation_dependency_dialog::DependencyNavigation)>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
     examples_host: UtilityHostState,
+    examples_presentation_prepared: bool,
     examples_epoch: u64,
     examples_owner: Option<DocumentIncarnation>,
     examples_search: String,
@@ -77,6 +80,8 @@ pub(crate) struct CalculationPadDialog {
     host_close_requested: bool,
     #[cfg(test)]
     test_editor_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_editor_scroll_id: Option<egui::Id>,
     #[cfg(test)]
     test_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -92,6 +97,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_select_comparison: Option<egui::Rect>,
     #[cfg(test)]
+    test_dependency_open: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
@@ -101,6 +108,8 @@ pub(crate) struct CalculationPadDialog {
     test_keep_editing_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_examples_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_examples_button_ownership: Option<(egui::Rect, bool)>,
     #[cfg(test)]
     test_examples_window_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -124,12 +133,15 @@ pub(crate) struct CalculationPadDialog {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CalculationPadDialogEffect {
+pub(super) enum CalculationPadDialogEffect {
     CopyText(String),
-    OpenInspector,
+    OpenInspector(PadOpenReceipt),
+    OpenDependencies(PadOpenReceipt),
     ShowRoot,
     SaveRecoveryPreference(bool),
 }
+
+pub(super) type PadOpenReceipt = super::utility_host::AcceptedParentOpen<(DocumentIncarnation, DocumentId)>;
 
 struct RootEffects {
     pass: ViewportPassProvenance,
@@ -157,6 +169,15 @@ struct HelpEffects {
     embedded_focus: Option<egui::Id>,
 }
 
+struct DependencyEditorUpdate {
+    navigation: super::calculation_dependency_dialog::DependencyNavigation,
+    revision: u64,
+    editor_id: egui::Id,
+    editor_state: egui::widgets::text_edit::TextEditState,
+    scroll_id: egui::Id,
+    scroll_state: egui::scroll_area::State,
+}
+
 struct HostEffects {
     identity: PadHostIdentity,
     viewport_id: egui::ViewportId,
@@ -169,6 +190,8 @@ struct HostEffects {
     inspector_selection: Option<LineId>,
     inspector_caret: Option<std::ops::Range<usize>>,
     open_inspector: bool,
+    open_dependencies: bool,
+    dependency_applied: Option<DependencyEditorUpdate>,
     save_as_name: Option<String>,
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
@@ -270,6 +293,8 @@ impl CalculationPadDialog {
             inspector_selection: None,
             inspector_caret: None,
             open_inspector: false,
+            open_dependencies: false,
+            dependency_applied: None,
             save_as_name: None,
             source_focus_requested: false,
             source_editor_id: None,
@@ -358,11 +383,14 @@ impl CalculationPadDialog {
             recovery_attempted: false,
             last_recovery_identity: None,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             deferred_source_focus: None,
+            dependency_navigation: None,
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
             examples_host: UtilityHostState::docked(),
+            examples_presentation_prepared: false,
             examples_epoch: 0,
             examples_owner: None,
             examples_search: String::new(),
@@ -376,6 +404,8 @@ impl CalculationPadDialog {
             host_close_requested: false,
             #[cfg(test)]
             test_editor_id: None,
+            #[cfg(test)]
+            test_editor_scroll_id: None,
             #[cfg(test)]
             test_editor_rect: None,
             #[cfg(test)]
@@ -391,6 +421,8 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_select_comparison: None,
             #[cfg(test)]
+            test_dependency_open: None,
+            #[cfg(test)]
             test_inspector_reopen: None,
             #[cfg(test)]
             test_window_rect: None,
@@ -400,6 +432,8 @@ impl CalculationPadDialog {
             test_keep_editing_rect: None,
             #[cfg(test)]
             test_examples_button_rect: None,
+            #[cfg(test)]
+            test_examples_button_ownership: None,
             #[cfg(test)]
             test_examples_window_rect: None,
             #[cfg(test)]
@@ -453,7 +487,27 @@ impl CalculationPadDialog {
 
     fn reset_host_to_docked(&mut self) {
         self.host_state.retire_to_docked();
+        self.presentation_prepared = false;
         self.deferred_source_focus = None;
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            super::utility_host::restore_remembered_presentation(
+                ctx,
+                calculation_pad_tool_key(),
+                &mut self.host_state,
+            );
+            self.presentation_prepared = true;
+        }
+        if self.examples_open && !self.examples_presentation_prepared {
+            super::utility_host::restore_remembered_presentation(
+                ctx,
+                reference_tool_key(),
+                &mut self.examples_host,
+            );
+            self.examples_presentation_prepared = true;
+        }
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
@@ -474,6 +528,7 @@ impl CalculationPadDialog {
             self.examples_epoch = self.examples_epoch.wrapping_add(1);
             self.examples_owner = self.examples_owner();
             self.examples_host.retire_to_docked();
+            self.examples_presentation_prepared = false;
             self.examples_open = true;
         }
     }
@@ -726,6 +781,7 @@ impl CalculationPadDialog {
             self.test_editor_id = None;
             self.test_editor_rect = None;
             self.test_examples_button_rect = None;
+            self.test_examples_button_ownership = None;
             self.test_examples_window_rect = None;
             self.test_examples_copy_rect = None;
             self.test_examples_copy_state = None;
@@ -751,6 +807,7 @@ impl CalculationPadDialog {
             return;
         }
 
+        self.prepare_open_presentation(ctx);
         let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let mut host_effects = None;
         match self.host_state.presentation() {
@@ -1152,6 +1209,18 @@ impl CalculationPadDialog {
         source_focus_allowed: bool,
         effects: &mut HostEffects,
     ) {
+        if self.dependency_navigation.is_some_and(|(host, nav)| {
+            host != self.host_identity()
+                || self.session.current_id() != Some(nav.document)
+                || self.session.document_incarnation() != Some(nav.incarnation)
+                || !self.open
+                || !self
+                    .session
+                    .line_ids()
+                    .is_some_and(|ids| ids.contains(&nav.line))
+        }) {
+            self.dependency_navigation = None;
+        }
         let content_rect = ui.clip_rect();
         let editor_id = egui::Id::new("calculation-pad-source");
         effects.source_editor_id = Some(editor_id);
@@ -1186,6 +1255,8 @@ impl CalculationPadDialog {
                         &mut effects.inspector_selection,
                         &mut effects.inspector_caret,
                         &mut effects.open_inspector,
+                        &mut effects.open_dependencies,
+                        &mut effects.dependency_applied,
                         identity,
                         viewport_id,
                     );
@@ -1198,7 +1269,7 @@ impl CalculationPadDialog {
 
     /// Apply host state only after ROOT and the originating host pass are retained.
     /// Source edits precede document intents and result-copy resolution.
-    pub(crate) fn on_ui_frame_complete(
+    pub(super) fn on_ui_frame_complete(
         &mut self,
         ctx: &egui::Context,
     ) -> Vec<CalculationPadDialogEffect> {
@@ -1230,20 +1301,56 @@ impl CalculationPadDialog {
         }
 
         let help = effects.help;
-        let mut delivered = effects
-            .host
-            .map_or_else(Vec::new, |host| self.complete_pad_host(ctx, host));
+        let mut reference_open = None;
+        let mut delivered = effects.host.map_or_else(Vec::new, |host| {
+            self.complete_pad_host(ctx, effects.pass, host, &mut reference_open)
+        });
         if (self.examples_open
             || self.examples_owner.is_some()
             || self.examples_host.presentation() == PadHost::Popout)
             && (!self.open || !self.examples_open || self.examples_owner != self.examples_owner())
         {
+            if !self.open && self.examples_open {
+                super::utility_host::remember_presentation(ctx, reference_tool_key(), self.examples_host.presentation());
+            }
             self.retire_examples(ctx);
         }
         if let Some(help) = help {
             self.complete_examples(ctx, help, &mut delivered);
         }
+        if let Some((receipt, was_open)) = reference_open
+            && self.accepts_inspector_origin(&receipt)
+            && self.examples_open
+        {
+            let key = reference_tool_key();
+            let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                .and_then(|manager| manager.preference(key))
+                .map(Into::into);
+            let desired = super::utility_host::resolve_child_presentation(
+                was_open.then(|| self.examples_host.presentation()), remembered,
+                self.examples_host.presentation(), &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            );
+            if self.examples_host.transition(desired) {
+                self.examples_host.request_focus();
+            }
+            if desired == PadHost::Popout {
+                super::utility_host::remember_presentation(ctx, key, desired);
+            }
+            if desired == PadHost::Docked {
+                delivered.push(CalculationPadDialogEffect::ShowRoot);
+            }
+        }
         delivered
+    }
+
+    pub(super) fn accepts_inspector_origin(&self, origin: &PadOpenReceipt) -> bool {
+        self.open
+            && !self.host_close_requested
+            && !self.open_chooser
+            && !self.save_as_open
+            && self.session.pending_transition().is_none()
+            && self.session.document_incarnation().zip(self.session.current_id())
+                .is_some_and(|session| origin.is_current(self.host_identity(), &session))
     }
 
     fn retire_examples(&mut self, ctx: &egui::Context) {
@@ -1261,6 +1368,7 @@ impl CalculationPadDialog {
             ctx.send_viewport_cmd_to(reference_viewport_id(), egui::ViewportCommand::Close);
         }
         self.examples_host.retire_to_docked();
+        self.examples_presentation_prepared = false;
         self.examples_open = false;
         self.examples_owner = None;
         self.examples_epoch = self.examples_epoch.wrapping_add(1);
@@ -1312,6 +1420,7 @@ impl CalculationPadDialog {
             self.examples_scroll = scroll.max(0.0);
         }
         if help.close {
+            super::utility_host::remember_presentation(ctx, reference_tool_key(), help.identity.host);
             self.retire_examples(ctx);
             ctx.request_repaint();
             return;
@@ -1320,6 +1429,7 @@ impl CalculationPadDialog {
         if let Some(requested) = help.host_request
             && self.examples_host.transition(requested)
         {
+            super::utility_host::remember_presentation(ctx, reference_tool_key(), requested);
             if requested == PadHost::Docked {
                 crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx,
@@ -1374,7 +1484,9 @@ impl CalculationPadDialog {
     fn complete_pad_host(
         &mut self,
         ctx: &egui::Context,
+        root: ViewportPassProvenance,
         mut host: HostEffects,
+        reference_open: &mut Option<(PadOpenReceipt, bool)>,
     ) -> Vec<CalculationPadDialogEffect> {
         let mut delivered = Vec::new();
         let host_pass_retained = host.pass_accepted
@@ -1402,6 +1514,8 @@ impl CalculationPadDialog {
             host.inspector_selection = None;
             host.inspector_caret = None;
             host.open_inspector = false;
+            host.open_dependencies = false;
+            host.dependency_applied = None;
         }
 
         let needs_repaint = host.edited_source.is_some()
@@ -1484,16 +1598,22 @@ impl CalculationPadDialog {
                 pending_decision = Some(TransitionDecision::Save);
             }
             let show_root = matches!(&intent, DialogIntent::OpenExamples);
+            let reference_was_open = self.examples_open;
             let requested_recovery_preference = match &intent {
                 DialogIntent::SetRememberSource(enabled) => Some(*enabled),
                 _ => None,
             };
             self.apply_intent(intent);
-            if show_root
-                && self.examples_open
-                && self.examples_host.presentation() == PadHost::Docked
+            self.prepare_open_presentation(ctx);
+            if show_root && self.examples_open
+                && let (Some(incarnation), Some(document), Some(owner)) = (
+                    self.session.document_incarnation(), self.session.current_id(), host.pass,
+                )
+                && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, host.identity, (incarnation, document), root, owner,
+                )
             {
-                delivered.push(CalculationPadDialogEffect::ShowRoot);
+                *reference_open = Some((receipt, reference_was_open));
             }
             if let Some(enabled) = requested_recovery_preference
                 && enabled != self.remember_source
@@ -1577,8 +1697,55 @@ impl CalculationPadDialog {
             }
         }
         self.sync_inspector_context();
-        if host.open_inspector && !host.close_requested && host.host_request.is_none() {
-            delivered.push(CalculationPadDialogEffect::OpenInspector);
+        if host.open_inspector && !host.close_requested && host.host_request.is_none()
+            && host.document_basis.map(|(incarnation, document, _)| (incarnation, document))
+                == self.session.document_incarnation().zip(self.session.current_id())
+            && let (Some(incarnation), Some(document), Some(owner)) = (
+                self.session.document_incarnation(), self.session.current_id(), host.pass,
+            )
+            && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, host.identity, (incarnation, document), root, owner,
+            )
+        {
+            delivered.push(CalculationPadDialogEffect::OpenInspector(receipt));
+        }
+        if host.open_dependencies
+            && !host.close_requested
+            && host.host_request.is_none()
+            && host
+                .document_basis
+                .map(|(incarnation, document, _)| (incarnation, document))
+                == self
+                    .session
+                    .document_incarnation()
+                    .zip(self.session.current_id())
+            && let (Some(incarnation), Some(document), Some(owner)) = (
+                self.session.document_incarnation(),
+                self.session.current_id(),
+                host.pass,
+            )
+            && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx,
+                host.identity,
+                (incarnation, document),
+                root,
+                owner,
+            )
+        {
+            delivered.push(CalculationPadDialogEffect::OpenDependencies(receipt));
+        }
+        if let Some(update) = host.dependency_applied
+            && self.dependency_navigation == Some((host.identity, update.navigation))
+            && self.session.revision() == Some(update.revision)
+            && self.host_identity() == host.identity
+            && self.open
+        {
+            update.editor_state.store(ctx, update.editor_id);
+            update.scroll_state.store(ctx, update.scroll_id);
+            self.host_state.request_focus();
+            ctx.request_repaint_of(host.viewport_id);
+            host.source_focus_requested = true;
+            self.dependency_navigation = None;
         }
         if host.close_requested {
             self.host_close_requested = false;
@@ -1697,6 +1864,9 @@ impl CalculationPadDialog {
             }
         }
 
+        if !self.open {
+            super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), host.identity.host);
+        }
         let close_popout = host.identity.host == PadHost::Popout && !self.open;
         if close_popout {
             crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
@@ -1810,6 +1980,75 @@ impl CalculationPadDialog {
         }
     }
 
+    pub(super) fn dependency_context(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::calculation_pad::DependencySnapshot>> {
+        if !self.open
+            || self.host_close_requested
+            || self.open_chooser
+            || self.save_as_open
+            || self.session.pending_transition().is_some()
+        {
+            return None;
+        }
+        self.session.dependency_snapshot()
+    }
+
+    pub(super) fn dependency_host(&self) -> Option<super::utility_host::HostIdentity> {
+        (self.open
+            && !self.host_close_requested
+            && !self.open_chooser
+            && !self.save_as_open
+            && self.session.pending_transition().is_none())
+        .then(|| self.host_identity())
+    }
+
+    pub(super) fn dependency_seed(&self) -> Option<LineId> {
+        let caret = self.inspector_caret.as_ref()?;
+        if self.session.document_incarnation() != Some(caret.incarnation)
+            || self.session.current_id() != Some(caret.document)
+            || self.session.revision() != Some(caret.revision)
+        {
+            return None;
+        }
+        let source = self.session.source()?;
+        let index = source
+            .get(..caret.range.start)?
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        self.session.line_id(index)
+    }
+
+    pub(super) fn navigate_dependency(
+        &mut self,
+        nav: super::calculation_dependency_dialog::DependencyNavigation,
+        source_host: super::utility_host::HostIdentity,
+        ctx: &egui::Context,
+    ) -> bool {
+        if self.host_identity() != source_host
+            || !self.open
+            || self.host_close_requested
+            || self.open_chooser
+            || self.save_as_open
+            || self.session.pending_transition().is_some()
+            || self
+                .session
+                .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
+                .is_none()
+        {
+            return false;
+        }
+        self.dependency_navigation = Some((self.host_identity(), nav));
+        let viewport = if source_host.host == PadHost::Popout {
+            pad_viewport_id()
+        } else {
+            egui::ViewportId::ROOT
+        };
+        ctx.request_repaint_of(viewport);
+        true
+    }
+
     pub(super) fn inspector_context(&self) -> std::sync::Arc<InspectorPadContext> {
         std::sync::Arc::clone(&self.inspector_context)
     }
@@ -1852,6 +2091,7 @@ impl CalculationPadDialog {
             return false;
         }
         self.host_state.transition(requested_host);
+        super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), requested_host);
         self.deferred_source_focus = None;
         match requested_host {
             PadHost::Docked => {
@@ -1908,6 +2148,8 @@ impl CalculationPadDialog {
         inspector_selection: &mut Option<LineId>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         open_inspector: &mut bool,
+        open_dependencies: &mut bool,
+        dependency_applied: &mut Option<DependencyEditorUpdate>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
@@ -1936,10 +2178,14 @@ impl CalculationPadDialog {
             #[cfg(test)]
             if ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_examples_button_rect = Some(examples.rect);
+                self.test_examples_button_ownership = Some((ui.clip_rect(), examples.enabled()));
             }
             if examples.clicked() {
                 *intent = Some(DialogIntent::OpenExamples);
             }
+            let dependencies = ui.button("Dependencies…");
+            #[cfg(test)] { self.test_dependency_open = Some((dependencies.rect, ui.clip_rect(), dependencies.enabled())); }
+            if dependencies.clicked() { *open_dependencies = true; }
             let inspector = ui.button("Programmer Inspector…");
             #[cfg(test)]
             {
@@ -2015,6 +2261,7 @@ impl CalculationPadDialog {
                     source_focus_requested,
                     edited_source,
                     inspector_caret,
+                    dependency_applied,
                 );
                 self.results_ui(
                     &mut columns[1],
@@ -2038,6 +2285,7 @@ impl CalculationPadDialog {
                 source_focus_requested,
                 edited_source,
                 inspector_caret,
+                dependency_applied,
             );
             self.results_ui(
                 ui,
@@ -2169,9 +2417,24 @@ impl CalculationPadDialog {
         source_focus_requested: &mut bool,
         edited_source: &mut Option<String>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
+        dependency_applied: &mut Option<DependencyEditorUpdate>,
     ) {
         ui.heading("Source");
-        let response = ui
+        let navigation = self.dependency_navigation.and_then(|(host, nav)| {
+            (authorized_pass
+                && host == self.host_identity()
+                && self.open
+                && !self.open_chooser
+                && !self.save_as_open
+                && self.session.pending_transition().is_none())
+            .then(|| {
+                self.session
+                    .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
+                    .map(|location| (nav, location))
+            })
+            .flatten()
+        });
+        let scroll = ui
             .add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
                 egui::ScrollArea::both()
                     .id_salt("calculation-pad-editor-scroll")
@@ -2185,11 +2448,44 @@ impl CalculationPadDialog {
                             .hint_text("total = 2 + 3\nr1 * 4")
                             .show(ui)
                     })
-                    .inner
             })
             .inner;
-
-        let response = &response.response;
+        if let Some((nav, location)) = navigation
+            && let Some(revision) = self.session.revision()
+        {
+            let start = source[..location.source_range.start].chars().count();
+            let end = source[..location.source_range.end].chars().count();
+            let mut state = scroll.inner.state.clone();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(start),
+                    egui::text::CCursor::new(end),
+                )));
+            let target = scroll
+                .inner
+                .galley
+                .pos_from_cursor(egui::text::CCursor::new(start))
+                .translate(scroll.inner.galley_pos.to_vec2());
+            let mut scroll_state = scroll.state;
+            scroll_state.offset.y =
+                (scroll_state.offset.y + target.center().y - scroll.inner_rect.center().y).max(0.0);
+            scroll_state.offset.x =
+                (scroll_state.offset.x + target.left() - scroll.inner_rect.left()).max(0.0);
+            *dependency_applied = Some(DependencyEditorUpdate {
+                navigation: nav,
+                revision,
+                editor_id,
+                editor_state: state,
+                scroll_id: scroll.id,
+                scroll_state,
+            });
+        }
+        #[cfg(test)]
+        {
+            self.test_editor_scroll_id = Some(scroll.id);
+        }
+        let response = &scroll.inner.response;
         let cursor_interaction = response.clicked()
             || response.dragged()
             || response.changed()
@@ -2595,6 +2891,7 @@ impl CalculationPadDialog {
     }
 
     fn reset_transient_ui(&mut self) {
+        self.dependency_navigation = None;
         self.open_chooser = false;
         self.examples_open = false;
         self.saved_documents.clear();
@@ -2701,6 +2998,12 @@ impl CalculationPadDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_dependency_navigation_pending(&self) -> bool { self.dependency_navigation.is_some() }
+
+    #[cfg(test)]
+    pub(crate) fn test_dependency_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_dependency_open }
+
+    #[cfg(test)]
     pub(crate) fn test_inspector_reopen(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_inspector_reopen
     }
@@ -2742,6 +3045,16 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_popout_pad(&mut self, ctx: &egui::Context) {
         self.apply_host_request(ctx, PadHost::Popout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_examples_button_ownership(&self) -> Option<(egui::Rect, bool)> {
+        self.test_examples_button_ownership
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reference_is_popout(&self) -> bool {
+        self.examples_open && self.examples_host.presentation() == PadHost::Popout
     }
 
     #[cfg(test)]
@@ -2948,6 +3261,214 @@ mod tests {
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+    #[test]
+    fn dependency_navigation_applies_current_utf8_caret_and_scroll_only_after_retention() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let mut lines = (0..50).map(|n| format!("v{n} = {n}")).collect::<Vec<_>>();
+        lines.push("{顧客 名} = 42".into());
+        dialog.test_replace_source(&lines.join("\n"));
+        let size = egui::vec2(900.0, 700.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let snapshot = dialog.dependency_context().unwrap();
+        let target = snapshot.rows.last().unwrap();
+        let nav = super::super::calculation_dependency_dialog::DependencyNavigation {
+            document: snapshot.document_id,
+            incarnation: snapshot.incarnation,
+            line: target.id,
+        };
+        let host = dialog.host_identity();
+        let editor_id = dialog.test_editor_id.unwrap();
+        let scroll_id = dialog.test_editor_scroll_id.unwrap();
+        let before_cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .and_then(|state| state.cursor.char_range());
+        let before_scroll = egui::scroll_area::State::load(&ctx, scroll_id)
+            .unwrap()
+            .offset;
+        let before = (
+            dialog.session.source().unwrap().to_owned(),
+            dialog.session.revision(),
+            dialog.session.is_dirty(),
+            dialog.session.can_undo(),
+            dialog.session.can_redo(),
+            dialog.session.evaluation_count(),
+        );
+        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(
+            !dialog.focus_source,
+            "queued navigation does not force focus before retention"
+        );
+        frame_requesting_late_discard(&mut dialog, &ctx, size, Vec::new());
+        assert_eq!(
+            egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+                .and_then(|state| state.cursor.char_range()),
+            before_cursor
+        );
+        assert_eq!(
+            egui::scroll_area::State::load(&ctx, scroll_id)
+                .unwrap()
+                .offset,
+            before_scroll
+        );
+        frame(&mut dialog, &ctx, size, Vec::new());
+        let cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
+        let expected_start = dialog.session.source().unwrap()[..target.source_range.start]
+            .chars()
+            .count();
+        let expected_end = dialog.session.source().unwrap()[..target.source_range.end]
+            .chars()
+            .count();
+        assert_eq!(
+            (
+                usize::from(cursor.primary.index),
+                usize::from(cursor.secondary.index)
+            ),
+            (expected_end, expected_start)
+        );
+        assert!(
+            egui::scroll_area::State::load(&ctx, scroll_id)
+                .unwrap()
+                .offset
+                .y
+                > before_scroll.y
+        );
+        assert_eq!(
+            (
+                dialog.session.source().unwrap().to_owned(),
+                dialog.session.revision(),
+                dialog.session.is_dirty(),
+                dialog.session.can_undo(),
+                dialog.session.can_redo(),
+                dialog.session.evaluation_count()
+            ),
+            before
+        );
+        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(!dialog.focus_source);
+        dialog.host_state.transition(super::PadHost::Popout);
+        assert!(
+            !dialog.focus_source,
+            "a queued request cannot focus a retired host"
+        );
+        assert!(!dialog.navigate_dependency(nav, host, &ctx));
+        dialog.host_state.transition(super::PadHost::Docked);
+        assert!(!dialog.navigate_dependency(nav, host, &ctx));
+    }
+
+    #[test]
+    fn pad_and_reference_restore_accepted_presentations_and_ignore_cancelled_close() {
+        use super::super::utility_presentation::UtilityPresentationManager;
+        use crate::settings::{RememberedPresentation, Settings, UtilityPresentations};
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+
+        let (_directory, root, mut dialog) = fixture();
+        let settings_dir = tempfile::tempdir().unwrap();
+        let path = settings_dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        Settings::default().save(&path).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
+        dialog.test_replace_source("dirty = 7");
+        let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discarded.host_request = Some(super::PadHost::Popout);
+        complete_host_effects(&mut dialog, &ctx, discarded);
+        assert_eq!(manager.preference(super::calculation_pad_tool_key()), None);
+        let mut pop = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        pop.pass_accepted = true;
+        pop.host_request = Some(super::PadHost::Popout);
+        complete_host_effects(&mut dialog, &ctx, pop);
+        assert_eq!(
+            manager.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Popout)
+        );
+        dialog.open_examples();
+        dialog.prepare_open_presentation(&ctx);
+        let mut reference = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        reference.accepted = true;
+        reference.host_request = Some(super::PadHost::Popout);
+        complete_help_effects(&mut dialog, &ctx, reference, None);
+        let mut reference_close = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        reference_close.accepted = true;
+        reference_close.close = true;
+        complete_help_effects(&mut dialog, &ctx, reference_close, None);
+        dialog.open_examples();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.examples_host.presentation(), super::PadHost::Popout);
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        assert!(dialog.open);
+        let mut cancel = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        cancel.pass_accepted = true;
+        cancel.intent = Some(super::DialogIntent::Decision(TransitionDecision::Cancel));
+        complete_host_effects(&mut dialog, &ctx, cancel);
+        assert!(dialog.open);
+        assert_eq!(dialog.test_source(), Some("dirty = 7"));
+        assert_eq!(
+            manager.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Popout)
+        );
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        let mut discard = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discard.pass_accepted = true;
+        discard.intent = Some(super::DialogIntent::Decision(TransitionDecision::Discard));
+        complete_host_effects(&mut dialog, &ctx, discard);
+        assert!(!dialog.open);
+        dialog.open();
+        dialog.prepare_open_presentation(&ctx);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
+        workers.join_all();
+        let saved = Settings::load(&path).unwrap();
+        let workers2 = SettingsSaveWorkerRegistry::default();
+        let ctx2 = egui::Context::default();
+        let manager2 =
+            UtilityPresentationManager::new(path, workers2.clone(), saved.utility_presentations);
+        manager2.install_in_context(&ctx2);
+        let mut restarted = CalculationPadDialog::new(&root);
+        assert!(!restarted.open);
+        restarted.open();
+        restarted.prepare_open_presentation(&ctx2);
+        assert_eq!(restarted.host_state.presentation(), super::PadHost::Popout);
+        restarted.open_examples();
+        restarted.prepare_open_presentation(&ctx2);
+        assert_eq!(
+            restarted.examples_host.presentation(),
+            super::PadHost::Popout
+        );
+        let mut dock = restarted.empty_host_effects(egui::ViewportId::ROOT);
+        dock.pass_accepted = true;
+        dock.host_request = Some(super::PadHost::Docked);
+        complete_host_effects(&mut restarted, &ctx2, dock);
+        assert_eq!(
+            manager2.preference(super::calculation_pad_tool_key()),
+            Some(RememberedPresentation::Docked)
+        );
+        workers2.join_all();
     }
 
     #[test]
@@ -4009,6 +4530,74 @@ mod tests {
         stale_examples.intent = Some(DialogIntent::OpenExamples);
         assert!(complete_host_effects(&mut dialog, &ctx, stale_examples).is_empty());
         assert!(!dialog.examples_open);
+    }
+
+    #[test]
+    fn retained_native_pad_opens_reference_and_invalidates_old_inspector_origin() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.apply_host_request(&ctx, super::PadHost::Popout);
+
+        let mut inspector = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        inspector.pass_accepted = true;
+        inspector.open_inspector = true;
+        let effects = complete_host_effects(&mut dialog, &ctx, inspector);
+        let receipt = match effects.into_iter().next().unwrap() {
+            CalculationPadDialogEffect::OpenInspector(receipt) => receipt,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        assert!(dialog.accepts_inspector_origin(&receipt));
+
+        let mut examples = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        examples.pass_accepted = true;
+        examples.intent = Some(DialogIntent::OpenExamples);
+        assert!(complete_host_effects(&mut dialog, &ctx, examples).is_empty());
+        assert_eq!(dialog.examples_host.presentation(), super::PadHost::Popout);
+        assert!(dialog.examples_layer_if_root().is_none());
+
+        dialog.apply_host_request(&ctx, super::PadHost::Docked);
+        assert!(!dialog.accepts_inspector_origin(&receipt));
+    }
+
+    #[test]
+    fn inspector_origin_rejects_closed_replaced_and_modal_parent() {
+        fn accepted(dialog: &mut CalculationPadDialog, ctx: &egui::Context) -> super::PadOpenReceipt {
+            let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+            host.pass_accepted = true;
+            host.open_inspector = true;
+            match complete_host_effects(dialog, ctx, host).into_iter().next().unwrap() {
+                CalculationPadDialogEffect::OpenInspector(receipt) => receipt,
+                other => panic!("unexpected effect: {other:?}"),
+            }
+        }
+
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let old_document = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::New);
+        assert!(!dialog.accepts_inspector_origin(&old_document));
+
+        let before_close = accepted(&mut dialog, &ctx);
+        dialog.apply_close_request();
+        assert!(!dialog.open);
+        assert!(!dialog.accepts_inspector_origin(&before_close));
+
+        dialog.open();
+        let before_chooser = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::OpenChooser);
+        assert!(!dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::HideChooser);
+        assert!(dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::OpenSaveAs);
+        assert!(!dialog.accepts_inspector_origin(&before_chooser));
+        dialog.apply_intent(DialogIntent::CancelSaveAs);
+        dialog.test_replace_source("unsaved");
+        let before_decision = accepted(&mut dialog, &ctx);
+        dialog.apply_intent(DialogIntent::New);
+        assert!(dialog.session.pending_transition().is_some());
+        assert!(!dialog.accepts_inspector_origin(&before_decision));
     }
 
     #[test]

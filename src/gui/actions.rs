@@ -792,7 +792,7 @@ pub(super) mod tests {
 
         let mut theme = new_app(&ctx);
         theme.activate_action(dialog_action("theme:dialog"), None, ActivationSource::Macro);
-        assert!(theme.theme_settings_dialog_open);
+        assert!(theme.is_theme_settings_dialog_open());
     }
 
     #[test]

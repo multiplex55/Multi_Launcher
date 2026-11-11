@@ -67,6 +67,25 @@ struct OccupancyMap {
     slot_conflicts: Vec<bool>,
 }
 
+struct DashboardPreview {
+    painter: egui::Painter,
+    slots: Vec<(u64, egui::Rect)>,
+    hovered_token: Option<u64>,
+}
+
+impl DashboardPreview {
+    fn highlight_from_list(&self, token: u64, color: egui::Color32) {
+        if let Some((_, rect)) = self.slots.iter().find(|(candidate, _)| *candidate == token) {
+            self.painter.rect_stroke(
+                rect.shrink(3.0),
+                2.0,
+                (2.0, color),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
 enum SplitDirection {
     Horizontal,
     Vertical,
@@ -258,6 +277,7 @@ fn register_editor_target_at_order(
 pub struct DashboardEditorDialog {
     pub open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
     owner_instance: u64,
     show_root_after_host_change: bool,
     pending_host_frame: Option<DashboardEditorHostFrame>,
@@ -310,6 +330,7 @@ impl Default for DashboardEditorDialog {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
             owner_instance: 0,
             show_root_after_host_change: false,
             pending_host_frame: None,
@@ -367,6 +388,55 @@ impl DashboardEditorDialog {
             ),
         );
         dialog
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY)
+                .expect("stable Dashboard Editor key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
+        }
+    }
+
+    fn remember_host_presentation(&self, ctx: &egui::Context, value: UtilityPresentation) {
+        let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY)
+            .expect("stable Dashboard Editor key");
+        super::utility_host::remember_presentation(ctx, key, value);
+    }
+
+    pub(super) fn apply_open_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        let key = crate::settings::UtilityToolKey::parse("dashboard-editor")
+            .expect("stable Dashboard Editor key");
+        self.prepare_open_presentation(ctx);
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| manager.preference(key))
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.host_state.presentation()),
+            remembered,
+            self.host_state.presentation(),
+            origin,
+        );
+        if self.pending_host_frame.is_some() {
+            return None;
+        }
+        if self.host_state.transition(desired) {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+        }
+        if matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout
+        {
+            super::utility_host::remember_presentation(ctx, key, desired);
+        }
+        self.request_host_focus();
+        Some(desired)
     }
 
     pub(crate) fn is_popped_out(&self) -> bool {
@@ -440,6 +510,7 @@ impl DashboardEditorDialog {
         let identity =
             dashboard_editor_native_identity(self.host_state.identity(), self.owner_instance);
         self.open = false;
+        self.presentation_prepared = false;
         if let Some(identity) = identity {
             crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
@@ -494,6 +565,7 @@ impl DashboardEditorDialog {
             self.retained_host_checkpoint = None;
             self.pending_launcher_close = false;
         }
+        if !self.open { self.presentation_prepared = false; }
         self.path = path.to_string();
         self.reload(registry);
         self.open = true;
@@ -1100,9 +1172,9 @@ impl DashboardEditorDialog {
                     let occupancy = self.occupancy_map(rows, cols, None);
                     let conflict_messages = self.conflict_messages(&occupancy, rows, cols);
                     let has_conflicts = occupancy.slot_conflicts.iter().any(|c| *c);
-                    if self.show_preview {
-                        self.preview(ui, registry, &occupancy);
-                    }
+                    let preview = self
+                        .show_preview
+                        .then(|| self.preview(ui, registry, &occupancy));
 
                     if !conflict_messages.is_empty() {
                         ui.separator();
@@ -1275,7 +1347,29 @@ impl DashboardEditorDialog {
                             }
                             let header_response = state.show_header(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("Slot {idx}"));
+                                    let is_selected = self.selected_slot == Some(idx);
+                                    let is_conflict = occupancy.slot_conflicts.get(idx).copied().unwrap_or(false);
+                                    let is_preview_hovered = preview.as_ref().is_some_and(|preview| {
+                                        preview.hovered_token == Some(slot_token)
+                                    });
+                                    let marker = Self::slot_marker(slot_token, is_selected, is_conflict);
+                                    let marker = if is_preview_hovered {
+                                        format!("{marker} [hover]")
+                                    } else {
+                                        marker
+                                    };
+                                    ui.label(egui::RichText::new(marker).strong())
+                                        .on_hover_text(Self::slot_tooltip(&slot, slot_token));
+                                    let caption = Self::slot_preview_label(&slot);
+                                    let caption = if is_selected || is_preview_hovered {
+                                        egui::RichText::new(caption).strong()
+                                    } else {
+                                        egui::RichText::new(caption)
+                                    };
+                                    ui.add_sized(
+                                        [120.0, ui.spacing().interact_size.y],
+                                        egui::Label::new(caption).truncate(),
+                                    ).on_hover_text(Self::slot_tooltip(&slot, slot_token));
                                     ui.label("Label");
                                     let id = slot.id.get_or_insert_with(|| format!("slot-{idx}"));
                                     let id_response = ui.text_edit_singleline(id);
@@ -1348,7 +1442,7 @@ impl DashboardEditorDialog {
                             expanded_this_pass = header_response.is_open();
                             section_order = visual_order;
                             visual_order = visual_order.saturating_add(1);
-                            let (response, _, body) = header_response.body_unindented(|ui| {
+                            let (response, header, body) = header_response.body_unindented(|ui| {
                                 let widget_anchor = format!("slot/{slot_token}/widget-type");
                                 let widget_popup = jump_scope.map(|scope| scope.combo_popup_scope(&widget_anchor));
                                 let widget_combo = egui::ComboBox::from_id_salt(
@@ -1443,6 +1537,18 @@ impl DashboardEditorDialog {
                                 register_editor_target(jump_scope, ui, &overflow_combo.response, overflow_anchor, "Overflow policy", crate::gui::jump_mode::TargetKind::ComboBox, &mut visual_order);
                                 ui.separator();
                             });
+                            if header.response.contains_pointer()
+                                && ui.clip_rect().intersects(header.response.rect)
+                            {
+                                if let Some(preview) = &preview {
+                                    preview.highlight_from_list(slot_token, ui.visuals().selection.stroke.color);
+                                }
+                                ui.painter().rect_stroke(
+                                    header.response.rect, 2.0,
+                                    (1.0, ui.visuals().selection.stroke.color),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                             section_response = Some(response);
                             if body.is_none() {
                                 // Ensure state is stored even when collapsed
@@ -2259,6 +2365,8 @@ impl DashboardEditorDialog {
 
         self.pending_launcher_close = false;
         if !self.open {
+            self.remember_host_presentation(ctx, frame.host.host);
+            self.presentation_prepared = false;
             if let Some(identity) = native_identity {
                 crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx, identity,
@@ -2282,6 +2390,7 @@ impl DashboardEditorDialog {
                 }
             }
             if self.host_state.transition(requested) {
+                self.remember_host_presentation(ctx, requested);
                 self.native_jump_mode.cancel_all();
                 self.native_jump_frame = None;
                 if requested == UtilityPresentation::Docked {
@@ -2733,12 +2842,14 @@ impl DashboardEditorDialog {
         Ok(clamped)
     }
 
-    fn preview(&mut self, ui: &mut egui::Ui, registry: &WidgetRegistry, occupancy: &OccupancyMap) {
+    fn preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        registry: &WidgetRegistry,
+        occupancy: &OccupancyMap,
+    ) -> DashboardPreview {
         let rows = self.config.grid.rows.max(1) as usize;
         let cols = self.config.grid.cols.max(1) as usize;
-        if rows == 0 || cols == 0 {
-            return;
-        }
 
         self.ensure_selected_slot();
         if self.selected_slot.is_none() && !self.config.slots.is_empty() {
@@ -2752,6 +2863,11 @@ impl DashboardEditorDialog {
             (rows as f32).max(1.0) * cell_size,
         );
         let (response, painter) = ui.allocate_painter(grid_size, egui::Sense::click_and_drag());
+        let mut preview = DashboardPreview {
+            painter: painter.clone(),
+            slots: Vec::new(),
+            hovered_token: None,
+        };
         let rect = response.rect;
         let row_h = rect.height() / rows as f32;
         let col_w = rect.width() / cols as f32;
@@ -2788,11 +2904,6 @@ impl DashboardEditorDialog {
             );
         }
 
-        let selected_slot_cfg = self
-            .selected_slot
-            .and_then(|idx| self.config.slots.get(idx))
-            .cloned();
-
         for (idx, slot) in self.config.slots.iter().enumerate() {
             let mut display_slot = slot.clone();
             Self::clamp_slot(&mut display_slot, rows, cols);
@@ -2811,17 +2922,21 @@ impl DashboardEditorDialog {
                     row_h * display_slot.row_span as f32,
                 ),
             );
-            let is_selected = selected_slot_cfg.as_ref().is_some_and(|selected| {
-                let selected_row = selected.row.max(0);
-                let selected_col = selected.col.max(0);
-                (display_slot.id.is_some() && display_slot.id == selected.id)
-                    || (display_slot.id.is_none()
-                        && selected.id.is_none()
-                        && display_slot.widget == selected.widget
-                        && display_slot.row == selected_row
-                        && display_slot.col == selected_col)
-            });
+            let Some(&slot_token) = self.slot_tokens.get(idx) else {
+                continue;
+            };
+            let is_selected = self.selected_slot == Some(idx);
             let has_conflict = occupancy.slot_conflicts.get(idx).copied().unwrap_or(false);
+            preview.slots.push((slot_token, slot_rect));
+            let slot_response = ui.interact(
+                slot_rect,
+                ui.id().with(("preview-slot", slot_token)),
+                egui::Sense::hover(),
+            );
+            let is_hovered = slot_response.hovered();
+            if is_hovered {
+                preview.hovered_token = Some(slot_token);
+            }
             let fill = if has_conflict {
                 egui::Color32::from_rgba_unmultiplied(200, 64, 64, 70)
             } else if is_selected {
@@ -2834,10 +2949,10 @@ impl DashboardEditorDialog {
                 slot_rect,
                 2.0,
                 (
-                    2.0,
+                    if is_hovered { 3.0 } else { 2.0 },
                     if has_conflict {
                         egui::Color32::from_rgb(200, 64, 64)
-                    } else if is_selected {
+                    } else if is_selected || is_hovered {
                         ui.visuals().selection.stroke.color
                     } else {
                         ui.visuals().window_stroke().color
@@ -2845,21 +2960,40 @@ impl DashboardEditorDialog {
                 ),
                 egui::StrokeKind::Middle,
             );
-            let slot_label = Self::slot_label(&display_slot);
-            let slot_response = ui.interact(
-                slot_rect,
-                ui.id().with(("preview-slot", idx)),
-                egui::Sense::hover(),
+            let text_rect = slot_rect.shrink(3.0).intersect(painter.clip_rect());
+            let text_painter = painter.with_clip_rect(text_rect);
+            let font = egui::TextStyle::Small.resolve(ui.style());
+            let line_height = ui.ctx().fonts_mut(|fonts| fonts.row_height(&font));
+            let owners = &occupancy.owners[display_slot.row as usize][display_slot.col as usize];
+            let overlap_index = owners.iter().position(|owner| *owner == idx).unwrap_or(0);
+            let show_label = slot_rect.width() >= 55.0
+                && slot_rect.height() >= (owners.len().max(1) * 2) as f32 * line_height + 8.0;
+            let line_offset =
+                overlap_index as f32 * line_height * if show_label { 2.0 } else { 1.0 };
+            text_painter.text(
+                slot_rect.min + egui::vec2(4.0, 3.0 + line_offset),
+                egui::Align2::LEFT_TOP,
+                Self::slot_marker(slot_token, is_selected, has_conflict),
+                font.clone(),
+                ui.visuals().text_color(),
             );
-            slot_response.on_hover_text(format!(
-                "{slot_label} (row {}, col {}, span {}x{})",
-                display_slot.row, display_slot.col, display_slot.row_span, display_slot.col_span
-            ));
+            if show_label {
+                text_painter.text(
+                    slot_rect.min + egui::vec2(4.0, 4.0 + line_offset + line_height),
+                    egui::Align2::LEFT_TOP,
+                    Self::slot_preview_label(slot),
+                    font,
+                    ui.visuals().text_color(),
+                );
+            }
+            slot_response.on_hover_text(Self::slot_tooltip(slot, slot_token));
         }
 
         let mut drag_preview: Option<(usize, usize, usize, usize, bool)> = None;
         if response.drag_started()
-            && let Some(pos) = response.interact_pointer_pos()
+            && let Some(pos) = ui
+                .input(|input| input.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos())
         {
             let cell = self.point_to_cell(pos, rect, rows, cols);
             self.drag_anchor = Some(cell);
@@ -2899,7 +3033,7 @@ impl DashboardEditorDialog {
                     if idx >= self.config.slots.len() {
                         self.blocked_warning =
                             Some("Selected slot no longer exists; please reselect".into());
-                        return;
+                        return preview;
                     }
                     let res = self.commit_slot(
                         idx,
@@ -2928,7 +3062,7 @@ impl DashboardEditorDialog {
                 if idx >= self.config.slots.len() {
                     self.blocked_warning =
                         Some("Selected slot no longer exists; please reselect".into());
-                    return;
+                    return preview;
                 }
                 let res = self.commit_slot(
                     idx,
@@ -2992,6 +3126,7 @@ impl DashboardEditorDialog {
                 }
             }
         }
+        preview
     }
 
     fn updated_slot(
@@ -3134,6 +3269,33 @@ impl DashboardEditorDialog {
 
     fn slot_label(slot: &SlotConfig) -> String {
         slot.id.clone().unwrap_or_else(|| slot.widget.clone())
+    }
+
+    fn slot_preview_label(slot: &SlotConfig) -> String {
+        match slot.id.as_deref().filter(|id| !id.trim().is_empty()) {
+            Some(id) if id != slot.widget => format!("{id} ({})", slot.widget),
+            Some(id) => id.to_owned(),
+            None => slot.widget.clone(),
+        }
+    }
+
+    fn slot_marker(token: u64, selected: bool, conflict: bool) -> String {
+        format!(
+            "{}S{token}{}",
+            if selected { "* " } else { "" },
+            if conflict { " !" } else { "" }
+        )
+    }
+
+    fn slot_tooltip(slot: &SlotConfig, token: u64) -> String {
+        format!(
+            "S{token} — {} (row {}, col {}, span {}x{})",
+            Self::slot_preview_label(slot),
+            slot.row,
+            slot.col,
+            slot.row_span,
+            slot.col_span
+        )
     }
 
     fn point_to_cell(
@@ -3382,6 +3544,312 @@ impl DashboardEditorDialog {
 mod persistence_tests {
     use super::*;
 
+    fn preview_frame(
+        dialog: &mut DashboardEditorDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> (DashboardPreview, egui::FullOutput) {
+        let registry = WidgetRegistry::with_defaults();
+        let mut preview = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 700.0),
+                )),
+                focused: true,
+                events,
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let occupancy = dialog.occupancy_map(
+                        dialog.config.grid.rows.max(1) as usize,
+                        dialog.config.grid.cols.max(1) as usize,
+                        None,
+                    );
+                    preview = Some(dialog.preview(ui, &registry, &occupancy));
+                });
+            },
+        );
+        (preview.expect("preview rendered"), output)
+    }
+
+    #[test]
+    fn preview_markers_clip_to_exact_slots_and_survive_duplicate_ids() {
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.config.grid.rows = 2;
+        dialog.config.grid.cols = 3;
+        let mut first = SlotConfig::with_widget("weather_site", 0, 0);
+        first.id = Some("duplicate".into());
+        let mut second = SlotConfig::with_widget("pinned_commands", 0, 0);
+        second.id = Some("duplicate".into());
+        let mut third = SlotConfig::with_widget("todo", 1, 1);
+        third.id = Some("a very long custom label ".repeat(20));
+        third.col_span = 2;
+        dialog.config.slots = vec![first, second, third];
+        dialog.renew_slot_tokens();
+        dialog.selected_slot = Some(0);
+        let before = dialog.config.clone();
+        let tokens = dialog.slot_tokens.clone();
+        let ctx = egui::Context::default();
+        let (preview, output) = preview_frame(&mut dialog, &ctx, Vec::new(), 1.0);
+        assert_eq!(
+            dialog.config, before,
+            "passive rendering leaves the draft unchanged"
+        );
+        assert_eq!(preview.slots.len(), 3);
+        assert_eq!(
+            preview
+                .slots
+                .iter()
+                .map(|(token, _)| *token)
+                .collect::<Vec<_>>(),
+            tokens
+        );
+        let markers = [
+            DashboardEditorDialog::slot_marker(tokens[0], true, true),
+            DashboardEditorDialog::slot_marker(tokens[1], false, true),
+            DashboardEditorDialog::slot_marker(tokens[2], false, false),
+        ];
+        assert_ne!(markers[0], markers[1]);
+        for (index, marker) in markers.iter().enumerate() {
+            let painted = output.shapes.iter().find(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == *marker)
+            }).expect("each live token has a painted marker");
+            assert!(preview.slots[index].1.contains_rect(painted.clip_rect));
+        }
+        let marker_position = |marker: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == marker => Some(text.pos),
+                    _ => None,
+                })
+                .expect("overlapping marker was painted")
+        };
+        assert!(
+            marker_position(&markers[1]).y > marker_position(&markers[0]).y,
+            "overlapping slots get distinct marker lines"
+        );
+        let third_label = DashboardEditorDialog::slot_preview_label(&dialog.config.slots[2]);
+        let painted = output.shapes.iter().find(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == third_label)
+        }).expect("long label is painted with a slot clip");
+        assert!(preview.slots[2].1.contains_rect(painted.clip_rect));
+        assert!(
+            DashboardEditorDialog::slot_tooltip(&dialog.config.slots[2], tokens[2])
+                .contains("span 1x2")
+        );
+        output.drop_without_applying_deltas();
+
+        ctx.all_styles_mut(|style| {
+            style
+                .text_styles
+                .insert(egui::TextStyle::Small, egui::FontId::proportional(32.0));
+        });
+        let (_, output) = preview_frame(&mut dialog, &ctx, Vec::new(), 2.0);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == markers[2])));
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == third_label)), "a short slot retains its marker and uses the list for full identification");
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn preview_click_and_drag_still_edit_selected_slot_and_reject_conflicts() {
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.config.grid.rows = 2;
+        dialog.config.grid.cols = 3;
+        dialog.config.slots = vec![
+            SlotConfig::with_widget("weather_site", 0, 0),
+            SlotConfig::with_widget("pinned_commands", 0, 1),
+        ];
+        dialog.renew_slot_tokens();
+        dialog.selected_slot = Some(0);
+        let ctx = egui::Context::default();
+        let (preview, output) = preview_frame(&mut dialog, &ctx, Vec::new(), 1.0);
+        let origin = preview.slots[0].1.min;
+        output.drop_without_applying_deltas();
+        let cell = |row: f32, col: f32| origin + egui::vec2(col * 60.0 + 30.0, row * 60.0 + 30.0);
+        let mut time = 2.0;
+        for pressed in [true, false] {
+            let (_, output) = preview_frame(
+                &mut dialog,
+                &ctx,
+                pointer_events(cell(0.0, 2.0), pressed),
+                time,
+            );
+            output.drop_without_applying_deltas();
+            time += 0.1;
+        }
+        assert_eq!(dialog.selected_slot, Some(0));
+        assert_eq!(
+            (dialog.config.slots[0].row, dialog.config.slots[0].col),
+            (0, 2)
+        );
+        let after_move = dialog.config.clone();
+        for pressed in [true, false] {
+            let (_, output) = preview_frame(
+                &mut dialog,
+                &ctx,
+                pointer_events(cell(0.0, 1.0), pressed),
+                time,
+            );
+            output.drop_without_applying_deltas();
+            time += 0.1;
+        }
+        assert_eq!(
+            dialog.config, after_move,
+            "collision cannot replace the selected slot"
+        );
+        assert_eq!(dialog.selected_slot, Some(0));
+
+        let (_, output) = preview_frame(
+            &mut dialog,
+            &ctx,
+            pointer_events(cell(1.0, 0.0), true),
+            time,
+        );
+        output.drop_without_applying_deltas();
+        time += 0.1;
+        let (_, output) = preview_frame(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(cell(1.0, 1.0))],
+            time,
+        );
+        output.drop_without_applying_deltas();
+        time += 0.1;
+        let (_, output) = preview_frame(
+            &mut dialog,
+            &ctx,
+            pointer_events(cell(1.0, 1.0), false),
+            time,
+        );
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            (
+                dialog.config.slots[0].row,
+                dialog.config.slots[0].col,
+                dialog.config.slots[0].row_span,
+                dialog.config.slots[0].col_span
+            ),
+            (1, 0, 1, 2)
+        );
+    }
+
+    #[test]
+    fn preview_and_slot_list_share_token_hover_without_editing_config() {
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.open = true;
+        dialog.show_preview = true;
+        dialog.config.grid.rows = 1;
+        dialog.config.grid.cols = 2;
+        let mut first = SlotConfig::with_widget("weather_site", 0, 0);
+        let mut second = SlotConfig::with_widget("pinned_commands", 0, 1);
+        first.id = Some("same".into());
+        second.id = Some("same".into());
+        dialog.config.slots = vec![first, second];
+        dialog.renew_slot_tokens();
+        dialog.ensure_presentations();
+        for presentation in &mut dialog.slot_presentations {
+            presentation.expanded = false;
+        }
+        dialog.selected_slot = Some(0);
+        let second_marker = DashboardEditorDialog::slot_marker(dialog.slot_tokens[1], false, false);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let registry = WidgetRegistry::with_defaults();
+        let draw = |dialog: &mut DashboardEditorDialog, events: Vec<egui::Event>, time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 1800.0),
+                    )),
+                    focused: true,
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    let context = ui.ctx().clone();
+                    let mut host_request = None;
+                    dialog.ui_with_jump_mode_inner(
+                        &context,
+                        &registry,
+                        WidgetSettingsContext::empty(),
+                        false,
+                        None,
+                        None,
+                        None,
+                        true,
+                        true,
+                        true,
+                        Some(ui),
+                        UtilityPresentation::Docked,
+                        &mut host_request,
+                        false,
+                        false,
+                        None,
+                    );
+                },
+            )
+        };
+        let output = draw(&mut dialog, Vec::new(), 1.0);
+        output.drop_without_applying_deltas();
+        let output = draw(&mut dialog, Vec::new(), 1.1);
+        let before = dialog.config.clone();
+        let matching = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == second_marker => {
+                    Some((text.pos, shape.clip_rect))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            2,
+            "one token is painted in the preview and in its list row"
+        );
+        let (preview_pos, preview_clip) = matching[0];
+        let (list_pos, _) = matching[1];
+        assert!(preview_pos.y < list_pos.y);
+        output.drop_without_applying_deltas();
+
+        let output = draw(
+            &mut dialog,
+            vec![egui::Event::PointerMoved(
+                preview_pos + egui::vec2(8.0, 8.0),
+            )],
+            1.2,
+        );
+        output.drop_without_applying_deltas();
+        let output = draw(&mut dialog, Vec::new(), 1.3);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == format!("{second_marker} [hover]"))), "preview hover emphasizes only its matching list marker");
+        output.drop_without_applying_deltas();
+
+        let output = draw(
+            &mut dialog,
+            vec![egui::Event::PointerMoved(list_pos + egui::vec2(3.0, 3.0))],
+            1.4,
+        );
+        output.drop_without_applying_deltas();
+        let output = draw(&mut dialog, Vec::new(), 1.5);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.rect == preview_clip && rect.stroke.width == 2.0)), "list hover outlines the matching preview slot");
+        assert_eq!(
+            dialog.config, before,
+            "hovering either view does not edit the draft"
+        );
+        assert_eq!(dialog.selected_slot, Some(0));
+        output.drop_without_applying_deltas();
+    }
+
     fn dashboard_host_frame(
         dialog: &mut DashboardEditorDialog,
         ctx: &egui::Context,
@@ -3435,6 +3903,72 @@ mod persistence_tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    #[test]
+    fn dashboard_restores_and_remembers_inherited_presentation_on_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        crate::settings::Settings::default()
+            .save(&settings_path)
+            .unwrap();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            settings_path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse(DASHBOARD_EDITOR_VIEWPORT_KEY).unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
+        let path = directory
+            .path()
+            .join("dashboard.json")
+            .to_string_lossy()
+            .into_owned();
+        let registry = WidgetRegistry::with_defaults();
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.open(&path, &registry);
+        dialog.prepare_open_presentation(&ctx);
+        assert!(!dialog.is_popped_out());
+        dialog.config.grid.rows = 7;
+        let source = UtilityHostState::popped_out();
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let receipt = super::super::utility_host::AcceptedParentOpen::from_retained(
+            &ctx,
+            source.identity(),
+            1_u64,
+            pass,
+            pass,
+        )
+        .unwrap();
+        dialog.apply_open_origin(
+            &ctx,
+            true,
+            &super::super::utility_host::ChildOpenOrigin::Parent(receipt),
+        );
+        assert!(dialog.is_popped_out());
+        assert_eq!(dialog.config.grid.rows, 7);
+        output.drop_without_applying_deltas();
+        dialog.request_close();
+        for _ in 0..3 {
+            dashboard_host_frame(&mut dialog, &ctx, Vec::new(), true, true);
+        }
+        assert!(!dialog.open);
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
+        dialog.open(&path, &registry);
+        dialog.prepare_open_presentation(&ctx);
+        assert!(dialog.is_popped_out());
+        workers.join_all();
     }
 
     #[test]
@@ -3628,8 +4162,11 @@ mod persistence_tests {
         dialog.open(dashboard_path.to_str().unwrap(), &registry);
         assert_eq!(dialog.test_slot_expanded(0), Some(false));
         assert_eq!(dialog.test_slot_expanded(1), Some(true));
+        let first_token = dialog.slot_tokens[0];
+        let second_token = dialog.slot_tokens[1];
 
         dialog.swap_slots(0, 1, &registry).unwrap();
+        assert_eq!(dialog.slot_tokens, vec![second_token, first_token]);
         assert_eq!(
             dialog.test_slot(0).unwrap().id.as_deref(),
             Some("pinned-user-id")
@@ -3645,6 +4182,7 @@ mod persistence_tests {
         assert_eq!(dialog.test_slot_expanded(2), Some(true));
         let added_presentation_id = dialog.slot_presentations[2].id;
         dialog.remove_slot_at(2);
+        assert_eq!(dialog.slot_tokens, vec![second_token, first_token]);
         assert!(
             dialog
                 .slot_presentations

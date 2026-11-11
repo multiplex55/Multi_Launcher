@@ -273,7 +273,7 @@ pub(crate) enum RecordingOutputError {
     InvalidRgbaLength { expected: usize, actual: usize },
     TimestampMovedBackwards,
     FrameAfterTerminal,
-    ClipTooLong,
+    TimestampOverflow,
     EmptyClip,
     AllocationFailed,
     ReceiptMismatch,
@@ -302,8 +302,8 @@ impl std::fmt::Display for RecordingOutputError {
             Self::FrameAfterTerminal => {
                 formatter.write_str("captured frame timestamp is after the terminal time")
             }
-            Self::ClipTooLong => {
-                formatter.write_str("recording duration exceeds the 120-second limit")
+            Self::TimestampOverflow => {
+                formatter.write_str("recording timestamp or frame count exceeds the supported range")
             }
             Self::EmptyClip => formatter.write_str("cannot publish a GIF with no captured frames"),
             Self::AllocationFailed => {
@@ -418,7 +418,7 @@ mod tests {
         let options = RecordingOptions::new(
             RecordingFormat::Gif,
             FrameRate::new(30).unwrap(),
-            Duration::from_secs(1),
+            crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(1)),
             false,
         )
         .unwrap();

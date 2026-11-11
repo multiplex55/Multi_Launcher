@@ -42,6 +42,7 @@ pub(super) trait HostedUtilityDialog: Sized {
     const SIZE: egui::Vec2;
     const MINIMUM: egui::Vec2;
     const SCROLL_NATIVE_WINDOW: bool;
+    const RESIZABLE: bool = true;
     const REGISTER_TARGETS_ON_REPLAY: bool = false;
     type Runtime;
     type Actions;
@@ -52,11 +53,25 @@ pub(super) trait HostedUtilityDialog: Sized {
         Self::KIND.and_then(NavigationDialogKind::layer_id).expect("utility window layer")
     }
 
+    fn dialog_layer(&self) -> egui::LayerId { Self::layer() }
+
     fn navigation_owner(instance: u64) -> NavigationOwner {
         NavigationOwner::Dialog {
             kind: Self::KIND.expect("utility window navigation kind"),
             instance,
         }
+    }
+
+    fn dialog_navigation_owner(&self, instance: u64) -> NavigationOwner {
+        Self::navigation_owner(instance)
+    }
+
+    fn dialog_surface(&self, instance: u64) -> SurfaceId {
+        SurfaceId::dialog(Self::SURFACE_KIND, instance)
+    }
+
+    fn dialog_namespace(&self) -> String {
+        format!("{}/form", Self::KEY)
     }
 
     fn is_open(&self) -> bool;
@@ -176,8 +191,11 @@ pub(super) enum SnippetHostCommand {
 
 pub(super) struct UtilityWindowHost<D: HostedUtilityDialog> {
     state: UtilityHostState,
+    dialog_layer: Option<egui::LayerId>,
+    presentation_session: Option<u64>,
     native_session: Option<u64>,
     pending: Option<HostFrame<D>>,
+    deferred_open: Option<(u64, UtilityPresentation, bool)>,
     deferred_close: Option<(u64, HostIdentity)>,
     docked_focus_pending: bool,
     native_jump: JumpModeUi,
@@ -190,8 +208,11 @@ impl<D: HostedUtilityDialog> Default for UtilityWindowHost<D> {
     fn default() -> Self {
         Self {
             state: UtilityHostState::default(),
+            dialog_layer: None,
+            presentation_session: None,
             native_session: None,
             pending: None,
+            deferred_open: None,
             deferred_close: None,
             docked_focus_pending: false,
             native_jump: JumpModeUi::default(),
@@ -237,6 +258,7 @@ pub(super) struct HostCompletion<C> {
     pub commands: Vec<C>,
     pub show_root: bool,
     pub owner_viewport: egui::ViewportId,
+    pub origin: Option<super::utility_host::AcceptedParentOpen<u64>>,
 }
 
 pub(super) struct CompanionPass {
@@ -259,8 +281,24 @@ pub(super) trait UtilityWindowCompanion {
 }
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
-    fn docked_layer() -> egui::LayerId {
-        D::layer()
+    #[cfg(test)]
+    pub(super) fn test_target_rect(&self, label: &str) -> egui::Rect {
+        self.native_jump.retained_registry().targets().iter()
+            .find(|target| target.eligible() && target.metadata().label() == label)
+            .unwrap_or_else(|| {
+                let labels: Vec<_> = self.native_jump.retained_registry().targets().iter()
+                    .map(|target| (target.metadata().label(), target.eligible())).collect();
+                panic!("missing hosted target {label:?}, owner {:?}, targets {labels:?}", self.native_jump.frame_navigation_owner())
+            })
+            .clipped_rect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_native_owner(&self) -> NavigationOwner {
+        self.native_jump.frame_navigation_owner()
+    }
+    fn docked_layer(&self) -> egui::LayerId {
+        self.dialog_layer.unwrap_or_else(D::layer)
     }
 
     fn viewport(session: u64) -> egui::ViewportId {
@@ -298,7 +336,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
 
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
         if self.state.presentation() == UtilityPresentation::Docked {
-            Some(Self::docked_layer())
+            Some(self.docked_layer())
         } else {
             self.state.embedded_root_layer()
         }
@@ -311,6 +349,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.state.identity()
     }
 
+    pub(super) fn accepts_origin(&self, dialog: &D, origin: &super::utility_host::AcceptedParentOpen<u64>) -> bool {
+        dialog.is_open() && origin.is_current(self.state.identity(), &dialog.session())
+    }
+
     pub(super) fn owner_viewport(&self) -> egui::ViewportId {
         if self.root_layer().is_none()
             && let Some(session) = self.native_session
@@ -321,7 +363,8 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     }
 
     pub(super) fn needs_root_ui_when_hidden(&self, open: bool) -> bool {
-        (open && self.state.presentation() == UtilityPresentation::Popout)
+        (open && (self.state.presentation() == UtilityPresentation::Popout
+            || self.presentation_session.is_none()))
             || self.state.bootstrap_pending()
             || self.pending.is_some()
     }
@@ -334,6 +377,14 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         }
     }
 
+    pub(super) fn cancel_docked_focus_request(&mut self) {
+        self.docked_focus_pending = false;
+    }
+
+    pub(super) fn has_pending_frame(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(super) fn has_deferred_close(&self) -> bool {
         self.deferred_close.is_some()
     }
@@ -344,11 +395,18 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.native_jump.set_enabled(enabled);
     }
 
+    pub(super) fn close_from_app(&mut self, ctx: &egui::Context) {
+        self.remember_presentation(ctx, self.state.presentation());
+        self.retire(ctx);
+    }
+
     pub(super) fn retire(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.pending = None;
+        self.deferred_open = None;
         self.deferred_close = None;
         self.docked_focus_pending = false;
+        self.presentation_session = None;
         self.state.retire_to_docked();
         self.cancel_jump();
     }
@@ -356,6 +414,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     pub(super) fn suspend(&mut self, ctx: &egui::Context) {
         self.close_viewport(ctx);
         self.pending = None;
+        self.deferred_open = None;
         self.deferred_close = None;
         self.docked_focus_pending = false;
         let identity = self.state.identity();
@@ -387,6 +446,110 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.show_with_companion(ctx, dialog, runtime, input, None);
     }
 
+    pub(super) fn prepare_open(&mut self, ctx: &egui::Context, dialog: &D) {
+        if !dialog.is_open() {
+            return;
+        }
+        let session = dialog.session();
+        self.dialog_layer = Some(dialog.dialog_layer());
+        if self.presentation_session != Some(session) {
+            self.presentation_session = Some(session);
+            let remembered =
+                super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+                    .and_then(|manager| {
+                        crate::settings::UtilityToolKey::parse(D::KEY)
+                            .ok()
+                            .and_then(|key| manager.preference(key))
+                    })
+                    .map(Into::into);
+            let presentation = super::utility_host::resolve_child_presentation(
+                None,
+                remembered,
+                self.state.presentation(),
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            self.state.transition(presentation);
+        }
+    }
+
+    /// Apply an accepted open without replacing the dialog or losing a frame
+    /// that was already staged for its current host.
+    pub(super) fn open_from_origin<S>(
+        &mut self,
+        ctx: &egui::Context,
+        dialog: &D,
+        was_open: bool,
+        origin: &super::utility_host::ChildOpenOrigin<S>,
+    ) -> Option<UtilityPresentation> {
+        self.prepare_open(ctx, dialog);
+        let remembered = super::utility_presentation::UtilityPresentationManager::for_context(ctx)
+            .and_then(|manager| {
+                crate::settings::UtilityToolKey::parse(D::KEY)
+                    .ok()
+                    .and_then(|key| manager.preference(key))
+            })
+            .map(Into::into);
+        let desired = super::utility_host::resolve_child_presentation(
+            was_open.then(|| self.state.presentation()),
+            remembered,
+            self.state.presentation(),
+            origin,
+        );
+        let remember = matches!(origin, super::utility_host::ChildOpenOrigin::Parent(_))
+            && desired == UtilityPresentation::Popout;
+        if self.pending.is_some() {
+            self.deferred_open = Some((dialog.session(), desired, remember));
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            None
+        } else {
+            self.apply_open_presentation(ctx, desired, remember);
+            Some(desired)
+        }
+    }
+
+    fn apply_open_presentation(
+        &mut self,
+        ctx: &egui::Context,
+        desired: UtilityPresentation,
+        remember: bool,
+    ) {
+        if self.state.presentation() != desired {
+            self.close_viewport(ctx);
+            self.state.transition(desired);
+            if desired == UtilityPresentation::Popout {
+                self.docked_focus_pending = false;
+            }
+            self.deferred_close = None;
+            self.cancel_jump();
+        }
+        if remember {
+            self.remember_presentation(ctx, desired);
+        }
+        self.request_focus();
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn apply_deferred_open(
+        &mut self,
+        ctx: &egui::Context,
+        dialog: &D,
+    ) -> Option<UtilityPresentation> {
+        if let Some((session, desired, remember)) = self.deferred_open.take()
+            && dialog.is_open()
+            && dialog.session() == session
+        {
+            let desired = super::utility_host::resolve_child_presentation(
+                Some(self.state.presentation()),
+                Some(desired),
+                desired,
+                &super::utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            self.apply_open_presentation(ctx, desired, remember);
+            return Some(desired);
+        }
+        None
+    }
+
     pub(super) fn show_with_companion(
         &mut self,
         ctx: &egui::Context,
@@ -399,11 +562,13 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             if self.native_session.is_some() {
                 self.retire(ctx);
             }
+            self.presentation_session = None;
             return;
         }
+        self.prepare_open(ctx, dialog);
+        let session = dialog.session();
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let host = self.state.identity();
-        let session = dialog.session();
         let mut os_close = self.deferred_close.take() == Some((session, host));
         if let Some(previous) = self.pending.take()
             && previous.root.frame_nr == root.frame_nr
@@ -465,7 +630,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                     *companion,
                     scope.clone(),
                     &frame,
-                    Self::docked_layer(),
+                    self.docked_layer(),
                     input.root_input,
                 );
             }
@@ -480,7 +645,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 .with_title(Self::title(session))
                 .with_inner_size(D::SIZE)
                 .with_min_inner_size(D::MINIMUM)
-                .with_resizable(true);
+                .with_resizable(D::RESIZABLE);
             ctx.show_viewport_immediate(id, builder, |child, class| {
                 let child_ctx = child.ctx().clone();
                 let native =
@@ -562,11 +727,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         companion: &mut Option<(&mut dyn UtilityWindowCompanion, Option<JumpModeScope>)>,
     ) {
         let instance = frame.session;
-        let layer = Self::docked_layer();
+        let layer = self.docked_layer();
         let parent = NavigationViewportBinding {
             viewport,
             base_layer: layer,
-            owner: D::navigation_owner(instance),
+            owner: dialog.dialog_navigation_owner(instance),
         };
         let dialog_child = dialog.confirmation_binding(viewport, instance);
         let companion_binding = companion
@@ -606,14 +771,14 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.native_jump
             .handle_viewport_input(ctx, jump_current, frame.first, viewport);
         self.native_jump.begin_ui_pass();
-        let surface = SurfaceId::dialog(D::SURFACE_KIND, instance);
+        let surface = dialog.dialog_surface(instance);
         let parent_scope =
             (jump_current && child.is_none() && dialog.parent_targets_allowed(runtime))
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
                         dialog.target_generation(),
-                        format!("{}/form", D::KEY),
+                        dialog.dialog_namespace(),
                         binding,
                     )
                 })
@@ -740,14 +905,26 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
                 ctx.request_repaint_of(frame.owner.viewport_id);
             }
             self.cancel_jump();
+            if self.deferred_close.is_none()
+                && let Some(presentation) = self.apply_deferred_open(ctx, dialog)
+            {
+                return Some(HostCompletion {
+                    commands: Vec::new(),
+                    show_root: presentation == UtilityPresentation::Docked,
+                    owner_viewport: frame.owner.viewport_id,
+                    origin: None,
+                });
+            }
             return None;
         }
         if frame.close || frame.os_close {
+            self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
             return Some(HostCompletion {
                 commands: vec![D::closed_command()],
                 show_root: false,
                 owner_viewport: frame.owner.viewport_id,
+                origin: None,
             });
         }
         self.state
@@ -775,38 +952,66 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
             } else if let Some(layer) = frame.embedded_layer {
                 ctx.move_to_top(layer);
             } else if frame.host.host == UtilityPresentation::Docked {
-                ctx.move_to_top(Self::docked_layer());
+                ctx.move_to_top(self.docked_layer());
                 self.docked_focus_pending = false;
             }
             self.state.complete_focus(frame.host);
         }
-        let actions = frame.actions.take()?;
+        let Some(actions) = frame.actions.take() else {
+            return self
+                .apply_deferred_open(ctx, dialog)
+                .map(|presentation| HostCompletion {
+                    commands: Vec::new(),
+                    show_root: presentation == UtilityPresentation::Docked,
+                    owner_viewport: frame.owner.viewport_id,
+                    origin: None,
+                });
+        };
         let presentation = D::host_request(&actions);
         #[cfg(windows)]
         let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, native);
         #[cfg(not(windows))]
         let hwnd = None;
         let commands = dialog.complete_actions(actions, hwnd);
+        let origin = if presentation.is_none() && !commands.iter().any(D::command_closes) {
+            super::utility_host::AcceptedParentOpen::from_retained(ctx, frame.host, frame.session, frame.root, frame.owner)
+        } else {
+            None
+        };
         let mut show_root = false;
         if commands.iter().any(D::command_closes) {
+            self.remember_presentation(ctx, frame.host.host);
             self.retire(ctx);
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
         {
+            self.remember_presentation(ctx, presentation);
             self.close_viewport(ctx);
             self.state.transition(presentation);
             self.cancel_jump();
             show_root = presentation == UtilityPresentation::Docked;
             if show_root {
-                ctx.move_to_top(Self::docked_layer());
+                ctx.move_to_top(self.docked_layer());
             }
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+        let deferred = self.apply_deferred_open(ctx, dialog);
         Some(HostCompletion {
             commands,
-            show_root,
+            show_root: (show_root || deferred == Some(UtilityPresentation::Docked))
+                && self.state.presentation() == UtilityPresentation::Docked,
             owner_viewport: frame.owner.viewport_id,
+            origin,
         })
+    }
+
+    fn remember_presentation(&self, ctx: &egui::Context, presentation: UtilityPresentation) {
+        if let (Some(manager), Ok(key)) = (
+            super::utility_presentation::UtilityPresentationManager::for_context(ctx),
+            crate::settings::UtilityToolKey::parse(D::KEY),
+        ) {
+            manager.remember(ctx, key, presentation.into());
+        }
     }
 }
 
@@ -1789,7 +1994,7 @@ pub(super) type ProgrammerInspectorWindowHost =
     UtilityWindowHost<super::programmer_inspector_dialog::ProgrammerInspectorDialog>;
 pub(super) enum ProgrammerInspectorHostCommand {
     Closed,
-    Apply(super::programmer_inspector_dialog::InspectorActions),
+    Apply(super::programmer_inspector_dialog::InspectorActions, Option<usize>),
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
     const KEY: &'static str = "programmer-inspector";
@@ -1874,15 +2079,979 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     fn command_closes(command: &Self::Command) -> bool {
         matches!(command, ProgrammerInspectorHostCommand::Closed)
     }
-    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+    fn complete_actions(&mut self, actions: Self::Actions, hwnd: Option<usize>) -> Vec<Self::Command> {
         if actions.close {
             vec![ProgrammerInspectorHostCommand::Closed]
         } else {
-            vec![ProgrammerInspectorHostCommand::Apply(actions)]
+            vec![ProgrammerInspectorHostCommand::Apply(actions, hwnd)]
         }
     }
     #[cfg(test)]
     fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
         actions.host_button
+    }
+}
+
+pub(super) type ImageWindowHost = UtilityWindowHost<super::image_panel::ImagePanel>;
+pub(super) enum ImageHostCommand {
+    Closed,
+    Apply(super::image_panel::ImageHostActions),
+}
+impl HostedUtilityDialog for super::image_panel::ImagePanel {
+    const KEY: &'static str = "image-viewer";
+    const TITLE: &'static str = "Image Viewer";
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 480.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(200.0, 160.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = super::image_panel::ImageHostActions;
+    type Checkpoint = ();
+    type Command = ImageHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("image-viewer"))
+    }
+    fn dialog_layer(&self) -> egui::LayerId {
+        self.query_focus_layer_id()
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.session()
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        ImageHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, ImageHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![ImageHostCommand::Closed]
+        } else {
+            vec![ImageHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type NoteTemplatesWindowHost =
+    UtilityWindowHost<super::notes_dialog::TemplateManagerState>;
+pub(super) enum NoteTemplatesHostCommand {
+    Closed,
+    Apply(super::notes_dialog::TemplateHostActions),
+}
+impl HostedUtilityDialog for super::notes_dialog::TemplateManagerState {
+    const KEY: &'static str = "note-templates";
+    const TITLE: &'static str = "Note Templates";
+    const SIZE: egui::Vec2 = egui::vec2(520.0, 360.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = ();
+    type Actions = super::notes_dialog::TemplateHostActions;
+    type Checkpoint = ();
+    type Command = NoteTemplatesHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Note Templates")))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.is_open()
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &()) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && (self.owns_input(ctx)
+                || (ctx.memory(|memory| memory.top_modal_layer().is_none())
+                    && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                        .is_none_or(|layer| layer == binding.base_layer)
+                    && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        layer == binding.base_layer
+                            || Some(layer) == popup
+                            || layer == egui::LayerId::background()
+                    })))
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        _: &(),
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        super::notes_dialog::TemplateManagerState::render_host(
+            self,
+            ctx,
+            allowed,
+            first,
+            child,
+            presentation,
+        )
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        NoteTemplatesHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, NoteTemplatesHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![NoteTemplatesHostCommand::Closed]
+        } else {
+            vec![NoteTemplatesHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type UnusedAssetsWindowHost =
+    UtilityWindowHost<super::unused_assets_dialog::UnusedAssetsDialog>;
+pub(super) enum UnusedAssetsHostCommand {
+    Closed,
+    Apply(super::unused_assets_dialog::UnusedAssetsHostActions),
+}
+impl HostedUtilityDialog for super::unused_assets_dialog::UnusedAssetsDialog {
+    const KEY: &'static str = "unused-note-assets";
+    const TITLE: &'static str = "Unused Note Assets";
+    const SIZE: egui::Vec2 = egui::vec2(300.0, 200.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(160.0, 120.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = bool;
+    type Actions = super::unused_assets_dialog::UnusedAssetsHostActions;
+    type Checkpoint = ();
+    type Command = UnusedAssetsHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some("Unused Note Assets")),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        pinned: &bool,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        let mut actions = self.render_host(ctx, allowed, first, child, presentation);
+        if *pinned {
+            actions.close = false;
+        }
+        actions
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        UnusedAssetsHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, UnusedAssetsHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![UnusedAssetsHostCommand::Closed]
+        } else {
+            vec![UnusedAssetsHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) enum PluginHostCommand {
+    Close,
+    Save(
+        u64,
+        u64,
+        crate::plugin_editor::PluginSelection,
+        crate::plugin_editor::PluginSelection,
+    ),
+    Navigation(crate::settings_editor::render::SettingsNavigationFrameObserver),
+}
+impl HostedUtilityDialog for crate::plugin_editor::PluginEditor {
+    const KEY: &'static str = "plugin-settings";
+    const TITLE: &'static str = "Plugin Settings";
+    const SIZE: egui::Vec2 = egui::vec2(540.0, 440.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = crate::plugin_editor::PluginHostRuntime;
+    type Actions = crate::plugin_editor::PluginHostActions;
+    type Checkpoint = Self;
+    type Command = PluginHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("Plugin Settings"))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.host_open
+    }
+    fn session(&self) -> u64 {
+        self.host_session()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|l| l == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|l| {
+                l == binding.base_layer || Some(l) == popup || l == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.presentation_request
+    }
+    fn closed_command() -> PluginHostCommand {
+        PluginHostCommand::Close
+    }
+    fn command_closes(command: &PluginHostCommand) -> bool {
+        matches!(command, PluginHostCommand::Close)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        _: Option<usize>,
+    ) -> Vec<PluginHostCommand> {
+        self.apply_host_filter(&actions.filter_before, actions.filter_after);
+        let mut commands = Vec::new();
+        if actions.close {
+            commands.push(PluginHostCommand::Close);
+        } else if actions.changed {
+            commands.push(PluginHostCommand::Save(
+                actions.catalog_revision,
+                actions.selection_revision,
+                actions.before,
+                actions.candidate,
+            ));
+        }
+        if let Some(observer) = actions.navigation {
+            commands.push(PluginHostCommand::Navigation(observer));
+        }
+        commands
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.test_button
+    }
+}
+
+pub(super) type FilePreviewWindowHost =
+    UtilityWindowHost<super::file_search_preview_dialog::FileSearchPreviewDialogState>;
+pub(super) enum FilePreviewHostCommand {
+    Closed,
+    Apply(super::file_search_preview_dialog::FileSearchPreviewHostActions),
+}
+impl HostedUtilityDialog for super::file_search_preview_dialog::FileSearchPreviewDialogState {
+    const KEY: &'static str = "file-preview";
+    const TITLE: &'static str = "File preview";
+    const SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = crate::file_search::settings::FileSearchSettings;
+    type Actions = super::file_search_preview_dialog::FileSearchPreviewHostActions;
+    type Checkpoint = ();
+    type Command = FilePreviewHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(super::file_search_preview_dialog::preview_window_id_source()),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        FilePreviewHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, FilePreviewHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![FilePreviewHostCommand::Closed]
+        } else {
+            vec![FilePreviewHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+pub(super) type HashGeneratorWindowHost =
+    UtilityWindowHost<super::hash_generator_dialog::HashGeneratorDialogState>;
+pub(super) enum HashGeneratorHostCommand {
+    Closed,
+    Apply(super::hash_generator_dialog::HashHostActions, Option<usize>),
+}
+impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogState {
+    const KEY: &'static str = "hash-generator";
+    const TITLE: &'static str = "Hash Generator";
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 440.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(420.0, 320.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = super::hash_generator_dialog::HashRuntime;
+    type Actions = super::hash_generator_dialog::HashHostActions;
+    type Checkpoint = ();
+    type Command = HashGeneratorHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("hash_generator_dialog"))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self::Checkpoint {}
+    fn restore(&mut self, _: Self::Checkpoint) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        HashGeneratorHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, HashGeneratorHostCommand::Closed)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command> {
+        if actions.close {
+            vec![HashGeneratorHostCommand::Closed]
+        } else {
+            vec![HashGeneratorHostCommand::Apply(actions, hwnd)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type TodoViewWindowHost =
+    UtilityWindowHost<super::todo_view_dialog::TodoViewDialog>;
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded inline action avoids an extra allocation on each active host frame."
+)]
+pub(super) enum TodoViewHostCommand {
+    Closed,
+    Apply(super::todo_view_dialog::TodoViewHostActions),
+}
+impl HostedUtilityDialog for super::todo_view_dialog::TodoViewDialog {
+    const KEY: &'static str = "todo-view";
+    const TITLE: &'static str = "View Todos";
+    const SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(360.0, 260.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const RESIZABLE: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = super::todo_view_dialog::TodoViewRuntime;
+    type Actions = super::todo_view_dialog::TodoViewHostActions;
+    type Checkpoint = ();
+    type Command = TodoViewHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("View Todos")))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self::Checkpoint {}
+    fn restore(&mut self, _: Self::Checkpoint) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        allowed: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, allowed, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        TodoViewHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, TodoViewHostCommand::Closed)
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        _: Option<usize>,
+    ) -> Vec<Self::Command> {
+        if actions.close {
+            vec![TodoViewHostCommand::Closed]
+        } else {
+            vec![TodoViewHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+pub(super) type CalculationDependencyWindowHost =
+    UtilityWindowHost<super::calculation_dependency_dialog::CalculationDependencyDialog>;
+pub(super) enum CalculationDependencyHostCommand {
+    Closed,
+    Apply(super::calculation_dependency_dialog::DependencyActions),
+}
+impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDependencyDialog {
+    const KEY: &'static str = "calculation-pad-dependencies";
+    const TITLE: &'static str = "Dependency Explorer";
+    const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = super::calculation_dependency_dialog::DependencyRuntime;
+    type Actions = super::calculation_dependency_dialog::DependencyActions;
+    type Checkpoint = ();
+    type Command = CalculationDependencyHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("calculation-dependencies-window"),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        _: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, parent, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        CalculationDependencyHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, CalculationDependencyHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![CalculationDependencyHostCommand::Closed]
+        } else {
+            vec![CalculationDependencyHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod deferred_open_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn inspector_label_file_action_rejects_discard_and_retired_source_host() {
+        let ctx = egui::Context::default();
+        let mut dialog =
+            super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        dialog.open();
+        let context =
+            Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
+        dialog.publish(Arc::clone(&context));
+        let mut host = ProgrammerInspectorWindowHost::default();
+        host.prepare_open(&ctx, &dialog);
+        let make_frame = |host: &ProgrammerInspectorWindowHost, dialog: &super::super::programmer_inspector_dialog::ProgrammerInspectorDialog| {
+            let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+            HostFrame {
+                root: pass, owner: pass, host: host.state.identity(), session: dialog.epoch(),
+                first: true, os_close: false, close: false,
+                actions: Some(dialog.test_pending_label_file_action(&ctx, Arc::clone(&context), host.identity())),
+                checkpoint: None, native_info: None, embedded_layer: None, embedded_focus: None, focus: false,
+            }
+        };
+        host.pending = Some(make_frame(&host, &dialog));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if ui.ctx().current_pass_index() == 0 {
+                ui.ctx().request_discard("discard label-file action");
+            }
+        });
+        assert!(host.complete(&ctx, &mut dialog).is_none());
+        assert_eq!(dialog.test_file_feedback(), None);
+        output.drop_without_applying_deltas();
+
+        host.pending = Some(make_frame(&host, &dialog));
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let completion = host.complete(&ctx, &mut dialog).unwrap();
+        host.state.transition(UtilityPresentation::Popout);
+        for command in completion.commands {
+            if let ProgrammerInspectorHostCommand::Apply(actions, hwnd) = command {
+                dialog.commit_with_file(actions, &context, hwnd, &host);
+            }
+        }
+        assert_eq!(
+            dialog.test_file_feedback(),
+            None,
+            "retired source must not start a picker"
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn pending_popout_and_edit_win_over_deferred_root_open() {
+        let ctx = egui::Context::default();
+        let mut dialog = super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        dialog.open();
+        let context = Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
+        dialog.publish(Arc::clone(&context));
+        let before = dialog.test_value().bit_pattern();
+        let epoch = dialog.epoch();
+        let mut host = ProgrammerInspectorWindowHost::default();
+        host.prepare_open(&ctx, &dialog);
+        let pass = ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
+        host.pending = Some(HostFrame {
+            root: pass,
+            owner: pass,
+            host: host.state.identity(),
+            session: epoch,
+            first: true,
+            os_close: false,
+            close: false,
+            actions: Some(dialog.test_pending_popout_with_bit_edit(&ctx, Arc::clone(&context))),
+            checkpoint: None,
+            native_info: None,
+            embedded_layer: None,
+            embedded_focus: None,
+            focus: false,
+        });
+        assert_eq!(
+            host.open_from_origin(
+                &ctx,
+                &dialog,
+                true,
+                &super::super::utility_host::ChildOpenOrigin::<()>::Root,
+            ),
+            None
+        );
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let completion = host.complete(&ctx, &mut dialog).unwrap();
+        assert!(!completion.show_root);
+        assert!(host.is_popped_out());
+        assert_eq!(dialog.epoch(), epoch);
+        for command in completion.commands {
+            if let ProgrammerInspectorHostCommand::Apply(actions, _) = command {
+                dialog.commit(actions, &context);
+            }
+        }
+        assert_eq!(dialog.test_value().bit_pattern(), before ^ 1);
+        output.drop_without_applying_deltas();
     }
 }

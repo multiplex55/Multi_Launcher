@@ -40,6 +40,9 @@ pub fn filename_highlight_match(
         FilenameMatchMode::RankedSubstring => {
             ranked_substring_match_ranges(file_name, path, search_text, case_sensitive)
         }
+        FilenameMatchMode::FilenameContains => {
+            ranked_filename_substring_match_ranges(file_name, search_text, case_sensitive)
+        }
         FilenameMatchMode::Fuzzy => {
             fuzzy_filename_match_ranges(file_name, search_text, case_sensitive).map(
                 |filename_match_ranges| FilenameHighlightMatch {
@@ -55,6 +58,22 @@ pub fn filename_highlight_match(
 pub fn ranked_substring_match_ranges(
     file_name: &str,
     path: &Path,
+    search_text: &str,
+    case_sensitive: bool,
+) -> Option<FilenameHighlightMatch> {
+    ranked_filename_substring_match_ranges(file_name, search_text, case_sensitive).or_else(|| {
+        path_substring_match_ranges(&path.to_string_lossy(), search_text, case_sensitive).map(
+            |path_match_ranges| FilenameHighlightMatch {
+                rank: FilenameRank::FullPathContains,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges,
+            },
+        )
+    })
+}
+
+fn ranked_filename_substring_match_ranges(
+    file_name: &str,
     search_text: &str,
     case_sensitive: bool,
 ) -> Option<FilenameHighlightMatch> {
@@ -79,15 +98,6 @@ pub fn ranked_substring_match_ranges(
                     rank: FilenameRank::FilenameContains,
                     filename_match_ranges,
                     path_match_ranges: Vec::new(),
-                },
-            )
-        })
-        .or_else(|| {
-            path_substring_match_ranges(&path.to_string_lossy(), search_text, case_sensitive).map(
-                |path_match_ranges| FilenameHighlightMatch {
-                    rank: FilenameRank::FullPathContains,
-                    filename_match_ranges: Vec::new(),
-                    path_match_ranges,
                 },
             )
         })
@@ -195,7 +205,11 @@ fn substring_ranges(text: &str, query: &str, case_sensitive: bool) -> Option<Vec
                 .into_iter()
                 .filter_map(|r| {
                     let start = *byte_to_original.get(r.byte_start)?;
-                    let end = *byte_to_original.get(r.byte_end)?;
+                    // A lowercase mapping can expand one source character into
+                    // several characters. Include the entire original character
+                    // even if this match ends partway through that expansion.
+                    let last_start = *byte_to_original.get(r.byte_end.checked_sub(1)?)?;
+                    let end = last_start + text[last_start..].chars().next()?.len_utf8();
                     (start < end).then_some(TextMatchRange {
                         byte_start: start,
                         byte_end: end,
@@ -291,6 +305,53 @@ pub fn fuzzy_char_indices_to_byte_ranges(
 mod tests {
     use super::*;
     use crate::file_search::model::FilenameRank;
+
+    #[test]
+    fn filename_contains_is_literal_leaf_only_and_preserves_unicode_ranges() {
+        let matched = |name: &str, path: &str, query: &str, case_sensitive| {
+            filename_highlight_match(
+                name,
+                Path::new(path),
+                query,
+                case_sensitive,
+                FilenameMatchMode::FilenameContains,
+            )
+        };
+        for name in ["gcc.exe", "libgcc.a"] {
+            let hit = matched(name, &format!("C:/tools/{name}"), "gcc", false).unwrap();
+            assert!(!hit.filename_match_ranges.is_empty());
+            assert!(hit.path_match_ranges.is_empty());
+        }
+        assert!(matched("readme.txt", "C:/gcc/readme.txt", "gcc", false).is_none());
+        assert!(matched("g_config_c.txt", "C:/g_config_c.txt", "gcc", false).is_none());
+        assert!(matched("report[1].rs", "report[1].rs", "[1]", true).is_some());
+        assert!(matched("report1.rs", "report1.rs", "[1]", true).is_none());
+        assert!(matched("abc.txt", "abc.txt", "*.txt", false).is_none());
+        assert!(matched("gcc.exe", "gcc.exe", ".exe", true).is_some());
+        assert!(matched("gcc.EXE", "gcc.EXE", ".exe", true).is_none());
+        assert!(matched("gcc.EXE", "gcc.EXE", ".exe", false).is_some());
+        assert!(matched("gcc.exe", "gcc.exe", "", false).is_none());
+        let name = "İSTANBUL-café.rs";
+        let hit = matched(name, name, "i", false).unwrap();
+        assert_eq!(
+            hit.filename_match_ranges[0],
+            TextMatchRange {
+                byte_start: 0,
+                byte_end: "İ".len()
+            }
+        );
+        assert!(
+            hit.filename_match_ranges
+                .iter()
+                .all(|range| name.is_char_boundary(range.byte_start)
+                    && name.is_char_boundary(range.byte_end))
+        );
+        let hit = matched(name, name, "CAFÉ", false).unwrap();
+        assert_eq!(
+            &name[hit.filename_match_ranges[0].byte_start..hit.filename_match_ranges[0].byte_end],
+            "café"
+        );
+    }
 
     #[test]
     fn literal_refinement_matching_is_case_insensitive() {

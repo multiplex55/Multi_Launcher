@@ -1595,7 +1595,7 @@ mod tests {
             let options = RecordingOptions::new(
                 RecordingFormat::Gif,
                 frame_rate,
-                Duration::from_secs(10),
+                crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(10)),
                 false,
             )
             .unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
             let options = RecordingOptions::new(
                 RecordingFormat::Gif,
                 frame_rate,
-                Duration::from_secs(10),
+                crate::recording::RecordingDurationLimit::Timed(Duration::from_secs(10)),
                 false,
             )
             .unwrap();

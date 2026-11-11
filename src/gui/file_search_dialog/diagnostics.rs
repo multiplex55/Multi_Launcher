@@ -179,6 +179,7 @@ pub fn format_status_line(
     limit_reached: bool,
 ) -> String {
     match status {
+        crate::file_search::model::SearchStatus::Pending => format!("Ready — {results} results"),
         crate::file_search::model::SearchStatus::Running => format!("Searching… {results} results"),
         crate::file_search::model::SearchStatus::Completed if limit_reached => {
             format!("Completed — showing first {results} results")

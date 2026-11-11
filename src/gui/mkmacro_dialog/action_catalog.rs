@@ -2694,57 +2694,174 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
     true
 }
 
-pub fn close(d: &mut MkMacroDialog) {
-    d.action_catalog_visible = false;
+#[derive(Clone, Default)]
+pub(super) struct CatalogState {
+    pub(super) open: bool,
+    pub(super) query: String,
+    pub(super) epoch: u64,
+    pub(super) owner: u64,
+    pub(super) revision: u64,
+    pub(super) macro_id: Option<u64>,
+    pub(super) error: Option<String>,
+    #[cfg(test)]
+    pub(super) test_delay: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_query: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(super) test_run_program: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
-pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
-    if !d.action_catalog_visible {
-        return;
+#[cfg(test)]
+pub fn close(d: &mut MkMacroDialog) {
+    d.catalog.open = false;
+}
+
+#[derive(Default)]
+pub(super) struct CatalogActions {
+    presentation: Option<super::super::utility_host::UtilityPresentation>,
+    command: Option<CatalogCommand>,
+}
+#[derive(Clone)]
+pub(super) enum CatalogCommand {
+    Select(&'static str),
+    Close,
+    Retired,
+}
+
+impl super::super::utility_window_host::HostedUtilityDialog for CatalogState {
+    const KEY: &'static str = "mkmacro-action-catalog";
+    const TITLE: &'static str = "Add Action";
+    const SIZE: egui::Vec2 = egui::vec2(520.0, 580.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = MkMacroDialog;
+    type Actions = CatalogActions;
+    type Checkpoint = Self;
+    type Command = CatalogCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Self::KEY))
     }
-    let mut open = d.action_catalog_visible;
-    let mut close_clicked = false;
-    egui::Window::new("Add Action")
-        .enabled(d.host_child_input_allowed())
-        .default_width(520.0)
-        .show_utility(
-            ctx,
-            "mkmacro-action-catalog",
-            egui::Id::new("Add Action"),
-            Some(&mut open),
-            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(520.0),
-                egui::Vec2::ZERO,
-                [None, None],
-            ),
-            |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.action_search).hint_text("Search actions"),
-                );
+    fn navigation_owner(_: u64) -> super::super::jump_mode::ui::NavigationOwner {
+        super::super::jump_mode::ui::NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: super::super::jump_mode::ui::NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|i| i.focused)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && super::super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer
+                    || Some(layer) == popup
+                    || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<super::super::jump_mode::ui::NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) -> Self {
+        self.clone()
+    }
+    fn restore(&mut self, checkpoint: Self) {
+        *self = checkpoint;
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+            Option<&super::super::jump_mode::ui::JumpModeScope>,
+        ),
+        _: super::super::jump_mode::ui::NavigationOwner,
+        allowed: bool,
+        _: super::super::jump_mode::ui::NavigationOwner,
+        first: bool,
+        _: u64,
+        parent: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: super::super::utility_host::UtilityPresentation,
+    ) -> CatalogActions {
+        let mut result = CatalogActions::default();
+        let mut open = true;
+        let mut body = |ui: &mut egui::Ui| {
+            let (button, next) =
+                super::super::utility_host::presentation_button(ui, presentation, allowed);
+            if first && !ctx.will_discard() && button.clicked() {
+                result.presentation = Some(next);
+            }
+            ui.add_enabled_ui(allowed, |ui| {
+                #[cfg(test)]
+                {
+                    self.test_delay = None;
+                    self.test_run_program = None;
+                }
+                if let Some(error) = &self.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                let _query =
+                    ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search actions"));
+                #[cfg(test)]
+                {
+                    self.test_query = Some((_query.rect, ui.clip_rect(), _query.enabled()));
+                }
+                let footer = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
+                let available = ui
+                    .available_rect_before_wrap()
+                    .intersect(ui.clip_rect())
+                    .height()
+                    .max(0.0);
                 egui::ScrollArea::vertical()
-                    .max_height(430.0)
+                    .max_height((available - footer).max(0.0))
                     .show(ui, |ui| {
-                        let query = d.action_search.clone();
-                        for (category, descriptors) in group_visible_descriptors(&query) {
+                        for (category, entries) in group_visible_descriptors(&self.query) {
                             ui.heading(category.label());
-                            for x in descriptors {
-                                let blocked = d.action_editor.draft.is_some();
-                                let action = (x.make_default)();
-                                let context_error = if matches!(x.editor, EditorKind::DirectInsert)
-                                {
-                                    d.selected_macro().and_then(|m| {
-                                        validate_direct_context(m, insertion_position(d), &action)
+                            for entry in entries {
+                                let blocked = parent.action_editor.draft.is_some();
+                                let action = (entry.make_default)();
+                                let context_error =
+                                    if matches!(entry.editor, EditorKind::DirectInsert) {
+                                        parent.selected_macro().and_then(|m| {
+                                            validate_direct_context(
+                                                m,
+                                                insertion_position(parent),
+                                                &action,
+                                            )
                                             .err()
-                                    })
-                                } else {
-                                    None
-                                };
+                                        })
+                                    } else {
+                                        None
+                                    };
                                 let response = ui
                                     .add_enabled(
                                         !blocked && context_error.is_none(),
-                                        egui::Button::new(x.name),
+                                        egui::Button::new(entry.name),
                                     )
-                                    .on_hover_text(x.description);
+                                    .on_hover_text(entry.description);
                                 let response = if blocked {
                                     response.on_disabled_hover_text(
                                         "Apply or cancel the current action first.",
@@ -2754,20 +2871,74 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                                 } else {
                                     response
                                 };
+                                #[cfg(test)]
+                                if entry.name == "Delay" {
+                                    self.test_delay =
+                                        Some((response.rect, ui.clip_rect(), response.enabled()));
+                                }
+                                #[cfg(test)]
+                                if entry.name == "Run Program" {
+                                    self.test_run_program =
+                                        Some((response.rect, ui.clip_rect(), response.enabled()));
+                                }
                                 if response.clicked() {
-                                    select_descriptor(d, &x);
+                                    result.command = Some(CatalogCommand::Select(entry.name));
                                 }
                             }
                         }
                     });
                 ui.separator();
-                close_clicked = ui.button("Close").clicked();
-            },
-        );
-    if !open || close_clicked {
-        close(d);
+                if ui.button("Close").clicked() {
+                    result.command = Some(CatalogCommand::Close);
+                }
+            });
+        };
+        if let Some(ui) = child {
+            body(ui);
+        } else {
+            let id = egui::Id::new(Self::KEY);
+            egui::Window::new(Self::TITLE).id(id).show_utility(
+                ctx,
+                Self::KEY,
+                id,
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(Self::SIZE),
+                body,
+            );
+        }
+        if !open {
+            result.command = Some(CatalogCommand::Close);
+        }
+        if !first || ctx.will_discard() {
+            result.presentation = None;
+            result.command = None;
+        }
+        result
+    }
+    fn host_request(
+        actions: &CatalogActions,
+    ) -> Option<super::super::utility_host::UtilityPresentation> {
+        actions.presentation
+    }
+    fn closed_command() -> CatalogCommand {
+        CatalogCommand::Retired
+    }
+    fn command_closes(_: &CatalogCommand) -> bool {
+        false
+    }
+    fn complete_actions(
+        &mut self,
+        actions: CatalogActions,
+        _: Option<usize>,
+    ) -> Vec<CatalogCommand> {
+        actions.command.into_iter().collect()
+    }
+    #[cfg(test)]
+    fn test_button(_: &CatalogActions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
     }
 }
+
 
 #[cfg(test)]
 mod launcher_command_default_tests {

@@ -20,6 +20,7 @@ pub(crate) struct PendingSettingsNavigation {
     pub(crate) section: super::catalog::SettingsSection,
     pub(crate) catalog_revision: u64,
     pub(crate) settings_instance: Option<u64>,
+    pub(crate) source_origin: Option<crate::gui::settings_window_host::SettingsOpenOrigin>,
     pub(crate) stage: SettingsNavigationStage,
     pub(crate) frames_remaining: u8,
     pub(crate) scroll_requested: bool,
@@ -97,6 +98,7 @@ impl SettingsNavigationHighlight {
             section: self.section.clone(),
             catalog_revision: self.catalog_revision,
             settings_instance: self.settings_instance,
+            source_origin: None,
             stage: match &self.section {
                 super::catalog::SettingsSection::Main(_)
                 | super::catalog::SettingsSection::Notes
@@ -291,6 +293,8 @@ pub struct SettingsEditor {
     pub(crate) test_search_navigation_history: Vec<String>,
     #[cfg(test)]
     pub(crate) test_search_navigation_trace_started: bool,
+    #[cfg(test)]
+    pub(crate) test_hotkey_directory_button: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     pub(crate) test_notes_external_open_response: Option<TestNotesControlResponse>,
 }

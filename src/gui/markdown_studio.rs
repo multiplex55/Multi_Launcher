@@ -100,11 +100,14 @@ pub(crate) struct MarkdownFenceOrigin {
     pub(crate) identity: DiagramSourceCopyOrigin,
     pub(crate) source_snapshot: String,
     pub(crate) fence_index: usize,
+    pub(super) host_origin: Option<super::utility_host::AcceptedParentOpen<(u64, Option<PathBuf>, Option<u64>)>>,
 }
 
 pub(crate) struct MarkdownStudioDialog {
     pub(crate) open: bool,
     host_state: UtilityHostState,
+    presentation_prepared: bool,
+    host_epoch: u64,
     show_root_after_host_change: bool,
     document: MarkdownDocument,
     default_directory: PathBuf,
@@ -182,6 +185,8 @@ impl MarkdownStudioDialog {
         Self {
             open: false,
             host_state: UtilityHostState::docked(),
+            presentation_prepared: false,
+            host_epoch: 0,
             show_root_after_host_change: false,
             document: MarkdownDocument::new(),
             default_directory: root.path().to_path_buf(),
@@ -245,6 +250,10 @@ impl MarkdownStudioDialog {
             self.active_diagram_origin = None;
             self.pending_diagram_origin = None;
         }
+        if !self.open {
+            self.presentation_prepared = false;
+            self.host_epoch = self.host_epoch.wrapping_add(1);
+        }
         self.open = true;
         self.deferred_selection = None;
         // The launcher can open the Studio while the Enter event that
@@ -259,7 +268,20 @@ impl MarkdownStudioDialog {
     /// Pinned maintenance is passive and cannot resurrect a retired document.
     pub(crate) fn ensure_open(&mut self) {
         if self.document.source().is_some() {
+            if !self.open {
+                self.presentation_prepared = false;
+                self.host_epoch = self.host_epoch.wrapping_add(1);
+            }
             self.open = true;
+        }
+    }
+
+    pub(super) fn prepare_open_presentation(&mut self, ctx: &egui::Context) {
+        if self.open && !self.presentation_prepared {
+            let key = crate::settings::UtilityToolKey::parse("markdown-studio")
+                .expect("stable Markdown Studio key");
+            super::utility_host::restore_remembered_presentation(ctx, key, &mut self.host_state);
+            self.presentation_prepared = true;
         }
     }
 
@@ -357,6 +379,23 @@ impl MarkdownStudioDialog {
         }
     }
 
+    pub(super) fn accepts_diagram_origin(&self, origin: &MarkdownFenceOrigin) -> bool {
+        self.open
+            && !self.close_requested
+            && self.document.pending_transition().is_none()
+            && self.document.source() == Some(origin.source_snapshot.as_str())
+            && origin.host_origin.as_ref().is_some_and(|receipt| {
+                receipt.is_current(
+                    self.host_state.identity(),
+                    &(
+                        self.host_epoch,
+                        self.document.path().map(Path::to_path_buf),
+                        self.document.revision(),
+                    ),
+                )
+            })
+    }
+
     pub(crate) fn track_diagram_source_origin(&mut self, origin: MarkdownFenceOrigin) {
         self.pending_diagram_origin = Some(origin);
     }
@@ -442,6 +481,7 @@ impl MarkdownStudioDialog {
         root_visible: bool,
         root_input_allowed: bool,
     ) {
+        self.prepare_open_presentation(ctx);
         #[cfg(test)]
         {
             self.test_editor_rect = None;
@@ -840,7 +880,17 @@ impl MarkdownStudioDialog {
                 self.picker_owner = None;
             }
         }
+        if let Some(MarkdownStudioEffect::OpenDiagram { origin, .. }) = diagram_effect.as_mut() {
+            origin.host_origin = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, effects.host,
+                (self.host_epoch, self.document.path().map(Path::to_path_buf), self.document.revision()),
+                effects.root_pass, effects.owner_pass.unwrap_or(effects.root_pass),
+            );
+        }
         if !self.open {
+            let key = crate::settings::UtilityToolKey::parse("markdown-studio").expect("stable Markdown Studio key");
+            super::utility_host::remember_presentation(ctx, key, effects.host.host);
+            self.presentation_prepared = false;
             if let Some(identity) = native_geometry_identity(effects.host) {
                 super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
                 ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::Close);
@@ -865,6 +915,8 @@ impl MarkdownStudioDialog {
                 ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::Close);
             }
             if self.host_state.transition(requested) {
+                let key = crate::settings::UtilityToolKey::parse("markdown-studio").expect("stable Markdown Studio key");
+                super::utility_host::remember_presentation(ctx, key, requested);
                 self.deferred_selection = Some(self.selection.clone());
                 if requested == UtilityPresentation::Docked {
                     self.show_root_after_host_change = true;
@@ -1557,6 +1609,7 @@ impl MarkdownStudioDialog {
                             identity: identity.clone(),
                             source_snapshot,
                             fence_index: index,
+                            host_origin: None,
                         };
                         return Some(MarkdownStudioEffect::OpenDiagram {
                             source: copy.with_origin(identity),
@@ -1584,6 +1637,7 @@ impl MarkdownStudioDialog {
     fn finish_transition(&mut self, outcome: MarkdownTransitionOutcome, closes: bool) {
         match outcome {
             MarkdownTransitionOutcome::Applied => {
+                self.host_epoch = self.host_epoch.wrapping_add(1);
                 self.cache = None;
                 self.selection = 0..0;
                 self.deferred_selection = Some(0..0);
@@ -2143,6 +2197,20 @@ mod tests {
         let original_dirty = dialog.document.is_dirty();
         assert!(original_dirty);
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path.clone(),
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("markdown-studio").unwrap();
 
         hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
         hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
@@ -2181,6 +2249,10 @@ mod tests {
             dialog.host_state.presentation(),
             UtilityPresentation::Popout
         );
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Popout)
+        );
         assert_eq!(dialog.test_source(), Some(source));
         assert_eq!(dialog.document.revision(), original_revision);
         assert_eq!(dialog.document.undo_depth(), original_undo_depth);
@@ -2210,6 +2282,10 @@ mod tests {
             UtilityPresentation::Docked
         );
         assert!(dialog.take_show_root_after_host_change());
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
         hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
         assert_eq!(dialog.test_editor_id, Some(root_editor_id));
         assert_eq!(dialog.test_source(), Some(source));
@@ -2217,6 +2293,14 @@ mod tests {
         assert_eq!(dialog.document.undo_depth(), original_undo_depth);
         assert_eq!(dialog.document.is_dirty(), original_dirty);
         assert_eq!(dialog.selection, original_selection);
+        workers.join_all();
+        assert_eq!(
+            crate::settings::Settings::load(&path)
+                .unwrap()
+                .utility_presentations
+                .get(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
     }
 
     #[test]
@@ -2266,6 +2350,21 @@ mod tests {
         let source = "# draft\n";
         let mut dialog = dialog_with_source(source);
         let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = super::super::utility_presentation::UtilityPresentationManager::new(
+            path,
+            workers.clone(),
+            crate::settings::UtilityPresentations::default(),
+        );
+        manager.install_in_context(&ctx);
+        let key = crate::settings::UtilityToolKey::parse("markdown-studio").unwrap();
+        manager.remember(&ctx, key, crate::settings::RememberedPresentation::Docked);
         // Settle the window before the host request so the tested frame is an
         // ordinary retained frame, not its initial sizing pass.
         frame(&mut dialog, &ctx);
@@ -2291,6 +2390,11 @@ mod tests {
         assert_eq!(dialog.document.pending_transition(), None);
         assert!(dialog.open);
         assert_eq!(dialog.document.source(), Some(source));
+        assert_eq!(
+            manager.preference(key),
+            Some(crate::settings::RememberedPresentation::Docked)
+        );
+        workers.join_all();
     }
 
     #[cfg(windows)]
@@ -2499,6 +2603,7 @@ mod tests {
             identity: identity.clone(),
             source_snapshot: source.into(),
             fence_index: 0,
+                            host_origin: None,
         });
         let revision = dialog.document.revision().unwrap();
         let undo_depth = dialog.document.undo_depth();
@@ -2528,6 +2633,7 @@ mod tests {
             identity: identity.clone(),
             source_snapshot: source.into(),
             fence_index: 0,
+                            host_origin: None,
         });
         let changed = format!("{source}\nchanged\n");
         dialog.document.replace_source(&changed).unwrap();

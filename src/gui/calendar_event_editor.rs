@@ -297,6 +297,11 @@ impl CalendarEventEditor {
         )
     }
     #[cfg(test)]
+    pub(crate) fn test_set_title(&mut self, title: &str) {
+        self.title = title.to_owned();
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_title(&self) -> &str {
         &self.title
     }

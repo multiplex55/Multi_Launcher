@@ -42,6 +42,7 @@ It’s designed to be “one hotkey away” from:
 - [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
 - [Dashboard](#dashboard)
+- [Diagram Studio](#diagram-studio)
 - [Mouse gestures](#mouse-gestures)
 - [MkMacro authoring and reuse](#mkmacro-authoring-and-reuse)
 - [Layouts](#layouts)
@@ -222,7 +223,19 @@ The launcher searches applications, indexed files and enabled providers in one
 result list. Use `app <query>` to search the action catalog, or an enabled
 plugin's prefix, such as `fs`, `note`, `o`, `cs`, `paste` or `replace`, for its
 commands. Omni Search retains its own provider controls. Empty queries can
-show the dashboard, and pinned queries keep their usual behavior.
+show the dashboard, and pinned queries keep their usual behavior. Inline result
+descriptions show at most seven whitespace-separated words and may be shortened
+further to fit the available width. The underlying action and its details remain
+available through the existing detail and help surfaces; the full-path display
+retains its path detail.
+
+Ordinary utility windows offer **Dock** and **Pop Out**. Their chosen presentation
+is remembered across close and restart, but tools do not open automatically at
+startup. A child opened from a popped-out parent opens popped out; a direct or
+docked-parent open uses the child's remembered preference. Reopening a live tool
+focuses it and can promote it without replacing its draft. Use **Dock** to return
+it to the launcher. Menus, prompts, confirmations and overlays keep their existing
+workflows.
 
 The file-search plugin's **Global** and **Directory** choices select its search
 roots independently.
@@ -230,6 +243,9 @@ roots independently.
 ### 2) Calculator (with history)
 - `= 12*7 + 19`
 - `= history` (or `calc list`) to open the calculator history panel.
+
+For the Calculation Pad's Programmer Inspector and labels-only import/export,
+see the [Calculation Pad guide](src/calculation_pad/README.md#programmer-inspector-and-comparison).
 
 ### 3) Convert things quickly
 - Unit conversion:
@@ -394,6 +410,11 @@ plugin.
 
 Open the dedicated file-search UI from the launcher with the file-search action, then choose **Filename** or **Content** mode and **Global** or **Directory** scope. File search is intentionally explicit: edit the query and filters, then press **Search** or **Enter** in the search/root field to run it. It does not automatically search while typing, rerun when filters change, or persist typed search text.
 
+**Clear results** cancels and invalidates the current search, removes its rows,
+selection, preview, refinement, counts and diagnostics, and rejects late results.
+The query, roots, mode, type, include/exclude filters and sort preferences remain
+ready for another **Search**. It does not delete files or configuration.
+
 ### Launcher commands
 
 - `fs` opens the file-search dialog with the last saved UI preferences.
@@ -416,6 +437,7 @@ Examples: `fs`, `fs file README`, `fs content "TODO item"`, `fs here content lau
 **Filename** mode searches file and directory names under the selected roots.
 
 - **Ranked substring** is the default **Filename matching** mode. It is case-aware according to **Case-sensitive** and ranks stronger matches first: exact filename, filename starts with the query, filename contains the query, then path contains the query. Highlighting shows the matching filename/path ranges.
+- **Filename contains** matches a literal, contiguous substring in the filename, including its extension. Directory path text alone cannot qualify a result; **Case-sensitive** and **Type** still apply.
 - **Fuzzy** filename matching is available from **Filename matching** for typo-tolerant ordered-character matching. Use it when a filename is approximate or partially remembered; relevance still controls the default ordering.
 - Use the **Type** filter to choose **Files**, **Directories**, or **Files and directories**.
 - **Sort** options for filename results are **Relevance**, **Filename ↑**, **Filename ↓**, **Path ↑**, **Modified newest**, **Modified oldest**, **Size largest**, and **Size smallest**.
@@ -456,7 +478,7 @@ If ripgrep is missing, content search starts with the native backend automatical
 
 ### Everything CLI expectations
 
-When `plugin_settings.file_search.everything_enabled` is true, **Global** **Filename** searches in **Ranked substring** mode may use the Everything ES CLI before falling back to the walkdir backend. Everything is not used for **Fuzzy** filename searches, **Directory** custom-root searches, content searches, or global filename searches whose include-extension/type combination cannot be represented safely.
+When `plugin_settings.file_search.everything_enabled` is true, **Global** **Filename** searches in **Ranked substring** mode may use the Everything ES CLI before falling back to the walkdir backend. Everything is not used for **Filename contains** or **Fuzzy** filename searches, **Directory** custom-root searches, content searches, or global filename searches whose include-extension/type combination cannot be represented safely.
 
 Expected CLI setup:
 
@@ -933,6 +955,12 @@ largest measured entries in the current directory first by default, including
 during a scan. Click a column header to sort, then click it again to reverse the
 direction. **Type** identifies files, folders and skipped entries; **All**,
 **Files** and **Folders** filter the visible rows without changing scan totals.
+Choose **Table**, **Treemap**, or **Both** to inspect the same current directory
+and selection; the combined view may stack on narrow windows. A tile click selects
+its original row, and a directory tile double-click drills down. Use **Up** to
+return. Changing views, resizing, filtering and navigation reuse the current scan;
+only **Scan** or **Refresh** starts a new scan. Zero-size, unknown and skipped
+entries do not gain invented tile area, and partial subtotals remain marked.
 Double-click a directory row to drill down. Use **Copy Path** or **Open** for a
 selected path, or right-click a row and choose **Reveal in File Explorer** to
 select that exact entry in its parent folder. Use **Refresh** to scan again or
@@ -1206,7 +1234,29 @@ The dashboard is a set of configurable widgets you can pin and keep visible as a
 - **Utilities**
   - stopwatch widget, volume widget, recycle bin widget, tempfiles widget, system controls/actions
 
-> Use the dashboard editor UI to add/remove widgets and configure layout.
+Use the dashboard editor UI to add/remove widgets and configure layout.
+**Show preview** displays a grid and slot list with matching `S` markers. Hovering one
+highlights its partner; the tooltip gives the widget, row, column and span. A
+`*` marks selection and `!` marks a conflict. These markers identify slots in
+the editor session and are not persisted widget IDs.
+
+## Diagram Studio
+
+Search `diagram studio` and choose **Open Diagram Studio** (`diagram:studio`).
+File, Edit, View, Templates and Help are grouped in the menu strip; immediate
+viewer, mode, tool and zoom controls are in the action strip. In Mermaid
+**Source** and **Split** views, **Colors** sits directly under **Suggestions**;
+use **View** to restore source when hidden. The Visual document places Align and
+Distribute above the canvas, with a resizable, independently scrolling right
+properties sidebar. **Show properties** and **Hide properties** reopen or
+collapse it.
+
+Connector **From** and **To** choices show the object's own text and ID. With
+exactly two eligible objects selected, **Add connector** connects them; otherwise
+choose a source and then a destination, or press Escape to cancel. Drag a selected
+connector's From or To handle to reassign that endpoint. Double-clicking a
+connector opens its properties; double-clicking a primitive keeps its inline
+label editing behavior.
 
 ---
 
@@ -1441,8 +1491,11 @@ Opening the setup or choosing a format does not start a recording.
    **Refresh** requests a new list. A window that has disappeared stays marked
    unavailable and must be selected again before recording.
 2. Choose **GIF** (10 fps by default) or **MP4** (30 fps by default). Both
-   formats are silent. Set the frame rate, clip limit (30 seconds by default,
-   up to 120 seconds), and whether to include the cursor.
+   formats are silent. Set the frame rate, clip limit (30 seconds by default;
+   enter 0 for Unlimited or 1–1,000 seconds for a timed clip), and whether to
+   include the cursor. The duration step controls change the current value by
+   25 seconds, including the mouse wheel over the duration control; for example,
+   one step changes 17 to 42. You can also type an exact value.
 3. Choose **Fit**, **Half**, or **Quarter**. The output is limited to
    1920 × 1080. Check the displayed output size; MP4 pads odd dimensions
    to even values for the encoder.
@@ -1456,6 +1509,10 @@ Opening the setup or choosing a format does not start a recording.
    disabled by default. In **Settings → Hotkeys**, turn on **Enable Stop & Save
    hotkey** and choose a chord that does not conflict with other bindings.
    Escape is reserved by the launcher.
+
+Unlimited removes the automatic duration stop; **Stop**, target loss, disk and
+encoder safeguards still apply. The active controller shows the limit frozen when
+recording started. The three-second countdown is separate from that limit.
 
 The recorder saves only after the encoder finishes. It will not overwrite an
 existing file; choose a new name if another file takes the selected path.
@@ -1548,7 +1605,10 @@ part of the current pointer-input implementation.
 ## MkMacro authoring and reuse
 
 Open **Mouse/Keyboard Macros** and use its **Reuse** menu for packages, libraries,
-templates, and the complete in-app MkMacro help.
+templates, and the complete in-app MkMacro help. Ordinary authoring, help,
+library, Recording Review and annotation windows can be docked or popped out
+alongside their parent. Confirmations, native file pickers and capture overlays
+retain their existing workflows.
 
 - `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, and `Ctrl+D` operate on complete structured step
   selections. Drag the primary selected row to move a multi-selection together.
