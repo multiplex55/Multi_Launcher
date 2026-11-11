@@ -2923,10 +2923,7 @@ mod tests {
         assert_eq!(connector.from.anchor, VisualAnchor::East);
         assert_eq!(connector.to.anchor, VisualAnchor::West);
 
-        let sample = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/docs/plans/execution/standalone/desktop-productivity-completion-recovery/fixtures/diagram-grouped-supported.drawio"
-        ));
+        let sample = include_bytes!("fixtures/diagram-grouped-supported.drawio");
         let imported_sample = import_drawio_xml(sample).expect("portable sample imports");
         let sample_wire = export_drawio_xml(&imported_sample.document).expect("sample exports");
         let reopened_sample = import_drawio_xml(&sample_wire.bytes).expect("sample reimports");
