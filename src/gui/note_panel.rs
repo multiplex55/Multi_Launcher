@@ -18715,6 +18715,46 @@ More text.
     }
 
     #[test]
+    fn link_new_creates_only_when_missing_and_inserts_exact_wiki_syntax() {
+        let temp = TempNotesDir::new();
+        crate::plugins::note::append_note("Existing Note", "body").unwrap();
+        temp.refresh_cache();
+
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("prefix suffix"));
+        panel.note.slug = "current".into();
+        let editor = egui::Id::new("note_content");
+
+        let before_count = crate::plugins::note::load_notes().unwrap().len();
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Existing Note", ""),
+            )
+            .unwrap();
+        assert_eq!(panel.note_content(), "prefix suffix[[Existing Note]]");
+        let after_existing_count = crate::plugins::note::load_notes().unwrap().len();
+        assert_eq!(after_existing_count, before_count);
+
+        let basis = captured_form_fixture(&mut panel, &ctx, editor);
+        panel
+            .submit_child_form(
+                &ctx,
+                super::super::note_form_dialog::FormKind::NewNote,
+                &basis,
+                &form_test_draft("Fresh Note", ""),
+            )
+            .unwrap();
+        assert!(panel.note_content().contains("[[fresh-note]]"));
+        let final_notes = crate::plugins::note::load_notes().unwrap();
+        assert_eq!(final_notes.len(), before_count + 1);
+        assert!(final_notes.iter().any(|note| note.slug == "fresh-note"));
+    }
+
+    #[test]
     fn insert_or_create_note_link_replaces_selection_and_sets_cursor() {
         let temp = TempNotesDir::new();
         temp.refresh_cache();
