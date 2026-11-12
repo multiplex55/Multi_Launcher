@@ -15121,7 +15121,7 @@ pub(super) fn with_immediate_viewport_test_events_for<R>(
     }
 
     let previous = IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS
-        .with(|current| std::mem::replace(&mut *current.borrow_mut(), Some((viewport_id, events))));
+        .with(|current| (*current.borrow_mut()).replace((viewport_id, events)));
     let guard = EventsGuard(previous);
     let output = run();
     drop(guard);

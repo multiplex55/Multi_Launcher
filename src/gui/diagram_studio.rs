@@ -4636,7 +4636,7 @@ impl DiagramStudioDialog {
                 ));
                 return None;
             };
-            return Some(dialog.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+            Some(dialog.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)))
         }
         #[cfg(not(windows))]
         Some(dialog)
@@ -4928,7 +4928,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -4950,7 +4950,7 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -4976,11 +4976,11 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(ensure_drawio_extension);
+                .map(ensure_drawio_extension)
         }
         #[cfg(not(test))]
         {
@@ -5584,11 +5584,11 @@ impl DiagramStudioDialog {
                 let next = if self.owner_host.presentation() == UtilityPresentation::Docked { UtilityPresentation::Popout } else { UtilityPresentation::Docked };
                 self.owner_host.transition(next);
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(|path| ensure_export_extension(path, format));
+                .map(|path| ensure_export_extension(path, format))
         }
         #[cfg(not(test))]
         {
@@ -5670,7 +5670,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
@@ -5680,7 +5680,7 @@ impl DiagramStudioDialog {
                     } else {
                         path
                     }
-                });
+                })
         }
         #[cfg(not(test))]
         {
@@ -5721,11 +5721,11 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
-            return self
+            self
                 .test_next_file_picker_result
                 .take()
                 .unwrap_or(None)
-                .map(ensure_native_extension);
+                .map(ensure_native_extension)
         }
         #[cfg(not(test))]
         {
@@ -5892,7 +5892,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
-            return self.test_next_file_picker_result.take().unwrap_or(None);
+            self.test_next_file_picker_result.take().unwrap_or(None)
         }
         #[cfg(not(test))]
         {
@@ -10527,28 +10527,49 @@ impl DiagramStudioDialog {
                         self.test_visual_group_enabled = group.enabled();
                         self.test_action_rects.push(("visual_group_selection".into(), group.rect, ui.clip_rect()));
                     }
-                    if group.clicked() && document_intent.is_none() {
-                        if let (Some(scene), Some(projection)) = (scene_snapshot.as_deref(), base_projection) {
-                            let group_selection = group_roots.iter().copied().collect();
-                            if let Some(bounds) = visual_canvas_selection_bounds(scene, projection, &group_selection, visual_painted_item_prefix(projection)) {
-                                staged_operations = Some((vec![VisualOperation::Group {
+                    if group.clicked()
+                        && document_intent.is_none()
+                        && let (Some(scene), Some(projection)) =
+                            (scene_snapshot.as_deref(), base_projection)
+                    {
+                        let group_selection = group_roots.iter().copied().collect();
+                        if let Some(bounds) = visual_canvas_selection_bounds(
+                            scene,
+                            projection,
+                            &group_selection,
+                            visual_painted_item_prefix(projection),
+                        ) {
+                            staged_operations = Some((
+                                vec![VisualOperation::Group {
                                     frame: VisualObjectDraft {
                                         layer_id: DEFAULT_LAYER_ID,
-                                        transform: VisualTransform { x: bounds.center().x, y: bounds.center().y, width: (bounds.max.x - bounds.min.x + 40.0).max(40.0), height: (bounds.max.y - bounds.min.y + 64.0).max(64.0), rotation_degrees: 0.0 },
+                                        transform: VisualTransform {
+                                            x: bounds.center().x,
+                                            y: bounds.center().y,
+                                            width: (bounds.max.x - bounds.min.x + 40.0).max(40.0),
+                                            height: (bounds.max.y - bounds.min.y + 64.0).max(64.0),
+                                            rotation_degrees: 0.0,
+                                        },
                                         style: visual_frame_style(),
-                                        kind: VisualObjectKind::Container { label: "Group".into() },
+                                        kind: VisualObjectKind::Container {
+                                            label: "Group".into(),
+                                        },
                                     },
                                     members: group_roots,
-                                }], None));
-                            }
+                                }],
+                                None,
+                            ));
                         }
                     }
                     let ungroup_id = scene_snapshot.as_ref().and_then(|scene| self.visual_selection.and_then(|id| scene.objects.iter().find(|object| object.id == id && matches!(object.kind, VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. })).map(|object| object.id)));
                     let ungroup = ui.add_enabled(structural_edits_allowed && ungroup_id.is_some(), egui::Button::new("Ungroup"));
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_ungroup".into(), ungroup.rect, ui.clip_rect()));
-                    if ungroup.clicked() && document_intent.is_none() {
-                        if let Some(id) = ungroup_id { staged_operations = Some((vec![VisualOperation::Ungroup(id)], None)); }
+                    if ungroup.clicked()
+                        && document_intent.is_none()
+                        && let Some(id) = ungroup_id
+                    {
+                        staged_operations = Some((vec![VisualOperation::Ungroup(id)], None));
                     }
                     let add_horizontal_swimlane = ui.add_enabled(
                         structural_edits_allowed,

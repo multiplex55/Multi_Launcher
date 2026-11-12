@@ -3190,11 +3190,11 @@ impl NotePanel {
         {
             self.test_markdown_export_picker_calls =
                 self.test_markdown_export_picker_calls.saturating_add(1);
-            return self
+            self
                 .test_next_markdown_export_path
                 .take()
                 .unwrap_or(None)
-                .map(|path| ensure_extension(path, extension));
+                .map(|path| ensure_extension(path, extension))
         }
         #[cfg(not(test))]
         {

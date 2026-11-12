@@ -1001,25 +1001,17 @@ impl ProgrammerInspectorDialog {
                         model.bit_not();
                         changed = true;
                     }
-                    if ui.button("Shift left").clicked() {
-                        if model.shift_left(1).is_ok() {
-                            changed = true;
-                        }
+                    if ui.button("Shift left").clicked() && model.shift_left(1).is_ok() {
+                        changed = true;
                     }
-                    if ui.button("Shift right").clicked() {
-                        if model.shift_right(1).is_ok() {
-                            changed = true;
-                        }
+                    if ui.button("Shift right").clicked() && model.shift_right(1).is_ok() {
+                        changed = true;
                     }
-                    if ui.button("Rotate left").clicked() {
-                        if model.rotate_left(1).is_ok() {
-                            changed = true;
-                        }
+                    if ui.button("Rotate left").clicked() && model.rotate_left(1).is_ok() {
+                        changed = true;
                     }
-                    if ui.button("Rotate right").clicked() {
-                        if model.rotate_right(1).is_ok() {
-                            changed = true;
-                        }
+                    if ui.button("Rotate right").clicked() && model.rotate_right(1).is_ok() {
+                        changed = true;
                     }
                     ui.label(format!("Set bits: {}", model.popcount()));
                 });

@@ -844,10 +844,8 @@ impl FileLockDialogState {
                                 egui::ViewportCommand::Focus,
                             );
                         }
-                    } else if self.host_focus {
-                        if let Some(layer) = self.root_layer() {
-                            ctx.move_to_top(layer);
-                        }
+                    } else if self.host_focus && let Some(layer) = self.root_layer() {
+                        ctx.move_to_top(layer);
                     }
                     self.host_focus = false;
                     if pending.host.host == super::utility_host::UtilityPresentation::Popout {

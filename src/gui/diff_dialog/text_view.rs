@@ -1320,19 +1320,17 @@ fn render_pane_contents(
     if let Some((line, extend)) = selection_action {
         model.select_source_line(side, line, extend);
     }
-    if let Some(line) = begin_alignment_action {
-        if model.select_source_line(side, line, false)
-            && let Err(error) = model.begin_manual_alignment_from_selection()
-        {
-            model.alignment_error = Some(error);
-        }
+    if let Some(line) = begin_alignment_action
+        && model.select_source_line(side, line, false)
+        && let Err(error) = model.begin_manual_alignment_from_selection()
+    {
+        model.alignment_error = Some(error);
     }
-    if let Some(target_line) = confirm_alignment_action {
-        if model.select_source_line(side, target_line, false)
-            && let Err(error) = model.complete_manual_alignment_from_selection()
-        {
-            model.alignment_error = Some(error);
-        }
+    if let Some(target_line) = confirm_alignment_action
+        && model.select_source_line(side, target_line, false)
+        && let Err(error) = model.complete_manual_alignment_from_selection()
+    {
+        model.alignment_error = Some(error);
     }
     if let Some(anchor) = remove_anchor {
         model.remove_manual_alignment(anchor);

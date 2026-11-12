@@ -702,7 +702,7 @@ mod native {
             return Err("the native viewport process or root-owner identity changed".into());
         }
 
-        if unsafe { GetPropW(hwnd, BINDING_PROPERTY_NAME) }.0 != std::ptr::null_mut() {
+        if !unsafe { GetPropW(hwnd, BINDING_PROPERTY_NAME) }.0.is_null() {
             return Err("the native utility viewport already has an observer binding".into());
         }
 

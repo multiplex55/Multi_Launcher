@@ -2510,23 +2510,25 @@ impl CalculationPadDialog {
                     _ => false,
                 })
             });
-        if authorized_pass && response.has_focus() && cursor_interaction {
-            if let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                .and_then(|state| state.cursor.char_range())
-            {
-                let to_byte = |index: usize| {
-                    source
-                        .char_indices()
-                        .map(|(offset, _)| offset)
-                        .chain(std::iter::once(source.len()))
-                        .nth(index)
-                };
-                if let (Some(a), Some(b)) = (
-                    to_byte(range.primary.index.into()),
-                    to_byte(range.secondary.index.into()),
-                ) {
-                    *inspector_caret = Some(a.min(b)..a.max(b));
-                }
+        if authorized_pass
+            && response.has_focus()
+            && cursor_interaction
+            && let Some(range) =
+                egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                    .and_then(|state| state.cursor.char_range())
+        {
+            let to_byte = |index: usize| {
+                source
+                    .char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain(std::iter::once(source.len()))
+                    .nth(index)
+            };
+            if let (Some(a), Some(b)) = (
+                to_byte(range.primary.index.into()),
+                to_byte(range.secondary.index.into()),
+            ) {
+                *inspector_caret = Some(a.min(b)..a.max(b));
             }
         }
         #[cfg(test)]

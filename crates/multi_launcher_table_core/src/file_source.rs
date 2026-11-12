@@ -687,10 +687,9 @@ impl TableFileBackedSource {
                     // materialized only by a bounded cursor request.
                     if provisional_lease.is_some()
                         && provisional_rows.len() < TABLE_FILE_PROVISIONAL_MAX_ROWS
+                        && let Some(row) = provisional_row(id, data_ordinal, &fields)
                     {
-                        if let Some(row) = provisional_row(id, data_ordinal, &fields) {
-                            provisional_rows.push(row);
-                        }
+                        provisional_rows.push(row);
                     }
                     drop(fields);
                 }

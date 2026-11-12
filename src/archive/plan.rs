@@ -597,10 +597,8 @@ fn build_extraction_plan_with_finalization(
                 }
             }
         }
-        if valid {
-            if let Some(path) = safe_path {
-                prepared.push(Prepared { entry, path });
-            }
+        if valid && let Some(path) = safe_path {
+            prepared.push(Prepared { entry, path });
         }
     }
     if report.has_issues() {
