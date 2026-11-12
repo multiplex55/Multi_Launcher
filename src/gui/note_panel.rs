@@ -4131,8 +4131,10 @@ impl NotePanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_custom_table_origin_insert_at(&self) -> Option<usize> {
-        self.table_form.as_ref().map(|form| form.basis.range.start)
+    pub(crate) fn test_custom_table_origin_range(&self) -> Option<std::ops::Range<usize>> {
+        self.table_form
+            .as_ref()
+            .map(|form| form.basis.range.clone())
     }
 
     #[cfg(test)]

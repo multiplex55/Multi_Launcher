@@ -66715,6 +66715,8 @@ mod tests {
 
     #[test]
     fn studio_usability_custom_table_keeps_note_and_caret_owner_across_query_and_second_note() {
+        use super::super::note_form_dialog::FormKind;
+
         let query_id = egui::Id::new("query_input");
         let screen_size = egui::vec2(1600.0, 1200.0);
         let ctx = egui::Context::default();
@@ -66751,35 +66753,46 @@ mod tests {
         app.push_note_panel(note_b);
         launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
 
-        let editor_id = app.note_panels[0]
-            .test_editor_widget_id()
-            .expect("Note A renders its source editor");
         let insert_at = source
             .find("selected")
             .expect("the selected prose is present");
         let select_end = insert_at + "selected prose".len();
-        let mut editor_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
-            .expect("Note A has current TextEdit state");
-        editor_state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(
-                egui::text::CCursor::new(source[..insert_at].chars().count()),
-                egui::text::CCursor::new(source[..select_end].chars().count()),
-            )));
-        editor_state.store(&ctx, editor_id);
-        app.note_panels[0].test_begin_custom_table_builder(&ctx);
+        let query_rect_before_open = ctx
+            .read_response(query_id)
+            .expect("the real query response remains rendered")
+            .rect;
+        app.note_panels[0].test_form_selection(
+            &ctx,
+            source[..insert_at].chars().count(),
+            source[..select_end].chars().count(),
+        );
+        app.note_panels[0].test_stage_form_open(&ctx, FormKind::Table);
+        let output = ctx.run_ui(launcher_show_owner_input(true, screen_size), |_| {});
+        app.complete_markdown_diagram_handoff(&ctx);
+        output.drop_without_applying_deltas();
+        assert!(app.note_panels[0].test_form_session(FormKind::Table).is_some());
         assert_eq!(
-            app.note_panels[0].test_custom_table_origin_insert_at(),
-            Some(insert_at),
-            "the builder captures the original selection start"
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "the accepted Note host captures the complete source selection"
         );
 
-        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
-            .0
-            .drop_without_applying_deltas();
         let builder_layer = app.note_panels[0]
             .test_custom_table_builder_layer()
             .expect("the custom builder owns a distinct window layer");
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            builder_layer,
+            "Custom table placement fixture",
+            screen_size,
+            egui::pos2(
+                40.0,
+                (query_rect_before_open.bottom() + 24.0).min(screen_size.y - 420.0),
+            ),
+        );
+        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
         let ordinary = app
             .query_focus_ordinary_context()
             .expect("the two notes expose ordinary query ownership");
@@ -66788,11 +66801,11 @@ mod tests {
         let builder_rect = app.note_panels[0]
             .test_custom_table_builder_rect()
             .expect("the builder is rendered as a reachable nonmodal window");
-        let query_rect_before = ctx
+        let query_rect_after_open = ctx
             .read_response(query_id)
-            .expect("the real query response remains rendered")
+            .expect("the real query response remains rendered beside the builder")
             .rect;
-        assert!(!builder_rect.intersects(query_rect_before));
+        assert!(!builder_rect.intersects(query_rect_after_open));
 
         notes_query_mouse_prepare_interactive(&mut app, &ctx, screen_size, false);
         let query_rect = ctx
@@ -66815,36 +66828,92 @@ mod tests {
         let note_b_after_edit = app.note_panels[1].note_content().to_owned();
         assert!(note_b_after_edit.ends_with("untouched draft changed"));
 
-        let insert_button = app.note_panels[0]
-            .test_custom_table_builder_insert_rect()
-            .expect("Insert remains reachable while Note B owns focus");
+        let builder_window = app.note_panels[0]
+            .test_custom_table_builder_rect()
+            .expect("the real builder window remains open");
+        let builder_title = egui::pos2(builder_window.center().x, builder_window.top() + 10.0);
+        for pressed in [true, false] {
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![
+                    egui::Event::PointerMoved(builder_title),
+                    egui::Event::PointerButton {
+                        pos: builder_title,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        for _ in 0..2 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        }
+        assert_eq!(app.query, query_after_edit);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert_eq!(app.note_panels[1].note_content(), note_b_after_edit);
+        assert_eq!(
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "normal builder focus keeps the accepted source selection"
+        );
+
+        let (insert_button, insert_clip, insert_enabled) = app.note_panels[0]
+            .test_form_control(FormKind::Table, "submit")
+            .expect("the actual Insert button remains available after title focus");
+        assert!(
+            insert_enabled && insert_clip.contains_rect(insert_button),
+            "title focus admits the real Insert control: focused={:?}, builder={builder_window:?}, insert={insert_button:?}, clip={insert_clip:?}, enabled={insert_enabled}",
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+        );
         let insert_pos = insert_button.center();
+        let insert_events = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
         notes_query_mouse_run_frame(
             &mut app,
             &ctx,
             screen_size,
-            vec![
-                egui::Event::PointerMoved(insert_pos),
-                egui::Event::PointerButton {
-                    pos: insert_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
+            insert_events(insert_pos, true),
         );
-        let mut release = launcher_show_owner_input(true, screen_size);
-        release.events = vec![egui::Event::PointerButton {
-            pos: insert_pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }];
-        let (_, passes) = app.run_root_frame_for_test(&ctx, release, true);
+        let mut discarded_release = launcher_show_owner_input(true, screen_size);
+        discarded_release.events = insert_events(insert_pos, false);
+        let (output, passes) = app.run_root_frame_for_test(&ctx, discarded_release, true);
+        output.drop_without_applying_deltas();
         assert_eq!(
             passes, 2,
-            "the insertion event is replayed through an accepted pass"
+            "the rejected activation crosses a discarded ROOT pass"
         );
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 0));
+        assert!(app.note_panels[0].test_form_session(FormKind::Table).is_some());
+        assert_eq!(
+            app.note_panels[0].test_custom_table_origin_range(),
+            Some(insert_at..select_end),
+            "discarding the activation leaves the captured source selection intact"
+        );
+
+        let (insert_button, insert_clip, insert_enabled) = app.note_panels[0]
+            .test_form_control(FormKind::Table, "submit")
+            .expect("the rejected activation leaves the real Insert available for retry");
+        assert!(insert_enabled && insert_clip.contains_rect(insert_button));
+        let insert_pos = insert_button.center();
+        notes_query_mouse_run_frame(&mut app, &ctx, screen_size, insert_events(insert_pos, true));
+        let mut accepted_release = launcher_show_owner_input(true, screen_size);
+        accepted_release.events = insert_events(insert_pos, false);
+        let (output, passes) = app.run_root_frame_for_test(&ctx, accepted_release, false);
+        assert_eq!(passes, 1, "the retry is applied through one retained pass");
+        output.drop_without_applying_deltas();
 
         let updated = app.note_panels[0].note_content().to_owned();
         assert!(updated.starts_with("# Table A\n\nbefore \n\n"));
