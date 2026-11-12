@@ -1841,7 +1841,7 @@ mod tests {
                 None,
                 first_ui_pass,
                 || now,
-                |request| submit(request),
+                &mut *submit,
             );
         });
         output.drop_without_applying_deltas();
@@ -1881,7 +1881,7 @@ mod tests {
                 None,
                 first_ui_pass,
                 || now,
-                |request| submit(request),
+                &mut *submit,
             );
             clicked_states.push(effects.start_clicked.unwrap_or(false));
         });

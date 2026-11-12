@@ -50789,10 +50789,16 @@ mod tests {
             false,
         );
         detached(&mut app, vec![egui::Event::Copy], false);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         detached(&mut app, vec![egui::Event::Cut], true);
         assert_eq!(app.clipboard_dialog.test_text(), draft);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         for _ in 0..3 {
             detached(&mut app, Vec::new(), false);
         }
@@ -50823,7 +50829,10 @@ mod tests {
         let copy = app.clipboard_history_host.test_native_target("Copy clipboard entry").unwrap();
         detached(&mut app, tool_dialog_pointer_events(copy, true), false);
         detached(&mut app, tool_dialog_pointer_events(copy, false), true);
-        assert_eq!(fake.writes(), [draft.clone()]);
+        assert_eq!(
+            fake.writes().as_slice(),
+            std::slice::from_ref(&draft)
+        );
         for _ in 0..3 {
             detached(&mut app, Vec::new(), false);
         }
@@ -51367,7 +51376,11 @@ mod tests {
         prepare_actual_query_frame(&ctx, &mut app);
         prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
         let path = workspace.root().join("retained-result.txt");
-        seed_actual_file_search_filename_results(&mut app, SearchId(947), &[path.clone()]);
+        seed_actual_file_search_filename_results(
+            &mut app,
+            SearchId(947),
+            std::slice::from_ref(&path),
+        );
         for _ in 0..3 {
             app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
                 .0

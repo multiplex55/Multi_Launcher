@@ -960,7 +960,7 @@ mod resource_tests {
 
         // The admitted workspace keeps the original ten-byte temp limit,
         // while all of its growth remains visible to the current pool view.
-        let workspace = TableTempWorkspace::create(&std::env::temp_dir(), admitted, 12).unwrap();
+        let workspace = TableTempWorkspace::create(std::env::temp_dir(), admitted, 12).unwrap();
         let mut file = workspace.create_file("captured-policy").unwrap();
         file.append(&[0; 6]).unwrap();
         assert_eq!(pool.usage().temp_bytes, 6);

@@ -354,7 +354,7 @@ mod tests {
                     generation: self.generation,
                     frame: RgbaFrame::new(
                         self.canvas,
-                        vec![80, 120, 160, 255].repeat(self.canvas.rgba_bytes() / 4),
+                        [80, 120, 160, 255].repeat(self.canvas.rgba_bytes() / 4),
                     )
                     .unwrap(),
                 }

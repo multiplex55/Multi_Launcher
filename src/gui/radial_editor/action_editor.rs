@@ -5090,7 +5090,7 @@ mod tests {
                     )),
                     _ => None,
                 })
-                .last()
+                .next_back()
                 .expect("the live editor list publishes its scroll viewport");
         assert!(visible_viewport.is_positive());
         let scroll_origin = visible_viewport.center();

@@ -384,31 +384,38 @@ impl ExplorerTabsDialog {
             .map_err(|error| error.to_string())
             .and_then(|store| store.launch_snapshot(id).map_err(|error| error.to_string()));
         match result {
-            Ok(snapshot) => match {
-                #[cfg(test)]
-                if let Some(gate) = self.test_gate.clone() {
-                    self.job.start_test_held(snapshot.request().clone(), gate)
-                } else {
-                    self.job.start(
-                        snapshot.request().clone(),
-                        std::time::Duration::from_secs(30),
-                    )
+            Ok(snapshot) => {
+                let start_result = {
+                    #[cfg(test)]
+                    {
+                        if let Some(gate) = self.test_gate.clone() {
+                            self.job.start_test_held(snapshot.request().clone(), gate)
+                        } else {
+                            self.job.start(
+                                snapshot.request().clone(),
+                                std::time::Duration::from_secs(30),
+                            )
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
+                        self.job.start(
+                            snapshot.request().clone(),
+                            std::time::Duration::from_secs(30),
+                        )
+                    }
+                };
+                match start_result {
+                    Ok(id) => {
+                        self.job_active = true;
+                        self.run = Some((id, snapshot));
+                        self.notice = Some("Opening the saved folder list".into());
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!("Cannot start Explorer Tabs: {error:?}"))
+                    }
                 }
-                #[cfg(not(test))]
-                {
-                    self.job.start(
-                        snapshot.request().clone(),
-                        std::time::Duration::from_secs(30),
-                    )
-                }
-            } {
-                Ok(id) => {
-                    self.job_active = true;
-                    self.run = Some((id, snapshot));
-                    self.notice = Some("Opening the saved folder list".into());
-                }
-                Err(error) => self.notice = Some(format!("Cannot start Explorer Tabs: {error:?}")),
-            },
+            }
             Err(error) => self.notice = Some(error),
         }
     }

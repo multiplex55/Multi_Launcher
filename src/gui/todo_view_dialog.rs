@@ -1602,7 +1602,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("todo.json");
         let original = todo_entry("go @note:dest#section", 1, &[]);
-        write_todos(&path, &[original.clone()]);
+        write_todos(&path, std::slice::from_ref(&original));
         let ctx = egui::Context::default();
         let mut dialog = TodoViewDialog::default();
         dialog.open_from(path.to_str().unwrap());
@@ -1778,7 +1778,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("todo.json");
         let first = todo_entry("first", 1, &[]);
-        write_todos(&path, &[first.clone()]);
+        write_todos(&path, std::slice::from_ref(&first));
         let ctx = egui::Context::default();
         let mut app = test_app(&ctx, directory.path());
         let mut dialog = TodoViewDialog::default();

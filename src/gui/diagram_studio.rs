@@ -22333,7 +22333,15 @@ mod tests {
         let source = dialog.test_session().draft().to_owned();
         let output = crate::diagram::render_mermaid_preview(&source, RasterSize::new(400, 300).unwrap()).unwrap();
         for color in ["#123456", "#a10001", "#a20002", "#b10001", "#b20002"] { assert!(output.svg.contains(color), "{color}"); }
-        assert!(output.raster.rgba.chunks_exact(4).any(|pixel| pixel[..3] == [0x12, 0x34, 0x56]));
+        assert!(
+            output
+                .raster
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[..3] == [0x12, 0x34, 0x56])
+        );
         let rendered = DiagramRenderedImageSnapshot::capture(dialog.test_session().revision(), Arc::new(output));
         assert!(std::str::from_utf8(rendered.encode_svg(1.0).unwrap().bytes()).unwrap().contains("#123456"));
         let png = rendered.encode_png(1.0).unwrap();

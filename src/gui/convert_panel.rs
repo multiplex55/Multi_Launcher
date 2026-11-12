@@ -1643,7 +1643,7 @@ mod tests {
         panel.from = Some(PanelUnit::Base(BaseUnit::Decimal));
         panel.targets = vec![Some(PanelUnit::Base(BaseUnit::Binary))];
         let result = panel.compute_results();
-        let expected = format!("{} bin", format!("{:b}", -10_i64));
+        let expected = format!("{:b} bin", -10_i64);
         assert!(matches!(
             &result[0].value,
             Ok(TargetValue::Base { display }) if display.as_str() == expected.as_str()
@@ -1652,7 +1652,7 @@ mod tests {
         panel.input = (-i64::MAX).to_string();
         panel.targets = vec![Some(PanelUnit::Base(BaseUnit::Hexadecimal))];
         let result = panel.compute_results();
-        let expected = format!("{} hex", format!("{:x}", -i64::MAX));
+        let expected = format!("{:x} hex", -i64::MAX);
         assert!(matches!(
             &result[0].value,
             Ok(TargetValue::Base { display }) if display.as_str() == expected.as_str()
@@ -1660,7 +1660,7 @@ mod tests {
 
         panel.input = i64::MAX.to_string();
         let result = panel.compute_results();
-        let expected = format!("{} hex", format!("{:x}", i64::MAX));
+        let expected = format!("{:x} hex", i64::MAX);
         assert!(matches!(
             &result[0].value,
             Ok(TargetValue::Base { display }) if display.as_str() == expected.as_str()

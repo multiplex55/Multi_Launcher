@@ -500,9 +500,7 @@ fn account_record(
         ));
     }
     if limits.strict_width {
-        if limits.has_header && summary.record_count == 0 {
-            *expected_width = Some(record.width);
-        } else if !limits.has_header && summary.record_count == 0 {
+        if summary.record_count == 0 {
             *expected_width = Some(record.width);
         } else if let Some(expected) = *expected_width
             && record.width != expected

@@ -401,20 +401,32 @@ mod tests {
             }
             if template == DiagramTemplate::Timeline {
                 assert!(styled.svg.contains("fill=\"#b20002\""));
-                assert!(styled.raster.rgba.chunks_exact(4).any(|p| p[..3] == [0xb1, 0, 1]));
+                assert!(
+                    styled
+                        .raster
+                        .rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|p| p[..3] == [0xb1, 0, 1])
+                );
             }
             assert_eq!((output.raster.width, output.raster.height), (640, 420));
             assert_eq!(output.raster.rgba.len(), 640 * 420 * 4);
             let visible_pixels = output
                 .raster
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[3] > 0)
                 .count();
             let foreground_pixels = output
                 .raster
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[3] > 0 && pixel[0] < 100 && pixel[1] < 100 && pixel[2] < 100)
                 .count();
             assert!(

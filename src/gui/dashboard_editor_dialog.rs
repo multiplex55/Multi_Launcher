@@ -1017,7 +1017,7 @@ impl DashboardEditorDialog {
         native_ui_owner: bool,
         native_confirmation_owner: bool,
         first_ui_pass: bool,
-        mut body_ui: Option<&mut egui::Ui>,
+        body_ui: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
         host_request: &mut Option<UtilityPresentation>,
         host_control_allowed: bool,
@@ -1613,7 +1613,7 @@ impl DashboardEditorDialog {
                     },
                 );
         };
-        if let Some(ui) = body_ui.as_deref_mut() {
+        if let Some(ui) = body_ui {
             draw_body(ui);
         } else {
             let _ = egui::Window::new("Dashboard Editor")

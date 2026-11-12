@@ -2207,9 +2207,8 @@ impl JsonUtilityDialogState {
             if let Some((id, expanded)) = branch_action {
                 self.editor.tree.set_branch_expanded(id, expanded);
             }
-            match copy_action {
-                Some(action) => actions.tree_copy = selected.map(|id| (action, id)),
-                None => {}
+            if let Some(action) = copy_action {
+                actions.tree_copy = selected.map(|id| (action, id));
             }
         }
     }

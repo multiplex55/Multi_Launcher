@@ -2880,8 +2880,8 @@ impl TextViewModel {
             .source_line_selection
             .is_some_and(|selection| selection.side == other(from));
         match other(from) {
-            DiffSide::Left => self.left.apply_edits(&[edit.clone()])?,
-            DiffSide::Right => self.right.apply_edits(&[edit.clone()])?,
+            DiffSide::Left => self.left.apply_edits(std::slice::from_ref(&edit))?,
+            DiffSide::Right => self.right.apply_edits(std::slice::from_ref(&edit))?,
         };
         let target_document = match other(from) {
             DiffSide::Left => &mut self.left,

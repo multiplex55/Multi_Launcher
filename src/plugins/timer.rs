@@ -1722,7 +1722,7 @@ mod tests {
                 Duration::ZERO,
                 None,
                 "None".into(),
-                wall_now.clone(),
+                wall_now,
                 monotonic_now,
             )
             .is_err()

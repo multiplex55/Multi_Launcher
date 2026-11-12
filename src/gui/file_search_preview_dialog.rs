@@ -46,6 +46,7 @@ pub(super) struct FileSearchPreviewHostActions {
     actions: Vec<PreviewAction>,
 }
 
+#[derive(Default)]
 pub struct FileSearchPreviewDialogState {
     pub open: bool,
     epoch: u64,
@@ -113,28 +114,6 @@ impl PartialEq for FileSearchPreviewDialogState {
             && self.action_error_message == other.action_error_message
             && self.pending_auto_scroll == other.pending_auto_scroll
             && self.reset_horizontal_scroll == other.reset_horizontal_scroll
-    }
-}
-
-impl Default for FileSearchPreviewDialogState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            epoch: 0,
-            session_active: false,
-            request_generation: 0,
-            close_requested: false,
-            current_request: None,
-            loaded_preview: None,
-            selected_match: None,
-            loading: false,
-            load_error_message: None,
-            action_error_message: None,
-            pending_auto_scroll: false,
-            reset_horizontal_scroll: false,
-            load_state: PreviewLoadStateMachine::default(),
-            preview_result_rx: None,
-        }
     }
 }
 

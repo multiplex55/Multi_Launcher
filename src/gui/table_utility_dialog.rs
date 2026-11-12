@@ -1296,8 +1296,8 @@ impl TableUtilityDialogState {
                 .ok_or_else(|| {
                     "The Table Utility window is not ready to own the file picker.".to_owned()
                 })?;
-            return Ok(rfd::FileDialog::new()
-                .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+            Ok(rfd::FileDialog::new()
+                .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)))
         }
         #[cfg(not(target_os = "windows"))]
         {

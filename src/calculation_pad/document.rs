@@ -3100,7 +3100,7 @@ mod tests {
         let source = format!(
             "v = [{}]\n{}",
             vec!["1"; 128].join(","),
-            vec!["v"; 10].join(" * ")
+            ["v"; 10].join(" * ")
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();

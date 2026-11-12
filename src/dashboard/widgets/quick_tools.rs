@@ -1366,7 +1366,7 @@ mod tests {
         let focused_target = jump
             .retained_registry()
             .targets()
-            .into_iter()
+            .iter()
             .find(|target| target.id() == &final_target)
             .expect("the final tool registers after it scrolls into view");
         assert_eq!(
