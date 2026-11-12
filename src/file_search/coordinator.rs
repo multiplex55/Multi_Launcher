@@ -110,6 +110,10 @@ impl SearchEventSender {
             .is_some_and(|activity| activity.terminal.load(Ordering::Acquire))
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The public API preserves mpsc::SendError and its unsent SearchEvent."
+    )]
     pub fn send(&self, event: SearchEvent) -> Result<(), mpsc::SendError<SearchEvent>> {
         match &event {
             SearchEvent::Progress { progress, .. } => {

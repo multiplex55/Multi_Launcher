@@ -558,11 +558,11 @@ impl DiffDialogState {
         Ok(())
     }
 
-    fn apply_text_input(&mut self, draft: TextInputDraft) -> Result<(), (TextInputDraft, String)> {
+    fn apply_text_input(&mut self, draft: &TextInputDraft) -> Result<(), String> {
         if let Err(error) = crate::diff::model::validate_memory_text(&draft.left)
             .and_then(|()| crate::diff::model::validate_memory_text(&draft.right))
         {
-            return Err((draft, error));
+            return Err(error);
         }
         match draft.purpose {
             TextInputPurpose::NewComparison => {
@@ -572,7 +572,7 @@ impl DiffDialogState {
                     &self.workspace.settings,
                 ) {
                     Ok(model) => model,
-                    Err(error) => return Err((draft, error)),
+                    Err(error) => return Err(error),
                 };
                 configure_text_model(&mut model, &self.workspace.settings, &self.persistence);
                 let view_id = self.workspace.push_memory_text_compare();
@@ -585,32 +585,26 @@ impl DiffDialogState {
             }
             TextInputPurpose::EditInputs { view_id } => {
                 if self.workspace.current_view.id != view_id {
-                    return Err((
-                        draft,
+                    return Err(
                         "The active comparison changed while Edit Inputs was open. Reopen it to edit the current comparison.".into(),
-                    ));
+                    );
                 }
                 let Some(model) = self.text_views.get_mut(&view_id) else {
-                    return Err((
-                        draft,
-                        "The in-memory text view is no longer available".into(),
-                    ));
+                    return Err("The in-memory text view is no longer available".into());
                 };
                 let Some(expected_sources) = draft.expected_sources else {
-                    return Err((
-                        draft,
+                    return Err(
                         "The Edit Inputs draft is no longer tied to its source documents. Reopen it to continue.".into(),
-                    ));
+                    );
                 };
                 let current_sources = (
                     TextInputSourceSnapshot::capture(&model.left),
                     TextInputSourceSnapshot::capture(&model.right),
                 );
                 if current_sources != expected_sources {
-                    return Err((
-                        draft,
+                    return Err(
                         "The comparison sources changed while Edit Inputs was open. Reopen it to review the latest text.".into(),
-                    ));
+                    );
                 }
                 match model.replace_memory_sources(draft.left.clone(), draft.right.clone()) {
                     Ok(_) => {
@@ -618,7 +612,7 @@ impl DiffDialogState {
                         self.workspace.status = Some("In-memory text inputs updated".into());
                         Ok(())
                     }
-                    Err(error) => Err((draft, error)),
+                    Err(error) => Err(error),
                 }
             }
         }
@@ -2400,10 +2394,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "initial left".into();
         draft.right = "initial right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let view_id = dialog.workspace.current_view.id;
         dialog
             .text_views
@@ -2434,10 +2425,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = left.to_owned();
         draft.right = right.to_owned();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let view_id = dialog.workspace.current_view.id;
         (dialog, view_id)
     }
@@ -4012,12 +4000,12 @@ mod tests {
         assert_eq!(editor.draft.left, "typed left");
         assert_eq!(editor.draft.right, "typed right");
         editor.draft.left = "x".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES + 1);
-        let (mut draft, error) = dialog.apply_text_input(editor.draft.clone()).unwrap_err();
-        draft.error = Some(error);
+        let error = dialog.apply_text_input(&editor.draft).unwrap_err();
+        editor.draft.error = Some(error);
         assert!(dialog.workspace.navigation_stack.is_empty());
         assert_eq!(dialog.text_views.len(), 0);
-        assert!(draft.error.is_some());
-        assert!(draft.left.len() > crate::diff::model::MEMORY_TEXT_MAX_BYTES);
+        assert!(editor.draft.error.is_some());
+        assert!(editor.draft.left.len() > crate::diff::model::MEMORY_TEXT_MAX_BYTES);
     }
 
     #[test]
@@ -4027,10 +4015,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "first scratch sentinel".into();
         draft.right = "first right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let first_id = dialog.workspace.current_view.id;
         assert_eq!(dialog.persistence.recent_comparisons.len(), 0);
         assert!(!dialog.watch_views.contains_key(&first_id));
@@ -4040,10 +4025,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "second left".into();
         draft.right = String::new();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let second_id = dialog.workspace.current_view.id;
         assert_ne!(first_id, second_id);
         assert_eq!(
@@ -4366,10 +4348,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "before left".into();
         draft.right = "before right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let view_id = dialog.workspace.current_view.id;
         let model = dialog.text_views.get(&view_id).unwrap();
         let left_revision = model.left.revision;
@@ -4379,10 +4358,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "after left\r\n".into();
         draft.right = "after right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let model = dialog.text_views.get(&view_id).unwrap();
         assert_eq!(model.origin, TextCompareOrigin::Memory);
         assert_eq!(model.left.source(), "after left\r\n");
@@ -4406,10 +4382,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "initial left".into();
         draft.right = "initial right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let view_id = dialog.workspace.current_view.id;
 
         dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
@@ -4422,8 +4395,7 @@ mod tests {
             .unwrap();
         let latest_revision = model.left.revision;
         let latest_source = model.left.source().to_owned();
-        let (stale_revision_draft, error) =
-            dialog.apply_text_input(stale_revision_draft).unwrap_err();
+        let error = dialog.apply_text_input(&stale_revision_draft).unwrap_err();
         assert!(error.contains("changed while Edit Inputs was open"));
         assert_eq!(stale_revision_draft.left, "stale draft text");
         let model = dialog.text_views.get(&view_id).unwrap();
@@ -4437,14 +4409,11 @@ mod tests {
         let mut other_view = dialog.text_input.take().unwrap();
         other_view.left = "other view left".into();
         other_view.right = "other view right".into();
-        dialog
-            .apply_text_input(other_view)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&other_view).unwrap();
         let current_view_id = dialog.workspace.current_view.id;
         assert_ne!(current_view_id, view_id);
 
-        let (stale_view_draft, error) = dialog.apply_text_input(stale_view_draft).unwrap_err();
+        let error = dialog.apply_text_input(&stale_view_draft).unwrap_err();
         assert!(error.contains("active comparison changed"));
         assert_eq!(stale_view_draft.left, "draft for previous view");
         assert_eq!(
@@ -4461,10 +4430,7 @@ mod tests {
         let mut draft = dialog.text_input.take().unwrap();
         draft.left = "initial left".into();
         draft.right = "initial right".into();
-        dialog
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
-            .unwrap();
+        dialog.apply_text_input(&draft).unwrap();
         let view_id = dialog.workspace.current_view.id;
 
         let model = dialog.text_views.get_mut(&view_id).unwrap();
@@ -4489,7 +4455,7 @@ mod tests {
         assert_eq!(model.left.source(), "edited right");
         assert_eq!(model.right.source(), "edited left");
 
-        let (stale_draft, error) = dialog.apply_text_input(stale_draft).unwrap_err();
+        let error = dialog.apply_text_input(&stale_draft).unwrap_err();
         assert!(error.contains("sources changed while Edit Inputs was open"));
         assert_eq!(stale_draft.left, "draft left");
         assert_eq!(stale_draft.right, "draft right");

@@ -824,13 +824,12 @@ impl Children {
                     match command {
                         Command::Close => slot.editor.open = false,
                         Command::Input if input_current => {
-                            match parent.apply_text_input(slot.editor.draft.clone()) {
+                            match parent.apply_text_input(&slot.editor.draft) {
                                 Ok(()) => {
                                     slot.editor.open = false;
                                     slot.host.close_from_app(ctx);
                                 }
-                                Err((draft, error)) => {
-                                    slot.editor.draft = draft;
+                                Err(error) => {
                                     slot.editor.draft.error = Some(error);
                                 }
                             }
@@ -877,8 +876,7 @@ mod tests {
         draft.left = "left".into();
         draft.right = "right".into();
         parent
-            .apply_text_input(draft)
-            .map_err(|(_, error)| error)
+            .apply_text_input(&draft)
             .unwrap();
         parent
     }
