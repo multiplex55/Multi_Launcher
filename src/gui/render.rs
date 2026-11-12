@@ -16465,7 +16465,6 @@ mod tests {
             "starting each surface must not rewrite or independently cache its preference"
         );
 
-        drop(app);
         let teardown = fixture.finish().expect("fixture cleanup succeeds");
         assert!(teardown.cwd_restored);
         assert!(teardown.root_removed);
@@ -16638,7 +16637,6 @@ mod tests {
                 .preferred(key),
             Some(persisted)
         );
-        drop(reopened);
         let teardown = fixture.finish().expect("fixture cleanup succeeds");
         assert!(teardown.cwd_restored);
         assert!(teardown.root_removed);

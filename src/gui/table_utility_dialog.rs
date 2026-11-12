@@ -2550,7 +2550,7 @@ impl TableUtilityDialogState {
             self.test_first_data_column_rect = None;
             self.test_file_visible_column_range = None;
         }
-        let results = egui::ScrollArea::horizontal()
+        let _results = egui::ScrollArea::horizontal()
             .id_salt("table-file-results-horizontal")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2566,7 +2566,7 @@ impl TableUtilityDialogState {
                     for projected_column in start..end {
                         let source_column = source_columns[projected_column];
                         let label = file_column_label(source, source_column);
-                        let slot = ui.allocate_ui_with_layout(
+                        let _slot = ui.allocate_ui_with_layout(
                             egui::vec2(FILE_RESULT_COLUMN_WIDTH, header_height),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |cell_ui| {
@@ -2578,7 +2578,7 @@ impl TableUtilityDialogState {
                         );
                         #[cfg(test)]
                         if projected_column == 0 {
-                            self.test_first_header_column_rect = Some(slot.inner.rect);
+                            self.test_first_header_column_rect = Some(_slot.inner.rect);
                         }
                     }
                     ui.add_space(
@@ -2643,7 +2643,7 @@ impl TableUtilityDialogState {
                                     let text = row
                                         .cell_for_source_column(page, source_column)
                                         .unwrap_or("");
-                                    let response = ui.add_sized(
+                                    let _response = ui.add_sized(
                                         [FILE_RESULT_COLUMN_WIDTH, RESULT_ROW_HEIGHT],
                                         egui::Label::new(text)
                                             .truncate()
@@ -2651,7 +2651,7 @@ impl TableUtilityDialogState {
                                     );
                                     #[cfg(test)]
                                     if row_index == 0 && projected_column == 0 {
-                                        self.test_first_data_column_rect = Some(response.rect);
+                                        self.test_first_data_column_rect = Some(_response.rect);
                                     }
                                 }
                                 ui.add_space(
@@ -2664,10 +2664,10 @@ impl TableUtilityDialogState {
             });
         #[cfg(test)]
         {
-            self.test_results_horizontal_offset = results.state.offset.x;
-            self.test_results_scroll_area_id = Some(results.id);
-            self.test_results_content_size = results.content_size;
-            self.test_results_inner_rect = Some(results.inner_rect);
+            self.test_results_horizontal_offset = _results.state.offset.x;
+            self.test_results_scroll_area_id = Some(_results.id);
+            self.test_results_content_size = _results.content_size;
+            self.test_results_inner_rect = Some(_results.inner_rect);
         }
     }
 

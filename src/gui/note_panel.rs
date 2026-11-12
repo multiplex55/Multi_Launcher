@@ -3219,7 +3219,7 @@ impl NotePanel {
                         self.note.slug.clone()
                     }
                 });
-            let Some(mut picker) = self.owned_file_dialog() else {
+            let Some(picker) = self.owned_file_dialog() else {
                 return None;
             };
             picker
@@ -3258,7 +3258,7 @@ impl NotePanel {
 
     #[cfg(not(test))]
     fn complete_attachment_picker(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
-        let Some(mut picker) = self.owned_file_dialog() else {
+        let Some(picker) = self.owned_file_dialog() else {
             if let Some((true, message)) = self.markdown_export_feedback.as_ref() {
                 app.report_error("ui operation", message.clone());
             }
@@ -5997,7 +5997,6 @@ impl NotePanel {
         if !open {
             if self.defer_host_actions {
                 self.pending_host_actions.close_requested = true;
-                open = true;
             } else {
                 self.request_close(app);
             }

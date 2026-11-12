@@ -22,7 +22,6 @@ pub(crate) struct StreamLimits {
 pub(crate) struct StreamRecord {
     pub width: usize,
     pub start: TableLocation,
-    pub end_offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -388,7 +387,6 @@ where
                         record: usize::try_from(record_number).map_err(|_| identity_error())?,
                         field: 1,
                     },
-                    end_offset: offset,
                 };
                 summary = account_record(
                     summary,
@@ -443,7 +441,6 @@ where
                 record: usize::try_from(record_number).map_err(|_| identity_error())?,
                 field: 1,
             },
-            end_offset: offset,
         };
         summary = account_record(
             summary,

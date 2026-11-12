@@ -3523,7 +3523,7 @@ mod tests {
         session
             .request_file_backed_source(replaced_path, options)
             .expect("admit the replaceable file scan");
-        let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+        let _replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
         let replaced_scan_activity =
             latest_table_activity_key(&center, ActivityOperation::ReadTableFile);
         session

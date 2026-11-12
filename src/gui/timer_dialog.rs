@@ -2329,7 +2329,6 @@ mod tests {
             after.clone(),
             &mut submit,
         );
-        drop(submit);
         assert_eq!(
             submission_count.get(),
             1,
