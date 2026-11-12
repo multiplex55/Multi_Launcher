@@ -1435,6 +1435,11 @@ impl DiffDialogState {
                         request.apply(model, picker);
                     }
                 }
+                effects::ViewEffect::CopyHunk(request) => {
+                    if let Some(model) = self.text_views.get_mut(&view_id) {
+                        request.apply(model);
+                    }
+                }
                 effects::ViewEffect::Export(export) => {
                     if let Err(error) = export.save(picker) {
                         self.workspace.error = Some(error);

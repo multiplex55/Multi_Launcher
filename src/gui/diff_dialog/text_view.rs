@@ -46,6 +46,7 @@ pub fn show(
             ViewEffect::SaveText(save) => {
                 save.apply(model, PickerOwner::Legacy);
             }
+            ViewEffect::CopyHunk(copy) => copy.apply(model),
             ViewEffect::Export(export) => {
                 if let Err(error) = export.save(PickerOwner::Legacy) {
                     tracing::error!("{error}");
@@ -91,9 +92,8 @@ pub(super) fn show_with_effects(
                     .add_enabled(merge, egui::Button::new("Copy →"))
                     .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
                     .clicked()
-                    && let Err(e) = model.copy_hunk(DiffSide::Left)
                 {
-                    model.right_error = Some(e)
+                    request_hunk_copy(model, effects, DiffSide::Left);
                 }
                 if ui
                     .add_enabled(merge, egui::Button::new("← Copy"))
@@ -101,9 +101,8 @@ pub(super) fn show_with_effects(
                         "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
                     )
                     .clicked()
-                    && let Err(e) = model.copy_hunk(DiffSide::Right)
                 {
-                    model.left_error = Some(e)
+                    request_hunk_copy(model, effects, DiffSide::Right);
                 }
                 if ui.button("Find").clicked() {
                     model.find_open = true;
@@ -1465,15 +1464,11 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel, effects: &mut Vec<ViewEffect>
             ctrl: true,
             ..Default::default()
         };
-        if i.consume_key(copy_modifiers, egui::Key::ArrowRight)
-            && let Err(error) = m.copy_hunk(DiffSide::Left)
-        {
-            m.right_error = Some(error);
+        if i.consume_key(copy_modifiers, egui::Key::ArrowRight) {
+            request_hunk_copy(m, effects, DiffSide::Left);
         }
-        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft)
-            && let Err(error) = m.copy_hunk(DiffSide::Right)
-        {
-            m.left_error = Some(error);
+        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft) {
+            request_hunk_copy(m, effects, DiffSide::Right);
         }
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::Num1) {
             m.active_side = DiffSide::Left;
@@ -1482,6 +1477,34 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel, effects: &mut Vec<ViewEffect>
             m.active_side = DiffSide::Right;
         }
     });
+}
+
+fn request_hunk_copy(model: &mut TextViewModel, effects: &mut Vec<ViewEffect>, from: DiffSide) {
+    let destination = match from {
+        DiffSide::Left => DiffSide::Right,
+        DiffSide::Right => DiffSide::Left,
+    };
+    let save_precedes_copy = effects.iter().any(|effect| {
+        matches!(effect, ViewEffect::SaveText(save) if save.targets_side(destination))
+    });
+    let copy_precedes_copy = effects
+        .iter()
+        .any(|effect| matches!(effect, ViewEffect::CopyHunk(_)));
+    let request = super::effects::HunkCopyRequest::capture(model, from);
+    if save_precedes_copy || copy_precedes_copy {
+        effects.push(ViewEffect::CopyHunk(request));
+    } else {
+        request.apply(model);
+    }
+}
+
+pub(super) fn apply_hunk_copy(model: &mut TextViewModel, from: DiffSide, row: Option<usize>) {
+    if let Err(error) = model.copy_hunk_at_row(from, row) {
+        match from {
+            DiffSide::Left => model.right_error = Some(error),
+            DiffSide::Right => model.left_error = Some(error),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use crate::diff::model::{DiffSide, TextViewModel};
 
 pub(super) enum ViewEffect {
     SaveText(TextSaveRequest),
+    CopyHunk(HunkCopyRequest),
     Export(super::export::ExportRequest),
     SetTextRules(crate::diff::text_compare::TextComparisonRules),
     OpenTextRules,
@@ -39,6 +40,53 @@ impl TextSaveRequest {
     fn matches(self, model: &TextViewModel) -> bool {
         let current = Self::capture(model, self.side);
         current.source_id == self.source_id && current.revision == self.revision
+    }
+
+    pub(super) fn targets_side(self, side: DiffSide) -> bool {
+        self.side == side
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct HunkCopyRequest {
+    from: DiffSide,
+    row: Option<usize>,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    rules_revision: u64,
+    annotation_revision: u64,
+}
+
+impl HunkCopyRequest {
+    pub(super) fn capture(model: &TextViewModel, from: DiffSide) -> Self {
+        Self {
+            from,
+            row: model.current_row,
+            left_source_id: model.left.source_id(),
+            right_source_id: model.right.source_id(),
+            left_revision: model.left.revision,
+            right_revision: model.right.revision,
+            rules_revision: model.rules.revision,
+            annotation_revision: model.annotation_revision,
+        }
+    }
+
+    pub(super) fn apply(self, model: &mut TextViewModel) {
+        if !self.matches(model) {
+            return;
+        }
+        super::text_view::apply_hunk_copy(model, self.from, self.row);
+    }
+
+    fn matches(self, model: &TextViewModel) -> bool {
+        self.left_source_id == model.left.source_id()
+            && self.right_source_id == model.right.source_id()
+            && self.left_revision == model.left.revision
+            && self.right_revision == model.right.revision
+            && self.rules_revision == model.rules.revision
+            && self.annotation_revision == model.annotation_revision
     }
 }
 

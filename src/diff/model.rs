@@ -2816,6 +2816,17 @@ impl TextViewModel {
         changed
     }
     pub fn copy_hunk(&mut self, from: DiffSide) -> Result<(), String> {
+        self.copy_hunk_at_row(from, self.current_row)
+    }
+
+    /// Copies the hunk at a row captured by a retained view action. The
+    /// current row may change later in the same frame before the owner applies
+    /// that action.
+    pub(crate) fn copy_hunk_at_row(
+        &mut self,
+        from: DiffSide,
+        row: Option<usize>,
+    ) -> Result<(), String> {
         if !self.large_file_tier.editable() {
             return Err(self.large_file_tier.explanation().into());
         }
@@ -2823,7 +2834,7 @@ impl TextViewModel {
             return Err("Resolve external-change conflict before merging".into());
         }
         let c = self.fresh_comparison()?;
-        let row = self.current_row.ok_or("Select a difference first")?;
+        let row = row.ok_or("Select a difference first")?;
         let hi = c
             .navigation
             .row_to_hunk
