@@ -10490,6 +10490,9 @@ mod tests {
     #[test]
     fn tracked_openable_panels_count_as_any_panel_open() {
         let ctx = egui::Context::default();
+        let preview_directory = tempdir().unwrap();
+        let preview_path = preview_directory.path().join("preview.txt");
+        std::fs::write(&preview_path, "preview contents").unwrap();
         let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
             !matches!(
                 panel,
@@ -10503,7 +10506,13 @@ mod tests {
                 // An already-open synthetic snapshot keeps this fixture off audio hardware.
                 app.volume_dialog.open = true;
             }
-            app.ensure_open(panel);
+            if panel == Panel::FileSearchPreviewDialog {
+                app.file_search_dialog.request_preview(&preview_path, None);
+                app.focus_panel(panel);
+                assert!(app.file_search_dialog.preview_dialog.open);
+            } else {
+                app.ensure_open(panel);
+            }
             assert!(
                 app.any_panel_open(),
                 "expected {panel:?} to count as an open panel"

@@ -16628,6 +16628,16 @@ mod tests {
         root_events: Vec<egui::Event>,
         child_events: Vec<egui::Event>,
     ) -> NotePanelHostCompletion {
+        hosted_note_panel_frame_with_native_size(ctx, panel, app, root_events, child_events).0
+    }
+
+    fn hosted_note_panel_frame_with_native_size(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        root_events: Vec<egui::Event>,
+        child_events: Vec<egui::Event>,
+    ) -> (NotePanelHostCompletion, Option<egui::Vec2>) {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -16654,7 +16664,13 @@ mod tests {
                 .drop_without_applying_deltas();
             });
         });
-        panel.on_host_frame_complete(ctx, app)
+        let native_inner_size = panel
+            .pending_host_frame
+            .as_ref()
+            .and_then(|frame| frame.native_viewport.as_ref())
+            .and_then(|viewport| viewport.inner_rect.map(|rect| rect.size()));
+        let completion = panel.on_host_frame_complete(ctx, app);
+        (completion, native_inner_size)
     }
 
     fn note_panel_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
@@ -17514,28 +17530,59 @@ mod tests {
     }
 
     #[test]
-    fn note_panel_default_size_is_only_runtime_window_default() {
-        let source = include_str!("note_panel.rs");
-        let tests_start = source
-            .find("mod tests")
-            .expect("note_panel.rs should contain test module");
-        let production_source = &source[..tests_start];
+    fn note_panel_default_size_is_preserved_during_docked_and_native_rendering() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, directory.path());
+        app.note_panel_default_size = (500.0, 360.0);
+        let small_size = app.note_panel_default_size;
+        let mut small_panel =
+            NotePanel::from_note(note_with_slug("Small default", "small-default"));
+        let small_window_id = egui::Id::new(("note_panel_window", small_panel.note.slug.clone()));
+        hosted_note_panel_frame(&ctx, &mut small_panel, &mut app, Vec::new(), Vec::new());
+        let small_rect = ctx
+            .memory(|memory| memory.area_rect(small_window_id))
+            .expect("the docked note window should render");
+        assert_eq!(app.note_panel_default_size, small_size);
 
+        app.note_panel_default_size = (760.0, 540.0);
+        let large_size = app.note_panel_default_size;
+        let mut large_panel =
+            NotePanel::from_note(note_with_slug("Large default", "large-default"));
+        let large_window_id = egui::Id::new(("note_panel_window", large_panel.note.slug.clone()));
+        hosted_note_panel_frame(&ctx, &mut large_panel, &mut app, Vec::new(), Vec::new());
+        let large_rect = ctx
+            .memory(|memory| memory.area_rect(large_window_id))
+            .expect("the second docked note window should render");
+        assert!(
+            (large_rect.width() - small_rect.width() - (large_size.0 - small_size.0)).abs()
+                <= 2.0,
+            "a new docked note window should use the configured width, small={small_rect:?}, large={large_rect:?}"
+        );
+        assert_eq!(app.note_panel_default_size, large_size);
+
+        app.note_panel_default_size = (640.0, 480.0);
+        let native_size = app.note_panel_default_size;
+        let mut native_panel =
+            NotePanel::from_note(note_with_slug("Native default", "native-default"));
+        native_panel.test_pop_out();
+        let (_, native_inner_size) = hosted_note_panel_frame_with_native_size(
+            &ctx,
+            &mut native_panel,
+            &mut app,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(
+            native_panel.test_host_identity().0,
+            "the note panel should render natively"
+        );
         assert_eq!(
-            production_source
-                .matches("app.note_panel_default_size")
-                .count(),
-            1,
-            "production note panel code should only read app.note_panel_default_size for Window::default_size"
+            native_inner_size,
+            Some(egui::vec2(native_size.0, native_size.1))
         );
-        assert!(
-            production_source.contains(".default_size(app.note_panel_default_size)"),
-            "production note panel code should pass app.note_panel_default_size to egui::Window::default_size"
-        );
-        assert!(
-            !production_source.contains("app.note_panel_default_size ="),
-            "ordinary note panel rendering must not write measured sizes back to app.note_panel_default_size"
-        );
+        assert_eq!(app.note_panel_default_size, native_size);
     }
 
     #[test]
