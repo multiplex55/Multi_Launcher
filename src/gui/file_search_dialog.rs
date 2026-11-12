@@ -2102,12 +2102,13 @@ impl FileSearchDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 &mut visual_order,
             );
-            if search.clicked() && first_ui_pass && navigation_owner {
-                if self.stage_host_action(FileSearchHostAction::Start)
-                    || self.start_search(coordinator).is_some()
-                {
-                    ui.ctx().request_repaint();
-                }
+            if search.clicked()
+                && first_ui_pass
+                && navigation_owner
+                && (self.stage_host_action(FileSearchHostAction::Start)
+                    || self.start_search(coordinator).is_some())
+            {
+                ui.ctx().request_repaint();
             }
             let cancel = ui.button("Cancel");
             register_jump_mode_target(

@@ -842,10 +842,9 @@ impl TableUtilityDialogState {
             && native_owner_current
             && application_input_allowed
             && (!window_open || close_requested)
+            && !self.defer_action(TableHostedAction::Close)
         {
-            if !self.defer_action(TableHostedAction::Close) {
-                self.close();
-            }
+            self.close();
         }
         self.show_overwrite_confirmation(ctx, native_input_owner, first_ui_pass);
     }
@@ -903,10 +902,10 @@ impl TableUtilityDialogState {
             || self.host_pending.is_some()
     }
     pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) {
-        if self.open {
-            if let Err(error) = self.session.open(ctx) {
-                self.session_open_error = Some(error);
-            }
+        if self.open
+            && let Err(error) = self.session.open(ctx)
+        {
+            self.session_open_error = Some(error);
         }
         self.session.poll();
     }
@@ -1016,13 +1015,12 @@ impl TableUtilityDialogState {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                             || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     })
+                    && let Some(actions) = &mut self.host_actions
                 {
-                    if let Some(actions) = &mut self.host_actions {
-                        if self.pending_overwrite.is_some() {
-                            actions.push(TableHostedAction::Overwrite(false));
-                        } else if !pinned {
-                            actions.push(TableHostedAction::Close);
-                        }
+                    if self.pending_overwrite.is_some() {
+                        actions.push(TableHostedAction::Overwrite(false));
+                    } else if !pinned {
+                        actions.push(TableHostedAction::Close);
                     }
                 }
                 let output_start = ctx.output(|output| output.commands.len());
@@ -1096,10 +1094,13 @@ impl TableUtilityDialogState {
                         self.host_os_close_pending = true;
                     }
                 }
-                if child_first && self.host_os_close_pending && !pinned && !modal {
-                    if let Some(actions) = &mut self.host_actions {
-                        actions.push(TableHostedAction::Close);
-                    }
+                if child_first
+                    && self.host_os_close_pending
+                    && !pinned
+                    && !modal
+                    && let Some(actions) = &mut self.host_actions
+                {
+                    actions.push(TableHostedAction::Close);
                 }
                 if native {
                     let (chord, alphabet) = launcher_jump.configuration();
@@ -1139,13 +1140,12 @@ impl TableUtilityDialogState {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                 || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                         })
+                        && let Some(actions) = &mut self.host_actions
                     {
-                        if let Some(actions) = &mut self.host_actions {
-                            if modal {
-                                actions.push(TableHostedAction::Overwrite(false));
-                            } else if !pinned {
-                                actions.push(TableHostedAction::Close);
-                            }
+                        if modal {
+                            actions.push(TableHostedAction::Overwrite(false));
+                        } else if !pinned {
+                            actions.push(TableHostedAction::Close);
                         }
                     }
                     self.host_jump.begin_ui_pass();
@@ -1218,13 +1218,12 @@ impl TableUtilityDialogState {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                 || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                         })
+                        && let Some(actions) = &mut self.host_actions
                     {
-                        if let Some(actions) = &mut self.host_actions {
-                            if modal {
-                                actions.push(TableHostedAction::Overwrite(false));
-                            } else if !pinned {
-                                actions.push(TableHostedAction::Close);
-                            }
+                        if modal {
+                            actions.push(TableHostedAction::Overwrite(false));
+                        } else if !pinned {
+                            actions.push(TableHostedAction::Close);
                         }
                     }
                     self.show_inner(
@@ -1519,13 +1518,13 @@ impl TableUtilityDialogState {
             self.host_jump.cancel_all();
             self.host_jump_frame = None;
             self.host_focus = true;
-            if requested == UtilityPresentation::Docked {
-                if let Some(identity) = identity {
-                    super::utility_dialog_size::close_native_utility_geometry_viewport(
-                        ctx, identity,
-                    );
-                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
-                }
+            if requested == UtilityPresentation::Docked
+                && let Some(identity) = identity
+            {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
             }
             ctx.request_repaint();
         }
@@ -1760,10 +1759,11 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if combo_commit_enabled && delimiter != snapshot.parse_options.delimiter {
-                if !self.defer_action(TableHostedAction::Delimiter(delimiter)) {
-                    self.session.set_delimiter(delimiter);
-                }
+            if combo_commit_enabled
+                && delimiter != snapshot.parse_options.delimiter
+                && !self.defer_action(TableHostedAction::Delimiter(delimiter))
+            {
+                self.session.set_delimiter(delimiter);
             }
 
             let mut has_header = snapshot.parse_options.has_header;
@@ -1778,10 +1778,11 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if has_header_response.changed() && commit_enabled {
-                if !self.defer_action(TableHostedAction::Header(has_header)) {
-                    self.session.set_has_header(has_header);
-                }
+            if has_header_response.changed()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::Header(has_header))
+            {
+                self.session.set_has_header(has_header);
             }
             #[cfg(test)]
             {
@@ -2211,12 +2212,11 @@ impl TableUtilityDialogState {
                                     crate::gui::jump_mode::TargetKind::Button,
                                     order,
                                 );
-                                if column_response.changed() && commit_enabled {
-                                    if !self
-                                        .defer_action(TableHostedAction::Column(column, selected))
-                                    {
-                                        self.session.set_column_selected(column, selected);
-                                    }
+                                if column_response.changed()
+                                    && commit_enabled
+                                    && !self.defer_action(TableHostedAction::Column(column, selected))
+                                {
+                                    self.session.set_column_selected(column, selected);
                                 }
                                 #[cfg(test)]
                                 self.test_column_select_responses.push((
@@ -2280,12 +2280,11 @@ impl TableUtilityDialogState {
                                         crate::gui::jump_mode::TargetKind::Button,
                                         order,
                                     );
-                                    if row_response.changed() && commit_enabled {
-                                        if !self
-                                            .defer_action(TableHostedAction::Row(row_id, selected))
-                                        {
-                                            self.session.set_row_selected(row_id, selected);
-                                        }
+                                    if row_response.changed()
+                                        && commit_enabled
+                                        && !self.defer_action(TableHostedAction::Row(row_id, selected))
+                                    {
+                                        self.session.set_row_selected(row_id, selected);
                                     }
                                     #[cfg(test)]
                                     if visible_index == 0 {
@@ -2375,12 +2374,12 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if first.clicked() && commit_enabled {
-                if !self.defer_action(TableHostedAction::Page(0))
-                    && let Err(error) = self.session.request_file_page(0)
-                {
-                    self.status = Some(error);
-                }
+            if first.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::Page(0))
+                && let Err(error) = self.session.request_file_page(0)
+            {
+                self.status = Some(error);
             }
 
             let previous = ui.add_enabled(
@@ -2429,12 +2428,12 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if next.clicked() && commit_enabled {
-                if !self.defer_action(TableHostedAction::Page(page_next))
-                    && let Err(error) = self.session.request_file_page(page_next)
-                {
-                    self.status = Some(error);
-                }
+            if next.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::Page(page_next))
+                && let Err(error) = self.session.request_file_page(page_next)
+            {
+                self.status = Some(error);
             }
 
             let last = ui.add_enabled(
@@ -2450,12 +2449,12 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if last.clicked() && commit_enabled {
-                if !self.defer_action(TableHostedAction::Page(last_start))
-                    && let Err(error) = self.session.request_file_page(last_start)
-                {
-                    self.status = Some(error);
-                }
+            if last.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::Page(last_start))
+                && let Err(error) = self.session.request_file_page(last_start)
+            {
+                self.status = Some(error);
             }
 
             if snapshot.file_page_pending {
@@ -2507,10 +2506,11 @@ impl TableUtilityDialogState {
                         crate::gui::jump_mode::TargetKind::Button,
                         order,
                     );
-                    if response.changed() && commit_enabled {
-                        if !self.defer_action(TableHostedAction::Column(column, selected)) {
-                            self.session.set_column_selected(column, selected);
-                        }
+                    if response.changed()
+                        && commit_enabled
+                        && !self.defer_action(TableHostedAction::Column(column, selected))
+                    {
+                        self.session.set_column_selected(column, selected);
                     }
                     #[cfg(test)]
                     {
@@ -2618,12 +2618,11 @@ impl TableUtilityDialogState {
                                     crate::gui::jump_mode::TargetKind::Button,
                                     order,
                                 );
-                                if response.changed() && commit_enabled {
-                                    if !self
-                                        .defer_action(TableHostedAction::FileRow(row_id, selected))
-                                    {
-                                        self.session.set_file_row_selected(row_id, selected);
-                                    }
+                                if response.changed()
+                                    && commit_enabled
+                                    && !self.defer_action(TableHostedAction::FileRow(row_id, selected))
+                                {
+                                    self.session.set_file_row_selected(row_id, selected);
                                 }
                                 #[cfg(test)]
                                 if row_index == 0 {

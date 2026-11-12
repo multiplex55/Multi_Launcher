@@ -2381,13 +2381,13 @@ impl DashboardEditorDialog {
         } else if let Some(requested) = frame.host_request
             && requested != self.host_state.presentation()
         {
-            if requested == UtilityPresentation::Docked {
-                if let Some(identity) = native_identity {
-                    crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
-                        ctx, identity,
-                    );
-                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
-                }
+            if requested == UtilityPresentation::Docked
+                && let Some(identity) = native_identity
+            {
+                crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
             }
             if self.host_state.transition(requested) {
                 self.remember_host_presentation(ctx, requested);

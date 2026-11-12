@@ -707,10 +707,10 @@ impl DateTimeStudioDialog {
                         host.host,
                     ))
                 };
-                if let Some(result) = &mut result {
-                    if !pinned {
-                        result.close |= shortcut || self.host_os_close_pending;
-                    }
+                if let Some(result) = &mut result
+                    && !pinned
+                {
+                    result.close |= shortcut || self.host_os_close_pending;
                 }
                 staged = result;
             });
@@ -906,10 +906,10 @@ impl DateTimeStudioDialog {
             if self.host_focus {
                 ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
             }
-        } else if self.host_focus {
-            if let Some(layer) = self.root_layer() {
-                ctx.move_to_top(layer);
-            }
+        } else if self.host_focus
+            && let Some(layer) = self.root_layer()
+        {
+            ctx.move_to_top(layer);
         }
         self.host_focus = false;
         if let Some(draft) = frame.draft {
@@ -949,22 +949,22 @@ impl DateTimeStudioDialog {
             };
         }
         let show_root = frame.request == Some(UtilityPresentation::Docked);
-        if let Some(next) = frame.request {
-            if self.host.transition(next) {
-                let key = crate::settings::UtilityToolKey::parse("date-time-studio").expect("stable Date & Time Studio key");
-                super::utility_host::remember_presentation(ctx, key, next);
-                self.retire_owned_popup(ctx);
-                self.deferred_host_focus = None;
-                self.focus_pending = true;
-                if next == UtilityPresentation::Docked {
-                    super::utility_dialog_size::close_native_utility_geometry_viewport(
-                        ctx, identity,
-                    );
-                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
-                }
-                self.host_focus = true;
-                ctx.request_repaint();
+        if let Some(next) = frame.request
+            && self.host.transition(next)
+        {
+            let key = crate::settings::UtilityToolKey::parse("date-time-studio").expect("stable Date & Time Studio key");
+            super::utility_host::remember_presentation(ctx, key, next);
+            self.retire_owned_popup(ctx);
+            self.deferred_host_focus = None;
+            self.focus_pending = true;
+            if next == UtilityPresentation::Docked {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
             }
+            self.host_focus = true;
+            ctx.request_repaint();
         }
         if origin == UtilityPresentation::Popout {
             self.host.complete_bootstrap(

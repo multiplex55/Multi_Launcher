@@ -3405,11 +3405,11 @@ impl NotesDialog {
             if rebuild_idx && remove_note_index.is_none() {
                 self.rebuild_index();
             }
-            if let Some(idx) = remove_note_index {
-                if idx < self.entries.len() {
-                    self.entries.remove(idx);
-                    self.rebuild_index();
-                }
+            if let Some(idx) = remove_note_index
+                && idx < self.entries.len()
+            {
+                self.entries.remove(idx);
+                self.rebuild_index();
             }
             if let Some(note) = note_to_save
                 && self.save_note_draft(note, app)
@@ -3459,12 +3459,10 @@ impl NotesDialog {
             }
             if let Some(requested) = host_request
                 && requested != self.host_state.presentation()
+                && self.host_state.transition(requested)
+                && requested == UtilityPresentation::Docked
             {
-                if self.host_state.transition(requested)
-                    && requested == UtilityPresentation::Docked
-                {
-                    self.show_root_after_host_change = true;
-                }
+                self.show_root_after_host_change = true;
             }
             self.native_jump_mode = native_jump_mode;
             self.native_jump_frame = native_jump_frame;

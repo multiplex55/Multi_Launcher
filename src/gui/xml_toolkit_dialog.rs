@@ -1211,10 +1211,12 @@ impl XmlToolkitDialogState {
                 input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                     || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
             });
-        if first_pass && confirmation_owner_current && !popup_open {
-            if Self::consume_overwrite_cancel_shortcut(&ctx) {
-                intents.cancel_overwrite = confirmation_identity;
-            }
+        if first_pass
+            && confirmation_owner_current
+            && !popup_open
+            && Self::consume_overwrite_cancel_shortcut(&ctx)
+        {
+            intents.cancel_overwrite = confirmation_identity;
         }
         let close = keyboard_close
             || if self.host_staging {
@@ -1660,10 +1662,11 @@ impl XmlToolkitDialogState {
         let mut cancel_clicked = false;
         let mut targets = XmlJumpTargets::new(scope);
         let first_pass = ctx.current_pass_index() == 0 && (!self.host_staging || self.host_first);
-        if first_pass && confirmation_owner_current {
-            if Self::consume_overwrite_cancel_shortcut(ctx) {
-                intents.cancel_overwrite = Some(confirmation_instance);
-            }
+        if first_pass
+            && confirmation_owner_current
+            && Self::consume_overwrite_cancel_shortcut(ctx)
+        {
+            intents.cancel_overwrite = Some(confirmation_instance);
         }
         #[cfg(test)]
         let mut button_rects = [egui::Rect::NOTHING; 2];

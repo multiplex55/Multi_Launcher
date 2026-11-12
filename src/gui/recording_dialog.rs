@@ -1514,71 +1514,71 @@ impl RecordingDialogState {
         if switched_to_window && !close_setup && host_move.is_none() {
             accepted.push(RetainedRecordingAction::RefreshWindows);
         }
-        if let Some(frame) = self.setup_pass.take() {
-            if self.setup_receipt_retained(ctx, frame.owner, frame.receipt) {
-                let identity = self.native_identity(frame.receipt.host);
-                if let Some(info) = frame.info.as_ref() {
-                    super::utility_dialog_size::apply_native_utility_geometry_restore(
-                        ctx,
-                        egui::ViewportClass::Immediate,
-                        true,
-                        "Screen Recorder",
-                        identity,
-                        info,
-                        egui::vec2(480.0, 470.0),
-                        None,
-                        None,
-                    );
-                    if self.host_focus {
-                        ctx.send_viewport_cmd_to(
-                            identity.viewport_id,
-                            egui::ViewportCommand::Focus,
-                        );
-                    }
-                } else if self.host_focus {
-                    if let Some(layer) = self.root_layer() {
-                        ctx.move_to_top(layer);
-                    }
-                }
-                self.host_focus = false;
-                if frame.receipt.host.host == super::utility_host::UtilityPresentation::Popout {
-                    self.host.complete_bootstrap(
-                        frame.receipt.host,
-                        (!frame.receipt.native).then_some(egui::LayerId::new(
-                            egui::Order::Middle,
-                            egui::Id::new("recording-setup-window"),
-                        )),
-                        None,
+        if let Some(frame) = self.setup_pass.take()
+            && self.setup_receipt_retained(ctx, frame.owner, frame.receipt)
+        {
+            let identity = self.native_identity(frame.receipt.host);
+            if let Some(info) = frame.info.as_ref() {
+                super::utility_dialog_size::apply_native_utility_geometry_restore(
+                    ctx,
+                    egui::ViewportClass::Immediate,
+                    true,
+                    "Screen Recorder",
+                    identity,
+                    info,
+                    egui::vec2(480.0, 470.0),
+                    None,
+                    None,
+                );
+                if self.host_focus {
+                    ctx.send_viewport_cmd_to(
+                        identity.viewport_id,
+                        egui::ViewportCommand::Focus,
                     );
                 }
-                let copies = ctx
-                    .with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
-                        let mut found = Vec::new();
-                        let mut other = Vec::new();
-                        for (receipt, copies) in plugin.captured.drain(..) {
-                            if receipt.owner.viewport_id != frame.owner.viewport_id {
-                                other.push((receipt, copies));
-                            } else if receipt.root == frame.receipt.root
-                                && receipt.owner == frame.owner
-                                && receipt.host == frame.receipt.host
-                                && receipt.epoch == frame.receipt.epoch
-                            {
-                                found.extend(copies);
-                            }
+            } else if self.host_focus
+                && let Some(layer) = self.root_layer()
+            {
+                ctx.move_to_top(layer);
+            }
+            self.host_focus = false;
+            if frame.receipt.host.host == super::utility_host::UtilityPresentation::Popout {
+                self.host.complete_bootstrap(
+                    frame.receipt.host,
+                    (!frame.receipt.native).then_some(egui::LayerId::new(
+                        egui::Order::Middle,
+                        egui::Id::new("recording-setup-window"),
+                    )),
+                    None,
+                );
+            }
+            let copies = ctx
+                .with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                    let mut found = Vec::new();
+                    let mut other = Vec::new();
+                    for (receipt, copies) in plugin.captured.drain(..) {
+                        if receipt.owner.viewport_id != frame.owner.viewport_id {
+                            other.push((receipt, copies));
+                        } else if receipt.root == frame.receipt.root
+                            && receipt.owner == frame.owner
+                            && receipt.host == frame.receipt.host
+                            && receipt.epoch == frame.receipt.epoch
+                        {
+                            found.extend(copies);
                         }
-                        plugin.captured = other;
-                        found
-                    })
-                    .unwrap_or_default();
-                if !close_setup && host_move.is_none() {
-                    accepted.extend(
-                        frame
-                            .copies
-                            .into_iter()
-                            .chain(copies)
-                            .map(RetainedRecordingAction::CopyText),
-                    );
-                }
+                    }
+                    plugin.captured = other;
+                    found
+                })
+                .unwrap_or_default();
+            if !close_setup && host_move.is_none() {
+                accepted.extend(
+                    frame
+                        .copies
+                        .into_iter()
+                        .chain(copies)
+                        .map(RetainedRecordingAction::CopyText),
+                );
             }
         }
         for pending in retained {

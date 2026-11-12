@@ -14869,17 +14869,16 @@ impl LauncherApp {
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
-            && self.markdown_studio_dialog.accepts_diagram_origin(&origin) {
-            if let Some(receipt) = origin.host_origin.clone()
-                && self.diagram_studio_dialog.open_source_copy_from_origin(
-                    ctx, source, &super::utility_host::ChildOpenOrigin::Parent(receipt),
-                ).is_some()
-            {
-                self.markdown_studio_dialog
-                    .track_diagram_source_origin(origin);
-                self.focus_panel(super::Panel::DiagramStudioDialog);
-                ctx.request_repaint_of(egui::ViewportId::ROOT);
-            }
+            && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
+            && let Some(receipt) = origin.host_origin.clone()
+            && self.diagram_studio_dialog.open_source_copy_from_origin(
+                ctx, source, &super::utility_host::ChildOpenOrigin::Parent(receipt),
+            ).is_some()
+        {
+            self.markdown_studio_dialog
+                .track_diagram_source_origin(origin);
+            self.focus_panel(super::Panel::DiagramStudioDialog);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
@@ -64413,11 +64412,11 @@ mod tests {
         let (output, passes) =
             app.run_root_frame_for_test_with(&ctx, discarded_activation, true, |app, ui| {
                 app.render_root_ui(ui);
-                if discarded_origin.is_none() {
-                    if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                        discarded_origin = Some(origin);
-                        discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
-                    }
+                if discarded_origin.is_none()
+                    && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+                {
+                    discarded_origin = Some(origin);
+                    discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
                 }
             });
         output.drop_without_applying_deltas();
@@ -64464,11 +64463,11 @@ mod tests {
         let mut accepted_action = None;
         app.run_root_frame_for_test_with(&ctx, accepted_activation, false, |app, ui| {
             app.render_root_ui(ui);
-            if accepted_origin.is_none() {
-                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                    accepted_origin = Some(origin);
-                    accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
-                }
+            if accepted_origin.is_none()
+                && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+            {
+                accepted_origin = Some(origin);
+                accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
             }
         })
         .0
@@ -64587,11 +64586,11 @@ mod tests {
             app.render_root_ui(ui);
             // Simulate a protected Note dialog becoming active after the card
             // staged its effect but before ROOT accepts and dispatches it.
-            if staged_origin.is_none() {
-                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
-                    staged_origin = Some(origin);
-                    staged_action = app.note_panels[0].test_mermaid_open_rect(0);
-                }
+            if staged_origin.is_none()
+                && let Some(origin) = app.note_panels[0].test_pending_mermaid_origin()
+            {
+                staged_origin = Some(origin);
+                staged_action = app.note_panels[0].test_mermaid_open_rect(0);
             }
             app.note_panels[0].test_set_overwrite_prompt(true);
         });

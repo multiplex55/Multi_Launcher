@@ -330,10 +330,11 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             UtilityPresentation,
         ) -> A,
     {
-        if let Some(previous) = self.pending.take() {
-            if open && previous.epoch == epoch {
-                *dialog = previous.draft;
-            }
+        if let Some(previous) = self.pending.take()
+            && open
+            && previous.epoch == epoch
+        {
+            *dialog = previous.draft;
         }
         if !open {
             return;
@@ -466,10 +467,11 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
                 if allowed && child_first {
                     copies = captured;
                 }
-                if let Some(actions) = &mut result {
-                    if !pinned && (shortcut || self.close_pending) {
-                        actions.set_close();
-                    }
+                if let Some(actions) = &mut result
+                    && !pinned
+                    && (shortcut || self.close_pending)
+                {
+                    actions.set_close();
                 }
                 staged = result;
             });
@@ -548,20 +550,20 @@ impl<D: Clone, A: CalendarHostActions> CalendarWindowHost<D, A> {
             }
         }
         let show_root = request == Some(UtilityPresentation::Docked);
-        if let Some(next) = request {
-            if self.host.transition(next) {
-                let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
-                super::utility_host::remember_presentation(ctx, key, next);
-                close_bound_popup(ctx, self.owned_popup.take());
-                if next == UtilityPresentation::Docked {
-                    super::utility_dialog_size::close_native_utility_geometry_viewport(
-                        ctx, identity,
-                    );
-                    ctx.send_viewport_cmd_to(spec.viewport, egui::ViewportCommand::Close);
-                }
-                self.focus_pending = true;
-                ctx.request_repaint();
+        if let Some(next) = request
+            && self.host.transition(next)
+        {
+            let key = crate::settings::UtilityToolKey::parse(spec.key).expect("stable calendar key");
+            super::utility_host::remember_presentation(ctx, key, next);
+            close_bound_popup(ctx, self.owned_popup.take());
+            if next == UtilityPresentation::Docked {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(
+                    ctx, identity,
+                );
+                ctx.send_viewport_cmd_to(spec.viewport, egui::ViewportCommand::Close);
             }
+            self.focus_pending = true;
+            ctx.request_repaint();
         }
         if frame.host.host == UtilityPresentation::Popout {
             self.host.complete_bootstrap(

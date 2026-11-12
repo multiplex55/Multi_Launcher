@@ -449,10 +449,10 @@ impl TimerDialog {
     ) {
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         use crate::gui::jump_mode::ui::{NavigationOwner, NavigationViewportBinding};
-        if let Some(previous) = self.host_pending.take() {
-            if previous.epoch == self.host_session_epoch {
-                self.restore_host_draft(previous.draft);
-            }
+        if let Some(previous) = self.host_pending.take()
+            && previous.epoch == self.host_session_epoch
+        {
+            self.restore_host_draft(previous.draft);
         }
         if !self.open {
             return;

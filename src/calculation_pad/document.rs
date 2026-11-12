@@ -3631,12 +3631,9 @@ mod tests {
             DiagnosticKind::NestingTooDeep { .. }
         ));
 
-        let too_many_names = format!(
-            "{}",
-            std::iter::repeat_n("name", MAX_DEPENDENCIES_PER_LINE + 1)
-                .collect::<Vec<_>>()
-                .join(" + ")
-        );
+        let too_many_names = std::iter::repeat_n("name", MAX_DEPENDENCIES_PER_LINE + 1)
+            .collect::<Vec<_>>()
+            .join(" + ");
         let document = CalculationDocument::new(too_many_names);
         let evaluation = document.evaluate();
         assert!(matches!(

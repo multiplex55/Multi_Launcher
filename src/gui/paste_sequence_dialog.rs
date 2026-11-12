@@ -823,10 +823,9 @@ impl PasteSequenceDialog {
             && self.remove_confirmation.is_none()
             && !egui::Popup::is_any_open(ctx)
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && let Some(effects) = &mut self.hosted_actions
         {
-            if let Some(effects) = &mut self.hosted_actions {
-                effects.push(PasteSequenceHostEffect::ClosePicker);
-            }
+            effects.push(PasteSequenceHostEffect::ClosePicker);
         }
         let copy_start = presentation
             .is_some()
@@ -915,10 +914,10 @@ impl PasteSequenceDialog {
                                 crate::gui::jump_mode::TargetKind::Button,
                                 &mut jump_visual_order,
                             );
-                            if playback_settings.clicked() {
-                                if let Some(effects) = &mut self.hosted_actions {
-                                    effects.push(PasteSequenceHostEffect::Settings);
-                                }
+                            if playback_settings.clicked()
+                                && let Some(effects) = &mut self.hosted_actions
+                            {
+                                effects.push(PasteSequenceHostEffect::Settings);
                             }
                             let new_sequence = ui.button("New");
                             register_paste_sequence_jump_target(
@@ -1056,10 +1055,14 @@ impl PasteSequenceDialog {
         }
         #[cfg(not(test))]
         let _ = window;
-        if self.open && !window_open && owner_current && first && !pinned {
-            if let Some(effects) = &mut self.hosted_actions {
-                effects.push(PasteSequenceHostEffect::Close);
-            }
+        if self.open
+            && !window_open
+            && owner_current
+            && first
+            && !pinned
+            && let Some(effects) = &mut self.hosted_actions
+        {
+            effects.push(PasteSequenceHostEffect::Close);
         }
         if initial_confirmation_id.is_some()
             && self.remove_confirmation.is_none()
@@ -1359,10 +1362,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if confirm_remove.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Remove(id));
-                }
+            if confirm_remove.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Remove(id));
             }
             let keep = ui.button("Keep");
             register_paste_sequence_jump_target(
@@ -2322,13 +2325,13 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if preview.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Prepare {
-                        autostart: false,
-                        run_once: false,
-                    });
-                }
+            if preview.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Prepare {
+                    autostart: false,
+                    run_once: false,
+                });
             }
             let run_once =
                 ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run Once"));
@@ -2341,13 +2344,13 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if run_once.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Prepare {
-                        autostart: true,
-                        run_once: true,
-                    });
-                }
+            if run_once.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Prepare {
+                    autostart: true,
+                    run_once: true,
+                });
             }
             let run = ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run"));
             register_paste_sequence_jump_target(
@@ -2359,13 +2362,13 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if run.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Prepare {
-                        autostart: true,
-                        run_once: false,
-                    });
-                }
+            if run.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Prepare {
+                    autostart: true,
+                    run_once: false,
+                });
             }
             let save = ui.add_enabled(
                 self.snapshot.is_some() && self.hotkey_update.is_none(),
@@ -2380,10 +2383,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if save.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Save);
-                }
+            if save.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Save);
             }
         });
         ui.horizontal(|ui| {
@@ -2400,10 +2403,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if start.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Start);
-                }
+            if start.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Start);
             }
             let next = ui.add_enabled(
                 state == crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance,
@@ -2418,10 +2421,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if next.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::Next);
-                }
+            if next.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::Next);
             }
             let cancel_run = ui.add_enabled(
                 matches!(
@@ -2444,10 +2447,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if cancel_run.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::CancelRun);
-                }
+            if cancel_run.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::CancelRun);
             }
             let cancel_editor = ui.add_enabled(!pinned, egui::Button::new("Cancel Editor"));
             register_paste_sequence_jump_target(
@@ -2459,10 +2462,10 @@ impl PasteSequenceDialog {
                 crate::gui::jump_mode::TargetKind::Button,
                 jump_visual_order,
             );
-            if cancel_editor.clicked() {
-                if let Some(effects) = &mut self.hosted_actions {
-                    effects.push(PasteSequenceHostEffect::CancelEditor);
-                }
+            if cancel_editor.clicked()
+                && let Some(effects) = &mut self.hosted_actions
+            {
+                effects.push(PasteSequenceHostEffect::CancelEditor);
             }
         });
         self.show_run_status(ui, runtime);

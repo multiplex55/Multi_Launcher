@@ -767,23 +767,22 @@ impl TableTempFile {
 impl Drop for TableTempFile {
     fn drop(&mut self) {
         let _ = self.file.sync_all();
-        if let Err(error) = fs::remove_file(&self.path) {
-            if error.kind() != io::ErrorKind::NotFound
-                && let Some(mut lease) = self.lease.take()
-                && let Some(mut metadata_lease) = self.cleanup_metadata_lease.take()
-            {
-                let message = error
-                    .to_string()
-                    .chars()
-                    .take(MAX_CLEANUP_MESSAGE_CHARS)
-                    .collect::<String>();
-                lease.preserve_temp_cleanup(
-                    self.path.clone(),
-                    self.charged_bytes,
-                    message,
-                    &mut metadata_lease,
-                );
-            }
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+            && let Some(mut lease) = self.lease.take()
+            && let Some(mut metadata_lease) = self.cleanup_metadata_lease.take()
+        {
+            let message = error
+                .to_string()
+                .chars()
+                .take(MAX_CLEANUP_MESSAGE_CHARS)
+                .collect::<String>();
+            lease.preserve_temp_cleanup(
+                self.path.clone(),
+                self.charged_bytes,
+                message,
+                &mut metadata_lease,
+            );
         }
     }
 }
