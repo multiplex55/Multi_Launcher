@@ -48155,6 +48155,94 @@ mod tests {
         .drop_without_applying_deltas();
     }
 
+    fn start_actual_notes_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let target_snapshot = |app: &LauncherApp| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| {
+                    (
+                        target.id().clone(),
+                        target.response_id(),
+                        target.metadata().label().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let owner_before = app.jump_mode_ui.frame_navigation_owner();
+        assert!(
+            matches!(owner_before, NavigationOwner::Notes { .. }),
+            "Quick Notes owns the leader input: {owner_before:?}"
+        );
+        let focused_id_before = ctx.memory(|memory| memory.focused());
+        let target_generation_before = app.notes_dialog.jump_mode_target_generation();
+        let targets_before = target_snapshot(app);
+
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let session_generation = app
+            .jump_mode_ui
+            .active_session_generation()
+            .expect("the Notes leader starts an owned hint session");
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), owner_before);
+        assert_eq!(
+            app.notes_dialog.jump_mode_target_generation(),
+            target_generation_before,
+            "the Notes target generation stays stable through the leader press"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), focused_id_before);
+        assert_eq!(
+            target_snapshot(app),
+            targets_before,
+            "retained Notes target IDs stay stable through the leader press"
+        );
+
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    key_release(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.jump_mode_ui.active_session_generation(),
+            Some(session_generation),
+            "releasing the physical leader key preserves the Notes hint session"
+        );
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), owner_before);
+        assert_eq!(
+            app.notes_dialog.jump_mode_target_generation(),
+            target_generation_before
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), focused_id_before);
+        assert_eq!(
+            target_snapshot(app),
+            targets_before,
+            "retained Notes target IDs stay stable through the leader release"
+        );
+    }
+
     fn root_result_hint(app: &LauncherApp, index: usize) -> String {
         let target = crate::gui::jump_mode::TargetId::root_result(
             crate::gui::jump_mode::TargetGeneration(app.root_list_geometry.result_generation()),
@@ -57271,6 +57359,10 @@ mod tests {
         }));
         crate::plugins::note::save_notes(&notes).expect("write notes in the isolated workspace");
         prepare_actual_query_frame(&ctx, &mut app);
+        app.utility_dialog_size_manager.test_set_preferred_size(
+            crate::settings::UtilityToolKey::parse("quick-notes").unwrap(),
+            crate::settings::PreferredWindowSize::new(520.0, 420.0).unwrap(),
+        );
         app.notes_dialog.open();
         for _ in 0..3 {
             run_dialog_frame(&ctx, &mut app);
@@ -57327,6 +57419,16 @@ mod tests {
         )
         .0
         .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
         assert!(
             app.note_panels.is_empty(),
             "feature-off Notes input retains its prior non-activating row behavior"
@@ -57336,7 +57438,7 @@ mod tests {
             run_dialog_frame(&ctx, &mut app);
         }
 
-        start_actual_root_jump_mode(&ctx, &mut app);
+        start_actual_notes_jump_mode(&ctx, &mut app);
         let mut reordered = notes.clone();
         reordered.swap(0, 1);
         crate::plugins::note::save_notes(&reordered)
@@ -57371,7 +57473,94 @@ mod tests {
             app.notes_dialog.jump_mode_target_generation(),
             "the visible target carries the current reordered population generation"
         );
-        start_actual_root_jump_mode(&ctx, &mut app);
+
+        for _ in 0..6 {
+            let rows = app.notes_dialog.test_note_open_controls().0;
+            let first_row = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-first")
+                .expect("the reordered first note is rendered in the real scroll area");
+            let clip = first_row.2;
+            let second_row = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-second");
+            let second_visible = second_row.is_some_and(|row| row.2.intersects(row.1));
+            let second_registered = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Shared title (duplicate-second)");
+            if clip.contains_rect(first_row.1) && !second_visible && !second_registered {
+                break;
+            }
+
+            let target_top = clip.top() + 6.0;
+            let wheel_delta = if first_row.1.top() >= target_top {
+                -(first_row.1.top() - target_top).max(32.0)
+            } else {
+                (target_top - first_row.1.top()).max(32.0)
+            };
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(clip.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, wheel_delta),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            for _ in 0..2 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+        }
+        let (first_row_after_scroll, second_row_after_scroll) = {
+            let rows = app.notes_dialog.test_note_open_controls().0;
+            let first = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-first")
+                .expect("the exact first duplicate remains rendered after scrolling");
+            let second = rows
+                .iter()
+                .find(|(slug, ..)| slug == "duplicate-second")
+                .cloned();
+            (first.clone(), second)
+        };
+        assert!(
+            first_row_after_scroll.2.contains_rect(first_row_after_scroll.1),
+            "the selected first row is fully inside the real ScrollArea viewport: {first_row_after_scroll:?}"
+        );
+        assert!(
+            second_row_after_scroll
+                .as_ref()
+                .is_none_or(|row| !row.2.intersects(row.1)),
+            "the other duplicate is outside the real ScrollArea viewport: {second_row_after_scroll:?}"
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Shared title (duplicate-second)"),
+            "a scrolled offscreen duplicate has no retained target"
+        );
+        for _ in 0..2 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+        ));
+        start_actual_notes_jump_mode(&ctx, &mut app);
         let reordered_note_hint = dialog_hint_for_label(&app, "Shared title (duplicate-first)");
         let target_before_hint = app
             .jump_mode_ui
