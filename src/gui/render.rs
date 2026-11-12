@@ -26664,8 +26664,8 @@ mod tests {
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         app.set_jump_mode_enabled(false);
         prepare_tool_dialog_root(&ctx, &mut app);
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
         assert!(app.recording_dialog.is_popped_out());
@@ -26696,8 +26696,8 @@ mod tests {
         let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         app.set_jump_mode_enabled(false);
         prepare_tool_dialog_root(&ctx, &mut app);
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         let native = super::super::recording_dialog::RecordingDialogState::viewport();
         click_recording_setup_control(&ctx, &mut app, root, "format");
@@ -26940,7 +26940,6 @@ mod tests {
             std::sync::Arc::new(RecordingFramesBackend),
             move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
         );
-        app.recording_dialog.test_install_display();
         let action = crate::plugins::recording::RecordingPlugin
             .search("record")
             .into_iter()
@@ -26951,6 +26950,7 @@ mod tests {
                 .unwrap();
         app.dispatch_command_invocation(invocation);
         assert!(app.recording_dialog.open);
+        app.recording_dialog.test_install_display();
         assert!(!app.recording_controller.has_active_job());
         let root = egui::ViewportId::ROOT;
         let destination = workspace.root().join("joined-recording.gif");
@@ -27123,8 +27123,8 @@ mod tests {
             std::sync::Arc::new(RecordingFixtureBackend),
             || {},
         );
-        app.recording_dialog.test_install_display();
         app.open_recording_setup();
+        app.recording_dialog.test_install_display();
         let root = egui::ViewportId::ROOT;
         let native = super::super::recording_dialog::RecordingDialogState::viewport();
         app.recording_dialog.queue_save_choice_for_test(None);
@@ -72592,14 +72592,72 @@ mod tests {
             assert!(app.mouse_gesture_settings_dialog.open);
             assert_eq!(&gesture_settings, app.mouse_gesture_settings_dialog.test_settings());
             assert!(app.mouse_gesture_settings_dialog.test_dirty());
-            app.mouse_gesture_settings_dialog.test_seed_picker();
             for _ in 0..3 {
                 run_dialog_frame(&ctx, &mut app);
             }
-            let mut input = actual_query_input(true);
-            input.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
-            app.run_root_frame_for_test(&ctx, input, false).0.drop_without_applying_deltas();
-            assert!(app.mouse_gesture_settings_dialog.open && app.mouse_gesture_settings_dialog.window_picker_is_open());
+            let scroll = app
+                .mouse_gesture_settings_dialog
+                .test_scroll_area_id()
+                .expect("Gesture Settings scroll area was rendered");
+            let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll)
+                .unwrap_or_default();
+            scroll_state.offset.y = app
+                .mouse_gesture_settings_dialog
+                .test_scroll_max_offset_y();
+            scroll_state.store(&ctx, scroll);
+            run_dialog_frame(&ctx, &mut app);
+            super::super::mouse_gesture_settings_dialog::MouseGestureSettingsDialog::test_set_next_window_titles(
+                vec!["Fixture window".into()],
+            );
+            let select = mouse_gesture_settings_target(&app, "Select window").clipped_rect();
+            for pressed in [true, false] {
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    tool_dialog_pointer_events(select, pressed),
+                    false,
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(app.mouse_gesture_settings_dialog.window_picker_is_open());
+            for _ in 0..3 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+            assert!(app.gesture_window_picker_host.root_layer().is_some());
+            assert!(app
+                .mouse_gesture_settings_dialog
+                .test_picker_close_button()
+                .is_some());
+            let picker_owner = app.gesture_window_picker_host.owner_viewport();
+            let send_picker_key = |app: &mut LauncherApp, pressed| {
+                let events = vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }];
+                if picker_owner == egui::ViewportId::ROOT {
+                    run_tool_dialog_frame(&ctx, app, events, false)
+                        .drop_without_applying_deltas();
+                } else {
+                    super::with_immediate_viewport_test_events_for(
+                        picker_owner,
+                        events,
+                        || {
+                            app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                                .0
+                                .drop_without_applying_deltas();
+                        },
+                    );
+                }
+            };
+            send_picker_key(&mut app, true);
+            send_picker_key(&mut app, false);
+            assert!(app.mouse_gesture_settings_dialog.open);
+            assert!(!app.mouse_gesture_settings_dialog.window_picker_is_open());
+            assert_eq!(&gesture_settings, app.mouse_gesture_settings_dialog.test_settings());
+            assert!(app.mouse_gesture_settings_dialog.test_dirty());
             crate::plugins::mouse_gestures::apply_runtime_settings(previous_runtime);
         } else {
             assert!(app.mouse_settings_dialog.open);

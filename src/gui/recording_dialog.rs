@@ -1069,6 +1069,7 @@ impl RecordingDialogState {
         }];
         self.selection.display = Some((77, device));
         self.targets_loaded = true;
+        self.initial_target_request = false;
         self.test_accept_target = true;
     }
     #[cfg(test)]

@@ -9718,9 +9718,55 @@ mod tests {
         ));
         assert!(body_rendered && app_input_allowed);
 
-        assert!(app.close_front_dialog());
+        assert!(
+            !app.close_front_dialog(),
+            "the native Diagram Studio child is not root-presented"
+        );
         assert!(app.is_panel_open(Panel::DiagramStudioDialog));
         assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        let child_viewport = diagram_studio::viewport_id();
+        super::render::with_immediate_viewport_test_events_for(
+            child_viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            || {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+                output.drop_without_applying_deltas();
+            },
+        );
+        super::render::with_immediate_viewport_test_events_for(
+            child_viewport,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            || {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+                output.drop_without_applying_deltas();
+            },
+        );
         for _ in 0..2 {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -9823,7 +9869,8 @@ mod tests {
         app.visible_flag.store(false, Ordering::SeqCst);
         app.focus_query = false;
         assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
-        assert!(!<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
+        assert!(app.diagram_studio_dialog.needs_root_ui_when_hidden());
+        assert!(<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
             &app
         ));
         let input = egui::RawInput {
