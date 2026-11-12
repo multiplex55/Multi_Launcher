@@ -2557,7 +2557,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let window = CaptureTarget::window(11, 22, 33, ScreenRect::new(-40, -20, 32, 24)).unwrap();
-        let window_request = RecordingRequest::new(window, ScreenRect::new(-40, -20, 32, 24), request.options().clone()).unwrap();
+        let window_request = RecordingRequest::new(window, ScreenRect::new(-40, -20, 32, 24), request.options()).unwrap();
         let next = app.recording_controller.prepare(window_request, directory.path().join("window.gif"), &app.activity_center).unwrap();
         assert_ne!(generation, next);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);

@@ -1493,17 +1493,17 @@ mod tests {
     fn day_offsets_are_relative_to_injected_local_date_and_explicit_dates_refuse_past() {
         let now = utc_datetime(2025, 4, 3, 23, 59, 59, 500_000_000);
         let offset =
-            resolve_alarm_spec_at(parse_alarm_spec("1d 00:00").unwrap(), now.clone(), utc_map)
+            resolve_alarm_spec_at(parse_alarm_spec("1d 00:00").unwrap(), now, utc_map)
                 .unwrap();
         assert_eq!(offset, utc_datetime(2025, 4, 4, 0, 0, 0, 0));
 
         let yesterday = parse_alarm_spec("-1d 23:59").unwrap();
-        assert!(resolve_alarm_spec_at(yesterday, now.clone(), utc_map).is_err());
+        assert!(resolve_alarm_spec_at(yesterday, now, utc_map).is_err());
         let past = parse_alarm_spec("2025-04-03 23:59").unwrap();
-        assert!(resolve_alarm_spec_at(past, now.clone(), utc_map).is_err());
+        assert!(resolve_alarm_spec_at(past, now, utc_map).is_err());
         let future = parse_alarm_spec("2025-04-04 01:00").unwrap();
         assert_eq!(
-            resolve_alarm_spec_at(future, now.clone(), utc_map).unwrap(),
+            resolve_alarm_spec_at(future, now, utc_map).unwrap(),
             utc_datetime(2025, 4, 4, 1, 0, 0, 0)
         );
         let overflowing = AlarmSpec {
@@ -1523,21 +1523,21 @@ mod tests {
         let local = date.and_hms_opt(1, 30, 0).unwrap();
         let first = early_offset.from_local_datetime(&local).single().unwrap();
         let second = late_offset.from_local_datetime(&local).single().unwrap();
-        let between = first.clone() + chrono::Duration::minutes(5);
+        let between = first + chrono::Duration::minutes(5);
         let resolved = resolve_alarm_spec_at(spec, between, |_| {
-            LocalResult::Ambiguous(first.clone(), second.clone())
+            LocalResult::Ambiguous(first, second)
         })
         .unwrap();
         assert_eq!(resolved, second);
 
-        let before = first.clone() - chrono::Duration::minutes(5);
+        let before = first - chrono::Duration::minutes(5);
         let resolved = resolve_alarm_spec_at(spec, before, |_| {
-            LocalResult::Ambiguous(second.clone(), first.clone())
+            LocalResult::Ambiguous(second, first)
         })
         .unwrap();
         assert_eq!(resolved, first);
 
-        let after = second.clone() + chrono::Duration::minutes(1);
+        let after = second + chrono::Duration::minutes(1);
         let next_day_local = NaiveDate::from_ymd_opt(2025, 10, 27)
             .unwrap()
             .and_hms_opt(1, 30, 0)
@@ -1548,7 +1548,7 @@ mod tests {
             .unwrap();
         let resolved = resolve_alarm_spec_at(spec, after, |local| {
             if local.date() == date {
-                LocalResult::Ambiguous(first.clone(), second.clone())
+                LocalResult::Ambiguous(first, second)
             } else {
                 early_offset.from_local_datetime(&local)
             }
@@ -1562,7 +1562,7 @@ mod tests {
         let now = utc_datetime(2025, 3, 30, 1, 0, 0, 0);
         let spec = parse_alarm_spec("02:30").unwrap();
         let tomorrow = utc_datetime(2025, 3, 31, 2, 30, 0, 0);
-        let next = resolve_alarm_spec_at(spec, now.clone(), |local| {
+        let next = resolve_alarm_spec_at(spec, now, |local| {
             if local.date() == now.date_naive() {
                 LocalResult::None
             } else {
@@ -1591,7 +1591,7 @@ mod tests {
             spec,
             Some("work alarm".into()),
             "Bell".into(),
-            now.clone(),
+            now,
             monotonic_now,
             |local| offset.from_local_datetime(&local),
         )

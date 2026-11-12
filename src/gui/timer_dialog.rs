@@ -1840,7 +1840,7 @@ mod tests {
                 ctx,
                 None,
                 first_ui_pass,
-                || now.clone(),
+                || now,
                 |request| submit(request),
             );
         });
@@ -1880,7 +1880,7 @@ mod tests {
                 ctx,
                 None,
                 first_ui_pass,
-                || now.clone(),
+                || now,
                 |request| submit(request),
             );
             clicked_states.push(effects.start_clicked.unwrap_or(false));
@@ -1916,7 +1916,7 @@ mod tests {
             screen,
             true,
             vec![egui::Event::PointerMoved(pos)],
-            now.clone(),
+            now,
             submit,
         );
         run_runtime_frame(
@@ -1926,7 +1926,7 @@ mod tests {
             screen,
             true,
             vec![pointer_event(pos, true)],
-            now.clone(),
+            now,
             submit,
         );
         run_runtime_frame(
@@ -1981,7 +1981,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -1994,7 +1994,7 @@ mod tests {
             screen,
             true,
             Vec::new(),
-            now.clone(),
+            now,
             &mut submit,
         );
         assert!(!dialog.focus_duration_next_frame);
@@ -2106,7 +2106,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2120,7 +2120,7 @@ mod tests {
             screen,
             hour,
             true,
-            now.clone(),
+            now,
             &mut submit,
         );
         run_runtime_frame(
@@ -2136,7 +2136,7 @@ mod tests {
                 repeat: false,
                 modifiers: egui::Modifiers::NONE,
             }],
-            now.clone(),
+            now,
             &mut submit,
         );
         assert_eq!(
@@ -2154,7 +2154,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2168,7 +2168,7 @@ mod tests {
             screen,
             hour,
             true,
-            now.clone(),
+            now,
             &mut submit,
         );
         run_runtime_frame(
@@ -2219,7 +2219,7 @@ mod tests {
             .from_local_datetime(&date.and_hms_opt(10, 0, 0).unwrap())
             .single()
             .unwrap();
-        let clock = RefCell::new(before.clone());
+        let clock = RefCell::new(before);
         let mut dialog = TimerDialog::default();
         dialog.open_alarm();
         dialog.time = "09:00".into();
@@ -2237,7 +2237,7 @@ mod tests {
                 count_by_callback.set(count_by_callback.get() + 1);
                 let resolved = crate::plugins::timer::resolve_alarm_spec_at(
                     spec,
-                    clock.borrow().clone(),
+                    *clock.borrow(),
                     |local| Local.from_local_datetime(&local),
                 )
                 .unwrap();
@@ -2254,7 +2254,7 @@ mod tests {
             screen,
             false,
             Vec::new(),
-            before.clone(),
+            before,
             &mut submit,
         );
         let first_preview = dialog
@@ -2273,7 +2273,7 @@ mod tests {
         );
         assert!(first_preview.ends_with(&expected_first.format("%:z").to_string()));
 
-        *clock.borrow_mut() = after.clone();
+        *clock.borrow_mut() = after;
         let effects = run_runtime_frame(
             &ctx,
             &mut dialog,
@@ -2281,7 +2281,7 @@ mod tests {
             screen,
             false,
             Vec::new(),
-            after.clone(),
+            after,
             &mut submit,
         );
         let start = effects
@@ -2299,7 +2299,7 @@ mod tests {
             screen,
             start,
             false,
-            after.clone(),
+            after,
             &mut submit,
         );
         assert!(
@@ -2314,7 +2314,7 @@ mod tests {
             screen,
             false,
             Vec::new(),
-            after.clone(),
+            after,
             &mut submit,
         );
         click_at(
@@ -2326,7 +2326,7 @@ mod tests {
                 .start_rect
                 .expect("Start remains visible after discarded pass"),
             true,
-            after.clone(),
+            after,
             &mut submit,
         );
         assert_eq!(
@@ -2334,9 +2334,7 @@ mod tests {
             1,
             "one visible Start produces one submission"
         );
-        let submitted = submitted
-            .borrow()
-            .clone()
+        let submitted = (*submitted.borrow())
             .expect("Start submits the typed alarm specification");
         assert_eq!(
             submitted.date_naive(),
@@ -2385,7 +2383,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2396,7 +2394,7 @@ mod tests {
             screen,
             effects.start_rect.unwrap(),
             true,
-            now.clone(),
+            now,
             &mut submit,
         );
         drop(submit);
@@ -2419,7 +2417,7 @@ mod tests {
             screen,
             false,
             Vec::new(),
-            now.clone(),
+            now,
             &mut cancel_submit,
         );
         click_at(
@@ -2461,7 +2459,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2476,7 +2474,7 @@ mod tests {
             screen,
             true,
             vec![egui::Event::PointerMoved(pos)],
-            now.clone(),
+            now,
             &mut submit,
         );
         run_runtime_frame(
@@ -2486,7 +2484,7 @@ mod tests {
             screen,
             true,
             vec![pointer_event(pos, true)],
-            now.clone(),
+            now,
             &mut submit,
         );
         let (_, passes, discard_states, clicked_states) = run_requested_discard_start_frame(
@@ -2546,7 +2544,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2626,7 +2624,7 @@ mod tests {
                 screen,
                 false,
                 Vec::new(),
-                now.clone(),
+                now,
                 &mut submit,
             );
         }
@@ -2665,10 +2663,10 @@ mod tests {
                 screen,
                 rect,
                 true,
-                now.clone(),
+                now,
                 &mut submit,
             );
-            assert_eq!(clicked.control_clicked[index], true);
+            assert!(clicked.control_clicked[index]);
             effects = run_runtime_frame(
                 &ctx,
                 &mut dialog,
@@ -2676,10 +2674,10 @@ mod tests {
                 screen,
                 true,
                 vec![egui::Event::Text(value.into())],
-                now.clone(),
+                now,
                 &mut submit,
             );
-            assert_eq!(effects.control_changed[index], true);
+            assert!(effects.control_changed[index]);
             match value {
                 "1" => assert_eq!(dialog.duration_hours, expected),
                 "2" => assert_eq!(dialog.duration_minutes, expected as u32),

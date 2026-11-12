@@ -23884,7 +23884,7 @@ mod tests {
             .and_then(|cache| cache.scene.as_ref())
             .expect("document B has a shared native scene");
         assert_eq!(scene.nodes[0].id.as_str(), "B");
-        assert_eq!(dialog.viewer_camera.fit_next, false);
+        assert!(!dialog.viewer_camera.fit_next);
         assert!(dialog.viewer_open);
         assert_eq!(
             dialog.test_session().draft(),

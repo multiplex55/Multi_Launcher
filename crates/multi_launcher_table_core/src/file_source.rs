@@ -966,7 +966,7 @@ impl TableFileBackedSource {
                 drop(row);
                 page.rows.push(TableFileProjectedRow { id: row_id, cells });
                 let actual_page_bytes = projected_page_retained_bytes(&page)?;
-                if actual_page_bytes as u64 > max_bytes {
+                if actual_page_bytes > max_bytes {
                     let rejected = page
                         .rows
                         .pop()
@@ -986,7 +986,7 @@ impl TableFileBackedSource {
             }
         }
 
-        let retained = projected_page_retained_bytes(&page)? as u64;
+        let retained = projected_page_retained_bytes(&page)?;
         if retained > lease.bytes() {
             lease.grow(retained - lease.bytes())?;
         } else {
@@ -1072,7 +1072,7 @@ impl TableFileBackedSource {
         let _ = working_lease;
         result
             .map(Some)
-            .ok_or_else(|| TableFileSourceError::RowOutOfRange)
+            .ok_or(TableFileSourceError::RowOutOfRange)
     }
 }
 
@@ -1353,7 +1353,7 @@ fn decode_record(
         && raw.starts_with(&[0xEF, 0xBB, 0xBF])
         && let Some(first) = fields.first_mut()
     {
-        first.insert_str(0, "\u{FEFF}");
+        first.insert(0, '\u{FEFF}');
     }
     Ok(fields)
 }

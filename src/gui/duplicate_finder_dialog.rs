@@ -879,7 +879,7 @@ impl DuplicateFinderDialogState {
                     .show(ui, |ui| {
                         self.show_roots(ui, visible_owner, commit_enabled, scope, &mut order);
                         ui.separator();
-                        self.show_status(ui, &snapshot);
+                        self.show_status(ui, snapshot);
                         if let Some(message) = self.status.as_deref() {
                             ui.separator();
                             ui.label(message);
@@ -893,7 +893,7 @@ impl DuplicateFinderDialogState {
                         let results_max_height = body_max_height * 0.4;
                         self.show_results(
                             ui,
-                            &snapshot,
+                            snapshot,
                             visible_owner,
                             commit_enabled,
                             results_max_height,

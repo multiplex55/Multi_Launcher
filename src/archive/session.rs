@@ -1199,7 +1199,7 @@ mod tests {
                 .expect("fixture entry ordinal exists")
                 .id();
             selection
-                .add(SelectionTarget::Entry(id), &limits)
+                .add(SelectionTarget::Entry(id), limits)
                 .expect("select bounded physical entry");
         }
         selection

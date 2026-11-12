@@ -2372,11 +2372,7 @@ mod tests {
         let preview_uploads =
             uploaded_texture.map(|texture_id| output_preview_uploads(&release_output, texture_id));
         release_output.drop_without_applying_deltas();
-        assert_eq!(
-            uploaded_texture.is_some(),
-            true,
-            "the redacted preview is uploaded"
-        );
+        assert!(uploaded_texture.is_some(), "the redacted preview is uploaded");
         assert_eq!(preview_uploads, Some(1));
         let operations = redaction_layers(&editor.history);
         assert_eq!(operations.len(), 1);

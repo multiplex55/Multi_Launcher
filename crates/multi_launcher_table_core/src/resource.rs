@@ -31,7 +31,7 @@ impl TableResourcePolicy {
                 "RAM must be between 64 and 1024 MiB.",
             ));
         }
-        if !(1 * GIB..=64 * GIB).contains(&temp_limit_bytes) {
+        if !(GIB..=64 * GIB).contains(&temp_limit_bytes) {
             return Err(TableResourceError::InvalidPolicy(
                 "Temporary storage must be between 1 and 64 GiB.",
             ));

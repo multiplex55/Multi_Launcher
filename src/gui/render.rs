@@ -6391,7 +6391,7 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::Dialog {
                 kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
                 instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
+            } if clipboard_native_owner && !egui::Popup::is_any_open(ctx) => {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
                     self.clipboard_dialog.jump_mode_target_generation(),
@@ -6404,7 +6404,7 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
                 parent_instance,
                 confirmation_instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
+            } if clipboard_native_owner && !egui::Popup::is_any_open(ctx) => self
                 .clipboard_dialog
                 .jump_mode_pending_removal_identity()
                 .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
@@ -23919,7 +23919,7 @@ mod tests {
             }
             assert!(!app.programmer_inspector_dialog.open);
             workers.join_all();
-            let saved = crate::settings::Settings::load(&path).unwrap();
+            let saved = crate::settings::Settings::load(path).unwrap();
             assert_eq!(
                 saved.utility_presentations.get(key),
                 Some(crate::settings::RememberedPresentation::Popout)
@@ -23984,7 +23984,7 @@ mod tests {
             assert!(!app2.programmer_inspector_host.is_popped_out());
             workers2.join_all();
             assert_eq!(
-                crate::settings::Settings::load(&path)
+                crate::settings::Settings::load(path)
                     .unwrap()
                     .utility_presentations
                     .get(key),

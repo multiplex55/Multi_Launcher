@@ -3302,7 +3302,7 @@ mod tests {
         subtree
             .add(
                 crate::archive::SelectionTarget::FolderSubtree(directory),
-                &catalog.limits(),
+                catalog.limits(),
             )
             .unwrap();
         session.set_selection(subtree).unwrap();

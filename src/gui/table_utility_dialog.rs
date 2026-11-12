@@ -4919,13 +4919,12 @@ mod tests {
         assert!(dialog.test_filter_response.is_none());
         let page = loaded.file_page.as_ref().expect("first result page");
         assert_eq!(page.rows().len(), 64);
-        assert_eq!(
+        assert!(
             dialog
                 .test_file_visible_column_range
                 .map(|(start, end)| end - start)
                 .expect("file-backed columns were virtualized")
-                < column_count,
-            true
+                < column_count
         );
 
         click_test_widget(&context, &mut dialog, |state| {
