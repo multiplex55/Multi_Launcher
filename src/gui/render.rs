@@ -17732,6 +17732,7 @@ mod tests {
     struct EagerRootGridLayout {
         cells: Vec<egui::Rect>,
         cell_cursors: Vec<egui::Pos2>,
+        display_texts: Vec<String>,
         grid_bounds: egui::Rect,
         content_bounds: egui::Rect,
         nominal_width: f32,
@@ -17748,6 +17749,7 @@ mod tests {
             .max(0.0);
         let mut cells = Vec::with_capacity(actions.len());
         let mut cell_cursors = Vec::with_capacity(actions.len());
+        let mut display_texts = Vec::with_capacity(actions.len());
         let text_presentation = RootResultTextPresentation::new(ui);
         let margin = root_selectable_frame_margin(ui);
         let mut row_heights = vec![
@@ -17756,6 +17758,10 @@ mod tests {
         ];
         for (index, action) in actions.iter().enumerate() {
             let text = root_grid_result_text(ui, action, &text_presentation, nominal_width);
+            let egui::WidgetText::LayoutJob(job) = &text else {
+                panic!("root grid result text uses a layout job");
+            };
+            display_texts.push(job.text.clone());
             let size = text.measure_size_impl(
                 ui.ctx(),
                 ui.style(),
@@ -17790,6 +17796,7 @@ mod tests {
         EagerRootGridLayout {
             cells,
             cell_cursors,
+            display_texts,
             grid_bounds: grid.response.rect,
             content_bounds: ui.min_rect(),
             nominal_width,
@@ -33231,10 +33238,28 @@ mod tests {
             );
         }
         if state.recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
-            assert!(cache.row_response_widths[0] > state.old_first_response_width);
-            assert_ne!(cache.row_widths[1], state.old_next_row_width);
-            assert_ne!(cache.row_x_offsets[1], state.old_next_row_x_offset);
-            assert_ne!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
+            let full_description = &state.expected_actions[0].desc;
+            let shown_description = presentation[0]
+                .split_once(" : ")
+                .expect("the first result displays its description")
+                .1;
+            assert_eq!(
+                shown_description,
+                compact_result_description(full_description),
+                "the visible description is clipped to the compact seven-word summary"
+            );
+            assert!(full_description.split_whitespace().count() > 7);
+            assert!(shown_description.contains("early-wide-segment/"));
+            assert_ne!(old_presentation[0], presentation[0]);
+            assert!(cache.row_response_widths[0] <= available_width);
+            assert_eq!(
+                cache.row_response_widths[0].to_bits(),
+                state.old_first_response_width.to_bits(),
+                "the longer source description stays inside the existing row width"
+            );
+            assert_eq!(cache.row_widths[1], state.old_next_row_width);
+            assert_eq!(cache.row_x_offsets[1], state.old_next_row_x_offset);
+            assert_eq!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
         }
         let viewport_id = track_c2d_viewport_signature(&state.app).0;
         let geometry_id = track_c2d_geometry_signature(cache);
@@ -35411,7 +35436,12 @@ mod tests {
                 .expect("grid ScrollArea exists");
             let mut scroll = egui::scroll_area::State::load(&ctx, scroll_id)
                 .expect("settled grid has ScrollArea state");
-            scroll.offset.y = row_top + row_height + 8.0;
+            // Preserve the eager geometry check while scrolling beyond the
+            // actual row overscan buffer before asserting the first row is
+            // absent from the painted set.
+            scroll.offset.y = row_top
+                + row_height
+                + (row_height + 6.0) * (ROOT_LIST_OVERSCAN_ROWS + 3) as f32;
             scroll.store(&ctx, scroll_id);
             run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new())
                 .drop_without_applying_deltas();
@@ -35798,10 +35828,17 @@ mod tests {
         assert_eq!(old_key.grid_nominal_width_bits, key.grid_nominal_width_bits);
         assert_eq!(old_key.grid_spacing_x_bits, key.grid_spacing_x_bits);
         assert_eq!(old_key.grid_spacing_y_bits, key.grid_spacing_y_bits);
+        let column_gap = if state.columns > 1 {
+            8.0_f32.min(
+                actual_available_width.max(0.0) / (state.columns - 1) as f32,
+            )
+        } else {
+            8.0
+        };
         let expected_nominal = ((actual_available_width
-            - (state.columns.saturating_sub(1) as f32 * 8.0))
+            - (state.columns.saturating_sub(1) as f32 * column_gap))
             / state.columns as f32)
-            .max(160.0);
+            .max(0.0);
         assert_eq!(key.grid_nominal_width_bits, expected_nominal.to_bits());
 
         let after = cache.test_observation();
@@ -35926,53 +35963,82 @@ mod tests {
             }
         }
 
+        if matches!(
+            state.recipe,
+            TrackC2EGridRecipe::SharedPrefixGrowth | TrackC2EGridRecipe::SharedPrefixShrink
+        ) {
+            let late = state
+                .late_column_zero
+                .expect("prefix fixture identifies its late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert_eq!(cache.grid_cell_widths[late], old_cell_width);
+            assert_eq!(cache.grid_cell_widths[late], cache.grid_nominal_width);
+            assert_eq!(cache.grid_column_widths, state.old_grid_column_widths);
+            assert_eq!(cache.grid_column_x_offsets, state.old_grid_column_x_offsets);
+        }
         if state.recipe == TrackC2EGridRecipe::SharedPrefixGrowth {
             let late = state
                 .late_column_zero
                 .expect("growth fixture identifies its late column-zero stress cell");
-            let old_cell_width = state
-                .old_late_cell_width
-                .expect("settled source layout includes the stress cell");
-            assert!(cache.grid_cell_widths[late] > old_cell_width);
-            assert!(cache.grid_column_widths[0] > state.old_grid_column_widths[0]);
-            assert!(cache.grid_column_x_offsets[1] > state.old_grid_column_x_offsets[1]);
-            assert!(cache.grid_column_x_offsets[2] > state.old_grid_column_x_offsets[2]);
-        }
-        if state.recipe == TrackC2EGridRecipe::SharedPrefixShrink {
-            let late = state
-                .late_column_zero
-                .expect("shrink fixture identifies its old late column-zero stress cell");
-            let old_cell_width = state
-                .old_late_cell_width
-                .expect("settled source layout includes the stress cell");
-            assert!(old_cell_width > cache.grid_cell_widths[late]);
-            assert!(state.old_grid_column_widths[0] > cache.grid_column_widths[0]);
-            assert!(cache.grid_column_x_offsets[1] < state.old_grid_column_x_offsets[1]);
-            assert!(cache.grid_column_x_offsets[2] < state.old_grid_column_x_offsets[2]);
+            let source_label = &state.expected_actions[late].label;
+            let displayed_title = state.eager.display_texts[late]
+                .lines()
+                .next()
+                .expect("the grid cell displays its title");
+            assert!(source_label.len() > 2_000);
+            assert!(displayed_title.ends_with('…'));
+            assert!(
+                !displayed_title.contains(&"W".repeat(128)),
+                "the long title is ellipsized before the grid cell boundary"
+            );
         }
         if state.recipe == TrackC2EGridRecipe::TallCellSpillCold {
-            let (logical_top, logical_height, visual_top, visual_bottom) = row_geometry[0];
+            let source_title = &state.expected_actions[0].label;
+            let displayed_text = &state.eager.display_texts[0];
+            let displayed_title = displayed_text
+                .lines()
+                .next()
+                .expect("the bounded result displays a title");
+            assert_eq!(source_title.lines().count(), 150);
+            assert_eq!(displayed_text.lines().count(), 2);
+            assert!(displayed_title.ends_with('…'));
+            assert!(displayed_title.len() < source_title.len());
+            let eager_first_cell_height = state.eager.cells[0].height();
+            let measured_first_cell_height = cache.grid_cell_heights[0];
+            assert!(
+                (measured_first_cell_height - eager_first_cell_height).abs() <= 1.0,
+                "the bounded two-line cell matches the independent eager height: measured={measured_first_cell_height}, eager={eager_first_cell_height}"
+            );
+            let button_line_height = state
+                .ctx
+                .fonts_mut(|fonts| fonts.row_height(&key.button_font))
+                + f32::from_bits(key.extra_text_line_spacing_bits);
+            let selectable_margin_y = f32::from_bits(key.selectable_margin_y_bits);
+            let two_line_height_bound = button_line_height * 2.0 + selectable_margin_y + 1.0;
+            assert!(measured_first_cell_height >= ROOT_GRID_MIN_HEIGHT);
+            assert!(
+                measured_first_cell_height <= two_line_height_bound,
+                "the retained title and description fit within two button lines plus frame margins: measured={measured_first_cell_height}, bound={two_line_height_bound}"
+            );
+
+            let (logical_top, logical_height, _, visual_bottom) = row_geometry[0];
             let logical_bottom = content_origin.y + logical_top + logical_height;
             assert!(logical_bottom <= viewport.min.y);
             assert!(
-                content_origin.y + visual_top < viewport.max.y
-                    && content_origin.y + visual_bottom > viewport.min.y
+                content_origin.y + visual_bottom <= viewport.min.y,
+                "the bounded title row is wholly above the viewport after scrolling"
             );
             assert!(
-                rows.iter().any(|(index, _)| *index < state.columns),
-                "the offscreen logical row's visual spill remains painted"
-            );
-            let logical_row_zero_visible =
-                content_origin.y + logical_top < viewport.max.y && logical_bottom > viewport.min.y;
-            assert!(
-                !logical_row_zero_visible,
-                "row zero's logical interval is outside the viewport despite its tall visual spill"
+                !rows.iter().any(|(index, _)| *index < state.columns),
+                "the scrolled-out first row has no painted cells"
             );
             assert!(
-                actual_indices
+                !actual_indices
                     .iter()
                     .any(|index| *index / state.columns == 0),
-                "spill painting keeps row zero's absolute cell indices in the exact viewport set"
+                "scrolled-out first-row cells are excluded from the exact viewport set"
             );
         }
 
@@ -51848,6 +51914,10 @@ mod tests {
         app.set_jump_mode_enabled(true);
         app.test_skip_history_persistence = true;
         prepare_actual_query_frame(&ctx, &mut app);
+        app.utility_dialog_size_manager.test_set_preferred_size(
+            crate::settings::UtilityToolKey::parse("clipboard-history").unwrap(),
+            crate::settings::PreferredWindowSize::new(480.0, 360.0).unwrap(),
+        );
         let private_entry = "private clipboard secret λ\nline two";
         prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[private_entry, private_entry]);
         let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
@@ -54281,13 +54351,20 @@ mod tests {
             .0
             .drop_without_applying_deltas();
         assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.file_search_dialog
+                .test_native_popup_control_rect(PopupControl::ExportAnchor),
+            Some(export_anchor),
+            "the open popup still belongs to the current Export anchor"
+        );
         assert!(
-            !app.file_search_native_ui_owner_current(&ctx, true),
-            "the existing Export popup uses its own action validation and is not a general native-owner grant"
+            app.file_search_native_ui_owner_current(&ctx, true),
+            "the exact current Export popup anchor owns its native action surface"
         );
         assert_eq!(
             app.jump_mode_ui.frame_navigation_owner(),
-            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            "an exact Export popup owner does not grant Jump Mode navigation to its parent"
         );
         assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
 
@@ -58579,17 +58656,78 @@ mod tests {
         assert_eq!(app.selected, Some(0));
         assert!(app.jump_mode_ui.active_session().is_none());
         start_actual_root_jump_mode(&ctx, &mut app);
+
+        let before_height_resize_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the root grid viewport is recorded before the height resize");
+        let before_height_resize_targets: std::collections::HashSet<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.id().surface(),
+                    crate::gui::jump_mode::SurfaceId::LauncherResults
+                ) && matches!(
+                    target.id().semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                )
+            })
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(!before_height_resize_targets.is_empty());
         let mut population_change_input = actual_query_input(true);
         population_change_input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(560.0, 650.0),
+            egui::vec2(900.0, 400.0),
         ));
         app.run_root_frame_for_test(&ctx, population_change_input, false)
             .0
             .drop_without_applying_deltas();
+        let after_height_resize_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the resized root grid viewport is recorded");
+        assert!(
+            after_height_resize_viewport.height() < before_height_resize_viewport.height(),
+            "the height resize clips the result viewport from {}pt to {}pt",
+            before_height_resize_viewport.height(),
+            after_height_resize_viewport.height()
+        );
+        let after_height_resize_targets: std::collections::HashSet<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.id().surface(),
+                    crate::gui::jump_mode::SurfaceId::LauncherResults
+                ) && matches!(
+                    target.id().semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                )
+            })
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(
+            !after_height_resize_targets.is_empty(),
+            "the shortened viewport still retains visible result targets"
+        );
+        assert_ne!(
+            after_height_resize_targets, before_height_resize_targets,
+            "the height resize changes the semantic result target population"
+        );
+        assert!(
+            before_height_resize_targets
+                .difference(&after_height_resize_targets)
+                .next()
+                .is_some(),
+            "the shorter viewport clips at least one previously visible result target"
+        );
         assert!(
             app.jump_mode_ui.active_session().is_none(),
-            "a narrower resize that changes the visible target population cancels the frozen session"
+            "a height resize that changes the visible target population cancels the frozen session"
         );
         assert_eq!(
             app.jump_mode_ui.last_outcome(),
@@ -64382,6 +64520,60 @@ mod tests {
         let (output, passes) = app.run_root_frame_for_test(&ctx, enter_press, true);
         output.drop_without_applying_deltas();
         assert!(passes > 1, "the action crossed a discarded ROOT pass");
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "éclair",
+            "a discarded ROOT pass rolls back the toolbar draft"
+        );
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 0));
+
+        // The discarded activation consumed the menu event. Re-establish the
+        // source selection and keyboard path before submitting a retained pass.
+        let mut retry_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the retained editor remains available after the discarded pass");
+        retry_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new("éclair".chars().count()),
+            )));
+        retry_state.store(&ctx, editor_id);
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (retry_bold_id, retry_bold_rect, retry_bold_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Bold Selection")
+            .expect("the fresh keyboard opening exposes Bold again");
+        assert_eq!(retry_bold_id, bold_id);
+        assert!(retry_bold_clip.contains_rect(retry_bold_rect));
+        for _ in 0..16 {
+            if ctx.memory(|memory| memory.has_focus(retry_bold_id)) {
+                break;
+            }
+            run_note_panel_key(&ctx, &mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.memory(|memory| memory.has_focus(retry_bold_id)));
+
+        let mut accepted_enter = actual_query_input(true);
+        accepted_enter.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        app.run_root_frame_for_test(&ctx, accepted_enter, false)
+            .0
+            .drop_without_applying_deltas();
 
         assert_eq!(
             app.note_panels[0].note_content(),
@@ -64389,6 +64581,7 @@ mod tests {
             "menu activation does not leak Space/Enter into the source editor"
         );
         assert!(app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (1, 0));
         assert!(
             ctx.memory(|memory| memory.has_focus(editor_id)),
             "toolbar focus is restored only after the accepted ROOT pass"

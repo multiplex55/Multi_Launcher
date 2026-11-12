@@ -488,6 +488,18 @@ impl UtilityDialogSizeManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_preferred_size(
+        &self,
+        key: UtilityToolKey,
+        size: crate::settings::PreferredWindowSize,
+    ) {
+        self.lock()
+            .sizes
+            .set(key, size)
+            .expect("test utility window size is valid");
+    }
+
+    #[cfg(test)]
     pub(crate) fn tracked_windows(&self) -> Vec<(Id, UtilityToolKey)> {
         self.lock()
             .instances
