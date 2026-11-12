@@ -671,6 +671,10 @@ enum VisualAssetWorkKindTag {
     Export,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Worker results stay inline to preserve the existing channel message type."
+)]
 enum VisualAssetWorkResult {
     Import(Result<PreparedVisualAsset, String>),
     Hydrate(Vec<Result<DecodedVisualAsset, (VisualAssetId, String)>>),
@@ -732,6 +736,10 @@ enum DrawioWorkKind {
     Export,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Worker results stay inline to preserve the existing channel message type."
+)]
 enum DrawioWorkResult {
     Import(Result<DrawioImportResult, DrawioImportError>),
     Export(Result<DrawioExportResult, DrawioWireError>),
@@ -750,6 +758,10 @@ struct PendingDrawioWork {
     retired: bool,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Workflow review state stays in one enum for the modal lifecycle."
+)]
 enum DrawioWorkflowReview {
     Import {
         scope: DrawioWorkflowScope,

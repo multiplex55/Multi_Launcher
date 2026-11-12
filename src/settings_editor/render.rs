@@ -43,6 +43,10 @@ impl SettingsUiActions {
     }
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Host actions keep their operation payloads inline for direct dispatch."
+)]
 #[derive(Clone)]
 enum SettingsHostAction {
     Save,

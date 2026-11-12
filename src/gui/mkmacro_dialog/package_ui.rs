@@ -18,6 +18,10 @@ pub(super) enum PackageOpen {
     Help,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Package actions keep request-specific data inline for dialog dispatch."
+)]
 #[derive(Clone)]
 pub(super) enum PackageHostAction {
     Open(PackageOpen),

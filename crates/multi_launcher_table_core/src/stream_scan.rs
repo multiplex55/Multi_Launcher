@@ -600,6 +600,10 @@ fn consume_byte<R: BufRead>(
     Ok(byte)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The scanner step threads its explicit cursor and byte state."
+)]
 fn consume_line_ending<R: BufRead>(
     reader: &mut R,
     offset: &mut u64,
