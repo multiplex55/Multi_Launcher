@@ -13923,7 +13923,14 @@ mod tests {
         let mut app = new_app(&ctx);
         let mut target_note = empty_note("new note source");
         target_note.slug = "replace-target-note".into();
+        let mut source_note = empty_note("old note source");
+        source_note.slug = "replace-source-note".into();
+        let mut panel = NotePanel::from_note(source_note);
+        panel.view_mode = NoteViewMode::Edit;
+        panel.show_metadata = false;
+
         let mut target_panel = NotePanel::from_note(target_note.clone());
+        target_panel.prompt_identity = panel.prompt_identity;
         target_panel.view_mode = NoteViewMode::Edit;
         target_panel.show_metadata = false;
         for _ in 0..3 {
@@ -13941,11 +13948,6 @@ mod tests {
         target_state.store(&ctx, target_editor_id);
         drop(target_panel);
 
-        let mut source_note = empty_note("old note source");
-        source_note.slug = "replace-source-note".into();
-        let mut panel = NotePanel::from_note(source_note);
-        panel.view_mode = NoteViewMode::Edit;
-        panel.show_metadata = false;
         for _ in 0..3 {
             render_panel_once(&ctx, &mut panel, &mut app);
         }
@@ -13957,6 +13959,11 @@ mod tests {
         assert!(panel.retained_text_edit_history.is_none());
         assert_eq!(panel.note_content(), "new note source");
         render_panel_once(&ctx, &mut panel, &mut app);
+        assert_eq!(
+            panel.last_textedit_id,
+            Some(target_editor_id),
+            "replacement renders the seeded destination editor under the same panel owner"
+        );
 
         let fresh_state = egui::widgets::text_edit::TextEditState::load(&ctx, target_editor_id)
             .expect("the new note's actual TextEdit rendered its fresh state");
@@ -17153,21 +17160,36 @@ mod tests {
             ..Default::default()
         };
 
-        ctx.run_ui(raw_input(), |ctx| {
-            panel.ui(ctx, &mut app);
-        })
-        .drop_without_applying_deltas();
+        for _ in 0..3 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+        }
         let original_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should be remembered after rendering");
+        for _ in 0..2 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(
+                ctx.memory(|memory| memory.area_rect(window_id)),
+                Some(original_rect),
+                "the initial note window geometry is settled before changing its title"
+            );
+        }
         panel.note.title = "Renamed From Markdown".into();
         panel.note.content = "# Renamed From Markdown\n\nBody".into();
         app.note_panel_default_size = (760.0, 560.0);
 
-        ctx.run_ui(raw_input(), |ctx| {
-            panel.ui(ctx, &mut app);
-        })
-        .drop_without_applying_deltas();
+        for _ in 0..3 {
+            ctx.run_ui(raw_input(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+        }
         let renamed_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should still be remembered after title changes");
