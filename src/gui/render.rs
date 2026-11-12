@@ -13221,15 +13221,11 @@ impl LauncherApp {
                 super::note_panel::NotePanelEffect::OpenDiagram { source, origin } => {
                     let open_result = self
                         .note_panels
-                        .iter()
-                        .find(|panel| {
-                            panel.tracks_diagram_source_origin(&origin.identity)
-                                && origin
-                                    .host_origin
-                                    .as_ref()
-                                    .is_some_and(|receipt| panel.accepts_note_open(receipt))
+                        .get(panel_index)
+                        .zip(origin.host_origin.as_ref())
+                        .map(|(panel, receipt)| {
+                            panel.validate_diagram_source_copy(ctx, receipt, &origin)
                         })
-                        .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
                         .unwrap_or(Err("The originating Note is no longer open."));
                     match open_result {
                         Err(error) => self.report_error("notes.mermaid", error),
@@ -13244,9 +13240,9 @@ impl LauncherApp {
                                     )
                                     .is_some()
                             {
-                                if let Some(panel) = self.note_panels.iter_mut().find(|panel| {
-                                    panel.tracks_diagram_source_origin(&origin.identity)
-                                }) {
+                                if let Some(panel) = self.note_panels.get_mut(panel_index)
+                                    && panel.tracks_diagram_source_origin(&origin.identity)
+                                {
                                     panel.track_diagram_source_origin(origin);
                                 }
                                 self.focus_panel(super::Panel::DiagramStudioDialog);

@@ -2594,14 +2594,24 @@ impl NotePanel {
             && !self.pending_close_after_save
             && !self.discard_unsaved_prompt
             && !self.overwrite_prompt
-            && receipt.is_current(
-                self.host_state.identity(),
-                &(
-                    self.prompt_identity,
-                    self.note.slug.clone(),
-                    self.note.path.clone(),
-                ),
-            )
+            && self.note_open_receipt_matches_session(receipt)
+    }
+
+    fn matches_note_open_receipt(&self, receipt: &NoteOpenReceipt) -> bool {
+        self.open
+            && !self.pending_close_after_save
+            && self.note_open_receipt_matches_session(receipt)
+    }
+
+    fn note_open_receipt_matches_session(&self, receipt: &NoteOpenReceipt) -> bool {
+        receipt.is_current(
+            self.host_state.identity(),
+            &(
+                self.prompt_identity,
+                self.note.slug.clone(),
+                self.note.path.clone(),
+            ),
+        )
     }
 
     pub(super) fn open_from_origin<S>(
@@ -3460,7 +3470,7 @@ impl NotePanel {
             .is_some_and(|origin| origin.identity == *identity)
     }
 
-    pub(crate) fn can_open_diagram_source_copy(
+    fn can_open_diagram_source_copy(
         &self,
         ctx: &egui::Context,
         origin: &NoteMermaidOrigin,
@@ -3474,6 +3484,20 @@ impl NotePanel {
             return Err("The originating Note changed before Diagram Studio could open.");
         }
         self.diagram_handoff_block_reason(ctx).map_or(Ok(()), Err)
+    }
+
+    /// Validates the retained owner receipt, then reports blockers for the
+    /// still-current Note through its diagram-specific policy.
+    pub(super) fn validate_diagram_source_copy(
+        &self,
+        ctx: &egui::Context,
+        receipt: &NoteOpenReceipt,
+        origin: &NoteMermaidOrigin,
+    ) -> Result<(), &'static str> {
+        if !self.matches_note_open_receipt(receipt) {
+            return Err("The originating Note is no longer open.");
+        }
+        self.can_open_diagram_source_copy(ctx, origin)
     }
 
     fn diagram_handoff_block_reason(&self, ctx: &egui::Context) -> Option<&'static str> {
