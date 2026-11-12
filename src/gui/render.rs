@@ -22108,7 +22108,7 @@ mod tests {
             RootDialogEffect::CopyText {
                 owner: DialogCopyOwner::CalculationPad,
                 text,
-            } if text.contains("r1 answer = 42")
+            } if text == "Source and results\nr1 = answer = 40 + 2 = 42\n\nResults only\nr1 = 42\n\nSource and results without row labels\nanswer = 40 + 2 = 42"
         ));
         let repeated = app.complete_retained_tool_dialogs(&ctx);
         app.dispatch_root_dialog_effects(&ctx, repeated);
