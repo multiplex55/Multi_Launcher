@@ -14,7 +14,7 @@
 | M1-B | Complete, 3 targeted cases passed |
 | M2-A | Complete, 7 targeted cases passed after the editor height correction |
 | M2-B | Complete, 6 targeted cases passed |
-| M3-A | Pending |
+| M3-A | Complete, targeted interaction and host cases passed after correction |
 | M4-A | Pending |
 
 ## M1-A evidence
@@ -40,5 +40,13 @@
 
 ## M2-B evidence
 
+- Checkpoint `22897b39a4361d674e8c1f538de97ea3864b7aaf` is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`).
 - Dragging updates a retained host preview. Release persists one ratio through the existing display owner. Wide and stacked preferences default to 0.50 and 0.48 and remain independently validated.
 - Library preparation exited 0 in 278.22 seconds with verified descendant cleanup and output drain. Six exact cases passed in 1.48 seconds wall time. Tests exercised both orientations, actual divider movement, release save, stale and discarded passes, constrained layouts, host migration, editor geometry, and settings compatibility.
+
+## M3-A evidence
+
+- The row menu now uses the row's actual bounds and selectable text responses. Go to source targets stable physical identity, applies caret and scroll in the retained editor pass, and paints a separate timed highlight.
+- Initial batch passed 6/11. Three app-level cases aborted on default stack and were rerun individually with process-local `RUST_MIN_STACK=16777216`; native Inspector promotion passed and Inspector comparison/root query revealed clipping. The native child editor test also failed to focus. Corrected both wide panes' height budgets, and the expiry test now keeps editor focus while asserting selection and separately checks later focus behavior.
+- Corrected batch passed 16/17, including all existing app/host checks and both splitter tests. The remaining new fixture's 25 lines fit with the corrected height. An 80-line fixture asserted the target started offscreen and passed its isolated menu/scroll/expiry case.
+- All three preparations exited 0 (265.96, 167.25, 119.35 seconds). Owned-process cleanup and output drain were verified.

@@ -133,7 +133,8 @@ pub(crate) struct CalculationPadDialog {
     host_state: UtilityHostState,
     presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
-    dependency_navigation: Option<(PadHostIdentity, super::calculation_dependency_dialog::DependencyNavigation)>,
+    dependency_navigation: Option<SourceNavigation>,
+    source_highlight: Option<SourceHighlight>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
@@ -157,6 +158,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
+    test_editor_clip: Option<egui::Rect>,
+    #[cfg(test)]
     test_display_controls: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_editor_geometry: Option<(f32, f32, f32, Vec<(usize, f32)>)>,
@@ -176,6 +179,12 @@ pub(crate) struct CalculationPadDialog {
     test_rendered_result_rows: Vec<(usize, LineId)>,
     #[cfg(test)]
     test_select_comparison: Option<egui::Rect>,
+    #[cfg(test)]
+    test_go_to_source: Option<egui::Rect>,
+    #[cfg(test)]
+    test_result_bodies: Vec<(usize, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_highlight_rows: Vec<egui::Rect>,
     #[cfg(test)]
     test_dependency_open: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
@@ -257,6 +266,22 @@ struct DependencyEditorUpdate {
     editor_state: egui::widgets::text_edit::TextEditState,
     scroll_id: egui::Id,
     scroll_state: egui::scroll_area::State,
+    result_navigation: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceNavigation {
+    host: PadHostIdentity,
+    navigation: super::calculation_dependency_dialog::DependencyNavigation,
+    result_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct SourceHighlight {
+    host: PadHostIdentity,
+    navigation: super::calculation_dependency_dialog::DependencyNavigation,
+    revision: u64,
+    expires_at: f64,
 }
 
 struct HostEffects {
@@ -273,6 +298,7 @@ struct HostEffects {
     open_inspector: bool,
     open_dependencies: bool,
     dependency_applied: Option<DependencyEditorUpdate>,
+    result_navigation: Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
     save_as_name: Option<String>,
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
@@ -378,6 +404,7 @@ impl CalculationPadDialog {
             open_inspector: false,
             open_dependencies: false,
             dependency_applied: None,
+            result_navigation: None,
             save_as_name: None,
             source_focus_requested: false,
             source_editor_id: None,
@@ -473,6 +500,7 @@ impl CalculationPadDialog {
             presentation_prepared: false,
             deferred_source_focus: None,
             dependency_navigation: None,
+            source_highlight: None,
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
@@ -496,6 +524,8 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_editor_rect: None,
             #[cfg(test)]
+            test_editor_clip: None,
+            #[cfg(test)]
             test_display_controls: None,
             #[cfg(test)]
             test_editor_geometry: None,
@@ -515,6 +545,12 @@ impl CalculationPadDialog {
             test_rendered_result_rows: Vec::new(),
             #[cfg(test)]
             test_select_comparison: None,
+            #[cfg(test)]
+            test_go_to_source: None,
+            #[cfg(test)]
+            test_result_bodies: Vec::new(),
+            #[cfg(test)]
+            test_highlight_rows: Vec::new(),
             #[cfg(test)]
             test_dependency_open: None,
             #[cfg(test)]
@@ -1329,10 +1365,12 @@ impl CalculationPadDialog {
         source_focus_allowed: bool,
         effects: &mut HostEffects,
     ) {
-        if self.dependency_navigation.is_some_and(|(host, nav)| {
-            host != self.host_identity()
+        if self.dependency_navigation.is_some_and(|pending| {
+            let nav = pending.navigation;
+            pending.host != self.host_identity()
                 || self.session.current_id() != Some(nav.document)
                 || self.session.document_incarnation() != Some(nav.incarnation)
+                || pending.result_revision.is_some_and(|revision| self.session.revision() != Some(revision))
                 || !self.open
                 || !self
                     .session
@@ -1377,6 +1415,7 @@ impl CalculationPadDialog {
                         &mut effects.open_inspector,
                         &mut effects.open_dependencies,
                         &mut effects.dependency_applied,
+                        &mut effects.result_navigation,
                         &mut effects.display_preferences,
                         &mut effects.split_action,
                         identity,
@@ -1670,6 +1709,7 @@ impl CalculationPadDialog {
             host.open_inspector = false;
             host.open_dependencies = false;
             host.dependency_applied = None;
+            host.result_navigation = None;
         }
 
         let needs_repaint = host.edited_source.is_some()
@@ -1720,6 +1760,8 @@ impl CalculationPadDialog {
             None => {}
         }
         if accepted_source_or_history {
+            self.source_highlight = None;
+            self.dependency_navigation = None;
             self.schedule_recovery_snapshot(ctx);
         }
 
@@ -1888,8 +1930,26 @@ impl CalculationPadDialog {
         {
             delivered.push(CalculationPadDialogEffect::OpenDependencies(receipt));
         }
+        if let Some((nav, revision)) = host.result_navigation.take()
+            && !accepted_source_or_history
+            && !host.close_requested
+            && host.host_request.is_none()
+            && self.session.revision() == Some(revision)
+            && self.can_navigate_source(nav, host.identity)
+        {
+            self.dependency_navigation = Some(SourceNavigation {
+                host: host.identity,
+                navigation: nav,
+                result_revision: Some(revision),
+            });
+            ctx.request_repaint_of(host.viewport_id);
+        }
         if let Some(update) = host.dependency_applied
-            && self.dependency_navigation == Some((host.identity, update.navigation))
+            && self.dependency_navigation == Some(SourceNavigation {
+                host: host.identity,
+                navigation: update.navigation,
+                result_revision: update.result_navigation.then_some(update.revision),
+            })
             && self.session.revision() == Some(update.revision)
             && self.host_identity() == host.identity
             && self.open
@@ -1900,6 +1960,24 @@ impl CalculationPadDialog {
             ctx.request_repaint_of(host.viewport_id);
             host.source_focus_requested = true;
             self.dependency_navigation = None;
+            if update.result_navigation {
+                let now = ctx.input(|input| input.time);
+                self.source_highlight = Some(SourceHighlight {
+                    host: host.identity,
+                    navigation: update.navigation,
+                    revision: update.revision,
+                    expires_at: now + 1.5,
+                });
+                ctx.request_repaint_after_for(std::time::Duration::from_millis(1500), host.viewport_id);
+            }
+        }
+        if self.source_highlight.is_some_and(|highlight| {
+            highlight.host != self.host_identity()
+                || self.session.revision() != Some(highlight.revision)
+                || self.session.resolve_dependency_line(highlight.navigation.document, highlight.navigation.incarnation, highlight.navigation.line).is_none()
+                || ctx.input(|input| input.time) >= highlight.expires_at
+        }) {
+            self.source_highlight = None;
         }
         if host.close_requested {
             self.host_close_requested = false;
@@ -2180,7 +2258,29 @@ impl CalculationPadDialog {
         source_host: super::utility_host::HostIdentity,
         ctx: &egui::Context,
     ) -> bool {
-        if self.host_identity() != source_host
+        if !self.can_navigate_source(nav, source_host) {
+            return false;
+        }
+        self.dependency_navigation = Some(SourceNavigation {
+            host: self.host_identity(),
+            navigation: nav,
+            result_revision: None,
+        });
+        let viewport = if source_host.host == PadHost::Popout {
+            pad_viewport_id()
+        } else {
+            egui::ViewportId::ROOT
+        };
+        ctx.request_repaint_of(viewport);
+        true
+    }
+
+    fn can_navigate_source(
+        &self,
+        nav: super::calculation_dependency_dialog::DependencyNavigation,
+        source_host: PadHostIdentity,
+    ) -> bool {
+        !(self.host_identity() != source_host
             || !self.open
             || self.host_close_requested
             || self.open_chooser
@@ -2189,18 +2289,7 @@ impl CalculationPadDialog {
             || self
                 .session
                 .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
-                .is_none()
-        {
-            return false;
-        }
-        self.dependency_navigation = Some((self.host_identity(), nav));
-        let viewport = if source_host.host == PadHost::Popout {
-            pad_viewport_id()
-        } else {
-            egui::ViewportId::ROOT
-        };
-        ctx.request_repaint_of(viewport);
-        true
+                .is_none())
     }
 
     pub(super) fn inspector_context(&self) -> std::sync::Arc<InspectorPadContext> {
@@ -2246,6 +2335,8 @@ impl CalculationPadDialog {
         }
         self.host_state.transition(requested_host);
         self.split_preview = None;
+        self.dependency_navigation = None;
+        self.source_highlight = None;
         super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), requested_host);
         self.deferred_source_focus = None;
         match requested_host {
@@ -2305,6 +2396,7 @@ impl CalculationPadDialog {
         open_inspector: &mut bool,
         open_dependencies: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
+        result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
         display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
         split_action: &mut Option<SplitAction>,
         host_identity: PadHostIdentity,
@@ -2429,7 +2521,7 @@ impl CalculationPadDialog {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let source_ui = ui.allocate_ui_with_layout(
-                    egui::vec2(source_width, 0.0),
+                    egui::vec2(source_width, available_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_width(source_width);
@@ -2455,7 +2547,7 @@ impl CalculationPadDialog {
                     ui, &response, orientation, ratio, available_width, 220.0, split_action,
                 );
                 ui.allocate_ui_with_layout(
-                    egui::vec2(results_width, 0.0),
+                    egui::vec2(results_width, available_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_width(results_width);
@@ -2468,6 +2560,7 @@ impl CalculationPadDialog {
                             viewport_id,
                             inspector_selection,
                             open_inspector,
+                            result_navigation,
                         );
                     },
                 );
@@ -2504,6 +2597,7 @@ impl CalculationPadDialog {
                 viewport_id,
                 inspector_selection,
                 open_inspector,
+                result_navigation,
             );
         }
     }
@@ -2668,9 +2762,11 @@ impl CalculationPadDialog {
                 *display_preferences = Some(preferences);
             }
         });
-        let navigation = self.dependency_navigation.and_then(|(host, nav)| {
+        let navigation = self.dependency_navigation.and_then(|pending| {
+            let nav = pending.navigation;
             (authorized_pass
-                && host == self.host_identity()
+                && pending.host == self.host_identity()
+                && pending.result_revision.is_none_or(|revision| self.session.revision() == Some(revision))
                 && self.open
                 && !self.open_chooser
                 && !self.save_as_open
@@ -2678,7 +2774,7 @@ impl CalculationPadDialog {
             .then(|| {
                 self.session
                     .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
-                    .map(|location| (nav, location))
+                    .map(|location| (nav, location, pending.result_revision.is_some()))
             })
             .flatten()
         });
@@ -2744,18 +2840,51 @@ impl CalculationPadDialog {
                 scroll
             }).inner
         }).inner;
-        if let Some((nav, location)) = navigation
-            && let Some(revision) = self.session.revision()
+        #[cfg(test)]
+        self.test_highlight_rows.clear();
+        if let Some(highlight) = self.source_highlight
+            && highlight.host == self.host_identity()
+            && self.session.revision() == Some(highlight.revision)
+            && !scroll.inner.response.changed()
+            && ui.input(|input| input.time) < highlight.expires_at
+            && let Some(location) = self.session.resolve_dependency_line(
+                highlight.navigation.document, highlight.navigation.incarnation, highlight.navigation.line,
+            )
         {
-            let start = source[..location.source_range.start].chars().count();
-            let end = source[..location.source_range.end].chars().count();
+            let clip = scroll.inner_rect.intersect(scroll.inner.text_clip_rect);
+            let painter = ui.painter().with_clip_rect(clip);
+            let mut physical_line = 0;
+            for row in &scroll.inner.galley.rows {
+                if physical_line == location.line_index {
+                    let top = scroll.inner.galley_pos.y + row.pos.y;
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(clip.left(), top),
+                        egui::pos2(clip.right(), top + row.size.y),
+                    );
+                    #[cfg(test)]
+                    if rect.intersects(clip) { self.test_highlight_rows.push(rect.intersect(clip)); }
+                    painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 210, 70, 55));
+                }
+                if row.ends_with_newline { physical_line += 1; }
+            }
+        }
+        if let Some((nav, location, result_navigation)) = navigation
+            && !scroll.inner.response.changed()
+            && let Some(revision) = self.session.revision()
+            && let (Some(before_start), Some(before_end)) = (
+                source.get(..location.source_range.start),
+                source.get(..location.source_range.end),
+            )
+        {
+            let start = before_start.chars().count();
+            let end = before_end.chars().count();
             let mut state = scroll.inner.state.clone();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(start),
-                    egui::text::CCursor::new(end),
-                )));
+            let range = if result_navigation {
+                egui::text::CCursorRange::one(egui::text::CCursor::new(start))
+            } else {
+                egui::text::CCursorRange::two(egui::text::CCursor::new(start), egui::text::CCursor::new(end))
+            };
+            state.cursor.set_char_range(Some(range));
             let target = scroll
                 .inner
                 .galley
@@ -2773,6 +2902,7 @@ impl CalculationPadDialog {
                 editor_state: state,
                 scroll_id: scroll.id,
                 scroll_state,
+                result_navigation,
             });
         }
         #[cfg(test)]
@@ -2829,6 +2959,7 @@ impl CalculationPadDialog {
         {
             self.test_editor_id = Some(editor_id);
             self.test_editor_rect = Some(response.rect);
+            self.test_editor_clip = Some(scroll.inner_rect.intersect(ui.clip_rect()));
         }
 
         if response.changed() {
@@ -2849,6 +2980,7 @@ impl CalculationPadDialog {
         viewport_id: egui::ViewportId,
         inspector_selection: &mut Option<LineId>,
         open_inspector: &mut bool,
+        result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
     ) {
         ui.horizontal(|ui| {
             ui.heading("Results");
@@ -2878,6 +3010,8 @@ impl CalculationPadDialog {
             self.test_result_rows.clear();
             self.test_rendered_result_rows.clear();
             self.test_select_comparison = None;
+            self.test_go_to_source = None;
+            self.test_result_bodies.clear();
         }
 
         egui::ScrollArea::vertical()
@@ -2903,7 +3037,14 @@ impl CalculationPadDialog {
                         }
                         LineOutcome::Error(_) => None,
                     };
-                    ui.group(|ui| {
+                    #[cfg(test)]
+                    let mut text_rect = egui::Rect::NOTHING;
+                    let scope = ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(("calculation-result-row", line.id))
+                            .sense(egui::Sense::click()),
+                        |ui| ui.group(|ui| {
+                        ui.set_min_width(ui.available_width());
                         #[cfg(test)]
                         self.test_rendered_result_rows.push((line.line_index, line.id));
                         ui.horizontal_wrapped(|ui| {
@@ -2913,20 +3054,10 @@ impl CalculationPadDialog {
                             if matches!(line.outcome, LineOutcome::Value(_)) {
                                 #[cfg(test)]
                                 self.test_result_rows.push((line.line_index, row.rect));
-                                row.context_menu(|ui| {
-                                    let select = ui.button("Select for comparison");
-                                    #[cfg(test)]
-                                    {
-                                        self.test_select_comparison = Some(select.rect);
-                                    }
-                                    if select.clicked() {
-                                        *inspector_selection = Some(line.id);
-                                        ui.close();
-                                    }
-                                });
                             }
+                            let mut row_response = row;
                             if let Some(name) = line.assignment_name.as_deref() {
-                                ui.strong(name);
+                                row_response = row_response.union(ui.strong(name));
                             }
                             if !line.dependency_indices.is_empty() {
                                 let refs = line
@@ -2935,12 +3066,14 @@ impl CalculationPadDialog {
                                     .map(|index| format!("r{}", index + 1))
                                     .collect::<Vec<_>>()
                                     .join(", ");
-                                ui.weak(format!("uses {refs}"));
+                                row_response = row_response.union(ui.weak(format!("uses {refs}")));
                             }
                             match &line.outcome {
                                 LineOutcome::Blank | LineOutcome::Comment => {}
                                 LineOutcome::Value(value) => {
-                                    ui.label(formatted.as_deref().unwrap_or("unavailable"));
+                                    let value_label = ui.label(formatted.as_deref().unwrap_or("unavailable"));
+                                    #[cfg(test)] { text_rect = value_label.rect; }
+                                    row_response = row_response.union(value_label);
                                     if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
                                         let inspect = ui.small_button("Inspect bits…");
                                         #[cfg(test)]
@@ -2949,9 +3082,10 @@ impl CalculationPadDialog {
                                             *inspector_selection = Some(line.id);
                                             *open_inspector = true;
                                         }
+                                        row_response = row_response.union(inspect);
                                     }
                                     if value.is_approximate() {
-                                        ui.weak("approx.");
+                                        row_response = row_response.union(ui.weak("approx."));
                                     }
                                     let response = ui.small_button("Copy");
                                     #[cfg(test)]
@@ -2967,15 +3101,45 @@ impl CalculationPadDialog {
                                             target: ResultCopyTarget::Line(line.id),
                                         });
                                     }
+                                    row_response = row_response.union(response);
                                 }
                                 LineOutcome::Error(error) => {
-                                    ui.colored_label(
+                                    let error_label = ui.colored_label(
                                         ui.visuals().error_fg_color,
                                         error.to_string(),
                                     );
+                                    #[cfg(test)] { text_rect = error_label.rect; }
+                                    row_response = row_response.union(error_label);
                                 }
                             }
-                        });
+                            row_response
+                        }).inner
+                    }),
+                    );
+                    #[cfg(test)]
+                    self.test_result_bodies.push((line.line_index, scope.response.rect, text_rect));
+                    let row_response = scope.response.union(scope.inner.inner);
+                    row_response.context_menu(|ui| {
+                        let go_to_source = ui.button("Go to source");
+                        #[cfg(test)] { self.test_go_to_source = Some(go_to_source.rect); }
+                        if go_to_source.clicked()
+                            && let (Some(document), Some(incarnation), Some(revision)) = (
+                                self.session.current_id(), self.session.document_incarnation(), self.session.revision(),
+                            )
+                        {
+                            *result_navigation = Some((super::calculation_dependency_dialog::DependencyNavigation {
+                                document, incarnation, line: line.id,
+                            }, revision));
+                            ui.close();
+                        }
+                        if matches!(line.outcome, LineOutcome::Value(_)) {
+                            let select = ui.button("Select for comparison");
+                            #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
+                            if select.clicked() {
+                                *inspector_selection = Some(line.id);
+                                ui.close();
+                            }
+                        }
                     });
                 }
             });
@@ -3195,6 +3359,7 @@ impl CalculationPadDialog {
     fn reset_transient_ui(&mut self) {
         self.dependency_navigation = None;
         self.split_preview = None;
+        self.source_highlight = None;
         self.open_chooser = false;
         self.examples_open = false;
         self.saved_documents.clear();
@@ -4211,6 +4376,103 @@ mod tests {
     ) -> Option<CalculationPadDialogEffect> {
         frame(dialog, ctx, size, click_events(point, true));
         frame(dialog, ctx, size, click_events(point, false))
+    }
+
+    fn right_click(dialog: &mut CalculationPadDialog, ctx: &egui::Context, size: egui::Vec2, point: egui::Pos2) {
+        for pressed in [true, false] {
+            frame(dialog, ctx, size, vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton { pos: point, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE },
+            ]);
+        }
+        frame(dialog, ctx, size, Vec::new());
+    }
+
+    #[test]
+    fn result_context_menu_navigates_value_error_and_row_background() {
+        for target in ["value", "error", "background"] {
+            let (_directory, _root, mut dialog) = fixture();
+            let ctx = egui::Context::default();
+            let size = egui::vec2(1000.0, 760.0);
+            let source = format!("{}{{雪}} = 2\r\nbad =\r\n", "# hidden\r\n".repeat(80));
+            dialog.open();
+            dialog.test_replace_source(&source);
+            for _ in 0..4 { frame(&mut dialog, &ctx, size, Vec::new()); }
+            let index = if target == "error" { 81 } else { 80 };
+            let initial_rows = &dialog.test_editor_geometry.as_ref().unwrap().3;
+            assert!(initial_rows[index].1 > dialog.test_editor_clip.unwrap().bottom());
+            let (_, body, text) = dialog.test_result_bodies.iter().find(|(line, _, _)| *line == index).copied().unwrap();
+            let point = if target == "background" {
+                egui::pos2(body.right() - 4.0, body.center().y)
+            } else {
+                text.center()
+            };
+            right_click(&mut dialog, &ctx, size, point);
+            let menu = dialog.test_go_to_source.expect("row context menu offers Go to source");
+            if target != "error" { assert!(dialog.test_select_comparison.is_some()); }
+            click(&mut dialog, &ctx, size, menu.center());
+            for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+            let highlight = dialog.source_highlight.expect("navigation starts highlight");
+            assert_eq!(highlight.navigation.line, dialog.session.line_id(index).unwrap());
+            let location = dialog.session.resolve_dependency_line(highlight.navigation.document, highlight.navigation.incarnation, highlight.navigation.line).unwrap();
+            let expected = source[..location.source_range.start].chars().count();
+            let editor_id = dialog.test_editor_id.unwrap();
+            let range = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap().cursor.char_range().unwrap();
+            assert_eq!(usize::from(range.primary.index), expected);
+            assert_eq!(range.primary, range.secondary);
+            assert!(!dialog.test_highlight_rows.is_empty(), "target visual row is painted after scroll");
+            let scroll_id = dialog.test_editor_scroll_id.unwrap();
+            assert!(egui::scroll_area::State::load(&ctx, scroll_id).unwrap().offset.y > 0.0);
+
+            let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
+            let selection = egui::text::CCursorRange::two(egui::text::CCursor::new(1), egui::text::CCursor::new(3));
+            state.cursor.set_char_range(Some(selection));
+            state.store(&ctx, editor_id);
+            ctx.memory_mut(|memory| memory.request_focus(editor_id));
+            let mut raw = input(size, Vec::new());
+            raw.time = Some(highlight.expires_at + 0.1);
+            let output = ctx.run_ui(raw, |ui| dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, true, true));
+            dialog.on_ui_frame_complete(&ctx);
+            output.drop_without_applying_deltas();
+            assert!(dialog.source_highlight.is_none());
+            assert_eq!(egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap().cursor.char_range(), Some(selection));
+            let other = egui::Id::new("other-focus");
+            ctx.memory_mut(|memory| memory.request_focus(other));
+            frame(&mut dialog, &ctx, size, Vec::new());
+            assert!(!ctx.memory(|memory| memory.has_focus(editor_id)), "later frames must not steal focus");
+            assert_eq!(dialog.test_source(), Some(source.as_str()));
+        }
+    }
+
+    #[test]
+    fn result_navigation_rejects_discarded_stale_and_same_frame_edits() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("# note\r\nx = 2\r\n");
+        dialog.session.evaluation();
+        let nav = super::super::calculation_dependency_dialog::DependencyNavigation {
+            document: dialog.session.current_id().unwrap(),
+            incarnation: dialog.session.document_incarnation().unwrap(),
+            line: dialog.session.line_id(1).unwrap(),
+        };
+        let revision = dialog.session.revision().unwrap();
+        let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discarded.result_navigation = Some((nav, revision));
+        assert!(complete_host_effects(&mut dialog, &ctx, discarded).is_empty());
+        assert!(dialog.dependency_navigation.is_none());
+        let mut edited = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        edited.pass_accepted = true;
+        edited.edited_source = Some("# note\r\nx = 3\r\n".into());
+        edited.result_navigation = Some((nav, revision));
+        assert!(complete_host_effects(&mut dialog, &ctx, edited).is_empty());
+        assert!(dialog.dependency_navigation.is_none());
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true;
+        stale.result_navigation = Some((nav, revision));
+        assert!(complete_host_effects(&mut dialog, &ctx, stale).is_empty());
+        assert!(dialog.dependency_navigation.is_none());
+        assert!(dialog.source_highlight.is_none());
     }
 
     fn value(session: &mut CalculationPadSession, line: usize) -> f64 {
@@ -5245,6 +5507,8 @@ mod tests {
             .test_editor_rect
             .expect("native child publishes the editor rect")
             .center();
+        assert!(dialog.test_editor_clip.unwrap().contains(editor_center), "native editor center {editor_center:?} is outside clip {:?}", dialog.test_editor_clip);
+        assert!(!dialog.test_result_bodies.iter().any(|(_, rect, _)| rect.contains(editor_center)), "result row overlaps native editor center {editor_center:?}: {:?}", dialog.test_result_bodies);
         click_immediate_child(&mut dialog, &ctx, editor_center);
         assert_eq!(
             super::super::render::immediate_viewport_test_focused_id(),
