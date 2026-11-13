@@ -95,6 +95,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_result_rows: Vec<(usize, egui::Rect)>,
     #[cfg(test)]
+    test_rendered_result_rows: Vec<(usize, LineId)>,
+    #[cfg(test)]
     test_select_comparison: Option<egui::Rect>,
     #[cfg(test)]
     test_dependency_open: Option<(egui::Rect, egui::Rect, bool)>,
@@ -418,6 +420,8 @@ impl CalculationPadDialog {
             test_inspect_rects: Vec::new(),
             #[cfg(test)]
             test_result_rows: Vec::new(),
+            #[cfg(test)]
+            test_rendered_result_rows: Vec::new(),
             #[cfg(test)]
             test_select_comparison: None,
             #[cfg(test)]
@@ -2344,7 +2348,7 @@ impl CalculationPadDialog {
             .vertical_scroll_offset(self.examples_scroll).max_height(ui.available_height())
             .show(ui, |ui| {
                 if !active {
-                    ui.label("One expression or name = expression per physical line; # starts a full-line comment.");
+                    ui.label("One expression or name = expression per physical line; # or // starts a full-line comment.");
                     ui.label("Results include scalars, vectors, exact integers, quantities, and exact base conversions.");
                     ui.collapsing("Operator and function reference", |ui| {
                         ui.label("Functions are case-insensitive in call position. Unbound pi and pie mean PI. Infix mod matches signed %, while mod(a, b) is Euclidean.");
@@ -2580,6 +2584,7 @@ impl CalculationPadDialog {
         #[cfg(test)]
         {
             self.test_result_rows.clear();
+            self.test_rendered_result_rows.clear();
             self.test_select_comparison = None;
         }
 
@@ -2595,7 +2600,20 @@ impl CalculationPadDialog {
                     ui.colored_label(ui.visuals().error_fg_color, diagnostic.to_string());
                 }
                 for line in &evaluation.lines {
+                    let formatted = match &line.outcome {
+                        LineOutcome::Blank | LineOutcome::Comment => continue,
+                        LineOutcome::Value(value) => {
+                            let formatted = value.formatted_result();
+                            if formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
+                                continue;
+                            }
+                            formatted
+                        }
+                        LineOutcome::Error(_) => None,
+                    };
                     ui.group(|ui| {
+                        #[cfg(test)]
+                        self.test_rendered_result_rows.push((line.line_index, line.id));
                         ui.horizontal_wrapped(|ui| {
                             let row = ui
                                 .monospace(format!("r{}", line.line_index + 1))
@@ -2628,17 +2646,9 @@ impl CalculationPadDialog {
                                 ui.weak(format!("uses {refs}"));
                             }
                             match &line.outcome {
-                                LineOutcome::Blank => {
-                                    ui.weak("blank");
-                                }
-                                LineOutcome::Comment => {
-                                    ui.weak("comment");
-                                }
+                                LineOutcome::Blank | LineOutcome::Comment => {}
                                 LineOutcome::Value(value) => {
-                                    let formatted = value
-                                        .formatted_result()
-                                        .unwrap_or_else(|| "unavailable".into());
-                                    ui.label(&formatted);
+                                    ui.label(formatted.as_deref().unwrap_or("unavailable"));
                                     if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
                                         let inspect = ui.small_button("Inspect bits…");
                                         #[cfg(test)]
@@ -4058,6 +4068,41 @@ mod tests {
         );
         assert_eq!(dialog.test_source(), Some("amount = 2\namount * 3"));
         assert_eq!(value(&mut dialog.session, 1), 6.0);
+    }
+
+    #[test]
+    fn results_hide_comments_and_blanks_without_changing_physical_identity() {
+        let (_directory, _root, mut dialog) = fixture();
+        let source = "# inputs\r\nx = 2\r\n\r\n// ignored = missing\r\nr2 * 4\r\n0\r\nbad =\r\n";
+        dialog.open();
+        dialog.test_replace_source(source);
+        let ids = dialog.session.line_ids().unwrap().to_vec();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+
+        assert_eq!(
+            dialog.test_rendered_result_rows,
+            vec![(1, ids[1]), (4, ids[4]), (5, ids[5]), (6, ids[6])]
+        );
+        assert_eq!(dialog.session.line_ids().unwrap(), ids);
+        let evaluation = dialog.session.evaluation().unwrap();
+        assert_eq!(evaluation.lines.len(), 8);
+        assert_eq!(evaluation.lines[4].dependency_indices, vec![1]);
+        for (index, expected) in [(1, "2"), (4, "8"), (5, "0")] {
+            let LineOutcome::Value(value) = &evaluation.lines[index].outcome else {
+                panic!("expected a value on physical line {}", index + 1);
+            };
+            assert_eq!(value.formatted_result().as_deref(), Some(expected));
+        }
+        assert!(matches!(evaluation.lines[6].outcome, LineOutcome::Error(_)));
+        let summary = copy_all_session(&mut dialog.session);
+        assert!(summary.contains("# inputs\r\nr2 = x = 2 = 2\r\n\r\n// ignored = missing\r\nr5 = r2 * 4 = 8\r\nr6 = 0 = 0\r\nr7 = bad = = error:"));
+        assert!(summary.contains("Results only\nr2 = 2\nr5 = 8\nr6 = 0\nr7 = error:"));
+        assert!(summary.contains("# inputs\r\nx = 2 = 2\r\n\r\n// ignored = missing\r\nr2 * 4 = 8"));
+        assert_eq!(dialog.test_source(), Some(source));
     }
 
     #[test]
