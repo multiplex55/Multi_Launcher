@@ -2559,12 +2559,14 @@ impl CalculationPadDialog {
         if orientation == SplitOrientation::Wide {
             let (source_width, results_width, ratio) =
                 split_dimensions(available_width, ratio, 220.0, 0.5);
+            let child_item_spacing = ui.spacing().item_spacing.x;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let source_ui = ui.allocate_ui_with_layout(
                     egui::vec2(source_width, available_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        ui.spacing_mut().item_spacing.x = child_item_spacing;
                         ui.set_min_width(source_width);
                         self.editor_ui(
                             ui,
@@ -2592,6 +2594,7 @@ impl CalculationPadDialog {
                     egui::vec2(results_width, available_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        ui.spacing_mut().item_spacing.x = child_item_spacing;
                         ui.set_min_width(results_width);
                         self.results_ui(
                             ui,
@@ -4939,6 +4942,15 @@ mod tests {
             dialog.test_rendered_result_rows,
             vec![(1, ids[1]), (4, ids[4]), (5, ids[5]), (6, ids[6])]
         );
+        assert_eq!(dialog.test_splitter.unwrap().0, super::SplitOrientation::Wide);
+        let row_label = dialog.test_result_row(5).unwrap();
+        let value_label = dialog.test_result_bodies.iter()
+            .find(|(index, _, _)| *index == 5)
+            .map(|(_, _, text)| *text)
+            .unwrap();
+        assert!(value_label.left() > row_label.right());
+        let (line_numbers, word_wrap) = dialog.test_display_controls.unwrap();
+        assert!(word_wrap.left() > line_numbers.right());
         assert_eq!(dialog.session.line_ids().unwrap(), ids);
         let evaluation = dialog.session.evaluation().unwrap();
         assert_eq!(evaluation.lines.len(), 8);
