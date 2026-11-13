@@ -9,15 +9,17 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// Application-wide Calculation Pad source display preferences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CalculationPadDisplayPreferences {
     pub line_numbers: bool,
     pub word_wrap: bool,
+    pub wide_source_ratio: f32,
+    pub stacked_source_ratio: f32,
 }
 
 impl Default for CalculationPadDisplayPreferences {
     fn default() -> Self {
-        Self { line_numbers: true, word_wrap: false }
+        Self { line_numbers: true, word_wrap: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
     }
 }
 
@@ -28,6 +30,13 @@ impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
         if let Some(map) = value.as_object() {
             preferences.line_numbers = map.get("line_numbers").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.word_wrap = map.get("word_wrap").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ratio = |name: &str, fallback| {
+                map.get(name).and_then(|v| v.as_f64())
+                    .filter(|value| value.is_finite() && (0.05..=0.95).contains(value))
+                    .map_or(fallback, |value| value as f32)
+            };
+            preferences.wide_source_ratio = ratio("wide_source_ratio", 0.5);
+            preferences.stacked_source_ratio = ratio("stacked_source_ratio", 0.48);
         }
         Ok(preferences)
     }
@@ -77,9 +86,12 @@ mod display_preference_tests {
         assert_eq!(old.calculation_pad_display, CalculationPadDisplayPreferences::default());
         legacy["calculation_pad_display"] = serde_json::json!({"line_numbers":"no", "word_wrap":true});
         let malformed: Settings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(malformed.calculation_pad_display, CalculationPadDisplayPreferences { line_numbers: true, word_wrap: true });
+        assert_eq!(malformed.calculation_pad_display, CalculationPadDisplayPreferences { word_wrap: true, ..Default::default() });
+        let invalid: CalculationPadDisplayPreferences = serde_json::from_value(serde_json::json!({"wide_source_ratio": 1.2, "stacked_source_ratio": "invalid"})).unwrap();
+        assert_eq!(invalid.wide_source_ratio, 0.5);
+        assert_eq!(invalid.stacked_source_ratio, 0.48);
         let mut settings = Settings::default();
-        settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true };
+        settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, ..Default::default() };
         let decoded: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
         assert_eq!(decoded.calculation_pad_display, settings.calculation_pad_display);
     }

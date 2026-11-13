@@ -16,6 +16,58 @@ const PAD_VIEWPORT_SIZE: [f32; 2] = [1080.0, 760.0];
 const MIN_PAD_VIEWPORT_SIZE: [f32; 2] = [500.0, 380.0];
 const REFERENCE_SIZE: egui::Vec2 = egui::vec2(620.0, 540.0);
 const MIN_REFERENCE_SIZE: egui::Vec2 = egui::vec2(360.0, 280.0);
+const SPLITTER_SIZE: f32 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitOrientation {
+    Wide,
+    Stacked,
+}
+
+#[derive(Clone, Copy)]
+struct SplitPreview {
+    host: PadHostIdentity,
+    orientation: SplitOrientation,
+    ratio: f32,
+}
+
+#[derive(Clone, Copy)]
+enum SplitAction {
+    Preview(SplitOrientation, f32),
+    Finish(SplitOrientation),
+    Cancel,
+}
+
+fn split_dimensions(total: f32, ratio: f32, minimum: f32, fallback: f32) -> (f32, f32, f32) {
+    let content = (total - SPLITTER_SIZE).max(minimum * 2.0);
+    let ratio = if ratio.is_finite() { ratio } else { fallback };
+    let lower = (minimum / content).max(0.05);
+    let ratio = ratio.clamp(lower, 1.0 - lower);
+    (content * ratio, content * (1.0 - ratio), ratio)
+}
+
+fn splitter(ui: &mut egui::Ui, orientation: SplitOrientation, length: f32) -> egui::Response {
+    let size = match orientation {
+        SplitOrientation::Wide => egui::vec2(SPLITTER_SIZE, length),
+        SplitOrientation::Stacked => egui::vec2(length, SPLITTER_SIZE),
+    };
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
+    let fill = if response.dragged() {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        ui.visuals().widgets.inactive.bg_fill
+    };
+    ui.painter().rect_filled(rect, 2.0, fill);
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(match orientation {
+            SplitOrientation::Wide => egui::CursorIcon::ResizeHorizontal,
+            SplitOrientation::Stacked => egui::CursorIcon::ResizeVertical,
+        });
+    }
+    response
+}
 
 fn physical_line_positions(
     galley: &egui::Galley,
@@ -75,6 +127,7 @@ pub(crate) struct CalculationPadDialog {
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
     display_preferences: crate::settings::CalculationPadDisplayPreferences,
+    split_preview: Option<SplitPreview>,
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
     host_state: UtilityHostState,
@@ -107,6 +160,8 @@ pub(crate) struct CalculationPadDialog {
     test_display_controls: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_editor_geometry: Option<(f32, f32, f32, Vec<(usize, f32)>)>,
+    #[cfg(test)]
+    test_splitter: Option<(SplitOrientation, egui::Rect)>,
     #[cfg(test)]
     test_copy_all_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -157,7 +212,7 @@ pub(crate) struct CalculationPadDialog {
     test_request_child_discard: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(super) enum CalculationPadDialogEffect {
     CopyText(String),
     OpenInspector(PadOpenReceipt),
@@ -222,6 +277,7 @@ struct HostEffects {
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
     display_preferences: Option<crate::settings::CalculationPadDisplayPreferences>,
+    split_action: Option<SplitAction>,
     editor_history_action: Option<bool>,
     intent: Option<DialogIntent>,
     host_request: Option<PadHost>,
@@ -326,6 +382,7 @@ impl CalculationPadDialog {
             source_focus_requested: false,
             source_editor_id: None,
             display_preferences: None,
+            split_action: None,
             editor_history_action: None,
             intent: None,
             host_request: None,
@@ -409,6 +466,7 @@ impl CalculationPadDialog {
             recovery_writer: PadRecoveryWriter::new(PadRecoveryStore::new(root)),
             remember_source: false,
             display_preferences: Default::default(),
+            split_preview: None,
             recovery_attempted: false,
             last_recovery_identity: None,
             host_state: UtilityHostState::docked(),
@@ -441,6 +499,8 @@ impl CalculationPadDialog {
             test_display_controls: None,
             #[cfg(test)]
             test_editor_geometry: None,
+            #[cfg(test)]
+            test_splitter: None,
             #[cfg(test)]
             test_copy_all_rect: None,
             #[cfg(test)]
@@ -1318,6 +1378,7 @@ impl CalculationPadDialog {
                         &mut effects.open_dependencies,
                         &mut effects.dependency_applied,
                         &mut effects.display_preferences,
+                        &mut effects.split_action,
                         identity,
                         viewport_id,
                     );
@@ -1569,6 +1630,30 @@ impl CalculationPadDialog {
             self.display_preferences = preferences;
             delivered.push(CalculationPadDialogEffect::SaveDisplayPreferences(preferences));
             ctx.request_repaint();
+        }
+        match host.split_action.take() {
+            Some(SplitAction::Preview(orientation, ratio)) => {
+                self.split_preview = Some(SplitPreview { host: host.identity, orientation, ratio });
+                ctx.request_repaint();
+            }
+            Some(SplitAction::Finish(orientation)) => {
+                if let Some(preview) = self.split_preview.take()
+                    && preview.host == host.identity && preview.orientation == orientation
+                {
+                    let mut preferences = self.display_preferences;
+                    match orientation {
+                        SplitOrientation::Wide => preferences.wide_source_ratio = preview.ratio,
+                        SplitOrientation::Stacked => preferences.stacked_source_ratio = preview.ratio,
+                    }
+                    if preferences != self.display_preferences {
+                        self.display_preferences = preferences;
+                        delivered.push(CalculationPadDialogEffect::SaveDisplayPreferences(preferences));
+                    }
+                }
+                ctx.request_repaint();
+            }
+            Some(SplitAction::Cancel) => self.split_preview = None,
+            None => {}
         }
 
         let current_basis = self
@@ -2160,6 +2245,7 @@ impl CalculationPadDialog {
             return false;
         }
         self.host_state.transition(requested_host);
+        self.split_preview = None;
         super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), requested_host);
         self.deferred_source_focus = None;
         match requested_host {
@@ -2220,6 +2306,7 @@ impl CalculationPadDialog {
         open_dependencies: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
+        split_action: &mut Option<SplitAction>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
@@ -2320,38 +2407,81 @@ impl CalculationPadDialog {
         ui.separator();
         let available_height = ui.available_height().max(120.0);
         let available_width = ui.available_width();
-        if available_width >= 680.0 {
-            ui.columns(2, |columns| {
-                self.editor_ui(
-                    &mut columns[0],
-                    editor_id,
-                    &mut source,
-                    available_height,
-                    authorized_pass,
-                    source_focus_requested,
-                    edited_source,
-                    inspector_caret,
-                    dependency_applied,
-                    display_preferences,
+        let orientation = if available_width >= 680.0 {
+            SplitOrientation::Wide
+        } else {
+            SplitOrientation::Stacked
+        };
+        let preview = self.split_preview.filter(|preview| {
+            preview.host == host_identity && preview.orientation == orientation
+        });
+        if self.split_preview.is_some() && preview.is_none() {
+            *split_action = Some(SplitAction::Cancel);
+        }
+        let saved_ratio = match orientation {
+            SplitOrientation::Wide => self.display_preferences.wide_source_ratio,
+            SplitOrientation::Stacked => self.display_preferences.stacked_source_ratio,
+        };
+        let ratio = preview.map_or(saved_ratio, |preview| preview.ratio);
+        if orientation == SplitOrientation::Wide {
+            let (source_width, results_width, ratio) =
+                split_dimensions(available_width, ratio, 220.0, 0.5);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let source_ui = ui.allocate_ui_with_layout(
+                    egui::vec2(source_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_width(source_width);
+                        self.editor_ui(
+                            ui,
+                            editor_id,
+                            &mut source,
+                            available_height,
+                            false,
+                            authorized_pass,
+                            source_focus_requested,
+                            edited_source,
+                            inspector_caret,
+                            dependency_applied,
+                            display_preferences,
+                        );
+                    },
                 );
-                self.results_ui(
-                    &mut columns[1],
-                    evaluation,
-                    available_height,
-                    result_copy,
-                    host_identity,
-                    viewport_id,
-                    inspector_selection,
-                    open_inspector,
+                let response = splitter(ui, orientation, source_ui.response.rect.height().max(80.0));
+                #[cfg(test)]
+                { self.test_splitter = Some((orientation, response.rect)); }
+                self.stage_split_action(
+                    ui, &response, orientation, ratio, available_width, 220.0, split_action,
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(results_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_width(results_width);
+                        self.results_ui(
+                            ui,
+                            evaluation,
+                            available_height,
+                            result_copy,
+                            host_identity,
+                            viewport_id,
+                            inspector_selection,
+                            open_inspector,
+                        );
+                    },
                 );
             });
         } else {
-            let half_height = (available_height * 0.48).max(90.0);
+            let total_height = available_height.max(248.0);
+            let (source_height, results_height, ratio) =
+                split_dimensions(total_height, ratio, 120.0, 0.48);
             self.editor_ui(
                 ui,
                 editor_id,
                 &mut source,
-                half_height,
+                (source_height - 36.0).max(70.0),
+                true,
                 authorized_pass,
                 source_focus_requested,
                 edited_source,
@@ -2359,16 +2489,50 @@ impl CalculationPadDialog {
                 dependency_applied,
                 display_preferences,
             );
+            let response = splitter(ui, orientation, available_width.max(0.0));
+            #[cfg(test)]
+            { self.test_splitter = Some((orientation, response.rect)); }
+            self.stage_split_action(
+                ui, &response, orientation, ratio, total_height, 120.0, split_action,
+            );
             self.results_ui(
                 ui,
                 evaluation,
-                (available_height - half_height).max(90.0),
+                (results_height - 36.0).max(70.0),
                 result_copy,
                 host_identity,
                 viewport_id,
                 inspector_selection,
                 open_inspector,
             );
+        }
+    }
+
+    fn stage_split_action(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        orientation: SplitOrientation,
+        ratio: f32,
+        total: f32,
+        minimum: f32,
+        action: &mut Option<SplitAction>,
+    ) {
+        if action.is_some() {
+            return;
+        }
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let delta = match orientation {
+                SplitOrientation::Wide => response.drag_delta().x,
+                SplitOrientation::Stacked => response.drag_delta().y,
+            };
+            let content = (total - SPLITTER_SIZE).max(minimum * 2.0);
+            let (_, _, ratio) = split_dimensions(total, ratio + delta / content, minimum, ratio);
+            *action = Some(SplitAction::Preview(orientation, ratio));
+        } else if response.drag_stopped_by(egui::PointerButton::Primary) {
+            *action = Some(SplitAction::Finish(orientation));
+        } else if self.split_preview.is_some() && !ui.input(|input| input.pointer.primary_down()) {
+            *action = Some(SplitAction::Cancel);
         }
     }
 
@@ -2485,6 +2649,7 @@ impl CalculationPadDialog {
         editor_id: egui::Id,
         source: &mut String,
         max_height: f32,
+        fill_height: bool,
         authorized_pass: bool,
         source_focus_requested: &mut bool,
         edited_source: &mut Option<String>,
@@ -2535,7 +2700,7 @@ impl CalculationPadDialog {
                     .id_salt("calculation-pad-editor-scroll")
                     .max_width(viewport_width)
                     .max_height(max_height)
-                    .auto_shrink([false, true]);
+                    .auto_shrink([false, !fill_height]);
                 if word_wrap {
                     area = area.horizontal_scroll_offset(0.0);
                 }
@@ -3029,6 +3194,7 @@ impl CalculationPadDialog {
 
     fn reset_transient_ui(&mut self) {
         self.dependency_navigation = None;
+        self.split_preview = None;
         self.open_chooser = false;
         self.examples_open = false;
         self.saved_documents.clear();
@@ -4106,6 +4272,79 @@ mod tests {
     }
 
     #[test]
+    fn splitters_drag_in_both_layouts_and_save_once_on_release() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let wide = egui::vec2(1100.0, 850.0);
+        dialog.open();
+        dialog.test_replace_source("x = 2\nx * 4");
+        for _ in 0..3 { frame(&mut dialog, &ctx, wide, Vec::new()); }
+        let before = (dialog.session.revision(), dialog.session.is_dirty(), dialog.session.can_undo(), dialog.session.can_redo());
+        let (orientation, rect) = dialog.test_splitter.unwrap();
+        assert_eq!(orientation, super::SplitOrientation::Wide);
+        let start = rect.center();
+        assert_eq!(frame(&mut dialog, &ctx, wide, click_events(start, true)), None);
+        assert_eq!(frame(&mut dialog, &ctx, wide, vec![egui::Event::PointerMoved(start + egui::vec2(90.0, 0.0))]), None);
+        assert!(dialog.split_preview.is_some());
+        assert_eq!(dialog.display_preferences.wide_source_ratio, 0.5);
+        frame(&mut dialog, &ctx, wide, Vec::new());
+        assert!(dialog.test_splitter.unwrap().1.center().x > start.x + 20.0);
+        let release = start + egui::vec2(90.0, 0.0);
+        assert!(matches!(frame(&mut dialog, &ctx, wide, click_events(release, false)), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
+        assert!(dialog.split_preview.is_none());
+        let wide_ratio = dialog.display_preferences.wide_source_ratio;
+        assert!(wide_ratio > 0.5);
+        assert_eq!(dialog.display_preferences.stacked_source_ratio, 0.48);
+        assert_eq!(frame(&mut dialog, &ctx, wide, Vec::new()), None);
+
+        let narrow = egui::vec2(590.0, 850.0);
+        for _ in 0..4 { frame(&mut dialog, &ctx, narrow, Vec::new()); }
+        let (orientation, rect) = dialog.test_splitter.unwrap();
+        assert_eq!(orientation, super::SplitOrientation::Stacked);
+        let start = rect.center();
+        assert_eq!(frame(&mut dialog, &ctx, narrow, click_events(start, true)), None);
+        assert_eq!(frame(&mut dialog, &ctx, narrow, vec![egui::Event::PointerMoved(start + egui::vec2(0.0, 60.0))]), None);
+        frame(&mut dialog, &ctx, narrow, Vec::new());
+        assert!(dialog.test_splitter.unwrap().1.center().y > start.y + 10.0);
+        let release = start + egui::vec2(0.0, 60.0);
+        assert!(matches!(frame(&mut dialog, &ctx, narrow, click_events(release, false)), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
+        assert!(dialog.display_preferences.stacked_source_ratio > 0.48);
+        assert_eq!(dialog.display_preferences.wide_source_ratio, wide_ratio);
+        assert_eq!(dialog.test_source(), Some("x = 2\nx * 4"));
+        assert_eq!((dialog.session.revision(), dialog.session.is_dirty(), dialog.session.can_undo(), dialog.session.can_redo()), before);
+    }
+
+    #[test]
+    fn split_preview_rejects_retired_passes_and_clamps_extremes() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let mut rejected = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        rejected.split_action = Some(super::SplitAction::Preview(super::SplitOrientation::Wide, 0.7));
+        assert!(complete_host_effects(&mut dialog, &ctx, rejected).is_empty());
+        assert!(dialog.split_preview.is_none());
+        let mut accepted = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        accepted.pass_accepted = true;
+        accepted.split_action = Some(super::SplitAction::Preview(super::SplitOrientation::Wide, 0.7));
+        assert!(complete_host_effects(&mut dialog, &ctx, accepted).is_empty());
+        assert!(dialog.split_preview.is_some());
+        let old_host = dialog.host_identity();
+        dialog.apply_host_request(&ctx, super::PadHost::Popout);
+        assert!(dialog.split_preview.is_none());
+        let mut retired = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        retired.identity = old_host;
+        retired.pass_accepted = true;
+        retired.split_action = Some(super::SplitAction::Finish(super::SplitOrientation::Wide));
+        assert!(complete_host_effects(&mut dialog, &ctx, retired).is_empty());
+        assert_eq!(dialog.display_preferences.wide_source_ratio, 0.5);
+        for ratio in [f32::NAN, f32::NEG_INFINITY, -999.0, 999.0] {
+            let (first, second, valid) = super::split_dimensions(1_000_000.0, ratio, 220.0, 0.5);
+            assert!(first.is_finite() && second.is_finite());
+            assert!((0.05..=0.95).contains(&valid));
+        }
+    }
+
+    #[test]
     fn display_controls_preserve_document_and_follow_galley_rows() {
         let (_directory, _root, mut dialog) = fixture();
         let ctx = egui::Context::default();
@@ -4147,7 +4386,7 @@ mod tests {
         let (_directory, _root, mut dialog) = fixture();
         let ctx = egui::Context::default();
         dialog.open();
-        let changed = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true };
+        let changed = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, ..Default::default() };
         let mut rejected = dialog.empty_host_effects(egui::ViewportId::ROOT);
         rejected.display_preferences = Some(changed);
         assert!(complete_host_effects(&mut dialog, &ctx, rejected).is_empty());

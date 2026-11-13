@@ -13,7 +13,7 @@
 | M1-A | Complete, 5 targeted cases passed after the parser correction |
 | M1-B | Complete, 3 targeted cases passed |
 | M2-A | Complete, 7 targeted cases passed after the editor height correction |
-| M2-B | Pending |
+| M2-B | Complete, 6 targeted cases passed |
 | M3-A | Pending |
 | M4-A | Pending |
 
@@ -33,6 +33,12 @@
 
 ## M2-A evidence
 
+- Checkpoint `03edd2de4fec64a3830d0e65846c05624353ead9` is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`).
 - Fixed gutter positions come from the TextEdit galley. The existing editor scrolls horizontally by default and resets its horizontal offset when wrapping. A dedicated settings save owns the display fields and preserves open drafts and pending newer choices.
 - Initial batch passed 6/7. The dock-to-popout test failed again in isolation after scrolling a pending-decision editor. Restored vertical shrinking for short documents while keeping horizontal overflow. The corrected batch passed 7/7 in 2.35 seconds, including migration, constrained geometry, editor undo/redo, accepted preferences, tolerant settings serialization, and settings save ownership. Three additional retained navigation, stale-host, and native-shaped popout cases passed before the height correction.
 - Initial and corrected library preparation exited 0 in 297.48 and 79.69 seconds. The owned runner verified descendant cleanup and output drain.
+
+## M2-B evidence
+
+- Dragging updates a retained host preview. Release persists one ratio through the existing display owner. Wide and stacked preferences default to 0.50 and 0.48 and remain independently validated.
+- Library preparation exited 0 in 278.22 seconds with verified descendant cleanup and output drain. Six exact cases passed in 1.48 seconds wall time. Tests exercised both orientations, actual divider movement, release save, stale and discarded passes, constrained layouts, host migration, editor geometry, and settings compatibility.
