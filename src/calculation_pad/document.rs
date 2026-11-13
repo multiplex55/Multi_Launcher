@@ -504,8 +504,8 @@ fn scalar_from_scan(
         return Err(error.clone());
     }
     let lowered_numbers = lower_numeric_literals(expression, &scan.numeric_literals)?;
-    let lowered = if scan.uses_mod_function {
-        Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
+    let lowered = if scan.uses_binary_function {
+        Cow::Owned(lower_binary_function_calls(lowered_numbers.as_ref()))
     } else {
         lowered_numbers
     };
@@ -562,12 +562,17 @@ struct ExpressionScan {
     decimal_error: Option<DiagnosticKind>,
     uses_remainder: bool,
     uses_mod_function: bool,
+    uses_binary_function: bool,
 }
 
 #[derive(Debug)]
 struct NumericLiteralRewrite {
     source_range: Range<usize>,
     replacement: String,
+}
+
+fn is_full_line_comment(trimmed: &str) -> bool {
+    trimmed.starts_with('#') || trimmed.starts_with("//")
 }
 
 fn prepare_line(
@@ -580,7 +585,7 @@ fn prepare_line(
     if trimmed.is_empty() {
         return PreparedLine::simple(source_range, PreparedStatement::Blank);
     }
-    if trimmed.starts_with('#') {
+    if is_full_line_comment(trimmed) {
         return PreparedLine::simple(source_range, PreparedStatement::Comment);
     }
 
@@ -1211,7 +1216,7 @@ fn declared_names(source: &str) -> HashSet<String> {
         .split('\n')
         .filter_map(|line| {
             let line = line.trim();
-            if line.starts_with('#') {
+            if is_full_line_comment(line) {
                 return None;
             }
             let index = find_assignment_delimiter(line)?;
@@ -1434,11 +1439,13 @@ fn scan_expression(expression: &str) -> Result<ExpressionScan, DiagnosticKind> {
                     });
                 }
                 scan.identifiers += 1;
-                if &expression[start..start + name_bytes] == "mod"
+                let name = &expression[start..start + name_bytes];
+                if binary_function_operator(name).is_some()
                     && next_non_whitespace_index(expression, start + name_bytes)
                         .is_some_and(|open| expression[open..].starts_with('('))
                 {
-                    scan.uses_mod_function = true;
+                    scan.uses_binary_function = true;
+                    scan.uses_mod_function |= name == "mod";
                 }
             }
             _ => {}
@@ -1686,7 +1693,19 @@ fn lower_numeric_literals<'a>(
     Ok(Cow::Owned(lowered))
 }
 
-fn lower_mod_function_calls(expression: &str) -> String {
+fn binary_function_operator(name: &str) -> Option<&'static str> {
+    match name {
+        "mod" => Some("@"),
+        "min" => Some("min"),
+        "max" => Some("max"),
+        "atan2" => Some("atan2"),
+        _ => None,
+    }
+}
+
+// Exmex supports these operators in infix form, but its comma rewrite cannot
+// reliably associate nested binary calls with their matching function.
+fn lower_binary_function_calls(expression: &str) -> String {
     fn lower(source: &str) -> String {
         let mut output = String::with_capacity(source.len());
         let mut characters = source.char_indices().peekable();
@@ -1713,16 +1732,16 @@ fn lower_mod_function_calls(expression: &str) -> String {
                 end += next.len_utf8();
                 characters.next();
             }
-            if &source[start..end] != "mod" {
+            let Some(operator) = binary_function_operator(&source[start..end]) else {
                 continue;
-            }
+            };
             let Some(open) = next_non_whitespace_index(source, end) else {
                 continue;
             };
             if !source[open..].starts_with('(') {
                 continue;
             }
-            let Some((close, Some(comma), false)) = mod_call_delimiters(source, open) else {
+            let Some((close, Some(comma), false)) = binary_call_delimiters(source, open) else {
                 continue;
             };
 
@@ -1735,7 +1754,9 @@ fn lower_mod_function_calls(expression: &str) -> String {
             output.push_str(&source[copied_until..start]);
             output.push_str("((");
             output.push_str(&lower(left));
-            output.push_str(") @ (");
+            output.push_str(") ");
+            output.push_str(operator);
+            output.push_str(" (");
             output.push_str(&lower(right));
             output.push_str("))");
             copied_until = close + 1;
@@ -1754,7 +1775,7 @@ fn lower_mod_function_calls(expression: &str) -> String {
     lower(expression)
 }
 
-fn mod_call_delimiters(expression: &str, open: usize) -> Option<(usize, Option<usize>, bool)> {
+fn binary_call_delimiters(expression: &str, open: usize) -> Option<(usize, Option<usize>, bool)> {
     let mut depth = 0;
     let mut in_braces = false;
     let mut comma = None;
@@ -2548,6 +2569,33 @@ mod tests {
     }
 
     #[test]
+    fn full_line_comments_leave_source_and_physical_references_intact() {
+        let source = "  # input = missing\r\n\t// pi = 7\r\n // malformed = ( ???\r\n\r\nbase = 8 / 2\r\npi\r\nr5 * 2\r\n";
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(evaluation.source, source);
+        assert_eq!(evaluation.lines.len(), 8);
+        for (index, text) in ["  # input = missing", "\t// pi = 7", " // malformed = ( ???"]
+            .into_iter()
+            .enumerate()
+        {
+            let line = &evaluation.lines[index];
+            assert!(matches!(line.outcome, LineOutcome::Comment));
+            assert_eq!(&evaluation.source[line.source_range.clone()], text);
+            assert_eq!(line.assignment_name, None);
+            assert!(line.dependency_indices.is_empty());
+        }
+        assert!(matches!(evaluation.lines[3].outcome, LineOutcome::Blank));
+        assert_eq!(scalar(&evaluation, 4), 4.0);
+        assert_eq!(scalar(&evaluation, 5), std::f64::consts::PI);
+        assert_eq!(scalar(&evaluation, 6), 8.0);
+        assert_eq!(evaluation.lines[6].dependency_indices, vec![4]);
+        assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Blank));
+        assert!(!super::declared_names(source).contains("pi"));
+    }
+
+    #[test]
     fn resolves_named_and_one_based_physical_row_references() {
         let document = CalculationDocument::new("# inputs\nbase = 2\nbase + 3\nr2 * 4\n");
         let evaluation = document.evaluate();
@@ -2557,6 +2605,25 @@ mod tests {
         assert_eq!(evaluation.lines[3].dependency_indices, vec![1]);
         assert_eq!(evaluation.lines[3].source_range, 27..33);
         assert!(matches!(&evaluation.lines[4].outcome, LineOutcome::Blank));
+    }
+
+    #[test]
+    fn evaluates_balanced_nested_minimum_and_maximum_calls() {
+        let document = CalculationDocument::new(
+            "min(100, min(50, 75))\nmin(min(100, 50), 75)\nmax(min(100, 50), min(75, 60))\nbase = 20\nmin(base + 40, max(base * 2, 50))\nx = min(100,min(50,75)\nmin(100, min(1 / 0, 75))\nMAX(min(100, 50), mod(-7, 3))\natan2(min(2, 1), max(1, 2))\nmin(1)\nmin(1, 2, 3)",
+        );
+        let evaluation = document.evaluate();
+
+        assert_eq!(scalar(&evaluation, 0), 50.0);
+        assert_eq!(scalar(&evaluation, 1), 50.0);
+        assert_eq!(scalar(&evaluation, 2), 60.0);
+        assert_eq!(scalar(&evaluation, 4), 50.0);
+        assert!(matches!(error(&evaluation, 5), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 6), DiagnosticKind::InvalidArithmetic));
+        assert_eq!(scalar(&evaluation, 7), 50.0);
+        assert_eq!(scalar(&evaluation, 8), 1.0_f64.atan2(2.0));
+        assert!(matches!(error(&evaluation, 9), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 10), DiagnosticKind::InvalidExpression));
     }
 
     #[test]

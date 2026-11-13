@@ -17,7 +17,7 @@ in the Pad. Clearing search restores the ordinary groups.
 ## Lines and names
 
 * An empty or whitespace-only line is blank.
-* A line whose first non-whitespace character is `#` is a comment.
+* A line whose first non-whitespace characters are `#` or `//` is a comment.
 * A result line may be an expression or an assignment: `total = 2 + 3`.
 * Bare names use ASCII letters, Greek letters, digits after the first
   character, and underscores. Names are case-sensitive.
@@ -56,6 +56,7 @@ supports `+`, `-`, `*`, `/`, `^`, and `%`; unary `+` and `-`; the functions
 ```text
 radius = 3
 PI * radius ^ 2
+x = min(100, min(50, 75))
 ```
 
 Non-finite operands and intermediate results remain invalid even when a later
