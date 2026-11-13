@@ -15,7 +15,7 @@
 | M2-A | Complete, 7 targeted cases passed after the editor height correction |
 | M2-B | Complete, 6 targeted cases passed |
 | M3-A | Complete, targeted interaction and host cases passed after correction |
-| M4-A | Pending |
+| M4-A | Limited. Implementation, automated verification and review remediation complete. Windows interaction unverified. |
 
 ## M1-A evidence
 
@@ -46,7 +46,18 @@
 
 ## M3-A evidence
 
+- Checkpoint `d95b9937161ba46e48467ed313a5614c6e43e235` is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`).
 - The row menu now uses the row's actual bounds and selectable text responses. Go to source targets stable physical identity, applies caret and scroll in the retained editor pass, and paints a separate timed highlight.
 - Initial batch passed 6/11. Three app-level cases aborted on default stack and were rerun individually with process-local `RUST_MIN_STACK=16777216`; native Inspector promotion passed and Inspector comparison/root query revealed clipping. The native child editor test also failed to focus. Corrected both wide panes' height budgets, and the expiry test now keeps editor focus while asserting selection and separately checks later focus behavior.
 - Corrected batch passed 16/17, including all existing app/host checks and both splitter tests. The remaining new fixture's 25 lines fit with the corrected height. An 80-line fixture asserted the target started offscreen and passed its isolated menu/scroll/expiry case.
 - All three preparations exited 0 (265.96, 167.25, 119.35 seconds). Owned-process cleanup and output drain were verified.
+
+## M4-A evidence and handoff
+
+- The configured reviewer independently reviewed the frozen implementation at `d95b9937161ba46e48467ed313a5614c6e43e235`. Remediation `ed368771983757fc110f3fda678cb4273ea1eed0` preserves pending display settings at shutdown and active selections on toggles, uses the final divider pointer position, targets the current viewport for repaint, and guards highlight expiry, popup identity, and retained result navigation and Inspector caret publication.
+- Final library preparation exited 0 in 189.87 seconds. Final Nextest used 31 exact case selectors with one test thread, retries disabled, reusable binary metadata, and a process-local 16 MiB test-thread stack for app fixtures. All 31 passed in 9.75 seconds wall time, with verified cleanup and output drain.
+- `cargo clippy -p multi_launcher --profile fast-dev --lib --bin multi_launcher --offline --no-deps` exited 0 in 116.50 seconds. It reported 115 library and 3 binary warnings on the inherited predecessor, including the pre-existing collapsible caret block in the Pad. No warnings were identified on the introduced lines. Vendored and table-core warnings remain.
+- `cargo build --profile fast-dev --bin multi_launcher --offline` at the pre-remediation source exited 0 in 316.34 seconds. The isolated executable started, but the automation surfaces did not expose its window. See [Windows smoke limitation](stalls/20261113T010514Z.md). The remediated source was compiled by the final library build and checked by Clippy for both application targets.
+- Evidence receipts and exact selectors are in the chat's `calc-pad-verification` evidence directory. The repository root settings file's hash matched before and after the smoke attempt.
+- The remediation commit is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`). All previous pushes likewise failed. The final documentation commit receives one ordinary push attempt and the actual resulting tip and push state are recorded in the final chat handoff.
+- Create the next Goal's fresh branch directly from this Goal's final reported tip. This execution used the single existing checkout with no auxiliary clones, worktrees, agent branches, or intermediate integrations.
