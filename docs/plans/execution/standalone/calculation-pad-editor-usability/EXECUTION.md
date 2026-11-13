@@ -12,7 +12,7 @@
 | M0-A | Complete |
 | M1-A | Complete, 5 targeted cases passed after the parser correction |
 | M1-B | Complete, 3 targeted cases passed |
-| M2-A | Pending |
+| M2-A | Complete, 7 targeted cases passed after the editor height correction |
 | M2-B | Pending |
 | M3-A | Pending |
 | M4-A | Pending |
@@ -27,5 +27,12 @@
 
 ## M1-B evidence
 
+- Checkpoint `9a53eff4a4e1f77cd476f88179f4a4420409a28a` is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`).
 - Prepared the same library target with the M1-B change. Cargo exited 0 in 171.81 seconds, with verified descendant cleanup and output drain.
 - The mixed rendered-results test and both existing Copy all/explicit copy tests passed in 1.10 seconds wall time. The new fixture keeps physical result IDs, zero, errors, dependencies, CRLF, and source-containing copy text.
+
+## M2-A evidence
+
+- Fixed gutter positions come from the TextEdit galley. The existing editor scrolls horizontally by default and resets its horizontal offset when wrapping. A dedicated settings save owns the display fields and preserves open drafts and pending newer choices.
+- Initial batch passed 6/7. The dock-to-popout test failed again in isolation after scrolling a pending-decision editor. Restored vertical shrinking for short documents while keeping horizontal overflow. The corrected batch passed 7/7 in 2.35 seconds, including migration, constrained geometry, editor undo/redo, accepted preferences, tolerant settings serialization, and settings save ownership. Three additional retained navigation, stale-host, and native-shaped popout cases passed before the height correction.
+- Initial and corrected library preparation exited 0 in 297.48 and 79.69 seconds. The owned runner verified descendant cleanup and output drain.

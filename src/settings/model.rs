@@ -8,6 +8,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Application-wide Calculation Pad source display preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CalculationPadDisplayPreferences {
+    pub line_numbers: bool,
+    pub word_wrap: bool,
+}
+
+impl Default for CalculationPadDisplayPreferences {
+    fn default() -> Self {
+        Self { line_numbers: true, word_wrap: false }
+    }
+}
+
+impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut preferences = Self::default();
+        if let Some(map) = value.as_object() {
+            preferences.line_numbers = map.get("line_numbers").and_then(|v| v.as_bool()).unwrap_or(true);
+            preferences.word_wrap = map.get("word_wrap").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+        Ok(preferences)
+    }
+}
+
 /// Only display-format preferences; inspector work and comparisons are transient.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ProgrammerInspectorPreferences {
@@ -42,8 +67,23 @@ impl<'de> Deserialize<'de> for ProgrammerInspectorPreferences {
 }
 
 #[cfg(test)]
-mod programmer_inspector_preference_tests {
+mod display_preference_tests {
     use super::*;
+    #[test]
+    fn calculation_pad_display_preferences_load_legacy_malformed_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("calculation_pad_display");
+        let old: Settings = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(old.calculation_pad_display, CalculationPadDisplayPreferences::default());
+        legacy["calculation_pad_display"] = serde_json::json!({"line_numbers":"no", "word_wrap":true});
+        let malformed: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(malformed.calculation_pad_display, CalculationPadDisplayPreferences { line_numbers: true, word_wrap: true });
+        let mut settings = Settings::default();
+        settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true };
+        let decoded: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(decoded.calculation_pad_display, settings.calculation_pad_display);
+    }
+
     #[test]
     fn inspector_preferences_default_bound_and_round_trip() {
         let mut legacy = serde_json::to_value(Settings::default()).unwrap();
@@ -792,6 +832,8 @@ pub struct Settings {
     #[serde(default)]
     pub programmer_inspector: ProgrammerInspectorPreferences,
     #[serde(default)]
+    pub calculation_pad_display: CalculationPadDisplayPreferences,
+    #[serde(default)]
     pub note_images_as_links: bool,
     #[serde(default = "default_note_show_details")]
     pub note_show_details: bool,
@@ -1243,6 +1285,7 @@ impl Default for Settings {
             note_always_overwrite: false,
             calculation_pad_remember_source: false,
             programmer_inspector: ProgrammerInspectorPreferences::default(),
+            calculation_pad_display: CalculationPadDisplayPreferences::default(),
             note_images_as_links: false,
             note_show_details: default_note_show_details(),
             note_more_limit: default_note_more_limit(),

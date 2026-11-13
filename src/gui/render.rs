@@ -13642,6 +13642,9 @@ impl LauncherApp {
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
+                super::CalculationPadDialogEffect::SaveDisplayPreferences(preferences) => {
+                    self.request_calculation_pad_display_preference_save(ctx, preferences);
+                }
             }
         }
         let current_dependency_context = if self.calculation_dependency_dialog.open {

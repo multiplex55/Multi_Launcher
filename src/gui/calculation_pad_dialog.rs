@@ -17,6 +17,24 @@ const MIN_PAD_VIEWPORT_SIZE: [f32; 2] = [500.0, 380.0];
 const REFERENCE_SIZE: egui::Vec2 = egui::vec2(620.0, 540.0);
 const MIN_REFERENCE_SIZE: egui::Vec2 = egui::vec2(360.0, 280.0);
 
+fn physical_line_positions(
+    galley: &egui::Galley,
+    top: f32,
+) -> impl Iterator<Item = (usize, f32)> + '_ {
+    let mut line_number = 0;
+    let mut physical_start = true;
+    galley.rows.iter().filter_map(move |row| {
+        let position = if physical_start {
+            line_number += 1;
+            Some((line_number, top + row.pos.y))
+        } else {
+            None
+        };
+        physical_start = row.ends_with_newline;
+        position
+    })
+}
+
 fn reference_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("calculation_pad_reference_native_viewport")
 }
@@ -56,6 +74,7 @@ pub(crate) struct CalculationPadDialog {
     inspector_context_key: Option<(DocumentIncarnation, DocumentId, u64, Option<LineId>, u64)>,
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
+    display_preferences: crate::settings::CalculationPadDisplayPreferences,
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
     host_state: UtilityHostState,
@@ -84,6 +103,10 @@ pub(crate) struct CalculationPadDialog {
     test_editor_scroll_id: Option<egui::Id>,
     #[cfg(test)]
     test_editor_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_display_controls: Option<(egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_editor_geometry: Option<(f32, f32, f32, Vec<(usize, f32)>)>,
     #[cfg(test)]
     test_copy_all_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -141,6 +164,7 @@ pub(super) enum CalculationPadDialogEffect {
     OpenDependencies(PadOpenReceipt),
     ShowRoot,
     SaveRecoveryPreference(bool),
+    SaveDisplayPreferences(crate::settings::CalculationPadDisplayPreferences),
 }
 
 pub(super) type PadOpenReceipt = super::utility_host::AcceptedParentOpen<(DocumentIncarnation, DocumentId)>;
@@ -197,6 +221,7 @@ struct HostEffects {
     save_as_name: Option<String>,
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
+    display_preferences: Option<crate::settings::CalculationPadDisplayPreferences>,
     editor_history_action: Option<bool>,
     intent: Option<DialogIntent>,
     host_request: Option<PadHost>,
@@ -300,6 +325,7 @@ impl CalculationPadDialog {
             save_as_name: None,
             source_focus_requested: false,
             source_editor_id: None,
+            display_preferences: None,
             editor_history_action: None,
             intent: None,
             host_request: None,
@@ -382,6 +408,7 @@ impl CalculationPadDialog {
             inspector_context_key: None,
             recovery_writer: PadRecoveryWriter::new(PadRecoveryStore::new(root)),
             remember_source: false,
+            display_preferences: Default::default(),
             recovery_attempted: false,
             last_recovery_identity: None,
             host_state: UtilityHostState::docked(),
@@ -410,6 +437,10 @@ impl CalculationPadDialog {
             test_editor_scroll_id: None,
             #[cfg(test)]
             test_editor_rect: None,
+            #[cfg(test)]
+            test_display_controls: None,
+            #[cfg(test)]
+            test_editor_geometry: None,
             #[cfg(test)]
             test_copy_all_rect: None,
             #[cfg(test)]
@@ -570,6 +601,31 @@ impl CalculationPadDialog {
 
     pub(crate) fn initialize_recovery_preference(&mut self, enabled: bool) {
         self.remember_source = enabled;
+    }
+
+    pub(crate) fn initialize_display_preferences(
+        &mut self,
+        preferences: crate::settings::CalculationPadDisplayPreferences,
+    ) {
+        self.display_preferences = preferences;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_display_preferences(
+        &self,
+    ) -> crate::settings::CalculationPadDisplayPreferences {
+        self.display_preferences
+    }
+
+    pub(crate) fn display_preferences_saved(
+        &mut self,
+        previous: crate::settings::CalculationPadDisplayPreferences,
+        committed: crate::settings::CalculationPadDisplayPreferences,
+        newer_pending: bool,
+    ) {
+        if !newer_pending && self.display_preferences == previous {
+            self.display_preferences = committed;
+        }
     }
 
     pub(crate) fn apply_committed_recovery_preference(
@@ -1261,6 +1317,7 @@ impl CalculationPadDialog {
                         &mut effects.open_inspector,
                         &mut effects.open_dependencies,
                         &mut effects.dependency_applied,
+                        &mut effects.display_preferences,
                         identity,
                         viewport_id,
                     );
@@ -1504,6 +1561,14 @@ impl CalculationPadDialog {
                 ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::CancelClose);
             }
             return delivered;
+        }
+
+        if let Some(preferences) = host.display_preferences.take()
+            && preferences != self.display_preferences
+        {
+            self.display_preferences = preferences;
+            delivered.push(CalculationPadDialogEffect::SaveDisplayPreferences(preferences));
+            ctx.request_repaint();
         }
 
         let current_basis = self
@@ -2154,6 +2219,7 @@ impl CalculationPadDialog {
         open_inspector: &mut bool,
         open_dependencies: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
+        display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
@@ -2266,6 +2332,7 @@ impl CalculationPadDialog {
                     edited_source,
                     inspector_caret,
                     dependency_applied,
+                    display_preferences,
                 );
                 self.results_ui(
                     &mut columns[1],
@@ -2290,6 +2357,7 @@ impl CalculationPadDialog {
                 edited_source,
                 inspector_caret,
                 dependency_applied,
+                display_preferences,
             );
             self.results_ui(
                 ui,
@@ -2422,8 +2490,19 @@ impl CalculationPadDialog {
         edited_source: &mut Option<String>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
+        display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
     ) {
-        ui.heading("Source");
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Source");
+            let mut preferences = self.display_preferences;
+            let numbers = ui.checkbox(&mut preferences.line_numbers, "Line numbers");
+            let wrap = ui.checkbox(&mut preferences.word_wrap, "Word wrap");
+            #[cfg(test)]
+            { self.test_display_controls = Some((numbers.rect, wrap.rect)); }
+            if numbers.changed() || wrap.changed() {
+                *display_preferences = Some(preferences);
+            }
+        });
         let navigation = self.dependency_navigation.and_then(|(host, nav)| {
             (authorized_pass
                 && host == self.host_identity()
@@ -2438,22 +2517,68 @@ impl CalculationPadDialog {
             })
             .flatten()
         });
-        let scroll = ui
-            .add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
-                egui::ScrollArea::both()
+        let scroll = ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
+            ui.horizontal_top(|ui| {
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let gutter = if self.display_preferences.line_numbers {
+                    let digits = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                    let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(
+                        digits.to_string(), font.clone(), ui.visuals().weak_text_color(),
+                    ).size().x) + 8.0;
+                    Some(ui.allocate_exact_size(egui::vec2(width, 0.0), egui::Sense::hover()).0)
+                } else {
+                    None
+                };
+                let viewport_width = ui.available_width().max(24.0);
+                let word_wrap = self.display_preferences.word_wrap;
+                let mut area = egui::ScrollArea::both()
                     .id_salt("calculation-pad-editor-scroll")
+                    .max_width(viewport_width)
                     .max_height(max_height)
-                    .show(ui, |ui| {
-                        egui::TextEdit::multiline(source)
-                            .id(editor_id)
-                            .desired_rows(12)
-                            .desired_width(ui.available_width())
-                            .font(egui::TextStyle::Monospace)
-                            .hint_text("total = 2 + 3\nr1 * 4")
-                            .show(ui)
-                    })
-            })
-            .inner;
+                    .auto_shrink([false, true]);
+                if word_wrap {
+                    area = area.horizontal_scroll_offset(0.0);
+                }
+                let scroll = area.show(ui, |ui| {
+                    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
+                        let mut job = egui::text::LayoutJob::simple(
+                            text.as_str().to_owned(), font.clone(), ui.visuals().text_color(),
+                            if word_wrap { width } else { f32::INFINITY },
+                        );
+                        job.keep_trailing_whitespace = true;
+                        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font))
+                            + ui.spacing().extra_text_line_spacing;
+                        for section in &mut job.sections {
+                            section.format.line_height = Some(row_height);
+                        }
+                        ui.fonts_mut(|fonts| fonts.layout_job(job))
+                    };
+                    egui::TextEdit::multiline(source)
+                        .id(editor_id)
+                        .desired_rows(12)
+                        .desired_width(viewport_width)
+                        .font(egui::TextStyle::Monospace)
+                        .layouter(&mut layouter)
+                        .hint_text("total = 2 + 3\nr1 * 4")
+                        .show(ui)
+                });
+                if let Some(gutter) = gutter {
+                    let clip = egui::Rect::from_min_max(
+                        egui::pos2(gutter.left(), scroll.inner_rect.top()),
+                        egui::pos2(gutter.right(), scroll.inner_rect.bottom()),
+                    ).intersect(ui.clip_rect());
+                    let painter = ui.painter().with_clip_rect(clip);
+                    for (line_number, y) in physical_line_positions(&scroll.inner.galley, scroll.inner.galley_pos.y) {
+                        painter.text(
+                            egui::pos2(gutter.right() - 4.0, y),
+                            egui::Align2::RIGHT_TOP, line_number.to_string(), font.clone(),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
+                scroll
+            }).inner
+        }).inner;
         if let Some((nav, location)) = navigation
             && let Some(revision) = self.session.revision()
         {
@@ -2488,6 +2613,8 @@ impl CalculationPadDialog {
         #[cfg(test)]
         {
             self.test_editor_scroll_id = Some(scroll.id);
+            let rows = physical_line_positions(&scroll.inner.galley, scroll.inner.galley_pos.y).collect();
+            self.test_editor_geometry = Some((scroll.inner.galley.size().x, scroll.inner_rect.width(), scroll.content_size.x, rows));
         }
         let response = &scroll.inner.response;
         let cursor_interaction = response.clicked()
@@ -3976,6 +4103,60 @@ mod tests {
         }
         assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
         assert_eq!(dialog.test_source(), Some("initial = 1"));
+    }
+
+    #[test]
+    fn display_controls_preserve_document_and_follow_galley_rows() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        let source = format!("{{雪}} = {}\r\n# comment\r\n\r\n", "1 + ".repeat(80) + "1");
+        dialog.open();
+        dialog.test_replace_source(&source);
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let before = (dialog.session.revision(), dialog.session.is_dirty(), dialog.session.can_undo(), dialog.session.can_redo());
+        let (width, viewport, content, rows) = dialog.test_editor_geometry.clone().unwrap();
+        assert!(width > viewport, "unwrapped galley must overflow its scroll viewport");
+        assert!(content > viewport, "scroll area must expose horizontal overflow");
+        assert_eq!(rows.iter().map(|(line, _)| *line).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+
+        let scroll_id = dialog.test_editor_scroll_id.unwrap();
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        scroll_state.offset.x = 100.0;
+        scroll_state.store(&ctx, scroll_id);
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(egui::scroll_area::State::load(&ctx, scroll_id).unwrap().offset.x > 0.0);
+
+        let wrap = dialog.test_display_controls.unwrap().1;
+        assert!(matches!(click(&mut dialog, &ctx, size, wrap.center()), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
+        for _ in 0..2 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let (wrapped_width, wrapped_viewport, _, wrapped_rows) = dialog.test_editor_geometry.clone().unwrap();
+        assert!(wrapped_width <= wrapped_viewport + 1.0);
+        assert_eq!(egui::scroll_area::State::load(&ctx, scroll_id).unwrap().offset.x, 0.0);
+        assert_eq!(wrapped_rows.iter().map(|(line, _)| *line).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert!(wrapped_rows[1].1 - wrapped_rows[0].1 > rows[1].1 - rows[0].1);
+        let numbers = dialog.test_display_controls.unwrap().0;
+        assert!(matches!(click(&mut dialog, &ctx, size, numbers.center()), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
+        assert!(!dialog.display_preferences.line_numbers);
+        assert_eq!(dialog.test_source(), Some(source.as_str()));
+        assert_eq!((dialog.session.revision(), dialog.session.is_dirty(), dialog.session.can_undo(), dialog.session.can_redo()), before);
+    }
+
+    #[test]
+    fn display_preferences_publish_only_after_retained_host_pass() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let changed = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true };
+        let mut rejected = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        rejected.display_preferences = Some(changed);
+        assert!(complete_host_effects(&mut dialog, &ctx, rejected).is_empty());
+        assert_ne!(dialog.display_preferences, changed);
+        let mut accepted = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        accepted.pass_accepted = true;
+        accepted.display_preferences = Some(changed);
+        assert_eq!(complete_host_effects(&mut dialog, &ctx, accepted), vec![CalculationPadDialogEffect::SaveDisplayPreferences(changed)]);
+        assert_eq!(dialog.display_preferences, changed);
     }
 
     #[test]

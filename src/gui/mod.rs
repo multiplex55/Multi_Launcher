@@ -1134,6 +1134,7 @@ pub struct LauncherApp {
     pub(crate) settings_save_reconciliation_required: bool,
     pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
     pub(crate) pending_programmer_inspector_preference: Option<crate::settings::ProgrammerInspectorPreferences>,
+    pub(crate) pending_calculation_pad_display_preference: Option<crate::settings::CalculationPadDisplayPreferences>,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -3457,6 +3458,7 @@ impl LauncherApp {
         let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         calculation_pad_dialog
             .initialize_recovery_preference(settings.calculation_pad_remember_source);
+        calculation_pad_dialog.initialize_display_preferences(settings.calculation_pad_display);
         let mut programmer_inspector_dialog = programmer_inspector_dialog::ProgrammerInspectorDialog::default();
         programmer_inspector_dialog.initialize_preferences(settings.programmer_inspector);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
@@ -3995,6 +3997,7 @@ impl LauncherApp {
             settings_save_reconciliation_required: false,
             pending_calculation_pad_recovery_preference: None,
             pending_programmer_inspector_preference: None,
+            pending_calculation_pad_display_preference: None,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),
