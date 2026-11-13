@@ -61,3 +61,11 @@
 - Evidence receipts and exact selectors are in the chat's `calc-pad-verification` evidence directory. The repository root settings file's hash matched before and after the smoke attempt.
 - The remediation commit is local. Its ordinary upstream push failed with exit 1 (`github.com:443`, `Bad access`). All previous pushes likewise failed. The final documentation commit receives one ordinary push attempt and the actual resulting tip and push state are recorded in the final chat handoff.
 - Create the next Goal's fresh branch directly from this Goal's final reported tip. This execution used the single existing checkout with no auxiliary clones, worktrees, agent branches, or intermediate integrations.
+
+### Resumed Windows smoke
+
+- Built the remediated source at `278ea969197ef9c7efd21fd7a50601f6346b4595` with `cargo build --profile fast-dev --bin multi_launcher --offline`. Exit 0, 102.29 seconds, with verified process cleanup and output drain.
+- An interactive-desktop launch exposed the isolated launcher to Computer Use. The docked Pad accepted the mixed source fixture. Results showed `r2 = 2`, `r5 = 50`, `r6 = 8`, `r7 = 0`, an invalid expression at `r8`, and the additional integer and long-expression values. The Source scrollbar was exposed before enabling wrap and absent afterward. Keyboard actions turned wrapping on and line numbers off.
+- Pop Out opened a separate native Calculation Pad window, and the root accessibility tree continued to expose the launcher query. Windows capture timed out on both windows, and the popped-out accessibility tree exposed only window chrome. Native divider drags, result menus and highlight, result actions, root query input, and docking back remain unverified.
+- Quit the initial instance and restarted the same isolated executable with the same profile. The settings file retained `line_numbers = false` and `word_wrap = true`. The divider ratios remained at their defaults. The restarted instance could not reopen the Pad through the accessible launcher controls, so visual restoration and changed-divider persistence remain unverified. Both owned instances exited and the repository settings hash matched its initial value.
+- The receipt is `calc-pad-verification/resumed-native-smoke.json` in the chat evidence directory. Status remains limited.
