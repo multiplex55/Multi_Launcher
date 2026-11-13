@@ -20,6 +20,11 @@ impl SettingsEditor {
             preferences,
             app.pending_calculation_pad_display_preference.is_some(),
         );
+        if app.pending_calculation_pad_display_preference.is_none()
+            && app.calculation_pad_dialog.display_preferences() == preferences
+        {
+            app.calculation_pad_display_unacknowledged = false;
+        }
     }
 
     pub(crate) fn apply_committed_programmer_inspector_preference(

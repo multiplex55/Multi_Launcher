@@ -202,6 +202,18 @@ lowercase, with no base prefix or leading zeroes. This conversion syntax is
 separate from scalar prefixes: for example, `0bad hex to dec` means the exact
 hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
 
+## Source editor and Results
+
+**Line numbers** starts on and counts physical lines, including blanks and
+comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
+end of long lines, or enable wrapping to fit the Source pane. Drag the divider
+to resize Source and Results. The launcher remembers both display toggles and
+the separate divider positions for side-by-side and stacked layouts.
+
+Results show values and diagnostics. Blank and comment lines still count toward
+`rN`, so visible result labels can have gaps. Right-click a value or error row
+and choose **Go to source** to focus the editor and briefly highlight its line.
+
 ## Remembered source
 
 **Remember last Calculation Pad source** is off by default in Settings. When
