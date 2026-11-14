@@ -20,8 +20,9 @@
 | M3-C | Complete and pushed at `110910179822ef3edb05da9f827882722944c160`. Native folded input remains to be exercised. |
 | M4-A | Complete and pushed at `4966bdfdf68cf982a0e77e5880126dad70675b55`. 70 focused tests and six final targeted cases passed. |
 | M4-B | Complete and pushed at `8df4f947190a4caf0632d29cd8613433dc5baa0c`. 73 focused and 4 final targeted cases passed. |
-| M4-C | Complete at the automated level. 123 focused and 9 final relevant cases passed. |
-| M5-A through M6-A | Pending |
+| M4-C | Complete and pushed at `1bde28061bb62465b5832fa20a2feb2f3bb1c581`. 123 focused and 9 final relevant cases passed. |
+| M5-A | Complete at the automated level. Final affected QR cases passed in the 46-test integration run. UI-8 is pending. |
+| M6-A | Pending |
 
 ## M1-A evidence
 
@@ -85,6 +86,19 @@
 - The signature catalogue supplies parser arities and assistance. Scalar/vector calls follow their established case policy. Exact programmer constructors and helpers keep their existing case sensitivity.
 - Compilation initially found four egui character-index mismatches. After correction, 65 Pad, settings and script cases passed. The final 11 targeted checks passed, including compact completion, disabled Enter, case policy, nested hints, braced loop scope and retained source boundaries. UI-2 remains pending.
 
+## M3-C through M4-C evidence
+
+- Folding and smart input use source-coordinate projections and retained edits. M3-C passed 70 selected tests after correcting a folded boundary fixture, then 12 final targeted tests.
+- Inputs and output watches preserve selected source identity and resolve final bindings from the active evaluation. M4-A passed 70 selected and six final targeted tests. M4-B passed 73 selected and four final targeted tests for display-only formatting and canonical copy.
+- M4-C passed 123 selected and nine final relevant tests, including v1 reads, v2 writes, strict view metadata, Save As, recovery isolation and Pad settings. One broad selector also ran two unrelated cases, both passing. The final GUI selectors were exact.
+
+## M5-A evidence
+
+- QR uses the shared utility host with the existing geometry and presentation key. Source, correction, Advanced, validation and cached raster follow the same session across host moves. Retained commands own clipboard and file effects, and the QA capture adapter observes the live native child.
+- The first batch passed 15/17 and exposed two launcher close-routing failures. The QA-enabled correction passed both routing cases and 25/26 overall, with one focus assertion remaining. The second correction passed 28/28 in 13.349 seconds of Nextest runtime, including focus, failure-preserving Cut, raster availability and QR-specific QA probes. The process runner verified teardown and output drain in each execution batch with the 100-second cap.
+
+## Requirement matrix
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -108,4 +122,4 @@
 | CP-14 | M2-B | Yes | Passed | Pending |
 | CP-15 | M2-C/D | Yes | Passed | Pending |
 | CP-16 | M2-B/C | Yes | Passed | Pending |
-| QR-01 | M5-A | Pending | Pending | Pending |
+| QR-01 | M5-A | Yes | Passed | Pending |

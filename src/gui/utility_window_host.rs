@@ -4,23 +4,21 @@ use super::batch_rename_dialog::{BatchRenameHostActions, BatchRenameInteractionC
 use super::clipboard_dialog::{
     ClipboardDialogEffects, ClipboardHostActions, ClipboardInteractionCheckpoint,
 };
+use super::clipboard_modify_dialog::{
+    ClipboardModifyHostActions, ClipboardModifyInteractionCheckpoint,
+};
+use super::json_utility_dialog::{JsonUtilityHostActions, JsonUtilityInteractionCheckpoint};
 use super::jump_mode::ui::{
     JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
     batch_rename_confirmation_layer_id,
 };
 use super::jump_mode::{SurfaceId, TargetGeneration};
-use super::json_utility_dialog::{
-    JsonUtilityHostActions, JsonUtilityInteractionCheckpoint,
-};
 use super::paste_sequence_dialog::{
     PasteSequenceDialog, PasteSequenceHostActions, PasteSequenceHostRuntime,
     PasteSequenceInteractionCheckpoint,
 };
 use super::search_replace_dialog::{SearchReplaceHostActions, SearchReplaceInteractionCheckpoint};
 use super::snippet_dialog::{SnippetHostActions, SnippetHostEffects, SnippetInteractionCheckpoint};
-use super::clipboard_modify_dialog::{
-    ClipboardModifyHostActions, ClipboardModifyInteractionCheckpoint,
-};
 use super::utility_dialog_size::{
     apply_native_utility_geometry_restore, close_native_utility_geometry_viewport,
 };
@@ -29,8 +27,8 @@ use super::utility_host::{
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 use super::{
-    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, ClipboardModifyDialogState, JsonUtilityDialogState, SearchReplaceDialogState,
-    SearchReplaceUiCommand, SnippetDialog,
+    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, ClipboardModifyDialogState,
+    JsonUtilityDialogState, SearchReplaceDialogState, SearchReplaceUiCommand, SnippetDialog,
 };
 use crate::file_operations::RenameRuntimeSnapshot;
 
@@ -49,11 +47,19 @@ pub(super) trait HostedUtilityDialog: Sized {
     type Checkpoint;
     type Command;
 
-    fn layer() -> egui::LayerId {
-        Self::KIND.and_then(NavigationDialogKind::layer_id).expect("utility window layer")
+    fn viewport_id(session: u64) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of((Self::KEY, session))
     }
 
-    fn dialog_layer(&self) -> egui::LayerId { Self::layer() }
+    fn layer() -> egui::LayerId {
+        Self::KIND
+            .and_then(NavigationDialogKind::layer_id)
+            .expect("utility window layer")
+    }
+
+    fn dialog_layer(&self) -> egui::LayerId {
+        Self::layer()
+    }
 
     fn navigation_owner(instance: u64) -> NavigationOwner {
         NavigationOwner::Dialog {
@@ -283,12 +289,23 @@ pub(super) trait UtilityWindowCompanion {
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     #[cfg(test)]
     pub(super) fn test_target_rect(&self, label: &str) -> egui::Rect {
-        self.native_jump.retained_registry().targets().iter()
+        self.native_jump
+            .retained_registry()
+            .targets()
+            .iter()
             .find(|target| target.eligible() && target.metadata().label() == label)
             .unwrap_or_else(|| {
-                let labels: Vec<_> = self.native_jump.retained_registry().targets().iter()
-                    .map(|target| (target.metadata().label(), target.eligible())).collect();
-                panic!("missing hosted target {label:?}, owner {:?}, targets {labels:?}", self.native_jump.frame_navigation_owner())
+                let labels: Vec<_> = self
+                    .native_jump
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .map(|target| (target.metadata().label(), target.eligible()))
+                    .collect();
+                panic!(
+                    "missing hosted target {label:?}, owner {:?}, targets {labels:?}",
+                    self.native_jump.frame_navigation_owner()
+                )
             })
             .clipped_rect()
     }
@@ -302,7 +319,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     }
 
     fn viewport(session: u64) -> egui::ViewportId {
-        egui::ViewportId::from_hash_of((D::KEY, session))
+        D::viewport_id(session)
     }
 
     fn title(session: u64) -> String {
@@ -349,7 +366,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.state.identity()
     }
 
-    pub(super) fn accepts_origin(&self, dialog: &D, origin: &super::utility_host::AcceptedParentOpen<u64>) -> bool {
+    pub(super) fn accepts_origin(
+        &self,
+        dialog: &D,
+        origin: &super::utility_host::AcceptedParentOpen<u64>,
+    ) -> bool {
         dialog.is_open() && origin.is_current(self.state.identity(), &dialog.session())
     }
 
@@ -363,8 +384,9 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     }
 
     pub(super) fn needs_root_ui_when_hidden(&self, open: bool) -> bool {
-        (open && (self.state.presentation() == UtilityPresentation::Popout
-            || self.presentation_session.is_none()))
+        (open
+            && (self.state.presentation() == UtilityPresentation::Popout
+                || self.presentation_session.is_none()))
             || self.state.bootstrap_pending()
             || self.pending.is_some()
     }
@@ -444,6 +466,12 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         input: HostInput<'_>,
     ) {
         self.show_with_companion(ctx, dialog, runtime, input, None);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn prepare_capture_popout(&mut self, ctx: &egui::Context, dialog: &D) {
+        self.prepare_open(ctx, dialog);
+        self.apply_open_presentation(ctx, UtilityPresentation::Popout, false);
     }
 
     pub(super) fn prepare_open(&mut self, ctx: &egui::Context, dialog: &D) {
@@ -747,10 +775,11 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let owner = self
             .native_jump
             .update_navigation_owner_for_viewport(ctx, binding, input);
-        let companion_permits_jump = companion.as_ref()
+        let companion_permits_jump = companion
+            .as_ref()
             .is_none_or(|(child, _)| child.permits_jump_mode());
-        let jump_current = self.native_jump.is_enabled()
-            && owner == binding.owner && companion_permits_jump;
+        let jump_current =
+            self.native_jump.is_enabled() && owner == binding.owner && companion_permits_jump;
         let popup_layer = dialog.popup_layer(ctx, layer);
         let parent_current = input
             && child.is_none()
@@ -974,7 +1003,13 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let hwnd = None;
         let commands = dialog.complete_actions(actions, hwnd);
         let origin = if presentation.is_none() && !commands.iter().any(D::command_closes) {
-            super::utility_host::AcceptedParentOpen::from_retained(ctx, frame.host, frame.session, frame.root, frame.owner)
+            super::utility_host::AcceptedParentOpen::from_retained(
+                ctx,
+                frame.host,
+                frame.session,
+                frame.root,
+                frame.owner,
+            )
         } else {
             None
         };
@@ -1718,13 +1753,19 @@ impl HostedUtilityDialog for ClipboardModifyDialogState {
     }
 
     fn confirmation_binding(
-        &self, _: egui::ViewportId, _: u64,
+        &self,
+        _: egui::ViewportId,
+        _: u64,
     ) -> Option<NavigationViewportBinding> {
         None
     }
 
     fn confirmation_scope(
-        &self, _: &JumpModeUi, _: NavigationOwner, _: NavigationViewportBinding, _: SurfaceId,
+        &self,
+        _: &JumpModeUi,
+        _: NavigationOwner,
+        _: NavigationViewportBinding,
+        _: SurfaceId,
     ) -> Option<JumpModeScope> {
         None
     }
@@ -1753,14 +1794,29 @@ impl HostedUtilityDialog for ClipboardModifyDialogState {
         #[cfg(test)]
         if let Some(service) = &runtime.test_service {
             return self.render_host(
-                ctx, runtime.legacy_window_size, service, runtime.catalog.clone(),
-                Some(&runtime.store), parent_input, first, runtime.pinned, child_ui, presentation,
+                ctx,
+                runtime.legacy_window_size,
+                service,
+                runtime.catalog.clone(),
+                Some(&runtime.store),
+                parent_input,
+                first,
+                runtime.pinned,
+                child_ui,
+                presentation,
             );
         }
         self.render_host(
-            ctx, runtime.legacy_window_size, &crate::clipboard_modify::runtime::clipboard_service(),
-            runtime.catalog.clone(), Some(&runtime.store), parent_input, first, runtime.pinned,
-            child_ui, presentation,
+            ctx,
+            runtime.legacy_window_size,
+            &crate::clipboard_modify::runtime::clipboard_service(),
+            runtime.catalog.clone(),
+            Some(&runtime.store),
+            parent_input,
+            first,
+            runtime.pinned,
+            child_ui,
+            presentation,
         )
     }
 
@@ -1864,13 +1920,21 @@ impl HostedUtilityDialog for PasteSequenceDialog {
         presentation: UtilityPresentation,
     ) -> Self::Actions {
         self.render_host(
-            ctx, &runtime.dialog, scopes.0.cloned(), parent_input, first,
-            runtime.pinned, child_ui, presentation,
+            ctx,
+            &runtime.dialog,
+            scopes.0.cloned(),
+            parent_input,
+            first,
+            runtime.pinned,
+            child_ui,
+            presentation,
         )
     }
 
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
-        (!actions.needs_completion()).then_some(actions.host_request).flatten()
+        (!actions.needs_completion())
+            .then_some(actions.host_request)
+            .flatten()
     }
 
     fn closed_command() -> Self::Command {
@@ -1929,7 +1993,9 @@ impl HostedUtilityDialog for JsonUtilityDialogState {
     }
 
     fn confirmation_binding(
-        &self, _: egui::ViewportId, _: u64,
+        &self,
+        _: egui::ViewportId,
+        _: u64,
     ) -> Option<NavigationViewportBinding> {
         None
     }
@@ -1956,10 +2022,22 @@ impl HostedUtilityDialog for JsonUtilityDialogState {
         presentation: UtilityPresentation,
     ) -> Self::Actions {
         let instance = match owner {
-            NavigationOwner::Dialog { kind: NavigationDialogKind::JsonUtility, instance } => Some(instance),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::JsonUtility,
+                instance,
+            } => Some(instance),
             _ => None,
         };
-        self.render_host(ctx, scopes.0, instance, parent_input, first, *pinned, child_ui, presentation)
+        self.render_host(
+            ctx,
+            scopes.0,
+            instance,
+            parent_input,
+            first,
+            *pinned,
+            child_ui,
+            presentation,
+        )
     }
 
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
@@ -1994,7 +2072,10 @@ pub(super) type ProgrammerInspectorWindowHost =
     UtilityWindowHost<super::programmer_inspector_dialog::ProgrammerInspectorDialog>;
 pub(super) enum ProgrammerInspectorHostCommand {
     Closed,
-    Apply(super::programmer_inspector_dialog::InspectorActions, Option<usize>),
+    Apply(
+        super::programmer_inspector_dialog::InspectorActions,
+        Option<usize>,
+    ),
 }
 impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
     const KEY: &'static str = "programmer-inspector";
@@ -2079,7 +2160,11 @@ impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspe
     fn command_closes(command: &Self::Command) -> bool {
         matches!(command, ProgrammerInspectorHostCommand::Closed)
     }
-    fn complete_actions(&mut self, actions: Self::Actions, hwnd: Option<usize>) -> Vec<Self::Command> {
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command> {
         if actions.close {
             vec![ProgrammerInspectorHostCommand::Closed]
         } else {
@@ -2742,8 +2827,7 @@ impl HostedUtilityDialog for super::hash_generator_dialog::HashGeneratorDialogSt
     }
 }
 
-pub(super) type TodoViewWindowHost =
-    UtilityWindowHost<super::todo_view_dialog::TodoViewDialog>;
+pub(super) type TodoViewWindowHost = UtilityWindowHost<super::todo_view_dialog::TodoViewDialog>;
 #[expect(
     clippy::large_enum_variant,
     reason = "The bounded inline action avoids an extra allocation on each active host frame."
@@ -2835,11 +2919,7 @@ impl HostedUtilityDialog for super::todo_view_dialog::TodoViewDialog {
     fn command_closes(command: &Self::Command) -> bool {
         matches!(command, TodoViewHostCommand::Closed)
     }
-    fn complete_actions(
-        &mut self,
-        actions: Self::Actions,
-        _: Option<usize>,
-    ) -> Vec<Self::Command> {
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
         if actions.close {
             vec![TodoViewHostCommand::Closed]
         } else {
@@ -2953,6 +3033,113 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
     }
 }
 
+pub(super) type QrWindowHost = UtilityWindowHost<super::qr_dialog::QrDialogState>;
+pub(super) enum QrHostCommand {
+    Closed,
+    Apply(super::qr_dialog::QrActions),
+}
+impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
+    const KEY: &'static str = "qr-generator";
+    const TITLE: &'static str = "QR Generator";
+    const SIZE: egui::Vec2 = egui::vec2(620.0, 700.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 420.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = bool;
+    type Actions = super::qr_dialog::QrActions;
+    type Checkpoint = ();
+    type Command = QrHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new("qr_generator_embedded"))
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &bool) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        _: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        root_input: &bool,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(
+            ctx,
+            if presentation == UtilityPresentation::Docked {
+                *root_input
+            } else {
+                parent
+            },
+            first,
+            child,
+            presentation,
+        )
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        QrHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, QrHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![QrHostCommand::Closed]
+        } else {
+            vec![QrHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod deferred_open_tests {
     use super::*;
@@ -3008,9 +3195,11 @@ mod deferred_open_tests {
     #[test]
     fn pending_popout_and_edit_win_over_deferred_root_open() {
         let ctx = egui::Context::default();
-        let mut dialog = super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        let mut dialog =
+            super::super::programmer_inspector_dialog::ProgrammerInspectorDialog::default();
         dialog.open();
-        let context = Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
+        let context =
+            Arc::new(super::super::calculation_pad_dialog::InspectorPadContext::default());
         dialog.publish(Arc::clone(&context));
         let before = dialog.test_value().bit_pattern();
         let epoch = dialog.epoch();
