@@ -70,7 +70,7 @@ pub fn layout_positions(graph: &DiagramDocument) -> Result<Vec<NodePosition>, Di
         .map(|group| {
             let (min, max) = if matches!(
                 extent_scene.direction,
-                FlowDirection::TopDown | FlowDirection::TopBottom
+                FlowDirection::TopDown | FlowDirection::TopBottom | FlowDirection::BottomTop
             ) {
                 (group.bounds.min.x, group.bounds.max.x)
             } else {
@@ -127,7 +127,7 @@ pub fn layout_positions(graph: &DiagramDocument) -> Result<Vec<NodePosition>, Di
 
     let vertical = matches!(
         graph.direction,
-        FlowDirection::TopDown | FlowDirection::TopBottom
+        FlowDirection::TopDown | FlowDirection::TopBottom | FlowDirection::BottomTop
     );
     let primary_extent = |index: usize| -> Result<f64, DiagramLayoutError> {
         let (width, height) = extents
@@ -216,7 +216,13 @@ pub fn layout_positions(graph: &DiagramDocument) -> Result<Vec<NodePosition>, Di
             for (row_index, index) in row.iter().enumerate() {
                 let extent = cross_extent(*index)?;
                 let cross = cross_cursor + extent / 2.0;
-                let primary = (rank as f64 - max_rank as f64 / 2.0) * rank_step;
+                let mut primary = (rank as f64 - max_rank as f64 / 2.0) * rank_step;
+                if matches!(
+                    graph.direction,
+                    FlowDirection::RightLeft | FlowDirection::BottomTop
+                ) {
+                    primary = -primary;
+                }
                 let (x, y) = if vertical {
                     (cross, primary)
                 } else {
@@ -444,6 +450,8 @@ mod tests {
         for direction in [
             crate::diagram::FlowDirection::TopDown,
             crate::diagram::FlowDirection::LeftRight,
+            crate::diagram::FlowDirection::BottomTop,
+            crate::diagram::FlowDirection::RightLeft,
         ] {
             let mut directed = graph.clone();
             directed.direction = direction;
@@ -473,6 +481,31 @@ mod tests {
             assert!(!rects_overlap(alpha.bounds, beta.bounds));
             assert!(!rects_overlap(alpha.bounds, unconnected.bounds));
             assert!(!rects_overlap(beta.bounds, unconnected.bounds));
+        }
+    }
+
+    #[test]
+    fn reverse_directions_place_targets_and_arrowheads_in_flow_order() {
+        for (direction, vertical) in [("RL", false), ("BT", true)] {
+            let mut graph = parse_mermaid(&format!("graph {direction}; A --> B;")).unwrap();
+            for movement in layout_positions(&graph).unwrap() {
+                let index = graph.node_index(&movement.id).unwrap();
+                graph.nodes[index].position = movement.position;
+            }
+            let a = node_position(&graph, "A");
+            let b = node_position(&graph, "B");
+            assert!(if vertical { a.y > b.y } else { a.x > b.x });
+            let scene =
+                crate::diagram::build_scene(&graph, crate::diagram::SceneMetrics::default())
+                    .unwrap();
+            let arrow = scene.edges[0].arrowhead;
+            let base_x = (arrow.left.x + arrow.right.x) / 2.0;
+            let base_y = (arrow.left.y + arrow.right.y) / 2.0;
+            assert!(if vertical {
+                arrow.tip.y < base_y
+            } else {
+                arrow.tip.x < base_x
+            });
         }
     }
 

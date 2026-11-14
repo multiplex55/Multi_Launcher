@@ -886,6 +886,7 @@ enum PendingMutation {
         expected_revision: u64,
     },
     ReplaceSource(String),
+    ReparseSource { expected_document: RenderDocumentIdentity, expected_revision: u64 },
     ApplyMermaidStyle { source: String, expected_document: RenderDocumentIdentity, expected_revision: u64 },
     CopyHelpExample { text: String, expected_document: RenderDocumentIdentity },
     ReplaceSourceWithCursor {
@@ -6854,6 +6855,17 @@ impl DiagramStudioDialog {
                 if changed { self.mermaid_color_draft = None; }
                 changed
             }
+            PendingMutation::ReparseSource { expected_document, expected_revision } => {
+                if expected_document != self.render_document
+                    || self.documents.pending_transition().is_some()
+                    || self.documents.session().is_none_or(|session| session.revision() != expected_revision)
+                {
+                    self.message = Some(StudioNotice::error("The diagram changed. Refresh the preview again."));
+                    return false;
+                }
+                let source = self.documents.session().unwrap().draft().to_owned();
+                self.apply_mermaid_pending(PendingMutation::ReplaceSource(source))
+            }
             PendingMutation::ReplaceSourceWithCursor {
                 source,
                 expected_document,
@@ -7092,7 +7104,7 @@ impl DiagramStudioDialog {
             | PendingMutation::VisualHistory { .. } => {
                 unreachable!("visual mutation dispatched above")
             }
-            PendingMutation::ReplaceSourceWithCursor { .. } | PendingMutation::ApplyMermaidStyle { .. } | PendingMutation::CopyHelpExample { .. } => {
+            PendingMutation::ReplaceSourceWithCursor { .. } | PendingMutation::ApplyMermaidStyle { .. } | PendingMutation::CopyHelpExample { .. } | PendingMutation::ReparseSource { .. } => {
                 unreachable!("source mutation dispatched above")
             }
             PendingMutation::Transaction {
@@ -8227,6 +8239,18 @@ impl DiagramStudioDialog {
                         revision,
                         pending,
                     );
+                    if generic_family.is_none() && status.preview != PreviewState::Current
+                        && status.diagnostic.is_none() {
+                        let refresh = ui.add_enabled(editing_allowed, egui::Button::new("Refresh preview"));
+                        #[cfg(test)]
+                        test_action_rects.push(("refresh_preview".into(), refresh.rect, ui.clip_rect()));
+                        if refresh.clicked() && pending.is_none() {
+                            *pending = Some(PendingMutation::ReparseSource {
+                                expected_document: render_document.clone(),
+                                expected_revision: revision,
+                            });
+                        }
+                    }
                     let (color, detail) = if let Some((color, text)) = generic_status.as_ref() {
                         (*color, text.clone())
                     } else if generic_family.is_some() || status.preview == PreviewState::Current {
@@ -13526,6 +13550,8 @@ fn direction_control(
                     FlowDirection::TopDown,
                     FlowDirection::TopBottom,
                     FlowDirection::LeftRight,
+                    FlowDirection::RightLeft,
+                    FlowDirection::BottomTop,
                 ] {
                     ui.selectable_value(&mut direction, option, option.as_mermaid());
                 }
@@ -22169,6 +22195,32 @@ mod tests {
                 .map(StudioNotice::text)
                 .is_some_and(|message| message.contains("invalid"))
         );
+    }
+
+    #[test]
+    fn diagram_studio_refreshes_legacy_now_supported_draft_through_retained_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.mld");
+        let mut wire: serde_json::Value = serde_json::from_slice(
+            &crate::diagram::DiagramSession::new().encode().unwrap()
+        ).unwrap();
+        let source = "%% legacy comment\ngraph TD; A --> B";
+        wire["current"]["draft"] = serde_json::Value::String(source.into());
+        wire["current"]["last_good"] = serde_json::Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&wire).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut dialog = DiagramStudioDialog::default();
+        assert_eq!(dialog.documents.request_open(&path).unwrap(), TransitionOutcome::Applied);
+        dialog.open();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_session().status().preview, PreviewState::NoPreview);
+        click_action(&mut dialog, &ctx, "refresh_preview");
+        assert_eq!(dialog.test_session().status().preview, PreviewState::Current);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(dialog.documents.undo().unwrap());
+        assert_eq!(dialog.test_session().status().preview, PreviewState::NoPreview);
     }
 
     fn set_text_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, action: &str, value: &str) {

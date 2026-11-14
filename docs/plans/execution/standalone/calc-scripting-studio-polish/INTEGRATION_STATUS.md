@@ -9,8 +9,9 @@
 | --- | --- |
 | M0-A | Complete and pushed |
 | M0-B | Complete and pushed at `8249b28fa91bc603a4067db6b7d90cc4adad150a`, 8 focused baseline tests passed |
-| M1-A | Complete, 29 focused tests passed after review fixes |
-| M1-B through M6-A | Pending |
+| M1-A | Complete and pushed at `7ef7818fb2e1577d08b1bcbeb9fd33ff5530e347`, 29 focused tests passed after review fixes |
+| M1-B | Complete at the domain and GUI-test level, 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
+| M2-A through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -29,13 +30,20 @@
 - Nextest selected eight cases covering legacy binding diagnostics, cached evaluation, Mermaid grammar, assistance and stale preview, retained same-pass Pad copying, and QR fresh reset and cache reuse. All eight passed in 0.245 seconds with one test thread, retries disabled, and a 100-second batch watchdog. No app-level fixtures were constructed.
 - Mermaid syntax was cross-checked against the [official flowchart reference](https://mermaid.js.org/syntax/flowchart.html).
 
+## M1-B evidence
+
+- Visual transactions preserve full-line comment text and order using source-derived anchors. Deleted targets leave standalone comments. The formatter checks combined source bounds before publishing a transaction. Reverse direction controls and explicit layout reach first-party scene and export geometry.
+- The codec retains readable legacy stale drafts and history. The retained Refresh preview action re-admits now-supported exact source as one undoable operation. It leaves the saved file untouched until an explicit save.
+- Nextest passed 59/59 in the first batch and 73/73 after review corrections, including comment order and limits, reverse arrowheads, source/image export ownership, legacy Refresh preview, and Notes/non-flowchart regressions. The sharpened legacy codec guard then passed 1/1 in isolation. Batches used a 100-second execution watchdog. The batches with an app fixture used a process-local 16 MiB test-thread stack. The touched Notes app fixture now uses a temporary profile and already disables Paste Sequence shortcuts.
+- Review findings on exact-source activation, legacy guard specificity, trace traversal and header help were corrected. UI-7 remains scheduled for native verification.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
-| MMD-01 | M1-A, M1-B | Parser only | Parser passed | Pending |
+| MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
 | MMD-02 | M1-A | Yes | Passed | Pending |
 | MMD-03 | M1-A | Yes | Passed | Pending |
 | MMD-04 | M1-A | Yes | Passed | Pending |
-| MMD-05 | M1-B | Pending | Pending | Pending |
+| MMD-05 | M1-B | Yes | Passed | Pending |
 | CP-01 | M2-A/C/D | Pending | Pending | Pending |
 | CP-02 | M4-A/C | Pending | Pending | Pending |
 | CP-03 | M3-B, M4-C | Pending | Pending | Pending |

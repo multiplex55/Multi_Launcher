@@ -18810,13 +18810,14 @@ More text.
     #[test]
     fn note_markdown_tools_preview_adds_cards_and_retains_unsupported_fence_source() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, directory.path());
         let source = concat!(
             "# Mermaid cards\n\n",
             "Before the diagrams.\n\n",
             "```mermaid\nflowchart TD\n    A[\"Supported\"]\n```\n\n",
             "Between the diagrams.\n\n",
-            "~~~mermaid\nflowchart TD\n%% retained directive\nA --> B\n~~~\n\n",
+            "~~~mermaid\nflowchart TD\n%%{unsupported}%%\nA --> B\n~~~\n\n",
             "After the diagrams.\n",
         );
         let mut panel = NotePanel::from_note(empty_note(source));
@@ -18839,7 +18840,7 @@ More text.
                 .fence(1)
                 .expect("second fence remains indexed")
                 .raw_source(),
-            "flowchart TD\n%% retained directive\nA --> B\n"
+            "flowchart TD\n%%{unsupported}%%\nA --> B\n"
         );
         assert_eq!(
             panel.note_content(),

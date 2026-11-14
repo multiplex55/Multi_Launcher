@@ -1,6 +1,6 @@
 //! Versioned bounded byte codec for pure Diagram Studio session state.
 
-use super::mermaid::{MAX_MERMAID_SOURCE_BYTES, parse_mermaid};
+use super::mermaid::{MAX_MERMAID_SOURCE_BYTES, parse_mermaid, uses_expanded_flowchart_syntax};
 use super::model::DiagramDocument;
 use super::session::{
     DiagramSession, EditHistory, HistoryEntry, SessionSnapshot, semantically_equivalent,
@@ -492,6 +492,13 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
     }
 
     if let Ok(parsed) = parsed_draft {
+        let legacy_stale = snapshot.last_good.as_ref()
+            .is_none_or(|last_good| last_good.source != snapshot.draft
+                && !uses_expanded_flowchart_syntax(&last_good.source))
+            && uses_expanded_flowchart_syntax(&snapshot.draft);
+        if legacy_stale {
+            return Ok(());
+        }
         let Some(last_good) = &snapshot.last_good else {
             return Err("supported draft has no last-good graph".into());
         };
@@ -1098,5 +1105,37 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&decoded.encode().unwrap()).unwrap(),
             no_preview
         );
+    }
+
+    #[test]
+    fn legacy_newly_supported_draft_remains_readable_without_overwriting_history() {
+        let mut wire = encode_as_value(&DiagramSession::new());
+        wire["current"]["draft"] = serde_json::Value::String("%% old draft\ngraph TD; A --> B --> C".into());
+        wire["current"]["last_good"] = serde_json::Value::Null;
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let mut decoded = decode_session(&bytes).unwrap();
+        assert_eq!(decoded.status().preview, PreviewState::NoPreview);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded.encode().unwrap()).unwrap(), wire);
+        assert!(decoded.replace_source("%% old draft\ngraph TD; A --> B --> C").unwrap());
+        assert_eq!(decoded.status().preview, PreviewState::Current);
+        assert!(decoded.undo().unwrap());
+        assert_eq!(decoded.status().preview, PreviewState::NoPreview);
+        decoded.replace_source("%% old draft\ngraph TD; A --> B --> C\n").unwrap();
+        assert_eq!(decoded.status().preview, PreviewState::Current);
+        assert!(decoded.undo().unwrap());
+        assert_eq!(decoded.status().preview, PreviewState::NoPreview);
+
+        let mut forged_session = DiagramSession::new();
+        forged_session.replace_source("graph TD; A;").unwrap();
+        let mut forged = encode_as_value(&forged_session);
+        forged["current"]["draft"] = serde_json::Value::String("graph TD; B;".into());
+        forged["history"] = serde_json::json!([]);
+        forged["undo_len"] = serde_json::json!(0);
+        let result = decode_session(&serde_json::to_vec(&forged).unwrap());
+        assert!(matches!(
+            result,
+            Err(DiagramCodecError::InvalidState(message))
+                if message == "supported draft and current graph disagree"
+        ));
     }
 }

@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use super::mermaid::{
     MAX_MERMAID_SOURCE_BYTES, SourcePieceKind, assistance_edge_target_span, assistance_symbols,
-    parse_header, preflight_source, scan_source,
+    is_subgraph_keyword, parse_header, preflight_source, scan_source,
 };
 use super::model::{MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES};
 
@@ -409,10 +409,7 @@ fn has_open_subgraph(source: &str) -> bool {
         let line = source[piece.range].trim();
         if line == "end" {
             open = false;
-        } else if line == "subgraph"
-            || line.starts_with("subgraph ")
-            || line.starts_with("subgraph\t")
-        {
+        } else if is_subgraph_keyword(line) {
             open = true;
         }
     }
@@ -437,6 +434,24 @@ fn source_newline(source: &str) -> &'static str {
 mod tests {
     use super::{MermaidAssistanceContext, apply_mermaid_assistance, mermaid_assistance_at};
     use crate::diagram::parse_mermaid;
+
+    #[test]
+    fn assistance_recognizes_unicode_whitespace_after_subgraph() {
+        let source = "graph TD; subgraph\u{2003}G[\"Group\"]; ";
+        let assistance = mermaid_assistance_at(source, source.len()).unwrap();
+        assert!(
+            !assistance
+                .suggestions
+                .iter()
+                .any(|item| item.label == "Subgraph")
+        );
+        assert!(
+            assistance
+                .suggestions
+                .iter()
+                .any(|item| item.label == "End subgraph")
+        );
+    }
 
     #[test]
     fn mermaid_assistance_recognizes_supported_headers_and_directions() {

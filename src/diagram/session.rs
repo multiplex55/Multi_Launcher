@@ -2,7 +2,10 @@
 
 use super::codec::{DiagramCodecError, decode_session, encode_session};
 use super::mermaid::{
-    MAX_MERMAID_SOURCE_BYTES, MermaidDiagnostic, MermaidFormatError, format_mermaid, parse_mermaid,
+    MAX_MERMAID_LINE_BYTES, MAX_MERMAID_SOURCE_BYTES, MAX_MERMAID_SOURCE_LINES,
+    MermaidDiagnostic, MermaidFormatError, SourcePieceKind, StatementAnchor, StatementTrace,
+    format_mermaid, format_mermaid_with_anchors, parse_mermaid, parse_mermaid_with_trace, preflight_source,
+    scan_source,
 };
 use super::model::{
     DiagramDocument, DiagramEdge, DiagramGroup, DiagramNode, EdgeId, FlowDirection,
@@ -407,7 +410,9 @@ impl DiagramSession {
                 max_bytes: MAX_MERMAID_SOURCE_BYTES,
             });
         }
-        if source == self.current.draft {
+        if source == self.current.draft
+            && (self.status().preview == PreviewState::Current || parse_mermaid(source).is_err())
+        {
             return Ok(false);
         }
         let next_revision = self.next_revision()?;
@@ -456,7 +461,7 @@ impl DiagramSession {
         let Some(last_good) = self.current.last_good.as_ref() else {
             return Err(DiagramSessionError::VisualEditsBlocked);
         };
-        let parsed = parse_mermaid(&self.current.draft)
+        let (parsed, trace) = parse_mermaid_with_trace(&self.current.draft)
             .map_err(|_| DiagramSessionError::VisualEditsBlocked)?;
         if last_good.source != self.current.draft
             || !semantically_equivalent(&parsed, &last_good.graph)
@@ -476,7 +481,7 @@ impl DiagramSession {
             return Ok(false);
         }
 
-        let canonical_source = format_mermaid(&candidate).map_err(DiagramSessionError::Format)?;
+        let canonical_source = preserve_comments(&self.current.draft, &parsed, &trace, old_graph, &candidate, operations)?;
         let reparsed =
             parse_mermaid(&canonical_source).map_err(|_| DiagramSessionError::SemanticMismatch)?;
         if !semantically_equivalent(&candidate, &reparsed) {
@@ -572,6 +577,195 @@ impl DiagramSession {
             graph: parsed,
         })
     }
+}
+
+fn preserve_comments(
+    source: &str,
+    parsed: &DiagramDocument,
+    trace: &[StatementTrace],
+    old_graph: &DiagramDocument,
+    candidate: &DiagramDocument,
+    operations: &[GraphOperation],
+) -> Result<String, DiagramSessionError> {
+    let pieces = scan_source(source);
+    if !pieces
+        .iter()
+        .any(|piece| piece.kind == SourcePieceKind::Comment)
+    {
+        return format_mermaid(candidate).map_err(DiagramSessionError::Format);
+    }
+    let (canonical, anchors) =
+        format_mermaid_with_anchors(candidate).map_err(DiagramSessionError::Format)?;
+    let mut matches: HashMap<(NodeId, NodeId, Option<String>), VecDeque<EdgeId>> = HashMap::new();
+    for edge in &old_graph.edges {
+        matches
+            .entry((edge.from.clone(), edge.to.clone(), edge.label.clone()))
+            .or_default()
+            .push_back(edge.id);
+    }
+    let mut edge_ids = HashMap::new();
+    for edge in &parsed.edges {
+        let key = (edge.from.clone(), edge.to.clone(), edge.label.clone());
+        if let Some(id) = matches.get_mut(&key).and_then(VecDeque::pop_front) {
+            edge_ids.insert(edge.id, id);
+        }
+    }
+    let removed_nodes: HashSet<_> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            GraphOperation::RemoveNode { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let removed_groups: HashSet<_> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            GraphOperation::RemoveGroup { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let comments: Vec<_> = pieces
+        .iter()
+        .filter(|piece| piece.kind == SourcePieceKind::Comment)
+        .collect();
+    let mut blocks: Vec<(usize, String, Option<StatementAnchor>)> = Vec::new();
+    let mut index = 0;
+    let mut trace_index = 0;
+    while index < comments.len() {
+        let first = comments[index];
+        let mut end = first.range.end;
+        let mut text = String::from(&source[first.range.clone()]);
+        index += 1;
+        while index < comments.len() {
+            let next = comments[index];
+            let gap = &source[end..next.range.start];
+            if gap != "\n" && gap != "\r\n" {
+                break;
+            }
+            text.push_str(gap);
+            text.push_str(&source[next.range.clone()]);
+            end = next.range.end;
+            index += 1;
+        }
+        while trace_index < trace.len() && trace[trace_index].range.start < end {
+            trace_index += 1;
+        }
+        let next = trace.get(trace_index);
+        let anchor = next.and_then(|statement| {
+            let gap = &source[end..statement.range.start];
+            if gap.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+                return None;
+            }
+            match &statement.anchor {
+                StatementAnchor::Node(id) | StatementAnchor::Style(id)
+                    if removed_nodes.contains(id) =>
+                {
+                    None
+                }
+                StatementAnchor::GroupStart(id) | StatementAnchor::GroupEnd(id)
+                    if removed_groups.contains(id) =>
+                {
+                    None
+                }
+                StatementAnchor::Edges(ids) => ids
+                    .iter()
+                    .filter_map(|id| edge_ids.get(id))
+                    .map(|id| StatementAnchor::Edges(vec![*id]))
+                    .find(|anchor| anchors.contains_key(anchor)),
+                anchor => Some(anchor.clone()),
+            }
+        });
+        blocks.push((first.range.start, text, anchor));
+    }
+    let mut ceiling = canonical.len();
+    let mut insertions = Vec::with_capacity(blocks.len());
+    let mut following_orphan_at = None;
+    for (_, text, anchor) in blocks.into_iter().rev() {
+        let desired = anchor
+            .as_ref()
+            .and_then(|anchor| anchors.get(anchor))
+            .copied();
+        let attached = desired
+            .is_some_and(|position| position <= ceiling && following_orphan_at != Some(position));
+        let position = desired
+            .filter(|position| *position <= ceiling)
+            .unwrap_or(ceiling);
+        ceiling = position;
+        following_orphan_at = (!attached).then_some(position);
+        insertions.push((position, text, attached));
+    }
+    insertions.reverse();
+    let mut bytes = canonical.len();
+    let mut lines = canonical.bytes().filter(|byte| *byte == b'\n').count();
+    for (_, text, attached) in &insertions {
+        bytes = bytes
+            .checked_add(text.len())
+            .and_then(|n| n.checked_add(if *attached { 1 } else { 2 }))
+            .ok_or(DiagramSessionError::Format(
+                MermaidFormatError::SourceTooLarge {
+                    max_bytes: MAX_MERMAID_SOURCE_BYTES,
+                },
+            ))?;
+        lines = lines
+            .checked_add(
+                text.bytes().filter(|byte| *byte == b'\n').count() + if *attached { 1 } else { 2 },
+            )
+            .ok_or(DiagramSessionError::Format(
+                MermaidFormatError::TooManyLines {
+                    max_lines: MAX_MERMAID_SOURCE_LINES,
+                },
+            ))?;
+    }
+    if bytes > MAX_MERMAID_SOURCE_BYTES {
+        return Err(DiagramSessionError::Format(
+            MermaidFormatError::SourceTooLarge {
+                max_bytes: MAX_MERMAID_SOURCE_BYTES,
+            },
+        ));
+    }
+    if lines > MAX_MERMAID_SOURCE_LINES {
+        return Err(DiagramSessionError::Format(
+            MermaidFormatError::TooManyLines {
+                max_lines: MAX_MERMAID_SOURCE_LINES,
+            },
+        ));
+    }
+    let mut output = String::with_capacity(bytes);
+    let mut offset = 0;
+    for (position, text, attached) in insertions {
+        output.push_str(&canonical[offset..position]);
+        output.push_str(&text);
+        output.push('\n');
+        if !attached {
+            output.push('\n');
+        }
+        offset = position;
+    }
+    output.push_str(&canonical[offset..]);
+    if let Err(error) = preflight_source(&output) {
+        let format_error = if output.len() > MAX_MERMAID_SOURCE_BYTES {
+            MermaidFormatError::SourceTooLarge {
+                max_bytes: MAX_MERMAID_SOURCE_BYTES,
+            }
+        } else if output.lines().count() > MAX_MERMAID_SOURCE_LINES {
+            MermaidFormatError::TooManyLines {
+                max_lines: MAX_MERMAID_SOURCE_LINES,
+            }
+        } else if output
+            .lines()
+            .any(|line| line.trim_end_matches('\r').len() > MAX_MERMAID_LINE_BYTES)
+        {
+            MermaidFormatError::LineTooLarge {
+                max_bytes: MAX_MERMAID_LINE_BYTES,
+            }
+        } else {
+            let _ = error;
+            return Err(DiagramSessionError::SemanticMismatch);
+        };
+        return Err(DiagramSessionError::Format(format_error));
+    }
+    Ok(output)
 }
 
 fn deserialize_bounded_source<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -1091,6 +1285,71 @@ mod tests {
 
     fn baseline(session: &DiagramSession) -> Vec<u8> {
         session.encode().unwrap()
+    }
+
+    #[test]
+    fn visual_edits_preserve_comment_order_and_detach_deleted_targets() {
+        let source = concat!(
+            "%% introduction\r\n",
+            "graph RL; A[\"Start; ready\"] -->|yes| B[\"Work\"]; B --> C[\"Finish\"];\r\n",
+            "  %% finish explanation  \r\n",
+            "C --> D[\"Done\"]\r\n",
+        );
+        let mut session = DiagramSession::new();
+        session.replace_source(source).unwrap();
+        session.apply_transaction(&[GraphOperation::SetNodeLabel {
+            id: NodeId::new("B").unwrap(),
+            label: "Changed".into(),
+        }]).unwrap();
+        let edited = session.draft().to_owned();
+        assert!(edited.contains("%% introduction\n"));
+        assert!(edited.contains("  %% finish explanation  \nC --> D"));
+        assert!(edited.find("%% introduction").unwrap() < edited.find("%% finish explanation").unwrap());
+        assert_eq!(session.current_graph().unwrap().direction, FlowDirection::RightLeft);
+        let reopened = DiagramSession::decode(&session.encode().unwrap()).unwrap();
+        assert_eq!(reopened.draft(), edited);
+        assert_eq!(crate::diagram::DiagramSourceSnapshot::capture(&session).source(), edited);
+        assert!(crate::diagram::DiagramImageSnapshot::capture(
+            &session, crate::diagram::SceneMetrics::default()
+        ).unwrap().encode_svg(1.0).is_ok());
+        assert!(session.undo().unwrap());
+        assert_eq!(session.draft(), source);
+        assert!(session.redo().unwrap());
+        assert_eq!(session.draft(), edited);
+
+        let mut deleted = DiagramSession::new();
+        deleted.replace_source("graph TD\n%% old B\nB[\"before\"]\nA[\"a\"]\n").unwrap();
+        deleted.apply_transaction(&[
+            GraphOperation::RemoveNode { id: NodeId::new("B").unwrap() },
+            GraphOperation::AddNode {
+                id: NodeId::new("B").unwrap(), label: "new".into(),
+                shape: crate::diagram::NodeShape::Rectangle, position: Position::default(), group: None,
+            },
+        ]).unwrap();
+        assert!(deleted.draft().contains("%% old B\n\n"));
+        deleted.apply_transaction(&[GraphOperation::SetNodeLabel {
+            id: NodeId::new("A").unwrap(), label: "again".into(),
+        }]).unwrap();
+        assert!(deleted.draft().contains("%% old B\n\n"));
+    }
+
+    #[test]
+    fn comments_count_toward_visual_transaction_source_limit() {
+        let mut source = String::from("graph TD\n");
+        for _ in 0..8 {
+            source.push_str("%% ");
+            source.push_str(&"x".repeat(7990));
+            source.push('\n');
+        }
+        source.push_str("A\n");
+        let mut session = DiagramSession::new();
+        session.replace_source(&source).unwrap();
+        let revision = session.revision();
+        assert!(session.apply_transaction(&[GraphOperation::SetNodeLabel {
+            id: NodeId::new("A").unwrap(), label: "y".repeat(2000),
+        }]).is_err());
+        assert_eq!(session.draft(), source);
+        assert_eq!(session.revision(), revision);
     }
 
     #[test]

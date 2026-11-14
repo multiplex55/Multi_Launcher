@@ -115,6 +115,23 @@ pub(super) struct SourcePiece {
     pub column_offset: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum StatementAnchor {
+    Header,
+    Directive,
+    Node(NodeId),
+    GroupStart(GroupId),
+    GroupEnd(GroupId),
+    Edges(Vec<EdgeId>),
+    Style(NodeId),
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct StatementTrace {
+    pub range: std::ops::Range<usize>,
+    pub anchor: StatementAnchor,
+}
+
 /// Scan bounded source without changing its bytes. Separators inside labels,
 /// edge labels, shape delimiters, and Mermaid entities remain part of a token.
 pub(super) fn scan_source(source: &str) -> Vec<SourcePiece> {
@@ -181,9 +198,22 @@ pub(super) fn scan_source(source: &str) -> Vec<SourcePiece> {
 /// A blank or comment-only draft is a valid empty top-down graph. Other source
 /// begins with a supported flowchart header.
 pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic> {
+    parse_mermaid_internal(source, false).map(|(graph, _)| graph)
+}
+
+pub(super) fn parse_mermaid_with_trace(
+    source: &str,
+) -> Result<(DiagramDocument, Vec<StatementTrace>), MermaidDiagnostic> {
+    parse_mermaid_internal(source, true)
+}
+
+fn parse_mermaid_internal(
+    source: &str,
+    collect_trace: bool,
+) -> Result<(DiagramDocument, Vec<StatementTrace>), MermaidDiagnostic> {
     preflight_source(source)?;
     if source.trim().is_empty() {
-        return Ok(DiagramDocument::default());
+        return Ok((DiagramDocument::default(), Vec::new()));
     }
 
     let (style, directive) = extract_style(source).map_err(|(offset, message)| {
@@ -212,16 +242,25 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
     let mut active_group: Option<GroupId> = None;
     let mut active_group_span = None;
     let mut saw_header = false;
+    let mut trace = Vec::new();
     for piece in scan_source(source) {
         let line_number = piece.line;
         let byte_offset = piece.range.start;
         let line = &source[piece.range.clone()];
         let trimmed = line.trim();
-        if piece.kind == SourcePieceKind::Comment
-            || directive
-                .as_ref()
-                .is_some_and(|range| range.start == byte_offset)
+        if piece.kind == SourcePieceKind::Comment {
+            continue;
+        }
+        if directive
+            .as_ref()
+            .is_some_and(|range| range.start == byte_offset)
         {
+            if collect_trace {
+                trace.push(StatementTrace {
+                    range: piece.range.clone(),
+                    anchor: StatementAnchor::Directive,
+                });
+            }
             continue;
         }
         let result = (|| -> Result<(), MermaidDiagnostic> {
@@ -229,6 +268,12 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                 if !saw_header {
                     graph.direction = parse_header(line, byte_offset, line_number)?;
                     saw_header = true;
+                    if collect_trace {
+                        trace.push(StatementTrace {
+                            range: piece.range.clone(),
+                            anchor: StatementAnchor::Header,
+                        });
+                    }
                 } else {
                     let leading = line.len() - line.trim_start().len();
                     if trimmed.starts_with("%%") {
@@ -254,6 +299,12 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                                 line.len(),
                             )
                         })?;
+                        if collect_trace {
+                            trace.push(StatementTrace {
+                                range: piece.range.clone(),
+                                anchor: StatementAnchor::Style(id.clone()),
+                            });
+                        }
                         pending_styles.push((
                             id,
                             style,
@@ -264,7 +315,7 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                             piece.column_offset,
                         ));
                     } else if trimmed == "end" {
-                        if active_group.take().is_none() {
+                        let Some(group) = active_group.take() else {
                             return Err(diagnostic(
                                 MermaidDiagnosticKind::Invalid,
                                 "`end` does not have an open subgraph",
@@ -274,6 +325,12 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                                 leading,
                                 line.len(),
                             ));
+                        };
+                        if collect_trace {
+                            trace.push(StatementTrace {
+                                range: piece.range.clone(),
+                                anchor: StatementAnchor::GroupEnd(group),
+                            });
                         }
                         active_group_span = None;
                     } else if is_subgraph_keyword(trimmed) {
@@ -315,6 +372,12 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                             id: group.clone(),
                             label,
                         });
+                        if collect_trace {
+                            trace.push(StatementTrace {
+                                range: piece.range.clone(),
+                                anchor: StatementAnchor::GroupStart(group.clone()),
+                            });
+                        }
                         active_group = Some(group);
                         active_group_span = Some((
                             line.to_owned(),
@@ -324,7 +387,8 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                             piece.column_offset,
                         ));
                     } else {
-                        parse_statement(
+                        let edge_start = graph.edges.len();
+                        let first = parse_statement(
                             line,
                             byte_offset,
                             line_number,
@@ -333,6 +397,22 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                             &mut nodes_by_id,
                             &mut explicit_declarations,
                         )?;
+                        if collect_trace {
+                            let anchor = if edge_start == graph.edges.len() {
+                                StatementAnchor::Node(first)
+                            } else {
+                                StatementAnchor::Edges(
+                                    graph.edges[edge_start..]
+                                        .iter()
+                                        .map(|edge| edge.id)
+                                        .collect(),
+                                )
+                            };
+                            trace.push(StatementTrace {
+                                range: piece.range.clone(),
+                                anchor,
+                            });
+                        }
                     }
                 }
             }
@@ -351,11 +431,11 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
                 trimmed.is_empty() || (trimmed.starts_with("%%") && !trimmed.starts_with("%%{"))
             })
         {
-            return Ok(graph);
+            return Ok((graph, trace));
         }
         return Err(diagnostic(
             MermaidDiagnosticKind::Invalid,
-            "expected a `flowchart TD`, `flowchart TB`, or `flowchart LR` header",
+            "expected a flowchart or graph header with TD, TB, LR, RL, or BT direction",
             source,
             0,
             1,
@@ -426,21 +506,63 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
             source.len(),
         )
     })?;
-    Ok(graph)
+    Ok((graph, trace))
+}
+
+/// Whether a successfully parsed draft uses syntax older session readers rejected.
+pub(super) fn uses_expanded_flowchart_syntax(source: &str) -> bool {
+    let Ok((_, trace)) = parse_mermaid_with_trace(source) else {
+        return false;
+    };
+    let pieces = scan_source(source);
+    pieces.iter().any(|piece| {
+        piece.kind == SourcePieceKind::Comment
+            || (piece.kind == SourcePieceKind::Statement
+                && (piece.column_offset > 0
+                    || source.as_bytes().get(piece.range.end) == Some(&b';')))
+    }) || trace.iter().any(|statement| match &statement.anchor {
+        StatementAnchor::Header => {
+            let header = source[statement.range.clone()].trim();
+            let mut words = header.split_whitespace();
+            matches!(words.next(), Some("graph")) || matches!(words.next(), Some("RL" | "BT"))
+        }
+        StatementAnchor::Edges(ids) => ids.len() > 1,
+        _ => false,
+    })
 }
 
 /// Emit normalized supported Mermaid syntax. The input graph is never mutated.
 pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatError> {
+    format_mermaid_internal(graph, false).map(|(source, _)| source)
+}
+
+pub(super) fn format_mermaid_with_anchors(
+    graph: &DiagramDocument,
+) -> Result<(String, HashMap<StatementAnchor, usize>), MermaidFormatError> {
+    format_mermaid_internal(graph, true)
+}
+
+fn format_mermaid_internal(
+    graph: &DiagramDocument,
+    collect_anchors: bool,
+) -> Result<(String, HashMap<StatementAnchor, usize>), MermaidFormatError> {
     graph.validate().map_err(MermaidFormatError::InvalidGraph)?;
     let encoded_bytes = measure_formatted_size(graph)?;
 
     let mut output = String::with_capacity(encoded_bytes);
+    let mut anchors = HashMap::new();
     if !graph.style.is_empty() {
+        if collect_anchors {
+            anchors.insert(StatementAnchor::Directive, output.len());
+        }
         output.push_str("%%{init: ");
         output.push_str(
             &serde_json::to_string(&graph.style).map_err(MermaidFormatError::StyleSerialization)?,
         );
         output.push_str("}%%\n");
+    }
+    if collect_anchors {
+        anchors.insert(StatementAnchor::Header, output.len());
     }
     output.push_str("flowchart ");
     output.push_str(graph.direction.as_mermaid());
@@ -449,10 +571,18 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
     let mut emitted_groups = Vec::<GroupId>::with_capacity(graph.groups.len());
     for node in &graph.nodes {
         match &node.group {
-            None => write_node_line(&mut output, node),
+            None => {
+                if collect_anchors {
+                    anchors.insert(StatementAnchor::Node(node.id.clone()), output.len());
+                }
+                write_node_line(&mut output, node)
+            }
             Some(group_id) if !emitted_groups.contains(group_id) => {
                 if let Some(group) = graph.groups.iter().find(|group| &group.id == group_id) {
                     emitted_groups.push(group_id.clone());
+                    if collect_anchors {
+                        anchors.insert(StatementAnchor::GroupStart(group.id.clone()), output.len());
+                    }
                     output.push_str("subgraph ");
                     output.push_str(group.id.as_str());
                     output.push_str("[\"");
@@ -463,7 +593,13 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
                         .iter()
                         .filter(|candidate| candidate.group.as_ref() == Some(group_id))
                     {
+                        if collect_anchors {
+                            anchors.insert(StatementAnchor::Node(member.id.clone()), output.len());
+                        }
                         write_node_line(&mut output, member);
+                    }
+                    if collect_anchors {
+                        anchors.insert(StatementAnchor::GroupEnd(group.id.clone()), output.len());
                     }
                     output.push_str("end\n");
                 }
@@ -473,14 +609,24 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
     }
     for group in &graph.groups {
         if !emitted_groups.contains(&group.id) {
+            if collect_anchors {
+                anchors.insert(StatementAnchor::GroupStart(group.id.clone()), output.len());
+            }
             output.push_str("subgraph ");
             output.push_str(group.id.as_str());
             output.push_str("[\"");
             encode_mermaid_text(&group.label, &mut output);
-            output.push_str("\"]\nend\n");
+            output.push_str("\"]\n");
+            if collect_anchors {
+                anchors.insert(StatementAnchor::GroupEnd(group.id.clone()), output.len());
+            }
+            output.push_str("end\n");
         }
     }
     for edge in &graph.edges {
+        if collect_anchors {
+            anchors.insert(StatementAnchor::Edges(vec![edge.id]), output.len());
+        }
         output.push_str(edge.from.as_str());
         output.push_str(" -->");
         if let Some(label) = &edge.label {
@@ -493,10 +639,13 @@ pub fn format_mermaid(graph: &DiagramDocument) -> Result<String, MermaidFormatEr
         output.push('\n');
     }
     for (id, style) in &graph.node_styles {
+        if collect_anchors {
+            anchors.insert(StatementAnchor::Style(id.clone()), output.len());
+        }
         output.push_str(&format_node_style(id, style));
         output.push('\n');
     }
-    Ok(output)
+    Ok((output, anchors))
 }
 
 fn parse_node_style(line: &str) -> Result<(NodeId, MermaidNodeStyle), String> {
@@ -962,7 +1111,7 @@ pub(super) fn assistance_edge_target_span(line: &str, cursor: usize) -> Option<(
     None
 }
 
-fn is_subgraph_keyword(trimmed: &str) -> bool {
+pub(super) fn is_subgraph_keyword(trimmed: &str) -> bool {
     trimmed == "subgraph"
         || trimmed
             .strip_prefix("subgraph")
@@ -983,10 +1132,11 @@ fn parse_statement(
     graph: &mut DiagramDocument,
     nodes_by_id: &mut HashMap<NodeId, usize>,
     explicit_declarations: &mut HashMap<NodeId, (NodeShape, String)>,
-) -> Result<(), MermaidDiagnostic> {
+) -> Result<NodeId, MermaidDiagnostic> {
     let mut parser = StatementParser::new(line, byte_offset, line_number);
     parser.skip_whitespace();
     let first = parser.parse_node_term()?;
+    let first_id = first.id.clone();
     parser.skip_whitespace();
     let mut from = ensure_node(
         graph,
@@ -1043,7 +1193,7 @@ fn parse_statement(
             line.len(),
         ));
     }
-    Ok(())
+    Ok(first_id)
 }
 
 fn ensure_node(
