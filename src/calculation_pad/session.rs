@@ -674,6 +674,32 @@ impl CalculationPadSession {
         self.store.list().map_err(Into::into)
     }
 
+    /// Prepare a literal edit against the exact source snapshot without mutating it.
+    pub(crate) fn input_replacement(&self, revision: u64, line_id: LineId, original: &str, value: &str) -> Result<String, String> {
+        if self.pending.is_some() || self.revision() != Some(revision) {
+            return Err("The source changed; review this input before applying it.".into());
+        }
+        if value.contains(['\r', '\n']) { return Err("Enter a single literal value.".into()); }
+        let source = self.source().ok_or("No document is open.")?;
+        let line = self.line_ids().and_then(|ids| ids.iter().position(|id| *id == line_id))
+            .ok_or("This input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(source).into_iter()
+            .find(|input| input.line == line && input.source_line == original)
+            .ok_or("This input changed or is no longer a literal.")?;
+        let new_len = source.len().checked_sub(descriptor.value_range.len())
+            .and_then(|size| size.checked_add(value.len()))
+            .ok_or("Input is too large.")?;
+        if new_len > super::document::MAX_DOCUMENT_BYTES { return Err("Input is too large.".into()); }
+        let mut replacement = source.to_owned();
+        replacement.replace_range(descriptor.value_range.clone(), value);
+        let valid = super::document::literal_inputs(&replacement).into_iter()
+            .any(|input| input.line == line && input.name == descriptor.name
+                && input.value == value && input.value_range.start == descriptor.value_range.start);
+        if !valid { return Err("Enter a valid value for this input.".into()); }
+        validate_source_size(&replacement).map_err(|error| error.to_string())?;
+        Ok(replacement)
+    }
+
     pub fn replace_source(&mut self, source: impl Into<String>) -> Result<bool, SessionError> {
         self.ensure_editable()?;
         let source = source.into();
@@ -1297,6 +1323,49 @@ mod tests {
     };
     use crate::platform::app_data::AppDataRoot;
     use std::path::PathBuf;
+
+    #[test]
+    fn input_literal_detection_rejects_arithmetic_and_accepts_prefixed_literals() {
+        let source = "a = u64(1+2)\nb = u64( 0x10 )\nc = 0x10\nd = 0x10 m\ne = 12unknownunit\n  f = 2";
+        let inputs = super::super::document::literal_inputs(source);
+        assert_eq!(inputs.iter().map(|input| input.line).collect::<Vec<_>>(), vec![1, 2, 3, 5]);
+        assert_eq!(inputs[0].value, "0x10");
+        assert!(super::super::document::watch_name("{gross total}").is_some());
+        assert!(super::super::document::watch_name("{bad").is_none());
+        assert!(super::super::document::watch_name("{{bad}}").is_none());
+        let looped = "for i in range(2):\n  inner = 1\n  stray = 2\nafter = 3";
+        assert_eq!(super::super::document::literal_inputs(looped).iter().map(|input| input.line).collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test]
+    fn watches_use_final_current_binding_including_failed_reassignment() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx = x + 3\nbroken = 7\nbroken = 1 / 0").unwrap();
+        let evaluation = session.shared_evaluation().unwrap();
+        assert!(matches!(&evaluation.final_bindings["x"].outcome, LineOutcome::Value(CalculationValue::Scalar(value)) if *value == 5.0));
+        assert!(matches!(&evaluation.final_bindings["broken"].outcome, LineOutcome::Error(_)));
+        assert!(!evaluation.final_bindings.contains_key("missing"));
+    }
+
+    #[test]
+    fn literal_inputs_are_source_bound_and_one_undo_restores_shadowed_assignment() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx = u64(4)\ndistance = 3 m\nformula = x + 1\nfor i in range(2):\n    local = 3").unwrap();
+        let inputs = super::super::document::literal_inputs(session.source().unwrap());
+        assert_eq!(inputs.iter().map(|input| input.line).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let ids = session.line_ids().unwrap().to_vec();
+        let revision = session.revision().unwrap();
+        assert!(session.input_replacement(revision, ids[1], &inputs[1].source_line, "-").is_err());
+        assert!(session.input_replacement(revision, ids[1], &inputs[1].source_line, "1+2").is_err());
+        let replacement = session.input_replacement(revision, ids[1], &inputs[1].source_line, "9").unwrap();
+        session.replace_source(replacement).unwrap();
+        assert!(session.source().unwrap().contains("x = u64(9)"));
+        assert!(session.input_replacement(revision, ids[1], &inputs[1].source_line, "5").is_err());
+        assert!(session.undo());
+        assert!(session.source().unwrap().contains("x = u64(4)"));
+        let quantity = session.input_replacement(session.revision().unwrap(), ids[2], &inputs[2].source_line, "7").unwrap();
+        assert!(quantity.contains("distance = 7 m"));
+    }
 
     #[test]
     fn inspector_observes_exact_values_and_preserves_dirty_binding() {

@@ -17,8 +17,9 @@
 | M2-D | Complete and pushed at `6066a7e88b701b4262fcbc549dfd226f1bcab528`. Final affected navigation cases passed 3/3. UI-6 pending. |
 | M3-A | Complete and pushed at `ed6c91fd6e83df0fecefddc38b45170344e5d464`. 56 unaffected cases passed and 6 final targeted cases passed. |
 | M3-B | Complete and pushed at `29abbc253090a74f9f738bd8df2f02ac8b893244`. 65 focused cases and 11 final targeted cases passed. |
-| M3-C | Automated checkpoints passed. Native folded input remains to be exercised. |
-| M4-A through M6-A | Pending |
+| M3-C | Complete and pushed at `110910179822ef3edb05da9f827882722944c160`. Native folded input remains to be exercised. |
+| M4-A | Complete in memory. 70 focused tests and six final targeted cases passed. |
+| M4-B through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -90,17 +91,17 @@
 | MMD-04 | M1-A | Yes | Passed | Pending |
 | MMD-05 | M1-B | Yes | Passed | Pending |
 | CP-01 | M2-A/C/D | Yes | Passed | Pending |
-| CP-02 | M4-A/C | Pending | Pending | Pending |
+| CP-02 | M4-A/C | In-memory panel | Passed for M4-A | Pending |
 | CP-03 | M3-B, M4-C | Assistance and toggles | Passed for M3-B | Pending |
 | CP-04 | M3-B | Yes | Passed | Pending |
-| CP-05 | M4-A/C | Pending | Pending | Pending |
-| CP-06 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
-| CP-07 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
+| CP-05 | M4-A/C | In-memory watches | Passed for M4-A | Pending |
+| CP-06 | M3-A/C | Yes | Passed | Pending |
+| CP-07 | M3-A/C | Yes | Passed | Pending |
 | CP-08 | M3-B | Yes | Passed | Pending |
 | CP-09 | M4-B/C | Pending | Pending | Pending |
 | CP-10 | M3-C | Yes | Passed | Pending |
 | CP-11 | M3-C | Yes | Passed | Pending |
-| CP-12 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
+| CP-12 | M3-A/C | Yes | Passed | Pending |
 | CP-13 | M2-B | Yes | Passed | Pending |
 | CP-14 | M2-B | Yes | Passed | Pending |
 | CP-15 | M2-C/D | Yes | Passed | Pending |

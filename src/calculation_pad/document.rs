@@ -66,6 +66,92 @@ pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
     result
 }
 
+pub(crate) fn watch_name(input: &str) -> Option<String> {
+    let parsed = parse_assignment_name(input.trim()).ok()?;
+    (!is_row_reference_name(&parsed.canonical)
+        && (parsed.braced || !is_reserved_name(&parsed.canonical))).then_some(parsed.canonical)
+}
+
+fn integer_literal_token(value: &str) -> bool {
+    let value = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
+    let (digits, radix) = if let Some(rest) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) { (rest, 16) }
+        else if let Some(rest) = value.strip_prefix("0b").or_else(|| value.strip_prefix("0B")) { (rest, 2) }
+        else if let Some(rest) = value.strip_prefix("0o").or_else(|| value.strip_prefix("0O")) { (rest, 8) }
+        else { (value, 10) };
+    digits.chars().any(|ch| ch.is_digit(radix)) && digits.chars().all(|ch| ch == '_' || ch.is_digit(radix))
+}
+
+/// A source-backed literal input; the editable range excludes constructor and unit text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiteralInput {
+    pub name: String,
+    pub line: usize,
+    pub value: String,
+    pub value_range: Range<usize>,
+    pub source_line: String,
+}
+
+pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
+    let mut result = Vec::new();
+    let mut offset = 0;
+    let has_loops = loops::contains_loop(source);
+    for (line, raw) in source.split_inclusive('\n').enumerate().take(MAX_SOURCE_LINES) {
+        let text = raw.trim_end_matches(['\r', '\n']);
+        let trimmed = text.trim();
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { offset += raw.len(); continue; }
+        if has_loops && text.len() != text.trim_start().len() { offset += raw.len(); continue; }
+        if let Some(index) = find_assignment_delimiter(text)
+            && let Ok(name) = parse_assignment_name(text[..index].trim())
+            && !is_row_reference_name(&name.canonical)
+            && (name.braced || !is_reserved_name(&name.canonical))
+        {
+            let rhs = &text[index + 1..];
+            let leading = rhs.len() - rhs.trim_start().len();
+            let expr = rhs.trim();
+            let (value, start, valid_shape) = if let Some(open) = expr.find('(') {
+                let constructor = &expr[..open];
+                let valid = matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
+                    && expr.ends_with(')');
+                let argument = if valid { &expr[open + 1..expr.len() - 1] } else { "" };
+                let value = argument.trim();
+                let start = open + 1 + argument.len() - argument.trim_start().len();
+                (value, start, valid && integer_literal_token(value))
+            } else {
+                let sign = usize::from(expr.starts_with('+') || expr.starts_with('-'));
+                let rest = &expr[sign..];
+                let base = rest.starts_with("0x") || rest.starts_with("0X") || rest.starts_with("0b") || rest.starts_with("0B") || rest.starts_with("0o") || rest.starts_with("0O");
+                let end = if base {
+                    sign + rest.char_indices().find_map(|(i, ch)| (i >= 2 && !(ch.is_ascii_hexdigit() || ch == '_')).then_some(i)).unwrap_or(rest.len())
+                } else { unit_conversion::parse_quantity_number_prefix(expr).map_or(0, |(_, end)| end) };
+                let suffix = expr[end..].trim();
+                let valid_number = end > 0 && (!base || integer_literal_token(&expr[..end]));
+                (&expr[..end], 0, valid_number && (suffix.is_empty() || suffix.chars().all(|ch| ch.is_alphabetic() || matches!(ch, '°' | 'µ' | 'μ' | '%'))))
+            };
+            if valid_shape {
+                let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
+                let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
+                if evaluation {
+                    let value_start = offset + index + 1 + leading + start;
+                    result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
+                        value_range: value_start..value_start + value.len(), source_line: text.to_owned() });
+                }
+            }
+        }
+        offset += raw.len();
+    }
+    result
+}
+
+impl CalculationDocument {
+    fn evaluate_owned_literal(&self, needs_quantity: bool) -> bool {
+        self.evaluate().lines.first().is_some_and(|line| match &line.outcome {
+            LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) => true,
+            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }) => !needs_quantity,
+            _ => false,
+        })
+    }
+}
+
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
 pub const MAX_EXPRESSION_BYTES: usize = 2048;
