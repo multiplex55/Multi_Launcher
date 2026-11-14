@@ -19,8 +19,9 @@
 | M3-B | Complete and pushed at `29abbc253090a74f9f738bd8df2f02ac8b893244`. 65 focused cases and 11 final targeted cases passed. |
 | M3-C | Complete and pushed at `110910179822ef3edb05da9f827882722944c160`. Native folded input remains to be exercised. |
 | M4-A | Complete and pushed at `4966bdfdf68cf982a0e77e5880126dad70675b55`. 70 focused tests and six final targeted cases passed. |
-| M4-B | Complete at the automated level. 73 focused and 4 final targeted cases passed. |
-| M4-C through M6-A | Pending |
+| M4-B | Complete and pushed at `8df4f947190a4caf0632d29cd8613433dc5baa0c`. 73 focused and 4 final targeted cases passed. |
+| M4-C | Complete at the automated level. 123 focused and 9 final relevant cases passed. |
+| M5-A through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -92,14 +93,14 @@
 | MMD-04 | M1-A | Yes | Passed | Pending |
 | MMD-05 | M1-B | Yes | Passed | Pending |
 | CP-01 | M2-A/C/D | Yes | Passed | Pending |
-| CP-02 | M4-A/C | In-memory panel | Passed for M4-A | Pending |
-| CP-03 | M3-B, M4-C | Assistance and toggles | Passed for M3-B | Pending |
+| CP-02 | M4-A/C | Yes | Passed | Pending |
+| CP-03 | M3-B, M4-C | Yes | Passed | Pending |
 | CP-04 | M3-B | Yes | Passed | Pending |
-| CP-05 | M4-A/C | In-memory watches | Passed for M4-A | Pending |
+| CP-05 | M4-A/C | Yes | Passed | Pending |
 | CP-06 | M3-A/C | Yes | Passed | Pending |
 | CP-07 | M3-A/C | Yes | Passed | Pending |
 | CP-08 | M3-B | Yes | Passed | Pending |
-| CP-09 | M4-B/C | Pad display and formatted copy | Passed for M4-B | Pending |
+| CP-09 | M4-B/C | Yes | Passed | Pending |
 | CP-10 | M3-C | Yes | Passed | Pending |
 | CP-11 | M3-C | Yes | Passed | Pending |
 | CP-12 | M3-A/C | Yes | Passed | Pending |

@@ -177,7 +177,6 @@ pub(crate) struct CalculationPadDialog {
     source_highlight: Option<SourceHighlight>,
     editor_tools: EditorTools,
     pad_view: PadView,
-    document_views: Vec<(DocumentId, PadView)>,
     completion: CompletionState,
     folds: FoldState,
     editor_tool_focus_pending: bool,
@@ -633,7 +632,6 @@ impl CalculationPadDialog {
             source_highlight: None,
             editor_tools: EditorTools::default(),
             pad_view: PadView::default(),
-            document_views: Vec::new(),
             completion: CompletionState::default(),
             folds: FoldState::default(),
             editor_tool_focus_pending: false,
@@ -732,8 +730,10 @@ impl CalculationPadDialog {
         if !self.open {
             self.reset_host_to_docked();
         }
+        let previous = self.session.document_incarnation();
         self.ensure_session_open();
         self.restore_recovery_on_explicit_open();
+        if self.session.document_incarnation() != previous { self.restore_view_from_session(); }
         self.open = true;
         self.host_close_requested = false;
         self.request_source_focus();
@@ -744,7 +744,9 @@ impl CalculationPadDialog {
         if !was_open {
             self.reset_host_to_docked();
         }
+        let previous = self.session.document_incarnation();
         self.ensure_session_open();
+        if self.session.document_incarnation() != previous { self.restore_view_from_session(); }
         self.open = true;
         if !was_open {
             self.request_source_focus();
@@ -1639,6 +1641,27 @@ impl CalculationPadDialog {
         }
     }
 
+    fn persist_view_state_in_session(&mut self) {
+        let view = crate::calculation_pad::PadViewMetadata {
+            inputs: self.pad_view.inputs.iter().map(|input| crate::calculation_pad::PadInputReference {
+                id: input.id, name: input.name.clone(), unavailable: input.unavailable,
+            }).collect(),
+            watches: self.pad_view.watches.clone(),
+        };
+        if let Err(message) = self.session.set_view_metadata(view) { self.error = Some(message.into()); }
+    }
+
+    fn restore_view_from_session(&mut self) {
+        let metadata = self.session.view_metadata().cloned().unwrap_or_default();
+        self.pad_view = PadView {
+            inputs: metadata.inputs.into_iter().map(|input| InputSelection {
+                id: input.id, name: input.name, unavailable: input.unavailable, draft: None,
+            }).collect(),
+            watches: metadata.watches,
+            ..PadView::default()
+        };
+    }
+
     fn reconcile_input_selections(&mut self, old_source: Option<&str>, old_ids: Option<&[LineId]>, exact_input_edit: bool) {
         if self.pad_view.inputs.is_empty() { return; }
         let source = self.session.source().unwrap_or_default();
@@ -2345,9 +2368,14 @@ impl CalculationPadDialog {
             state.cursor.set_char_range(Some(selection));
             state.store(ctx, id);
         }
-        if let Some(view) = host.pad_view.take() { self.pad_view = view; }
+        if self.session.pending_transition().is_none()
+            && let Some(view) = host.pad_view.take()
+        { self.pad_view = view; }
         if accepted_source_or_history {
             self.reconcile_input_selections(old_source.as_deref(), old_ids.as_deref(), accepted_input_commit);
+        }
+        if current_basis.is_some() && host.document_basis == current_basis && self.session.pending_transition().is_none() {
+            self.persist_view_state_in_session();
         }
         if accepted_source_or_history {
             self.source_highlight = None;
@@ -2422,7 +2450,6 @@ impl CalculationPadDialog {
             .then(|| self.recovery_snapshot())
             .flatten();
         let pending_before_intent = self.session.pending_transition();
-        let save_as_intent = matches!(host.intent.as_ref(), Some(DialogIntent::SaveAs(_))) && pending_before_intent.is_none();
         let mut pending_decision = None;
         let mut transition_intent = false;
         if let Some(intent) = host.intent.take() {
@@ -2485,19 +2512,9 @@ impl CalculationPadDialog {
             .document_incarnation()
             .zip(self.session.current_id());
         if before_document != after_document {
-            if let Some((_, id)) = before_document {
-                if let Some((_, view)) = self.document_views.iter_mut().find(|(document, _)| *document == id) {
-                    *view = self.pad_view.clone();
-                } else {
-                    if self.document_views.len() >= 64 { self.document_views.remove(0); }
-                    self.document_views.push((id, self.pad_view.clone()));
-                }
+            if before_document.map(|(incarnation, _)| incarnation) != after_document.map(|(incarnation, _)| incarnation) {
+                self.restore_view_from_session();
             }
-            let save_as = save_as_intent && before_document.map(|(incarnation, _)| incarnation) == after_document.map(|(incarnation, _)| incarnation);
-            self.pad_view = if save_as { self.pad_view.clone() } else {
-                after_document.and_then(|(_, id)| self.document_views.iter().find(|(document, _)| *document == id).map(|(_, view)| view.clone())).unwrap_or_default()
-            };
-            for input in &mut self.pad_view.inputs { input.draft = None; }
             self.completion = CompletionState::default();
             self.editor_tools = EditorTools::default();
             self.folds.collapsed.clear();
@@ -2769,6 +2786,7 @@ impl CalculationPadDialog {
                 let recovery_before_close = self.recovery_snapshot();
                 let remembered_scratch = self.remember_source
                     && !self.session.is_saved()
+                    && !self.session.is_view_dirty()
                     && self.session.pending_transition().is_none()
                     && recovery_before_close.is_some();
                 if remembered_scratch {
@@ -3215,6 +3233,7 @@ impl CalculationPadDialog {
             Ok(changed) => {
                 if changed {
                     self.reconcile_input_selections(old_source.as_deref(), old_ids.as_deref(), false);
+                    self.persist_view_state_in_session();
                     self.inspector_caret = None;
                     self.schedule_recovery_snapshot(ctx);
                     self.request_source_focus();
@@ -4902,6 +4921,7 @@ impl CalculationPadDialog {
     }
 
     fn reset_transient_ui(&mut self) {
+        self.pad_view = PadView::default();
         self.dependency_navigation = None;
         self.deferred_projected_input = None;
         self.split_preview = None;
@@ -5259,6 +5279,71 @@ mod tests {
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+    #[test]
+    fn closing_saved_view_then_opening_blank_does_not_copy_watches() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 2");
+        let mut save = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        save.pass_accepted = true;
+        save.pad_view = Some(super::PadView { watches: vec!["x".into()], ..Default::default() });
+        save.intent = Some(super::DialogIntent::SaveAs("saved view".into()));
+        complete_host_effects(&mut dialog, &ctx, save);
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        assert!(!dialog.open);
+        dialog.open();
+        assert!(dialog.pad_view.watches.is_empty());
+        let host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        let mut host = host; host.pass_accepted = true;
+        complete_host_effects(&mut dialog, &ctx, host);
+        assert!(dialog.session.view_metadata().unwrap().watches.is_empty());
+    }
+
+    #[test]
+    fn remembered_scratch_with_dirty_view_requires_close_decision() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.initialize_recovery_preference(true);
+        dialog.open();
+        let mut edit = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        edit.pass_accepted = true;
+        edit.pad_view = Some(super::PadView { watches: vec!["x".into()], ..Default::default() });
+        complete_host_effects(&mut dialog, &ctx, edit);
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        assert!(dialog.open);
+        assert_eq!(dialog.session.pending_transition(), Some(crate::calculation_pad::PendingTransition::Close));
+    }
+
+    #[test]
+    fn retained_view_changes_are_saved_with_same_frame_save_as() {
+        let (_directory, root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 2");
+        let id = dialog.session.line_id(0).unwrap();
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.pad_view = Some(super::PadView {
+            inputs: vec![super::InputSelection { id, name: "x".into(), unavailable: false, draft: None }],
+            watches: vec!["x".into()], ..Default::default()
+        });
+        host.intent = Some(super::DialogIntent::SaveAs("view retained".into()));
+        complete_host_effects(&mut dialog, &ctx, host);
+        let document = dialog.session.current_id().unwrap();
+        let mut reopened = crate::calculation_pad::CalculationPadSession::new(&root);
+        reopened.request_open(document).unwrap();
+        let metadata = reopened.view_metadata().unwrap();
+        assert_eq!(metadata.inputs[0].id, id);
+        assert_eq!(metadata.watches, vec!["x"]);
     }
 
     #[test]

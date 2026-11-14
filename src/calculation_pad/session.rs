@@ -9,7 +9,7 @@ use super::inspector::{
 };
 use super::persistence::{
     DocumentId, LineId, LoadedDocument, PadDocumentStore, PadDocumentSummary, PadStoreError,
-    StoredDocument,
+    StoredDocument, PadViewMetadata,
 };
 use super::{IntegerMode, IntegerWidth, TypedInteger};
 use super::worker::{EvaluationStamp, EvaluationWorker, Request as EvaluationRequest};
@@ -259,6 +259,8 @@ struct DocumentBaseline {
     name: Option<String>,
     disk_sha256: Option<[u8; 32]>,
     next_line_id: u64,
+    view: PadViewMetadata,
+    format_version: u32,
 }
 
 struct ActiveDocument {
@@ -269,6 +271,7 @@ struct ActiveDocument {
     line_ids: Vec<LineId>,
     next_line_id: u64,
     revision: u64,
+    view: PadViewMetadata,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
     dependency_snapshot: Option<Arc<super::dependencies::DependencySnapshot>>,
@@ -289,6 +292,7 @@ impl ActiveDocument {
             line_ids: vec![LineId(1)],
             next_line_id: 2,
             revision: 0,
+            view: PadViewMetadata::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -298,6 +302,8 @@ impl ActiveDocument {
                 name: None,
                 disk_sha256: None,
                 next_line_id: 2,
+                view: PadViewMetadata::default(),
+                format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
             },
             cached_evaluation: None,
             dependency_snapshot: None,
@@ -323,6 +329,7 @@ impl ActiveDocument {
             line_ids: stored.line_ids,
             next_line_id: stored.next_line_id,
             revision: 0,
+            view: stored.view.clone(),
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -332,6 +339,8 @@ impl ActiveDocument {
                 name: Some(saved_name),
                 disk_sha256: Some(loaded.disk_sha256),
                 next_line_id: saved_next_line_id,
+                view: stored.view,
+                format_version: stored.format_version,
             },
             cached_evaluation: None,
             dependency_snapshot: None,
@@ -357,17 +366,14 @@ impl ActiveDocument {
             || self.id != self.baseline.id
             || self.name != self.baseline.name
             || self.next_line_id != self.baseline.next_line_id
+            || self.view != self.baseline.view
     }
 
     fn stored_document(&self) -> Result<StoredDocument, SessionError> {
         let name = self.name.clone().ok_or(SessionError::SaveAsRequired)?;
-        Ok(StoredDocument::new(
-            self.id,
-            name,
-            self.source.clone(),
-            self.line_ids.clone(),
-            self.next_line_id,
-        ))
+        let mut stored = StoredDocument::new(self.id, name, self.source.clone(), self.line_ids.clone(), self.next_line_id);
+        stored.view = self.view.clone();
+        Ok(stored)
     }
 }
 
@@ -470,6 +476,22 @@ impl CalculationPadSession {
         } else {
             EvaluationStatus::Pending
         }
+    }
+
+    pub(crate) fn view_metadata(&self) -> Option<&PadViewMetadata> {
+        self.current.as_ref().map(|document| &document.view)
+    }
+
+    pub(crate) fn is_view_dirty(&self) -> bool {
+        self.current.as_ref().is_some_and(|document| document.view != document.baseline.view)
+    }
+
+    pub(crate) fn set_view_metadata(&mut self, view: PadViewMetadata) -> Result<(), &'static str> {
+        if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
+        super::persistence::validate_view_metadata(&view)?;
+        let document = self.current.as_mut().ok_or("No document is open.")?;
+        document.view = view;
+        Ok(())
     }
 
     pub fn current_id(&self) -> Option<DocumentId> {
@@ -997,7 +1019,7 @@ impl CalculationPadSession {
         if current.name.is_none() {
             return Err(SessionError::SaveAsRequired);
         }
-        if !current.is_dirty() {
+        if !current.is_dirty() && current.baseline.format_version == super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION {
             return Ok(());
         }
         let stored = current.stored_document()?;
@@ -1018,6 +1040,8 @@ impl CalculationPadSession {
             name: current.name.clone(),
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
+            view: current.view.clone(),
+            format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
     }
@@ -1027,11 +1051,12 @@ impl CalculationPadSession {
             .current
             .as_ref()
             .ok_or(SessionError::NoActiveDocument)?;
-        let (stored, disk_sha256) = self.store.save_as(
+        let (stored, disk_sha256) = self.store.save_as_with_metadata(
             name,
             current.source.clone(),
             current.line_ids.clone(),
             current.next_line_id,
+            current.view.clone(),
         )?;
         self.retire_background_evaluation();
         let current = self
@@ -1046,6 +1071,8 @@ impl CalculationPadSession {
             name: current.name.clone(),
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
+            view: current.view.clone(),
+            format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
     }
@@ -2088,6 +2115,36 @@ mod tests {
         }
         assert!(large_edits.history.total_bytes() <= super::MAX_UNDO_BYTES);
         assert!(large_edits.history.undo.len() < MAX_UNDO_ENTRIES);
+    }
+
+    #[test]
+    fn view_metadata_is_dirty_without_source_edits_and_survives_save_as() {
+        let (_directory, root, mut session) = fixture();
+        session.replace_source("x = 2\nx = 3").unwrap();
+        session.save_as("view original").unwrap();
+        let id = session.current_id().unwrap();
+        let line = session.line_id(0).unwrap();
+        let revision = session.revision();
+        let view = super::super::persistence::PadViewMetadata {
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false }],
+            watches: vec!["x".into(), "missing".into()],
+        };
+        session.set_view_metadata(view.clone()).unwrap();
+        assert!(session.is_dirty());
+        assert_eq!(session.revision(), revision);
+        assert_eq!(session.source(), Some("x = 2\nx = 3"));
+        session.save().unwrap();
+        assert!(!session.is_dirty());
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.view_metadata(), Some(&view));
+        reopened.save_as("view copy").unwrap();
+        let copy = reopened.current_id().unwrap();
+        let mut copy_session = CalculationPadSession::new(&root);
+        copy_session.request_open(copy).unwrap();
+        assert_eq!(copy_session.view_metadata(), Some(&view));
+        copy_session.request_new().unwrap();
+        assert_eq!(copy_session.view_metadata(), Some(&Default::default()));
     }
 
     #[test]

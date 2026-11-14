@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
 pub const MAX_STORED_DOCUMENT_BYTES: usize = 512 * 1024;
-pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 2;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
 const DOCUMENTS_DIRECTORY: &str = "documents";
@@ -693,15 +693,42 @@ impl std::error::Error for PadStoreError {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PadViewMetadata {
+    pub inputs: Vec<PadInputReference>,
+    pub watches: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PadInputReference {
+    pub id: LineId,
+    pub name: String,
+    pub unavailable: bool,
+}
+#[derive(Deserialize)]
+struct DocumentVersion { format_version: u32 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDocumentV1 {
+    format_version: u32,
+    id: DocumentId,
+    name: String,
+    source: String,
+    line_ids: Vec<LineId>,
+    next_line_id: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredDocument {
-    format_version: u32,
+    pub(super) format_version: u32,
     pub id: DocumentId,
     pub name: String,
     pub source: String,
     pub line_ids: Vec<LineId>,
     pub next_line_id: u64,
+    pub view: PadViewMetadata,
 }
 
 impl StoredDocument {
@@ -719,6 +746,7 @@ impl StoredDocument {
             source,
             line_ids,
             next_line_id,
+            view: PadViewMetadata::default(),
         }
     }
 
@@ -795,6 +823,12 @@ impl PadDocumentStore {
         })
     }
 
+    pub(super) fn save_as_with_metadata(
+        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata,
+    ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
+        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, |path, bytes| save_atomic(path, bytes))
+    }
+
     pub(super) fn save_as_with_writer(
         &self,
         name: &str,
@@ -809,6 +843,7 @@ impl PadDocumentStore {
             source,
             line_ids,
             next_line_id,
+            PadViewMetadata::default(),
             writer,
         )
     }
@@ -820,6 +855,7 @@ impl PadDocumentStore {
         source: String,
         line_ids: Vec<LineId>,
         next_line_id: u64,
+        view: PadViewMetadata,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
         let name = validate_name(name)?;
@@ -842,7 +878,8 @@ impl PadDocumentStore {
         if read_limited(&path)?.is_some() {
             return Err(PadStoreError::OccupiedPath(path));
         }
-        let stored = StoredDocument::new(id, name, source, line_ids, next_line_id);
+        let mut stored = StoredDocument::new(id, name, source, line_ids, next_line_id);
+        stored.view = view;
         let bytes = encode_document(&path, &stored)?;
         self.ensure_write_directories()?;
         writer(&path, &bytes).map_err(|source| PadStoreError::AtomicWrite {
@@ -1054,7 +1091,7 @@ fn is_windows_device_name(name: &str) -> bool {
 }
 
 fn validate_stored_document(stored: &StoredDocument, path: &Path) -> Result<(), PadStoreError> {
-    if stored.format_version != CURRENT_DOCUMENT_FORMAT_VERSION {
+    if !(1..=CURRENT_DOCUMENT_FORMAT_VERSION).contains(&stored.format_version) {
         return Err(PadStoreError::UnsupportedVersion {
             found: stored.format_version,
             supported: CURRENT_DOCUMENT_FORMAT_VERSION,
@@ -1064,7 +1101,22 @@ fn validate_stored_document(stored: &StoredDocument, path: &Path) -> Result<(), 
         return Err(invalid_document(path, "document ID must be nonzero"));
     }
     validate_name(&stored.name).map_err(|_| invalid_document(path, "document name is unsafe"))?;
-    validate_source_and_line_ids(&stored.source, &stored.line_ids, stored.next_line_id, path)
+    validate_source_and_line_ids(&stored.source, &stored.line_ids, stored.next_line_id, path)?;
+    validate_view_metadata(&stored.view).map_err(|message| invalid_document(path, message))
+}
+
+pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'static str> {
+    if view.inputs.len() > 64 || view.watches.len() > 64 { return Err("too many input or watch references"); }
+    let valid_name = |name: &str| super::document::watch_name(&format!("{{{name}}}")).as_deref() == Some(name);
+    let mut lines = HashSet::new();
+    if view.inputs.iter().any(|input| input.id.0 == 0 || !valid_name(&input.name) || !lines.insert(input.id)) {
+        return Err("invalid or duplicate input reference");
+    }
+    let mut names = HashSet::new();
+    if view.watches.iter().any(|name| !valid_name(name) || !names.insert(name)) {
+        return Err("invalid or duplicate watch name");
+    }
+    Ok(())
 }
 
 fn validate_source_and_line_ids(
@@ -1117,11 +1169,17 @@ fn decode_document(
             max_bytes: MAX_STORED_DOCUMENT_BYTES,
         });
     }
-    let stored: StoredDocument =
-        serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let version: DocumentVersion = serde_json::from_slice(bytes)
+        .map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
+    if version.format_version != 1 && version.format_version != CURRENT_DOCUMENT_FORMAT_VERSION {
+        return Err(PadStoreError::UnsupportedVersion { found: version.format_version, supported: CURRENT_DOCUMENT_FORMAT_VERSION });
+    }
+    let stored = if version.format_version == 1 {
+        let old: StoredDocumentV1 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default() }
+    } else {
+        serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?
+    };
     validate_stored_document(&stored, path)?;
     if expected_id.is_some_and(|id| id != stored.id) {
         return Err(invalid_document(
@@ -1133,6 +1191,9 @@ fn decode_document(
 }
 
 fn encode_document(path: &Path, stored: &StoredDocument) -> Result<Vec<u8>, PadStoreError> {
+    if stored.format_version != CURRENT_DOCUMENT_FORMAT_VERSION {
+        return Err(PadStoreError::UnsupportedVersion { found: stored.format_version, supported: CURRENT_DOCUMENT_FORMAT_VERSION });
+    }
     validate_stored_document(stored, path)?;
     let bytes =
         serde_json::to_vec_pretty(stored).map_err(|source| PadStoreError::SerializeJson {
@@ -1254,6 +1315,57 @@ mod tests {
             revision,
             source: source.to_owned(),
         }
+    }
+
+    #[test]
+    fn legacy_v1_is_read_without_write_and_explicit_save_upgrades() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("legacy", "x = 2\r\n".into(), vec![LineId(1), LineId(2)], 3).unwrap();
+        let path = store.document_path(saved.id);
+        let old = format!(r#"{{"format_version":1,"id":{},"name":"legacy","source":"x = 2\r\n","line_ids":[1,2],"next_line_id":3}}"#, saved.id.as_u128()).into_bytes();
+        std::fs::write(&path, &old).unwrap();
+        let mut session = crate::calculation_pad::CalculationPadSession::with_store(store.clone());
+        session.request_open(saved.id).unwrap();
+        assert!(!session.is_dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        session.save().unwrap();
+        let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(upgraded["format_version"], 2);
+        assert_eq!(upgraded["source"], "x = 2\r\n");
+        assert_eq!(upgraded["view"]["inputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn legacy_document_cannot_be_encoded_with_new_fields_under_v1() {
+        let mut stored = super::StoredDocument::new(DocumentId(5), "old".into(), "".into(), vec![LineId(1)], 2);
+        stored.format_version = 1;
+        assert!(matches!(super::encode_document(std::path::Path::new("old"), &stored), Err(PadStoreError::UnsupportedVersion { found: 1, .. })));
+    }
+
+    #[test]
+    fn versioned_view_metadata_is_bounded_and_strict() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("strict", "x = 2".into(), vec![LineId(1)], 2).unwrap();
+        let path = store.document_path(saved.id);
+        let mut original: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        original["id"] = serde_json::json!(1);
+        let mut invalid = original.clone();
+        invalid["view"]["watches"] = serde_json::json!(vec!["x"; 65]);
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::InvalidDocument { .. })));
+        let mut invalid = original.clone();
+        invalid["view"]["extra"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
+        let mut future = original.clone();
+        future["format_version"] = serde_json::json!(3);
+        future["future_payload"] = serde_json::json!({"preserve": true});
+        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::UnsupportedVersion { .. })));
+        let mut legacy = original;
+        legacy["format_version"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
     }
 
     #[test]
@@ -1443,6 +1555,7 @@ mod tests {
                 "replacement".to_owned(),
                 vec![LineId(1)],
                 2,
+                super::PadViewMetadata::default(),
                 |_, _| anyhow::bail!("occupied path must not reach the writer")
             ),
             Err(PadStoreError::OccupiedPath(path)) if path == store.document_path(saved.id)
