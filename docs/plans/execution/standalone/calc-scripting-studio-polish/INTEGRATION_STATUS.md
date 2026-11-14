@@ -16,8 +16,9 @@
 | M2-C | Complete and pushed at `2d5c6c563159004f5a4dba97d7610253b75f604e`, 72 focused tests passed. |
 | M2-D | Complete and pushed at `6066a7e88b701b4262fcbc549dfd226f1bcab528`. Final affected navigation cases passed 3/3. UI-6 pending. |
 | M3-A | Complete and pushed at `ed6c91fd6e83df0fecefddc38b45170344e5d464`. 56 unaffected cases passed and 6 final targeted cases passed. |
-| M3-B | Complete at the automated level. 65 focused cases and 11 final targeted cases passed. |
-| M3-C through M6-A | Pending |
+| M3-B | Complete and pushed at `29abbc253090a74f9f738bd8df2f02ac8b893244`. 65 focused cases and 11 final targeted cases passed. |
+| M3-C | Automated checkpoints passed. Native folded input remains to be exercised. |
+| M4-A through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -97,8 +98,8 @@
 | CP-07 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
 | CP-08 | M3-B | Yes | Passed | Pending |
 | CP-09 | M4-B/C | Pending | Pending | Pending |
-| CP-10 | M3-C | Pending | Pending | Pending |
-| CP-11 | M3-C | Pending | Pending | Pending |
+| CP-10 | M3-C | Yes | Passed | Pending |
+| CP-11 | M3-C | Yes | Passed | Pending |
 | CP-12 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
 | CP-13 | M2-B | Yes | Passed | Pending |
 | CP-14 | M2-B | Yes | Passed | Pending |

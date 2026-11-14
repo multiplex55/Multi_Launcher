@@ -23,6 +23,10 @@ pub(super) mod script;
 #[path = "loops.rs"]
 mod loops;
 pub use script::CalculationSequence;
+
+pub(crate) fn editor_loop_header(source: &str) -> bool {
+    loops::editor_iterator(source).is_some()
+}
 pub(crate) use script::{FUNCTIONS, function_signature_help};
 
 /// Names visible before the caret, without evaluating the document.

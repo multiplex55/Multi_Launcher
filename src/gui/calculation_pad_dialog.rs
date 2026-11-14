@@ -14,7 +14,7 @@ use eframe::egui;
 
 #[path = "calculation_pad_editor.rs"]
 mod editor;
-use editor::{CompletionState, EditorTools, SourcePositions, SyntaxCache, SyntaxKind};
+use editor::{CompletionState, EditorTools, FoldRegion, Projection, SourcePositions, SyntaxCache, SyntaxKind};
 
 const PAD_VIEWPORT_SIZE: [f32; 2] = [1080.0, 760.0];
 const MIN_PAD_VIEWPORT_SIZE: [f32; 2] = [500.0, 380.0];
@@ -143,10 +143,12 @@ pub(crate) struct CalculationPadDialog {
     source_highlight: Option<SourceHighlight>,
     editor_tools: EditorTools,
     completion: CompletionState,
+    folds: FoldState,
     editor_tool_focus_pending: bool,
     selected_result: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
     active_source_line: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
     pending_result_scroll: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
+    deferred_projected_input: Option<DeferredProjectedInput>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
     examples_open: bool,
@@ -290,6 +292,12 @@ struct ResultScrollUpdate {
     state: egui::scroll_area::State,
 }
 
+struct DeferredProjectedInput {
+    host: PadHostIdentity,
+    basis: (DocumentIncarnation, DocumentId, u64),
+    events: Vec<egui::Event>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SourceNavigation {
     host: PadHostIdentity,
@@ -331,6 +339,11 @@ struct HostEffects {
     editor_tools: Option<EditorTools>,
     completion: Option<CompletionState>,
     completion_cursor: Option<egui::text::CCursorRange>,
+    folds: Option<FoldState>,
+    projection_state: Option<egui::widgets::text_edit::TextEditState>,
+    source_clipboard: Option<String>,
+    deferred_projected_input: Option<Vec<egui::Event>>,
+    projected_input_replayed: bool,
     editor_replacement: Option<String>,
     editor_navigation: Option<std::ops::Range<usize>>,
     editor_tool_focus: Option<egui::Id>,
@@ -348,6 +361,11 @@ struct HostEffects {
     focus_viewport: bool,
     embedded_root_layer: Option<egui::LayerId>,
     embedded_root_focused_id: Option<egui::Id>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct FoldState {
+    collapsed: Vec<LineId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -448,6 +466,11 @@ impl CalculationPadDialog {
             editor_tools: None,
             completion: None,
             completion_cursor: None,
+            folds: None,
+            projection_state: None,
+            source_clipboard: None,
+            deferred_projected_input: None,
+            projected_input_replayed: false,
             editor_replacement: None,
             editor_navigation: None,
             editor_tool_focus: None,
@@ -567,10 +590,12 @@ impl CalculationPadDialog {
             source_highlight: None,
             editor_tools: EditorTools::default(),
             completion: CompletionState::default(),
+            folds: FoldState::default(),
             editor_tool_focus_pending: false,
             selected_result: None,
             active_source_line: None,
             pending_result_scroll: None,
+            deferred_projected_input: None,
             open_chooser: false,
             saved_documents: Vec::new(),
             examples_open: false,
@@ -1168,8 +1193,11 @@ impl CalculationPadDialog {
                             completion.visible = false;
                             let caret = egui::widgets::text_edit::TextEditState::load(&child_ctx, egui::Id::new("calculation-pad-source"))
                                 .and_then(|state| state.cursor.char_range())
-                                .and_then(|range| self.session.source().and_then(|source| source.char_indices()
-                                    .map(|(offset, _)| offset).chain(std::iter::once(source.len())).nth(range.primary.index.0)));
+                                .and_then(|range| self.session.source().and_then(|source| {
+                                    let projection = self.fold_projection(source, &self.folds).1;
+                                    projection.byte_at_character(range.primary.index.0)
+                                        .and_then(|byte| projection.source_byte(byte))
+                                }));
                             completion.dismissed = self.session.revision().zip(caret);
                             effects.completion = Some(completion);
                         }
@@ -1601,6 +1629,15 @@ impl CalculationPadDialog {
         if source_focus_allowed && self.focus_source {
             effects.source_focus_requested = true;
         }
+        if actions_allowed && self.session.pending_transition().is_none()
+            && let Some(pending) = self.deferred_projected_input.as_ref()
+            && pending.host == identity
+            && Some(pending.basis) == effects.document_basis
+            && ui.memory(|memory| memory.has_focus(editor_id))
+        {
+            ui.input_mut(|input| { input.events.splice(0..0, pending.events.clone()); });
+            effects.projected_input_replayed = true;
+        }
         self.clear_text_edit_undoer(ctx, editor_id);
         ui.add_enabled_ui(actions_allowed, |ui| {
             egui::ScrollArea::vertical()
@@ -1617,6 +1654,7 @@ impl CalculationPadDialog {
                     self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects);
                     if tools != self.editor_tools { effects.editor_tools = Some(tools); }
                     let mut completion = effects.completion.clone().unwrap_or_else(|| self.completion.clone());
+                    let mut folds = self.folds.clone();
                     let mut staged_save_as_name = self.save_as_name.clone();
                     self.contents_ui(
                         ui,
@@ -1643,11 +1681,16 @@ impl CalculationPadDialog {
                         &mut effects.display_selection,
                         &mut completion,
                         &mut effects.completion_cursor,
+                        &mut folds,
+                        &mut effects.projection_state,
+                        &mut effects.source_clipboard,
+                        &mut effects.deferred_projected_input,
                         &mut effects.split_action,
                         identity,
                         viewport_id,
                     );
                     if completion != self.completion { effects.completion = Some(completion); }
+                    if folds != self.folds { effects.folds = Some(folds); }
                     if staged_save_as_name != self.save_as_name {
                         effects.save_as_name = Some(staged_save_as_name);
                     }
@@ -1930,6 +1973,18 @@ impl CalculationPadDialog {
             .zip(self.session.current_id())
             .zip(self.session.revision())
             .map(|((incarnation, document), revision)| (incarnation, document, revision));
+        // A pending batch gets exactly one retained opportunity on its owning host.
+        if self.deferred_projected_input.is_some() {
+            self.deferred_projected_input = None;
+        }
+        if !host.close_requested && !host.native_close_requested && host.host_request.is_none()
+            && self.session.pending_transition().is_none()
+            && host.document_basis == current_basis
+            && let (Some(events), Some(basis)) = (host.deferred_projected_input.take(), current_basis)
+        {
+            self.deferred_projected_input = Some(DeferredProjectedInput { host: host.identity, basis, events });
+            ctx.request_repaint_of(host.viewport_id);
+        }
         if host.document_basis != current_basis {
             host.edited_source = None;
             host.editor_history_action = None;
@@ -1943,6 +1998,9 @@ impl CalculationPadDialog {
             host.editor_tools = None;
             host.completion = None;
             host.completion_cursor = None;
+            host.folds = None;
+            host.projection_state = None;
+            host.source_clipboard = None;
             host.editor_replacement = None;
             host.editor_navigation = None;
             host.editor_tool_focus = None;
@@ -2004,6 +2062,15 @@ impl CalculationPadDialog {
         if let Some(name) = host.save_as_name.take() {
             self.save_as_name = name;
         }
+        let history_caret = if host.editor_history_action.is_some() && !self.folds.collapsed.is_empty() {
+            host.source_editor_id.and_then(|id| {
+                let state = egui::widgets::text_edit::TextEditState::load(ctx, id)?;
+                let selection = state.cursor.char_range()?;
+                let source = self.session.source()?;
+                let projection = self.fold_projection(source, &self.folds).1;
+                Some((id, state, projection.source_character(source, selection.primary.index.0)?, projection.source_character(source, selection.secondary.index.0)?))
+            })
+        } else { None };
         match host.editor_history_action {
             Some(true) => {
                 self.session.undo();
@@ -2015,6 +2082,17 @@ impl CalculationPadDialog {
             }
             None => {}
         }
+        if let Some((id, mut state, primary, secondary)) = history_caret
+            && let Some(source) = self.session.source()
+        {
+            self.folds.collapsed.clear();
+            let end = source.chars().count();
+            let mut selection = state.cursor.char_range().unwrap_or_default();
+            selection.primary.index = primary.min(end).into();
+            selection.secondary.index = secondary.min(end).into();
+            state.cursor.set_char_range(Some(selection));
+            state.store(ctx, id);
+        }
         if accepted_source_or_history {
             self.source_highlight = None;
             self.dependency_navigation = None;
@@ -2024,6 +2102,39 @@ impl CalculationPadDialog {
             self.schedule_recovery_snapshot(ctx);
         }
         if let Some(completion) = host.completion.take() { self.completion = completion; }
+        if let Some(folds) = host.folds.take()
+            && !host.close_requested && !host.native_close_requested && host.host_request.is_none()
+            && let (Some(editor_id), Some(source)) = (host.source_editor_id, self.session.source())
+        {
+            let (_, old_projection) = self.fold_projection(source, &self.folds);
+            let (_, next_projection) = self.fold_projection(source, &folds);
+            if !accepted_source_or_history && host.projection_state.is_none()
+                && let Some(mut state) = egui::widgets::text_edit::TextEditState::load(ctx, editor_id)
+                && let Some(range) = state.cursor.char_range()
+                && let (Some(primary), Some(secondary)) = (
+                    old_projection.source_character(source, range.primary.index.0),
+                    old_projection.source_character(source, range.secondary.index.0),
+                )
+                && let (Some(primary), Some(secondary)) = (
+                    next_projection.visible_character_clamped(source, primary),
+                    next_projection.visible_character_clamped(source, secondary),
+                )
+            {
+                let mut mapped = range;
+                mapped.primary.index = primary.into();
+                mapped.secondary.index = secondary.into();
+                state.cursor.set_char_range(Some(mapped));
+                state.store(ctx, editor_id);
+            }
+            self.folds = folds;
+            ctx.request_repaint_of(host.viewport_id);
+        }
+        if let Some(state) = host.projection_state.take()
+            && !host.close_requested && !host.native_close_requested && host.host_request.is_none()
+            && let Some(editor_id) = host.source_editor_id
+        {
+            state.store(ctx, editor_id);
+        }
         if let Some(tools) = host.editor_tools.take() {
             self.editor_tools = tools;
             if !self.editor_tools.open { self.editor_tool_focus_pending = false; }
@@ -2119,6 +2230,7 @@ impl CalculationPadDialog {
         if before_document != after_document {
             self.completion = CompletionState::default();
             self.editor_tools = EditorTools::default();
+            self.folds.collapsed.clear();
             self.selected_result = None;
             self.active_source_line = None;
             self.pending_result_scroll = None;
@@ -2533,6 +2645,13 @@ impl CalculationPadDialog {
                 }
             }
         }
+        if let Some(text) = host.source_clipboard.take()
+            && host.document_basis == current_basis
+            && !host.close_requested && !host.native_close_requested && !host_request_requested
+            && !transition_intent
+        {
+            delivered.push(CalculationPadDialogEffect::CopyText(text));
+        }
 
         if !self.open {
             super::utility_host::remember_presentation(ctx, calculation_pad_tool_key(), host.identity.host);
@@ -2795,6 +2914,15 @@ impl CalculationPadDialog {
         {
             return false;
         }
+        if let Some(source) = self.session.source() {
+            let regions = editor::fold_regions(source);
+            let ids = self.session.line_ids().unwrap_or_default();
+            let target = request.target();
+            self.folds.collapsed.retain(|id| !regions.iter().any(|region| {
+                ids.get(region.header) == Some(id)
+                    && region.hidden.start <= target.end && target.start < region.hidden.end
+            }));
+        }
         match self.session.apply_inspector_insert(request) {
             Ok(changed) => {
                 if changed {
@@ -2887,6 +3015,10 @@ impl CalculationPadDialog {
         display_selection: &mut Option<egui::text::CCursorRange>,
         completion: &mut CompletionState,
         completion_cursor: &mut Option<egui::text::CCursorRange>,
+        folds: &mut FoldState,
+        projection_state: &mut Option<egui::widgets::text_edit::TextEditState>,
+        source_clipboard: &mut Option<String>,
+        deferred_projected_input: &mut Option<Vec<egui::Event>>,
         split_action: &mut Option<SplitAction>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
@@ -3032,6 +3164,10 @@ impl CalculationPadDialog {
                             display_selection,
                             completion,
                             completion_cursor,
+                            folds,
+                            projection_state,
+                            source_clipboard,
+                            deferred_projected_input,
                         );
                     },
                 );
@@ -3083,6 +3219,10 @@ impl CalculationPadDialog {
                 display_selection,
                 completion,
                 completion_cursor,
+                folds,
+                projection_state,
+                source_clipboard,
+                deferred_projected_input,
             );
             let response = splitter(ui, orientation, available_width.max(0.0));
             #[cfg(test)]
@@ -3261,6 +3401,18 @@ impl CalculationPadDialog {
         }
     }
 
+    fn fold_projection(&self, source: &str, folds: &FoldState) -> (Vec<FoldRegion>, Projection) {
+        let regions = editor::fold_regions(source);
+        let ids = self.session.line_ids().unwrap_or_default();
+        let hidden = regions.iter().filter_map(|region| {
+            ids.get(region.header)
+                .filter(|id| folds.collapsed.contains(id))
+                .map(|_| region.hidden.clone())
+        }).collect::<Vec<_>>();
+        let projection = Projection::new(source, &hidden);
+        (regions, projection)
+    }
+
     fn editor_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -3278,11 +3430,177 @@ impl CalculationPadDialog {
         display_selection: &mut Option<egui::text::CCursorRange>,
         completion: &mut CompletionState,
         completion_cursor: &mut Option<egui::text::CCursorRange>,
+        folds: &mut FoldState,
+        projection_state: &mut Option<egui::widgets::text_edit::TextEditState>,
+        source_clipboard: &mut Option<String>,
+        deferred_projected_input: &mut Option<Vec<egui::Event>>,
     ) {
-        let editor_selection = ui.memory(|memory| memory.has_focus(editor_id)).then(|| {
-            egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+        let (regions, mut projection) = self.fold_projection(source, &self.folds);
+        // Place the pointer against the layout the user saw. Process later keyboard
+        // events only after that pointer placement has been retained.
+        if authorized_pass && !self.folds.collapsed.is_empty() {
+            let editor_rect = ui.ctx().read_response(editor_id).map(|response| response.rect);
+            let deferred = ui.input_mut(|input| {
+                let last_pointer = input.events.iter().rposition(|event| matches!(event,
+                    egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }))?;
+                let points_at_editor = input.events[..=last_pointer].iter().rev().find_map(|event| match event {
+                    egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => Some(*pos),
+                    _ => None,
+                }).is_some_and(|pos| editor_rect.is_some_and(|rect| rect.contains(pos)));
+                if !points_at_editor { return None; }
+                let first_edit = input.events.iter().position(|event| matches!(event,
+                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }))?;
+                if first_edit <= last_pointer {
+                    // Interleaved pointer and edits cannot be replayed at the same
+                    // coordinates after a layout change. Leave pointer placement safe.
+                    input.events.retain(|event| !matches!(event,
+                        egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                        | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+                    return None;
+                }
+                Some(input.events.split_off(last_pointer + 1))
+            });
+            if let Some(events) = deferred { *deferred_projected_input = Some(events); }
+        }
+        let clipboard_requested = ui.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Copy | egui::Event::Cut)));
+        let original_state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id);
+        let persistent_selection = original_state.as_ref().and_then(|state| state.cursor.char_range());
+        let mut editor_selection = ui.memory(|memory| memory.has_focus(editor_id)).then(|| {
+            original_state.clone()
                 .and_then(|state| state.cursor.char_range())
         }).flatten();
+        let mut expanded = false;
+        if authorized_pass && !self.folds.collapsed.is_empty()
+            && let Some(selection) = editor_selection
+            && let (Some(primary), Some(secondary)) = (
+                projection.byte_at_character(selection.primary.index.0),
+                projection.byte_at_character(selection.secondary.index.0),
+            )
+        {
+            let low = primary.min(secondary);
+            let high = primary.max(secondary);
+            let events = ui.input(|input| input.events.clone());
+            let select_all = events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: egui::Key::A, pressed: true, modifiers, .. } if modifiers.command));
+            let selection_has_newline = projection.visible.get(low..high).is_some_and(|text| text.contains('\n'));
+            let changes_lines = events.iter().any(|event| match event {
+                egui::Event::Paste(text) | egui::Event::Text(text) => text.contains(['\n', '\r']),
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } =>
+                    selection_has_newline || projection.visible.get(..low).is_some_and(|text| text.ends_with('\n')),
+                egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } =>
+                    selection_has_newline || projection.visible.get(high..).is_some_and(|text| text.starts_with('\n')),
+                egui::Event::Cut => selection_has_newline,
+                _ => false,
+            });
+            let modifying = events.iter().any(|event| matches!(event,
+                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+            let pointer_and_edit = modifying && events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
+            let edit_or_copy = events.iter().any(|event| matches!(event,
+                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. }));
+            let mixed_navigation = edit_or_copy && events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown | egui::Key::Home | egui::Key::End, pressed: true, .. }));
+            let gaps = projection.gaps.iter().filter(|(at, _)| {
+                select_all || changes_lines || pointer_and_edit || mixed_navigation || (modifying && low <= *at && *at <= high)
+            }).map(|(_, range)| range.clone()).collect::<Vec<_>>();
+            if !gaps.is_empty() {
+                let ids = self.session.line_ids().unwrap_or_default();
+                folds.collapsed.retain(|id| !regions.iter().any(|region| {
+                    ids.get(region.header) == Some(id)
+                        && gaps.iter().any(|gap| region.hidden.start < gap.end && gap.start < region.hidden.end)
+                }));
+                let next = self.fold_projection(source, folds).1;
+                if let Some(mut state) = original_state.clone()
+                    && let (Some(a), Some(b)) = (
+                        projection.source_character(source, selection.primary.index.0),
+                        projection.source_character(source, selection.secondary.index.0),
+                    )
+                    && let (Some(a), Some(b)) = (
+                        next.visible_character_clamped(source, a),
+                        next.visible_character_clamped(source, b),
+                    )
+                {
+                    let mut mapped = selection;
+                    mapped.primary.index = a.into();
+                    mapped.secondary.index = b.into();
+                    state.cursor.set_char_range(Some(mapped));
+                    state.store(ui.ctx(), editor_id);
+                    editor_selection = Some(mapped);
+                    projection = next;
+                    expanded = true;
+                }
+            }
+        }
+        if authorized_pass && editor_selection.is_none() && !self.folds.collapsed.is_empty() {
+            let (pointer, edit) = ui.input(|input| (
+                input.events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. })),
+                input.events.iter().any(|event| matches!(event, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. })),
+            ));
+            if pointer && edit {
+                folds.collapsed.clear();
+                let next = self.fold_projection(source, folds).1;
+                if let (Some(selection), Some(mut state)) = (persistent_selection, original_state.clone())
+                    && let (Some(a), Some(b)) = (
+                        projection.source_character(source, selection.primary.index.0),
+                        projection.source_character(source, selection.secondary.index.0),
+                    )
+                    && let (Some(a), Some(b)) = (
+                        next.visible_character_clamped(source, a),
+                        next.visible_character_clamped(source, b),
+                    )
+                {
+                    let mut mapped = selection;
+                    mapped.primary.index = a.into();
+                    mapped.secondary.index = b.into();
+                    state.cursor.set_char_range(Some(mapped));
+                    state.store(ui.ctx(), editor_id);
+                    editor_selection = Some(mapped);
+                }
+                projection = next;
+                expanded = true;
+            }
+        }
+        if authorized_pass
+            && let Some(pending) = self.dependency_navigation
+            && pending.host == self.host_identity()
+            && self.session.revision() == Some(pending.revision)
+            && let Some(location) = self.resolve_live_source(pending.navigation)
+        {
+            let target = pending.selection.map_or(location.source_range.start, |selection| selection.0);
+            let ids = self.session.line_ids().unwrap_or_default();
+            let before = folds.collapsed.len();
+            folds.collapsed.retain(|id| !regions.iter().any(|region| {
+                ids.get(region.header) == Some(id)
+                    && region.hidden.start <= target && target < region.hidden.end
+            }));
+            if folds.collapsed.len() != before {
+                let next = self.fold_projection(source, folds).1;
+                if let (Some(selection), Some(mut state)) = (editor_selection, original_state.clone())
+                    && let (Some(a), Some(b)) = (
+                        projection.source_character(source, selection.primary.index.0),
+                        projection.source_character(source, selection.secondary.index.0),
+                    )
+                    && let (Some(a), Some(b)) = (
+                        next.visible_character_clamped(source, a),
+                        next.visible_character_clamped(source, b),
+                    )
+                {
+                    let mut mapped = selection;
+                    mapped.primary.index = a.into();
+                    mapped.secondary.index = b.into();
+                    state.cursor.set_char_range(Some(mapped));
+                    state.store(ui.ctx(), editor_id);
+                    editor_selection = Some(mapped);
+                }
+                projection = next;
+                expanded = true;
+            }
+        }
+        let mut visible_source = projection.visible.clone();
         ui.horizontal_wrapped(|ui| {
             ui.heading("Source");
             let mut preferences = display_preferences.unwrap_or(self.display_preferences);
@@ -3294,6 +3612,25 @@ impl CalculationPadDialog {
             ui.menu_button("Editor options", |ui| {
                 assistance_changed |= ui.checkbox(&mut preferences.completion, "Completions").changed();
                 assistance_changed |= ui.checkbox(&mut preferences.parameter_hints, "Parameter hints").changed();
+                assistance_changed |= ui.checkbox(&mut preferences.auto_close_delimiters, "Auto-close delimiters").changed();
+                if !regions.is_empty() {
+                    ui.separator();
+                    for region in &regions {
+                        if let Some(id) = self.session.line_id(region.header) {
+                            let mut closed = folds.collapsed.contains(&id);
+                            let text = source.lines().nth(region.header).unwrap_or("").trim();
+                            if ui.checkbox(&mut closed, format!("Fold line {}: {text}", region.header + 1)).changed() {
+                                folds.collapsed.retain(|existing| *existing != id);
+                                let selection_overlaps = editor_selection.or(persistent_selection).and_then(|selection| {
+                                    let a = projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte))?;
+                                    let b = projection.byte_at_character(selection.secondary.index.0).and_then(|byte| projection.source_byte(byte))?;
+                                    Some(a.min(b) < region.hidden.end && a.max(b) >= region.hidden.start)
+                                }).unwrap_or(false);
+                                if closed && !selection_overlaps { folds.collapsed.push(id); }
+                            }
+                        }
+                    }
+                }
             });
             if numbers.changed() || wrap.changed() || assistance_changed {
                 *display_preferences = Some(preferences);
@@ -3301,8 +3638,9 @@ impl CalculationPadDialog {
         });
         let preferences = display_preferences.unwrap_or(self.display_preferences);
         let focused = authorized_pass && ui.memory(|memory| memory.has_focus(editor_id));
-        let caret = editor_selection.and_then(|range| source.char_indices().map(|(offset, _)| offset)
-            .chain(std::iter::once(source.len())).nth(range.primary.index.0));
+        let caret = editor_selection.and_then(|range| projection.source_character(source, range.primary.index.0))
+            .and_then(|index| source.char_indices().map(|(offset, _)| offset)
+            .chain(std::iter::once(source.len())).nth(index));
         let revision = self.session.revision().unwrap_or_default();
         let candidates = if focused && preferences.completion && !self.editor_tools.open {
             caret.map_or_else(Vec::new, |caret| editor::suggestions(source, caret))
@@ -3329,6 +3667,98 @@ impl CalculationPadDialog {
             } else {
                 accept = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
                     || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            }
+        }
+        let mut smart_cursor = None;
+        let mut smart_source_cursor = None;
+        if authorized_pass && focused && preferences.auto_close_delimiters && !completion.visible
+            && let Some(selection) = editor_selection
+            && let (Some(primary), Some(secondary)) = (
+                projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte)),
+                projection.byte_at_character(selection.secondary.index.0).and_then(|byte| projection.source_byte(byte)),
+            )
+        {
+            let range = primary.min(secondary)..primary.max(secondary);
+            let typed = ui.input(|input| {
+                if input.events.iter().any(|event| match event {
+                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => true,
+                    egui::Event::Text(text) => text.chars().count() != 1,
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => modifiers.command
+                        || matches!(key, egui::Key::Backspace | egui::Key::Delete | egui::Key::ArrowLeft
+                            | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown
+                            | egui::Key::Home | egui::Key::End | egui::Key::Enter | egui::Key::Tab),
+                    _ => false,
+                }) {
+                    return None;
+                }
+                let mut text = input.events.iter().filter_map(|event| match event {
+                    egui::Event::Text(text) if text.chars().count() == 1 => text.chars().next(),
+                    _ => None,
+                });
+                let character = text.next()?;
+                text.next().is_none().then_some(character)
+            });
+            if let Some(character) = typed {
+                let action = if matches!(character, '(' | '[') {
+                    editor::smart_edit(source, range.clone(), character).map(|(updated, cursor)| (Some(updated), cursor))
+                } else if range.is_empty() && matches!(character, ')' | ']')
+                    && source[range.start..].starts_with(character)
+                {
+                    Some((None, range.start + character.len_utf8()))
+                } else { None };
+                if let Some((updated, cursor)) = action {
+                    ui.input_mut(|input| input.events.retain(|event| !matches!(event, egui::Event::Text(text) if text.chars().eq(std::iter::once(character)))));
+                    if let Some(updated) = updated {
+                        *source = updated;
+                        *edited_source = Some(source.clone());
+                    }
+                    projection = self.fold_projection(source, folds).1;
+                    visible_source = projection.visible.clone();
+                    smart_cursor = SourcePositions::new(source).character(cursor)
+                        .and_then(|index| projection.visible_character_clamped(source, index));
+                    smart_source_cursor = Some(cursor);
+                }
+            }
+        }
+        if authorized_pass && focused && !completion.visible && !accept && smart_cursor.is_none()
+            && let Some(selection) = editor_selection
+            && let (Some(primary), Some(secondary)) = (
+                projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte)),
+                projection.byte_at_character(selection.secondary.index.0).and_then(|byte| projection.source_byte(byte)),
+            )
+        {
+            let range = primary.min(secondary)..primary.max(secondary);
+            let line_start = source[..range.start].rfind('\n').map_or(0, |offset| offset + 1);
+            let line = &source[line_start..range.start];
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            let add_level = crate::calculation_pad::editor_loop_header(line.trim());
+            if (indent > 0 || add_level)
+                && !ui.input(|input| input.events.iter().any(|event| match event {
+                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::Text(_) | egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => true,
+                    egui::Event::Key { key, pressed: true, modifiers, .. } =>
+                        *key != egui::Key::Enter || *modifiers != egui::Modifiers::NONE,
+                    _ => false,
+                }))
+                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            {
+                let newline = if source.contains("\r\n") { "\r\n" } else { "\n" };
+                let insertion = format!("{newline}{}", " ".repeat(indent + usize::from(add_level) * 4));
+                let mut updated = source.clone();
+                updated.replace_range(range.clone(), &insertion);
+                let cursor = range.start + insertion.len();
+                if updated.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES
+                    || updated.bytes().filter(|byte| *byte == b'\n').count() + 1 > crate::calculation_pad::MAX_SOURCE_LINES
+                {
+                    *edited_source = Some(updated);
+                } else {
+                    *source = updated;
+                    *edited_source = Some(source.clone());
+                    projection = self.fold_projection(source, folds).1;
+                    visible_source = projection.visible.clone();
+                    smart_cursor = SourcePositions::new(source).character(cursor)
+                        .and_then(|index| projection.visible_character_clamped(source, index));
+                    smart_source_cursor = Some(cursor);
+                }
             }
         }
         let navigation = self.dependency_navigation.and_then(|pending| {
@@ -3408,14 +3838,26 @@ impl CalculationPadDialog {
                         }
                         ui.fonts_mut(|fonts| fonts.layout_job(job))
                     };
-                    egui::TextEdit::multiline(source)
+                    let output_start = ui.ctx().output(|output| output.commands.len());
+                    let edit = egui::TextEdit::multiline(&mut visible_source)
                         .id(editor_id)
                         .desired_rows(12)
                         .desired_width(viewport_width)
                         .font(egui::TextStyle::Monospace)
                         .layouter(&mut layouter)
                         .hint_text("total = 2 + 3\nr1 * 4")
-                        .show(ui)
+                        .show(ui);
+                    ui.ctx().output_mut(|output| {
+                        let mut index = output_start.min(output.commands.len());
+                        while index < output.commands.len() {
+                            if matches!(output.commands[index], egui::OutputCommand::CopyText(_)) {
+                                if let egui::OutputCommand::CopyText(text) = output.commands.remove(index) {
+                                    *source_clipboard = Some(text);
+                                }
+                            } else { index += 1; }
+                        }
+                    });
+                    edit
                 });
                 if let Some(gutter) = gutter {
                     let clip = egui::Rect::from_min_max(
@@ -3423,7 +3865,8 @@ impl CalculationPadDialog {
                         egui::pos2(gutter.right(), scroll.inner_rect.bottom()),
                     ).intersect(ui.clip_rect());
                     let painter = ui.painter().with_clip_rect(clip);
-                    for (line_number, y) in physical_line_positions(&scroll.inner.galley, scroll.inner.galley_pos.y) {
+                    for (visible_line, y) in physical_line_positions(&scroll.inner.galley, scroll.inner.galley_pos.y) {
+                        let line_number = projection.visible_lines.get(visible_line - 1).copied().unwrap_or(visible_line - 1) + 1;
                         painter.text(
                             egui::pos2(gutter.right() - 4.0, y),
                             egui::Align2::RIGHT_TOP, line_number.to_string(), font.clone(),
@@ -3434,6 +3877,21 @@ impl CalculationPadDialog {
                 scroll
             }).inner
         }).inner;
+        if scroll.inner.response.changed() {
+            if visible_source.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES {
+                *edited_source = Some(visible_source.clone());
+            } else if let Some(updated) = projection.apply_edit(source, &visible_source) {
+                if updated.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES
+                    || updated.bytes().filter(|byte| *byte == b'\n').count() + 1 > crate::calculation_pad::MAX_SOURCE_LINES
+                {
+                    *edited_source = Some(updated);
+                } else {
+                    *source = updated;
+                    *edited_source = Some(source.clone());
+                    projection = self.fold_projection(source, folds).1;
+                }
+            }
+        }
         #[cfg(test)]
         self.test_highlight_rows.clear();
         if let Some(highlight) = self.source_highlight
@@ -3453,7 +3911,7 @@ impl CalculationPadDialog {
             let painter = ui.painter().with_clip_rect(clip);
             let mut physical_line = 0;
             for row in &scroll.inner.galley.rows {
-                if physical_line == location.line_index {
+                if projection.visible_lines.get(physical_line) == Some(&location.line_index) {
                     let top = scroll.inner.galley_pos.y + row.pos.y;
                     let rect = egui::Rect::from_min_max(
                         egui::pos2(clip.left(), top),
@@ -3475,7 +3933,7 @@ impl CalculationPadDialog {
             let painter = ui.painter().with_clip_rect(clip);
             let mut physical_line = 0;
             for row in &scroll.inner.galley.rows {
-                if physical_line == location.line_index {
+                if projection.visible_lines.get(physical_line) == Some(&location.line_index) {
                     let top = scroll.inner.galley_pos.y + row.pos.y;
                     let rect = egui::Rect::from_min_max(
                         egui::pos2(clip.left(), top),
@@ -3491,8 +3949,8 @@ impl CalculationPadDialog {
             && let Some(range) = self.session.revision().and_then(|revision| self.editor_tools.current_match(revision))
             && source.get(range.clone()).is_some()
             && let (Some(start), Some(end)) = (
-                SourcePositions::new(source).character(range.start),
-                SourcePositions::new(source).character(range.end),
+                SourcePositions::new(source).character(range.start).and_then(|char| projection.visible_character(source, char)),
+                SourcePositions::new(source).character(range.end).and_then(|char| projection.visible_character(source, char)),
             )
         {
             let galley = &scroll.inner.galley;
@@ -3514,13 +3972,35 @@ impl CalculationPadDialog {
                 }
             }
         }
+        if focused && !scroll.inner.response.changed()
+            && let Some(caret) = caret
+            && let Some((left, right)) = editor::matching_delimiters(source, caret)
+        {
+            let painter = ui.painter().with_clip_rect(scroll.inner_rect.intersect(scroll.inner.text_clip_rect));
+            for byte in [left, right] {
+                if let Some(index) = SourcePositions::new(source).character(byte)
+                    .and_then(|index| projection.visible_character(source, index))
+                {
+                    let start = scroll.inner.galley.pos_from_cursor(egui::text::CCursor::new(index));
+                    let end = scroll.inner.galley.pos_from_cursor(egui::text::CCursor::new(index + 1));
+                    let rect = egui::Rect::from_min_max(
+                        scroll.inner.galley_pos + start.min.to_vec2(),
+                        scroll.inner.galley_pos + egui::vec2(end.min.x.max(start.min.x + 3.0), start.max.y),
+                    );
+                    painter.rect_stroke(rect, 1.0, egui::Stroke::new(1.0, ui.visuals().selection.bg_fill), egui::StrokeKind::Inside);
+                }
+            }
+        }
         if let Some((nav, location, result_navigation, selection, focus_source)) = navigation
             && !scroll.inner.response.changed()
             && let Some(revision) = self.session.revision()
         {
             let selected = selection.unwrap_or((location.source_range.start, location.source_range.end));
             let positions = SourcePositions::new(source);
-            let (Some(start), Some(end)) = (positions.character(selected.0), positions.character(selected.1)) else { return; };
+            let (Some(start), Some(end)) = (
+                positions.character(selected.0).and_then(|char| projection.visible_character(source, char)),
+                positions.character(selected.1).and_then(|char| projection.visible_character(source, char)),
+            ) else { return; };
             let mut state = scroll.inner.state.clone();
             let range = if result_navigation && selection.is_none() {
                 egui::text::CCursorRange::one(egui::text::CCursor::new(start))
@@ -3586,13 +4066,8 @@ impl CalculationPadDialog {
             if let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
                 .and_then(|state| state.cursor.char_range())
             {
-                let to_byte = |index: usize| {
-                    source
-                        .char_indices()
-                        .map(|(offset, _)| offset)
-                        .chain(std::iter::once(source.len()))
-                        .nth(index)
-                };
+                let to_byte = |index: usize| projection.byte_at_character(index)
+                    .and_then(|byte| projection.source_byte(byte));
                 if let (Some(a), Some(b)) = (
                     to_byte(range.primary.index.into()),
                     to_byte(range.secondary.index.into()),
@@ -3632,10 +4107,29 @@ impl CalculationPadDialog {
                     }
                 });
         }
+        if accept && let Some(selection) = editor_selection
+            && let (Some(a), Some(b)) = (
+                projection.byte_at_character(selection.primary.index.0),
+                projection.byte_at_character(selection.secondary.index.0),
+            )
+        {
+            let gaps = projection.gaps.iter()
+                .filter(|(at, _)| a != b && a.min(b) <= *at && *at <= a.max(b))
+                .map(|(_, range)| range.clone()).collect::<Vec<_>>();
+            if !gaps.is_empty() {
+                let ids = self.session.line_ids().unwrap_or_default();
+                folds.collapsed.retain(|id| !regions.iter().any(|region| {
+                    ids.get(region.header) == Some(id)
+                        && gaps.iter().any(|gap| region.hidden.start < gap.end && gap.start < region.hidden.end)
+                }));
+                completion.visible = false;
+                accept = false;
+            }
+        }
         if accept && !response.changed() && let Some(candidate) = candidates.get(completion.selected) {
             let replacement = if let Some(range) = editor_selection.filter(|range| range.primary.index != range.secondary.index) {
-                let to_byte = |index| source.char_indices().map(|(offset, _)| offset)
-                    .chain(std::iter::once(source.len())).nth(index);
+                let to_byte = |index| projection.byte_at_character(index)
+                    .and_then(|byte| projection.source_byte(byte));
                 match (to_byte(range.primary.index.0), to_byte(range.secondary.index.0)) {
                     (Some(a), Some(b)) => a.min(b)..a.max(b),
                     _ => candidate.replacement.clone(),
@@ -3643,7 +4137,8 @@ impl CalculationPadDialog {
             } else { candidate.replacement.clone() };
             let cursor = replacement.start + candidate.cursor - candidate.replacement.start;
             source.replace_range(replacement, &candidate.insertion);
-            let character = source[..cursor].chars().count();
+            let character = self.fold_projection(source, folds).1
+                .visible_character_clamped(source, source[..cursor].chars().count()).unwrap_or(0);
             *completion_cursor = Some(egui::text::CCursorRange::one(egui::text::CCursor::new(character)));
             *inspector_caret = None;
             *editor_primary_caret = None;
@@ -3651,8 +4146,17 @@ impl CalculationPadDialog {
             completion.visible = false;
             completion.dismissed = Some((revision.saturating_add(1), cursor));
         }
-        if response.changed() {
-            *edited_source = Some(source.clone());
+        if expanded || smart_cursor.is_some() || clipboard_requested || deferred_projected_input.is_some() {
+            let mut state = scroll.inner.state.clone();
+            if let Some(cursor) = smart_cursor {
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+            }
+            *projection_state = Some(state);
+            if let Some(state) = original_state { state.store(ui.ctx(), editor_id); }
+        }
+        if let Some(cursor) = smart_source_cursor {
+            *inspector_caret = Some(cursor..cursor);
+            *editor_primary_caret = Some(cursor);
         }
         if display_preferences.is_some()
             && !response.changed()
@@ -4100,9 +4604,11 @@ impl CalculationPadDialog {
 
     fn reset_transient_ui(&mut self) {
         self.dependency_navigation = None;
+        self.deferred_projected_input = None;
         self.split_preview = None;
         self.source_highlight = None;
         self.editor_tools = EditorTools::default();
+        self.folds.collapsed.clear();
         self.editor_tool_focus_pending = false;
         self.selected_result = None;
         self.active_source_line = None;
@@ -4527,6 +5033,95 @@ mod tests {
         frame(&mut dialog, &ctx, size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         assert!(!dialog.editor_tools.open);
         assert!(dialog.open);
+    }
+
+    #[test]
+    fn folded_editor_edits_visible_text_and_select_all_reveals_full_source() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("# region values\n雪 = 2\n# endregion\ntotal = 3");
+        dialog.folds.collapsed.push(dialog.session.line_id(0).unwrap());
+        let size = egui::vec2(1000.0, 700.0);
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let editor_id = dialog.test_editor_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
+        let visible_len = "# region values\ntotal = 3".chars().count();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(visible_len))));
+        state.store(&ctx, editor_id);
+        frame(&mut dialog, &ctx, size, vec![egui::Event::Text("X".into())]);
+        assert!(dialog.test_source().unwrap().contains("雪 = 2\n# endregion"));
+        assert!(dialog.test_source().unwrap().ends_with("total = 3X"));
+        assert_eq!(dialog.folds.collapsed.len(), 1);
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+        assert!(dialog.folds.collapsed.is_empty());
+        let selection = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap()
+            .cursor.char_range().unwrap().as_sorted_char_range();
+        assert_eq!(selection.start.0, 0);
+        assert_eq!(selection.end.0, dialog.test_source().unwrap().chars().count());
+        let expected = dialog.test_source().unwrap().to_owned();
+        let effects = frame_effects(&mut dialog, &ctx, size, vec![egui::Event::Copy]);
+        assert!(effects.contains(&CalculationPadDialogEffect::CopyText(expected)));
+    }
+
+    #[test]
+    fn smart_edit_wraps_and_skips_closing_delimiter() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("雪");
+        dialog.display_preferences.auto_close_delimiters = true;
+        let size = egui::vec2(1000.0, 700.0);
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let editor_id = dialog.test_editor_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(1))));
+        state.store(&ctx, editor_id);
+        frame(&mut dialog, &ctx, size, vec![egui::Event::Text("(".into())]);
+        assert_eq!(dialog.test_source(), Some("(雪)"));
+        frame(&mut dialog, &ctx, size, vec![egui::Event::Text(")".into())]);
+        assert_eq!(dialog.test_source(), Some("(雪)"));
+
+        dialog.test_replace_source("ab");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(2))));
+        state.store(&ctx, editor_id);
+        frame(&mut dialog, &ctx, size, vec![
+            egui::Event::Text("(".into()), key(egui::Key::Backspace, egui::Modifiers::NONE),
+        ]);
+        assert_eq!(dialog.test_source(), Some("ab"));
+    }
+
+    #[test]
+    fn discarded_source_copy_and_cut_do_not_publish_or_edit() {
+        for event in [egui::Event::Copy, egui::Event::Cut] {
+            let (_directory, _root, mut dialog) = fixture();
+            let ctx = egui::Context::default();
+            dialog.open();
+            dialog.test_replace_source("secret = 4");
+            let size = egui::vec2(1000.0, 700.0);
+            for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+            let editor_id = dialog.test_editor_id.unwrap();
+            ctx.memory_mut(|memory| memory.request_focus(editor_id));
+            let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0), egui::text::CCursor::new(10),
+            )));
+            let selection = state.cursor.char_range();
+            state.store(&ctx, editor_id);
+            let output = ctx.run_ui(input(size, vec![event]), |ui| {
+                let first = ui.ctx().current_pass_index() == 0;
+                dialog.show(ui.ctx(), first, true, true);
+                if first { ui.ctx().request_discard("source copy/cut retained-pass check"); }
+            });
+            assert!(!output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(_))));
+            assert!(!dialog.on_ui_frame_complete(&ctx).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(_))));
+            assert_eq!(dialog.test_source(), Some("secret = 4"));
+            assert_eq!(egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap().cursor.char_range(), selection);
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
