@@ -24,7 +24,7 @@
 | M5-A | Complete and pushed at `06ba8cfa9327c6adde4b1ed9effe5a26b6a6f320`. Final affected QR cases passed in the 46-test integration run. |
 | M6-A-R1 | Complete and pushed at `1d7bf67cc73c6865e6b04a1081cc57904b507faf`. Folded typing with passive pointer movement passed in both event orders. |
 | M6-A-R2 | Complete and pushed at `fe3ef8c381b771ecc7f82bec6fefb2584993c1dc`. Introduced Clippy warnings corrected. The 14 directly affected cases passed. |
-| M6-A | LIMITED. Follow-up passed UI-1, UI-4, UI-5, UI-7 and UI-8. UI-2, UI-3 and UI-6 retain the limits below. |
+| M6-A | LIMITED. Seven of eight Windows scenarios passed. UI-6 remains partial. |
 
 ## M1-A evidence
 
@@ -116,15 +116,39 @@ The follow-up rebuilt the pushed tip `2e265c91ab9dc3c5068f3e5b1b2c61b92c7c2f9f` 
 | Scenario | Outcome |
 | --- | --- |
 | UI-1 | Passed. The H2 script produced the expected results and source Undo/Redo. Pinning `answer` showed 120. Editing `unit_price` from 12.5 to 20 updated its source assignment and preserved both `count` assignments. The binding fixture produced 2, 2, 5, 2, 5. Programmer Inspector compared `r1` and `x` as 2 and 5. |
-| UI-2 | Partial. Variable completion appeared and Tab accepted it. Turned completion off in Editor options and confirmed its checkbox was cleared. The nested `range` hint identified `stop` in both dark and compact light profiles. Explicit suggestion dismissal and normal-key behavior with completion off were not verified. |
-| UI-3 | Partial. Folded a region and a loop and verified physical row numbers. Find Next revealed the hidden region match. Ctrl+G revealed the hidden loop body. Replace All was undone in one step, and the complete source was copied and pasted back with no placeholder. The diagnostic row was reached, but its source highlight was not confirmed. |
+| UI-2 | Passed in the closeout. Escape dismissal, completion-off keys, nested parameter hints and dark/light readability were exercised. |
+| UI-3 | Passed in the closeout. Direct and context-menu diagnostic navigation visibly highlighted line 3, and clicking a folded diagnostic visibly revealed and highlighted line 4. |
 | UI-4 | Passed. Showed input and watch panels, rejected an invalid numeric edit without changing source, saved a named Pad, opened a blank Pad, and reopened the saved document. Its selected input and named watch returned when the panels were shown. In the 640 × 460 profile, both `x` assignments were separately selectable by line label and Results remained reachable by scrolling. |
 | UI-5 | Passed. Verified Auto, fixed decimal, grouping, scientific and scalar percent display. The exact integer `9007199254740993` retained all digits, the unit remained attached and the vector stayed canonical. Pasting canonical and formatted scalar copies yielded `12345.1` and `1.23e6%` respectively. Format changes preserved the source. |
-| UI-6 | Partial. The nested-loop fixture hit the explicit work limit and a newer source revision replaced it. The newer Pad popped out and the launcher remained responsive. The earlier workload finished before it could be superseded while pending. The dirty detached close/reopen cycle was not completed. |
+| UI-6 | Partial. Deterministic worker checks passed. Native current-result recovery and launcher responsiveness were observed. In-flight supersession and the detached close decisions remain unverified. |
 | UI-7 | Passed. The H2 Mermaid fixture had four nodes and three edges. Explicit RL layout placed arrows right to left. Added a node visually, changed to BT, and verified upward arrows after Auto-layout. Undo restored the previous geometry and Redo reapplied BT. Saved, opened a blank draft, and reopened from Recent. Both comments survived and the exported Mermaid source matched the saved draft exactly. A legacy sequence diagram rendered Alice, Bob and the Hello message. |
 | UI-8 | Passed. Changed synthetic source and pasted back the exact copied bytes. Copy QR reported a successful image clipboard write. Save PNG wrote a 232 × 232 PNG, while cancel left no destination file. Changed correction to High and verified the same text, High selection and Advanced state after Pop Out → Dock. Popped out again, typed in the independent launcher query, and closed the native QR window. A fresh command opened a distinct window in the remembered presentation. Docking it showed an empty source and default Medium correction. Raster clipboard fidelity remains covered by the automated tests. |
 
 Evidence is under the task visualization directory `calc-scripting/ui-followup`. See `root-captures-r1/framebuffer-004.png` and `framebuffer-006.png` for RL/BT, `framebuffer-012.png` for the legacy preview, `bt-roundtrip.mld` and `diagram.mmd` for matched source, `qa-native-42.png` for QR export, `qr-final-captures/framebuffer-003.png` and `framebuffer-004.png` for retained and reset QR correction, and `calc-captures` and `compact-light-captures` for Calc. The follow-up used synthetic clipboard content only. Process receipts are in the sibling `ui-followup-process*` directories.
+
+## Windows acceptance closeout
+
+The closeout began at `b4e2592602b5deac23eb8a1b8362de56fff6c554`. Only the ledger differed from the source commit of the original executable. The targeted Escape correction is `7c8f7fe10c549531999031474ce2e48153d5160a`. Both builds used a disposable profile with Paste Sequence next/cancel shortcuts disabled and Remember last source off. Evidence paths below are relative to the task visualization directory `calc-scripting`. Normal dark and light rendering was exercised using the disposable profile across launches.
+
+| Subtest | Result | Fixture, input and observation |
+| --- | --- | --- |
+| UI-2A | PASS after fix | In `total = 20` / `tot`, Escape twice reproduced the close prompt in separate trials, with completion visible before each trial. After the fix, one Escape hid the `total` suggestion, kept source focus and unchanged text, and stayed dismissed across later frames. Left moved the caret and the suggestion returned. Before-fix `ui-closeout/assist/framebuffer-001.png`, `002` and `003`. Corrected before/dismissed/returned `ui-closeout/retest/framebuffer-001.png` through `003`. Docked and pop-out regression tests passed. |
+| UI-2B | PASS | With completion unchecked, added `to`, pressed Enter, typed `another_value = 5`, then entered a new `tot` and pressed Tab. Exact source selection showed Enter inserted a separate line and Tab moved focus without expanding `tot` or activating the launcher. Re-enabled completion, refocused Source and confirmed `total` returned. See `ui-closeout/assist/framebuffer-004.png` and `005`. |
+| UI-2C | PASS | With `result = sum(range(1, 10, 2))`, Left moved from the end to the surrounding `sum(values)` hint, then into `range` where moving between arguments changed `step` to `stop`. Disabled and re-enabled hints independently, verifying disappearance and return with source unchanged. Dark evidence `ui-closeout/assist/framebuffer-006.png` and `007`. Light editor evidence `ui-closeout/retest/framebuffer-001.png` and the prior compact-light nested hint `ui-followup/compact-light-captures/framebuffer-001.png`. |
+| UI-3A | PASS | `seed = 5`, `good = seed * 2`, `bad = missing_input + 1`, `final = seed + 1` produced `good = 10`, `final = 6` and the `r3` diagnostic. Clicking it visibly highlighted only physical line 3. See `ui-closeout/assist/framebuffer-008.png` and `009`. |
+| UI-3B | PASS | Right-clicked `r3`, chose Go to source, and captured line 3 highlighted with editor focus. Appended `typing_check = 9` successfully afterward. See `ui-closeout/assist/framebuffer-010.png` and `011`. |
+| UI-3C | PASS | Inserted `# region hidden` before `good` and `# endregion` before `final`. Folded the region, then clicked `r4`. The source expanded and highlighted physical line 4. Ctrl+G to previously hidden line 3 selected its result. Full source selection still matched the original script with no placeholder. See `ui-closeout/assist/framebuffer-012.png` through `015`. |
+| UI-6A | PASS | Nextest ran only `worker_cancels_old_work_and_coalesces_latest_pending_revision` and `worker_reports_panics_and_accepts_later_revisions`. Both passed in 0.066 seconds. The synchronized test cancels held work, coalesces the pending revision and checks completion eligibility. See `ui-closeout-worker-run/stderr.log`. |
+| UI-6B | UNVERIFIED in flight | The exact 1,000-by-1,000 nested `outer`/`inner` loop hit the explicit work limit before supersession could be observed. Replaced it with `fresh_marker = 777` / `fresh_marker`; both results belonged to the new source, shown as `7.77e4%` under the profile's percent display, with no old `total` shown. Pad used a native window and the launcher query remained editable. Full Pad Dock round trip not confirmed. See `ui-closeout/retest/framebuffer-004.png`. |
+| UI-6C | UNVERIFIED | Saved `total = 10` / `total` as Native Lifecycle Closeout, changed the first line to 20, confirmed dirty state, popped out and sent Windows Alt+F4. The native child remained present and the launcher accepted query input. Detached accessibility exposed only the title bar and graphics capture timed out, so the close prompt and Keep Editing could not be verified visually. See `ui-closeout/retest/framebuffer-005.png` for the dirty draft before pop-out. |
+| UI-6D | UNVERIFIED | Could not inspect or invoke the detached Save decision. No native save/close/reopen claim. |
+| UI-6E | UNVERIFIED | Could not inspect or invoke the detached Discard decision. No native discard/reopen claim. |
+| UI-6F | UNVERIFIED | Verified launcher input with the dirty native child present. The requested identity check after the Save/Discard reopen sequence remains open. |
+| CP-10 | PASS | Disabled auto-close inserted only `(` or `[`. Enabled pairing produced `(5 + 3)` and `[5, 3]` with typed closers reused. Selecting `10 + 2` and typing `(` wrapped it, Undo restored it, and Redo restored the wrap. With completion off, Enter after `for n in range(3):` indented the body four spaces, and Enter after `total = total + n` indented the next line four spaces as confirmed by full source selection containing `    # marker`. Copy/paste round-tripped the indented source. |
+
+Three directly affected post-fix tests passed in 0.951 seconds, including the new docked and pop-out Escape regressions. Three selected retained-host lifecycle cases also passed in 0.306 seconds as automated evidence. See `ui-closeout-fix-run/stderr.log` and `ui-closeout-lifecycle-run/stderr.log`. These results do not substitute for the detached Windows close decisions.
+
+The smallest remaining Windows check is to use the detached Pad title-bar X on the named dirty fixture, choose Keep Editing, then Save, reopen and verify 20. Edit to 30, close and choose Discard, then reopen and verify a single clean document at 20. For in-flight supersession, the native verdict requires seeing Pending on the older work when the new revision is submitted. No work limits were changed.
 
 ## Requirement matrix
 
@@ -137,16 +161,16 @@ Evidence is under the task visualization directory `calc-scripting/ui-followup`.
 | MMD-05 | M1-B | Yes | Passed | Passed |
 | CP-01 | M2-A/C/D | Yes | Passed | Passed |
 | CP-02 | M4-A/C | Yes | Passed | Passed |
-| CP-03 | M3-B, M4-C | Yes | Passed | Partial, UI-2 |
-| CP-04 | M3-B | Yes | Passed | Partial, UI-2 |
+| CP-03 | M3-B, M4-C | Yes | Passed | Passed |
+| CP-04 | M3-B | Yes | Passed | Passed |
 | CP-05 | M4-A/C | Yes | Passed | Passed |
 | CP-06 | M3-A/C | Yes | Passed | Passed |
-| CP-07 | M3-A/C | Yes | Passed | Partial, UI-3 |
+| CP-07 | M3-A/C | Yes | Passed | Passed |
 | CP-08 | M3-B | Yes | Passed | Passed |
 | CP-09 | M4-B/C | Yes | Passed | Passed |
-| CP-10 | M3-C | Yes | Passed | Unverified |
+| CP-10 | M3-C | Yes | Passed | Passed |
 | CP-11 | M3-C | Yes | Passed | Passed |
-| CP-12 | M3-A/C | Yes | Passed | Partial, UI-3 |
+| CP-12 | M3-A/C | Yes | Passed | Passed |
 | CP-13 | M2-B | Yes | Passed | Passed |
 | CP-14 | M2-B | Yes | Passed | Passed |
 | CP-15 | M2-C/D | Yes | Passed | Partial, UI-1, UI-6 |
