@@ -9,6 +9,24 @@ use egui_toast::{Toast, ToastKind, ToastOptions};
 use std::sync::Arc;
 
 impl SettingsEditor {
+    pub(crate) fn apply_committed_calculation_pad_display_preference(
+        app: &mut LauncherApp,
+        preferences: crate::settings::CalculationPadDisplayPreferences,
+    ) {
+        let previous = app.settings_editor.baseline_settings.calculation_pad_display;
+        app.settings_editor.baseline_settings.calculation_pad_display = preferences;
+        app.calculation_pad_dialog.display_preferences_saved(
+            previous,
+            preferences,
+            app.pending_calculation_pad_display_preference.is_some(),
+        );
+        if app.pending_calculation_pad_display_preference.is_none()
+            && app.calculation_pad_dialog.display_preferences() == preferences
+        {
+            app.calculation_pad_display_unacknowledged = false;
+        }
+    }
+
     pub(crate) fn apply_committed_programmer_inspector_preference(
         app: &mut LauncherApp,
         preferences: crate::settings::ProgrammerInspectorPreferences,
@@ -78,6 +96,12 @@ impl SettingsEditor {
         new_settings: Settings,
         show_success_toast: bool,
     ) {
+        let previous_display = app.settings_editor.baseline_settings.calculation_pad_display;
+        app.calculation_pad_dialog.display_preferences_saved(
+            previous_display,
+            new_settings.calculation_pad_display,
+            app.pending_calculation_pad_display_preference.is_some(),
+        );
         let previous_inspector = app.settings_editor.baseline_settings.programmer_inspector;
         let newer_choice_pending = app.pending_programmer_inspector_preference.is_some();
         app.programmer_inspector_dialog.preference_saved(

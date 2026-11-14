@@ -27,6 +27,7 @@ pub(crate) enum SettingsSaveSource {
     General,
     PluginSelection,
     CalculationPadRecovery,
+    CalculationPadDisplay,
     ProgrammerInspector,
 }
 
@@ -151,6 +152,7 @@ enum SaveOwnership {
     },
     PluginSelection,
     CalculationPadRecovery,
+    CalculationPadDisplay,
     ProgrammerInspector,
 }
 
@@ -301,6 +303,19 @@ impl SettingsSaveIntent {
         }
     }
 
+    pub(crate) fn calculation_pad_display(preferences: crate::settings::CalculationPadDisplayPreferences) -> Self {
+        let mut desired = Settings::default();
+        desired.calculation_pad_display = preferences;
+        Self {
+            desired,
+            ownership: SaveOwnership::CalculationPadDisplay,
+            source: SettingsSaveSource::CalculationPadDisplay,
+            invocation_baseline: None,
+            calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
+        }
+    }
+
     fn owns_programmer_inspector(&self) -> bool {
         match &self.ownership {
             SaveOwnership::General { .. } => {
@@ -323,6 +338,7 @@ impl SettingsSaveIntent {
             }
             SaveOwnership::PluginSelection => false,
             SaveOwnership::CalculationPadRecovery => true,
+            SaveOwnership::CalculationPadDisplay => false,
             SaveOwnership::ProgrammerInspector => false,
         }
     }
@@ -354,6 +370,9 @@ impl SettingsSaveIntent {
             SaveOwnership::CalculationPadRecovery => {
                 latest.calculation_pad_remember_source =
                     self.desired.calculation_pad_remember_source;
+            }
+            SaveOwnership::CalculationPadDisplay => {
+                latest.calculation_pad_display = self.desired.calculation_pad_display;
             }
             SaveOwnership::ProgrammerInspector => {
                 latest.programmer_inspector = self.desired.programmer_inspector;
@@ -401,6 +420,9 @@ impl SettingsSaveIntent {
             SaveOwnership::CalculationPadRecovery => {
                 latest.calculation_pad_remember_source = committed.calculation_pad_remember_source;
             }
+            SaveOwnership::CalculationPadDisplay => {
+                latest.calculation_pad_display = committed.calculation_pad_display;
+            }
             SaveOwnership::ProgrammerInspector => {
                 latest.programmer_inspector = committed.programmer_inspector;
             }
@@ -415,6 +437,7 @@ impl SettingsSaveIntent {
             SaveOwnership::General { .. } => GENERAL_SETTINGS_FIELDS,
             SaveOwnership::PluginSelection => &["enabled_plugins", "enabled_capabilities"],
             SaveOwnership::CalculationPadRecovery => &["calculation_pad_remember_source"],
+            SaveOwnership::CalculationPadDisplay => &["calculation_pad_display"],
             SaveOwnership::ProgrammerInspector => &["programmer_inspector"],
         };
         let mut changed = Vec::new();
@@ -481,6 +504,9 @@ impl SettingsSaveIntent {
                     calculation_pad_remember_source,
                     conflicts
                 );
+            }
+            SaveOwnership::CalculationPadDisplay => {
+                rollback_field!(latest, before, written, calculation_pad_display, conflicts);
             }
             SaveOwnership::ProgrammerInspector => {
                 rollback_field!(latest, before, written, programmer_inspector, conflicts);
@@ -634,6 +660,7 @@ pub(crate) struct LauncherClosePreferences {
     pub(crate) pinned_panels: Vec<crate::gui::Panel>,
     pub(crate) file_search_ui_preferences:
         Option<crate::file_search::settings::FileSearchUiPreferences>,
+    pub(crate) calculation_pad_display: Option<crate::settings::CalculationPadDisplayPreferences>,
 }
 
 #[derive(Default)]
@@ -1431,6 +1458,30 @@ impl LauncherApp {
         self.start_pending_programmer_inspector_preference_save(context);
     }
 
+    pub(crate) fn request_calculation_pad_display_preference_save(
+        &mut self,
+        context: &egui::Context,
+        preferences: crate::settings::CalculationPadDisplayPreferences,
+    ) {
+        self.calculation_pad_display_unacknowledged = true;
+        self.pending_calculation_pad_display_preference = Some(preferences);
+        self.start_pending_calculation_pad_display_preference_save(context);
+    }
+
+    fn start_pending_calculation_pad_display_preference_save(&mut self, context: &egui::Context) {
+        if self.settings_save_pending() {
+            return;
+        }
+        let Some(preferences) = self.pending_calculation_pad_display_preference.take() else {
+            return;
+        };
+        if self.settings_editor.baseline_settings.calculation_pad_display != preferences {
+            self.begin_settings_save(context, SettingsSaveIntent::calculation_pad_display(preferences));
+        } else {
+            self.calculation_pad_display_unacknowledged = false;
+        }
+    }
+
     fn start_pending_programmer_inspector_preference_save(&mut self, context: &egui::Context) {
         if self.settings_save_pending() {
             return;
@@ -1553,6 +1604,7 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
+                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1567,6 +1619,7 @@ impl LauncherApp {
         if self.pending_settings_save.is_none() {
             self.start_pending_calculation_pad_recovery_preference_save(context);
             self.start_pending_programmer_inspector_preference_save(context);
+            self.start_pending_calculation_pad_display_preference_save(context);
         }
         let Some(pending) = self.pending_settings_save.as_ref() else {
             return;
@@ -1595,6 +1648,7 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
+                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1619,6 +1673,8 @@ impl LauncherApp {
                     );
                 } else if result.source == SettingsSaveSource::ProgrammerInspector {
                     crate::settings_editor::SettingsEditor::apply_committed_programmer_inspector_preference(self, completion.settings.programmer_inspector);
+                } else if result.source == SettingsSaveSource::CalculationPadDisplay {
+                    crate::settings_editor::SettingsEditor::apply_committed_calculation_pad_display_preference(self, completion.settings.calculation_pad_display);
                 } else {
                     crate::settings_editor::SettingsEditor::apply_saved_settings(
                         context,
@@ -1635,6 +1691,7 @@ impl LauncherApp {
                             SettingsSaveSource::CalculationPadRecovery => {
                                 "calculation_pad.recovery.preference"
                             }
+                            SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
                             SettingsSaveSource::ProgrammerInspector => {
                                 "programmer_inspector.preferences"
                             }
@@ -1655,6 +1712,7 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
+                        SettingsSaveSource::CalculationPadDisplay => "calculation_pad.display.preference",
                         SettingsSaveSource::ProgrammerInspector => {
                             "programmer_inspector.preferences"
                         }
@@ -1665,6 +1723,7 @@ impl LauncherApp {
         }
         self.start_pending_calculation_pad_recovery_preference_save(context);
         self.start_pending_programmer_inspector_preference_save(context);
+        self.start_pending_calculation_pad_display_preference_save(context);
     }
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
@@ -2137,17 +2196,22 @@ fn persist_launcher_close_preferences(
         preferences.window_size,
         preferences.pinned_panels.clone(),
     )?;
-    if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
+    if preferences.file_search_ui_preferences.is_some() || preferences.calculation_pad_display.is_some() {
         Settings::update(path, |settings| {
-            let mut file_search: crate::file_search::settings::FileSearchSettings = settings
-                .plugin_settings
-                .get("file_search")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                .unwrap_or_default();
-            file_search.ui_preferences = ui_preferences.clone();
-            settings
-                .plugin_settings
-                .insert("file_search".into(), serde_json::to_value(file_search)?);
+            if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
+                let mut file_search: crate::file_search::settings::FileSearchSettings = settings
+                    .plugin_settings
+                    .get("file_search")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default();
+                file_search.ui_preferences = ui_preferences.clone();
+                settings
+                    .plugin_settings
+                    .insert("file_search".into(), serde_json::to_value(file_search)?);
+            }
+            if let Some(display) = preferences.calculation_pad_display {
+                settings.calculation_pad_display = display;
+            }
             Ok(())
         })?;
     }
@@ -2306,6 +2370,35 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (context, app)
+    }
+
+    #[test]
+    fn pad_display_owned_save_preserves_general_draft_and_newer_choice() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (_ctx, mut app) = test_app(directory.path(), Settings::default());
+        let initial = crate::settings::CalculationPadDisplayPreferences::default();
+        let older = crate::settings::CalculationPadDisplayPreferences { word_wrap: true, ..initial };
+        let newer = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, ..older };
+        let baseline = app.settings_editor.baseline_settings.clone();
+        let general = SettingsSaveIntent::general(baseline.clone(), &baseline);
+        let mut latest = baseline.clone();
+        latest.calculation_pad_display = older;
+        general.apply(&mut latest);
+        assert_eq!(latest.calculation_pad_display, older);
+        let intent = SettingsSaveIntent::calculation_pad_display(newer);
+        latest.theme.mode = crate::settings::ThemeMode::Light;
+        intent.apply(&mut latest);
+        assert_eq!(latest.calculation_pad_display, newer);
+        assert_eq!(latest.theme.mode, crate::settings::ThemeMode::Light);
+        app.settings_editor.hotkey = "draft shortcut".into();
+        app.calculation_pad_dialog.initialize_display_preferences(newer);
+        app.pending_calculation_pad_display_preference = Some(newer);
+        crate::settings_editor::SettingsEditor::apply_committed_calculation_pad_display_preference(&mut app, older);
+        assert_eq!(app.settings_editor.hotkey, "draft shortcut");
+        assert_eq!(app.settings_editor.baseline_settings.calculation_pad_display, older);
+        assert_eq!(app.calculation_pad_dialog.test_display_preferences(), newer);
+        assert_eq!(app.pending_calculation_pad_display_preference, Some(newer));
     }
 
     #[test]
@@ -3694,6 +3787,49 @@ mod tests {
         );
         assert_eq!(Settings::load(&path).unwrap().hotkey.as_deref(), Some("F8"));
         app.settings_save_workers.join_all();
+    }
+
+    #[test]
+    fn shutdown_persists_latest_pad_display_choice_before_save_acknowledgement() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let baseline = Settings::default();
+        baseline.save(&path).unwrap();
+        let (context, mut app) = test_app(directory.path(), baseline.clone());
+        let old_choice = crate::settings::CalculationPadDisplayPreferences {
+            word_wrap: true,
+            ..baseline.calculation_pad_display
+        };
+        let original = baseline.calculation_pad_display;
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        let client_for_worker = client.clone();
+        let (continue_prepare, wait_for_prepare) = mpsc::channel();
+        app.begin_settings_save_with_prepare(
+            &context,
+            SettingsSaveIntent::calculation_pad_display(old_choice),
+            move |settings| {
+                wait_for_prepare.recv().unwrap();
+                client_for_worker.prepare(settings)
+            },
+        );
+        app.calculation_pad_dialog.initialize_display_preferences(original);
+        app.calculation_pad_display_unacknowledged = true;
+        app.pending_calculation_pad_display_preference = Some(original);
+        Settings::update(&path, |settings| {
+            settings.calculation_pad_display = old_choice;
+            Ok(())
+        }).unwrap();
+        app.window_size = (777, 555);
+        app.prepare_settings_save_shutdown();
+        drop(owner);
+        continue_prepare.send(()).unwrap();
+        app.settings_save_workers.join_all();
+
+        let saved = Settings::load(&path).unwrap();
+        assert_eq!(saved.calculation_pad_display, original);
+        assert_eq!(saved.window_size, Some((777, 555)));
+        assert_eq!(saved.hotkey, baseline.hotkey);
     }
 
     #[test]

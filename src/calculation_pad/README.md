@@ -17,7 +17,7 @@ in the Pad. Clearing search restores the ordinary groups.
 ## Lines and names
 
 * An empty or whitespace-only line is blank.
-* A line whose first non-whitespace character is `#` is a comment.
+* A line whose first non-whitespace characters are `#` or `//` is a comment.
 * A result line may be an expression or an assignment: `total = 2 + 3`.
 * Bare names use ASCII letters, Greek letters, digits after the first
   character, and underscores. Names are case-sensitive.
@@ -56,6 +56,7 @@ supports `+`, `-`, `*`, `/`, `^`, and `%`; unary `+` and `-`; the functions
 ```text
 radius = 3
 PI * radius ^ 2
+x = min(100, min(50, 75))
 ```
 
 Non-finite operands and intermediate results remain invalid even when a later
@@ -200,6 +201,18 @@ Values from zero through `u128::MAX` are supported. The output digits are
 lowercase, with no base prefix or leading zeroes. This conversion syntax is
 separate from scalar prefixes: for example, `0bad hex to dec` means the exact
 hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
+
+## Source editor and Results
+
+**Line numbers** starts on and counts physical lines, including blanks and
+comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
+end of long lines, or enable wrapping to fit the Source pane. Drag the divider
+to resize Source and Results. The launcher remembers both display toggles and
+the separate divider positions for side-by-side and stacked layouts.
+
+Results show values and diagnostics. Blank and comment lines still count toward
+`rN`, so visible result labels can have gaps. Right-click a value or error row
+and choose **Go to source** to focus the editor and briefly highlight its line.
 
 ## Remembered source
 

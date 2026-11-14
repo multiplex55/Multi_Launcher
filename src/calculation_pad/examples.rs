@@ -141,9 +141,9 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
             CalculationExample {
                 title: "Minimum and maximum",
-                source: "min(8, 3) + max(4, 9)",
-                explanation: "min, max, and atan2 are available for two scalar arguments.",
-                expected: ExampleExpectation::Scalar(12.0),
+                source: "min(100, min(50, 75))",
+                explanation: "min, max, and atan2 accept two scalar arguments, including nested calls.",
+                expected: ExampleExpectation::Scalar(50.0),
             },
             CalculationExample {
                 title: "Trigonometric function families",
