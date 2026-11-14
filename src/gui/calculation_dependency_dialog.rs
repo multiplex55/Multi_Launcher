@@ -233,6 +233,8 @@ fn describe_value(value: &crate::calculation_pad::CalculationValue) -> String {
     use crate::calculation_pad::CalculationValue;
     let kind = match value {
         CalculationValue::Scalar(_) => "Scalar".to_owned(),
+        CalculationValue::Boolean(_) => "Boolean".to_owned(),
+        CalculationValue::Sequence(_) => "Sequence".to_owned(),
         CalculationValue::Vector(_) => "Vector".to_owned(),
         CalculationValue::Integer(integer) => integer.mode().type_name().to_owned(),
         CalculationValue::DimensionalQuantity(_) => "Quantity".to_owned(),

@@ -11,8 +11,9 @@
 | M0-B | Complete and pushed at `8249b28fa91bc603a4067db6b7d90cc4adad150a`, 8 focused baseline tests passed |
 | M1-A | Complete and pushed at `7ef7818fb2e1577d08b1bcbeb9fd33ff5530e347`, 29 focused tests passed after review fixes |
 | M1-B | Complete and pushed at `68bc7de9a5921b904b66c1fdb3d6dd6a1c64d52a`. 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
-| M2-A | Complete, 53 selected tests passed plus the corrected alias case. |
-| M2-B through M6-A | Pending |
+| M2-A | Complete and pushed at `6406529aacf75c16de0cb900d5121f711ee3a0a2`, 53 selected tests passed plus the corrected alias case. |
+| M2-B | Complete, 60 focused tests passed plus the corrected typed composition fixture. |
+| M2-C through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -45,6 +46,13 @@
 - `CalculationEvaluation`, `SessionEvaluation` and `ComparisonContext` carry the internal binding map. The added crate-private fields change external struct-literal construction. There is no persistence format change at this checkpoint.
 - Nextest covered document, comparison, dependency and selected session tests. The initial fail-fast run hit the outdated duplicate-name expectation in the `pie` alias test. The other 53 selected tests passed. The corrected alias test passed in isolation, retaining the prior alias/forward-reference checks. The grammar README documents reassignment and failed latest bindings.
 
+## M2-B evidence
+
+- Calc Pad adds lazy `if`, comparisons, `&&`/`||`/`!`, checked half-open scalar ranges and six collection statistics. The population standard deviation convention, 1,024 generated element ceiling, and exact sequence generation rules are documented. Legacy scalar, exact integer, programmer, vector and unit evaluation remain the typed arithmetic owners.
+- `CalculationValue` now includes Boolean and sequence variants. Sequence previews show a bounded representation. Pad and Inspector result copying use complete parseable range syntax. No document wire change is involved.
+- The initial compile found a missing Dependency Explorer type-label match, which was corrected. The first compiled batch passed 59/61. Its two outdated expectations were updated for the new unary collection signature and the three added executable examples. The next batch passed 60/61. The remaining new fixture accidentally used a shadowed Boolean name as a scalar condition. After changing those fixture conditions to comparisons, its exact rerun passed, including direct unit/base conversion and skipped malformed exponent assertions.
+- Review corrections covered unique lowered expression slots, exact prefixed integers, contextual programmer operators, existing alias behavior, checked work, median precision and full sequence copy. Runtime batches used the 100-second watchdog. Loop execution and current-revision worker integration remain in M2-C and M2-D.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -64,8 +72,8 @@
 | CP-10 | M3-C | Pending | Pending | Pending |
 | CP-11 | M3-C | Pending | Pending | Pending |
 | CP-12 | M3-A/C | Pending | Pending | Pending |
-| CP-13 | M2-B | Pending | Pending | Pending |
-| CP-14 | M2-B | Pending | Pending | Pending |
+| CP-13 | M2-B | Yes | Passed | Pending |
+| CP-14 | M2-B | Yes | Passed | Pending |
 | CP-15 | M2-C/D | Pending | Pending | Pending |
-| CP-16 | M2-B/C | Pending | Pending | Pending |
+| CP-16 | M2-B/C | Range expressions | Passed for M2-B | Pending |
 | QR-01 | M5-A | Pending | Pending | Pending |

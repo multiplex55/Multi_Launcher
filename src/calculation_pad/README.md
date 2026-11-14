@@ -19,6 +19,17 @@ in the Pad. Clearing search restores the ordinary groups.
 * An empty or whitespace-only line is blank.
 * A line whose first non-whitespace characters are `#` or `//` is a comment.
 * A result line may be an expression or an assignment: `total = 2 + 3`.
+* Conditions use `if(condition, when_true, when_false)` and the Boolean operators
+  `&&`, `||`, and `!`. Comparisons use `<`, `<=`, `>`, `>=`, `==`,
+  and `!=`. Conditions require Boolean values. Conditional branches and
+  Boolean operators evaluate only the values they need. Programmer operators
+  such as `and`, `or`, `not`, `&`, and `|` keep their integer meanings.
+* `range(stop)`, `range(start, stop)`, and `range(start, stop, step)`
+  produce half-open sequences of at most 1,024 finite integral scalar values.
+  A zero step or an unrepresentable generated integer is an error. `sum`,
+  `average`, `median`, `min`, `max`, and `stdev` accept a scalar vector
+  or sequence. `stdev` uses population standard deviation. Empty `sum`
+  returns zero and the other statistics reject an empty sequence.
 * Bare names use ASCII letters, Greek letters, digits after the first
   character, and underscores. Names are case-sensitive.
 * Braced names such as `{顧客名}` may contain other Unicode characters and

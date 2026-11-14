@@ -2411,7 +2411,7 @@ impl CalculationPadDialog {
                 .iter()
                 .find(|line| line.id == line_id)
                 .and_then(|line| match &line.outcome {
-                    LineOutcome::Value(value) => value.formatted_result(),
+                    LineOutcome::Value(value) => value.canonical_result(),
                     _ => None,
                 })?,
         };
@@ -3659,7 +3659,7 @@ fn copy_all_results(
             LineOutcome::Blank | LineOutcome::Comment => None,
             LineOutcome::Value(value) => Some(
                 value
-                    .formatted_result()
+                    .canonical_result()
                     .unwrap_or_else(|| "unavailable".into()),
             ),
             LineOutcome::Error(error) => Some(format!("error: {error}")),

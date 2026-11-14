@@ -1339,7 +1339,9 @@ impl ProgrammerInspectorDialog {
                                     response.enabled(),
                                 ));
                                 if response.clicked() {
-                                    copy = Some(formatted);
+                                    copy = Some(side.value.as_ref().ok()
+                                        .and_then(crate::calculation_pad::CalculationValue::canonical_result)
+                                        .unwrap_or(formatted));
                                 }
                             });
                             let representation = match &side.value {

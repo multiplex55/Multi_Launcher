@@ -38,6 +38,7 @@ pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, Ty
 pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
 pub use vector::CalculationVector;
+pub use document::CalculationSequence;
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,

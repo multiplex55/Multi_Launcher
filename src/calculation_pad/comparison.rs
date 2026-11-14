@@ -51,6 +51,8 @@ impl ComparisonSide {
             Ok(CalculationValue::Integer(value)) => value.mode().type_name(),
             Ok(CalculationValue::ExactBase { .. }) => "exact base",
             Ok(CalculationValue::Scalar(_)) => "scalar",
+            Ok(CalculationValue::Boolean(_)) => "Boolean",
+            Ok(CalculationValue::Sequence(_)) => "sequence",
             Ok(CalculationValue::Vector(_)) => "vector",
             Ok(CalculationValue::DimensionalQuantity(_)) => "quantity",
             Ok(CalculationValue::PhysicalQuantity { .. }) => "quantity",

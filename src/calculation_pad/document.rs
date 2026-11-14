@@ -18,6 +18,9 @@ use super::quantity::{
     self, CalculatedQuantity, QuantityError, QuantityExpression, UnitParseEvidence, UnitProduct,
 };
 use super::vector::{self, VectorExpression};
+#[path = "script.rs"]
+pub(super) mod script;
+pub use script::CalculationSequence;
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -123,8 +126,17 @@ impl CalculationDocument {
         let mut values = vec![None; prepared.len()];
         let mut results = Vec::with_capacity(prepared.len());
 
+        let mut work = script::WorkBudget::default();
         for (line_index, line) in prepared.iter().enumerate() {
-            let outcome = evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values);
+            let mut dependencies = line.dependencies.clone();
+            let outcome = if let PreparedStatement::Script(expression) = &line.statement {
+                let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
+                match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
+            } else {
+                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values)
+            };
+            dependencies.sort_unstable();
+            dependencies.dedup();
             if let LineOutcome::Value(value) = &outcome {
                 values[line_index] = Some(value.clone());
             }
@@ -133,7 +145,7 @@ impl CalculationDocument {
                 line_index,
                 source_range: line.source_range.clone(),
                 assignment_name: line.assignment_name.clone(),
-                dependency_indices: line.dependencies.clone(),
+                dependency_indices: dependencies,
                 outcome,
             });
         }
@@ -217,6 +229,8 @@ pub enum LineOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
     Scalar(f64),
+    Boolean(bool),
+    Sequence(CalculationSequence),
     Vector(vector::CalculationVector),
     /// An exact fixed-width integer result with explicit width and signedness.
     Integer(TypedInteger),
@@ -239,6 +253,8 @@ impl CalculationValue {
     pub fn formatted_result(&self) -> Option<String> {
         match self {
             Self::Scalar(value) => format_number(*value),
+            Self::Boolean(value) => Some(value.to_string()),
+            Self::Sequence(value) => Some(value.display()),
             Self::Vector(value) => value.formatted_result(),
             Self::Integer(value) => Some(value.formatted_decimal()),
             Self::DimensionalQuantity(value) => value.formatted_result(),
@@ -249,11 +265,19 @@ impl CalculationValue {
         }
     }
 
+    /// Complete parseable value for clipboard operations.
+    pub fn canonical_result(&self) -> Option<String> {
+        match self {
+            Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
+            _ => self.formatted_result(),
+        }
+    }
+
     pub fn is_approximate(&self) -> bool {
         match self {
             Self::DimensionalQuantity(value) => value.is_approximate(),
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
-            Self::Scalar(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
+            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
         }
     }
 }
@@ -311,6 +335,9 @@ pub enum DiagnosticKind {
     ExpectedExactBase(String),
     InvalidExpression,
     InvalidArithmetic,
+    Script(String),
+    WorkLimit,
+    Canceled,
     Vector(String),
     InvalidBaseNumber,
     InvalidPrefixedInteger {
@@ -386,6 +413,9 @@ impl fmt::Display for Diagnostic {
             Kind::InvalidExpression => formatter.write_str("invalid expression"),
             Kind::InvalidArithmetic => formatter
                 .write_str("division or remainder by zero, or non-finite arithmetic result"),
+            Kind::Script(message) => formatter.write_str(message),
+            Kind::WorkLimit => formatter.write_str("evaluation work limit exceeded"),
+            Kind::Canceled => formatter.write_str("evaluation canceled"),
             Kind::Vector(message) => write!(formatter, "{message}"),
             Kind::InvalidBaseNumber => formatter.write_str("invalid unsigned base value"),
             Kind::InvalidPrefixedInteger { radix } => {
@@ -446,6 +476,7 @@ enum PreparedStatement {
     Blank,
     Comment,
     Expression(Box<PreparedExpression>),
+    Script(Box<script::ScriptExpression>),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -467,6 +498,7 @@ enum PreparedStatement {
 
 #[derive(Debug)]
 struct PreparedExpression {
+    simple_reference: Option<String>,
     vector: Option<Result<VectorExpression, DiagnosticKind>>,
     explicit_vector: bool,
     scalar: Option<PreparedScalar>,
@@ -586,6 +618,16 @@ fn prepare_line(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
 ) -> PreparedLine {
+    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false)
+}
+
+fn prepare_line_internal(
+    source_range: Range<usize>,
+    source_line: &str,
+    total_identifiers: &mut usize,
+    declared_names: &HashSet<String>,
+    internal_template: bool,
+) -> PreparedLine {
     let trimmed = source_line.trim();
     if trimmed.is_empty() {
         return PreparedLine::simple(source_range, PreparedStatement::Blank);
@@ -639,14 +681,34 @@ fn prepare_line(
             DiagnosticKind::InvalidExpression,
         );
     }
-    if expression.len() > MAX_EXPRESSION_BYTES {
+    let expression_limit = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    if expression.len() > expression_limit {
         return PreparedLine::invalid(
             source_range,
             assignment_name,
             DiagnosticKind::ExpressionTooLong {
-                max_bytes: MAX_EXPRESSION_BYTES,
+                max_bytes: expression_limit,
             },
         );
+    }
+
+    if script::uses_script_syntax(expression) {
+        let identifiers = match script::validate_source(expression) {
+            Ok(count) => count,
+            Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
+        };
+        if total_identifiers.saturating_add(identifiers) > MAX_DEPENDENCIES {
+            return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+        }
+        *total_identifiers += identifiers;
+        return match script::prepare(expression, declared_names) {
+            Ok(expression) => PreparedLine {
+                source_range, assignment_name,
+                statement: PreparedStatement::Script(Box::new(expression)),
+                references: Vec::new(), dependencies: Vec::new(), diagnostic: None,
+            },
+            Err(kind) => PreparedLine::invalid(source_range, assignment_name, kind),
+        };
     }
 
     // Exact base conversions have their own u128 grammar. Dispatch them before
@@ -733,6 +795,7 @@ fn prepare_line(
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                        simple_reference: None,
                         vector: Some(Ok(expression)),
                         explicit_vector: true,
                         scalar: None,
@@ -920,6 +983,7 @@ fn prepare_line(
             source_range,
             assignment_name,
             statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                simple_reference: None,
                 vector: None,
                 explicit_vector: false,
                 scalar: None,
@@ -960,6 +1024,7 @@ fn prepare_line(
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                    simple_reference: None,
                     vector: None,
                     explicit_vector: false,
                     scalar: None,
@@ -1042,6 +1107,7 @@ fn prepare_line(
         source_range,
         assignment_name,
         statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+            simple_reference: parse_simple_reference(expression).map(|reference| reference.name),
             vector,
             explicit_vector: false,
             scalar,
@@ -1093,7 +1159,13 @@ fn find_assignment_delimiter(expression: &str) -> Option<usize> {
         match character {
             '{' => in_braces = true,
             '}' => in_braces = false,
-            '=' if !in_braces => return Some(index),
+            '=' if !in_braces => {
+                let before = expression[..index].chars().next_back();
+                let after = expression[index + 1..].chars().next();
+                if !matches!(before, Some('=' | '!' | '<' | '>')) && after != Some('=') {
+                    return Some(index);
+                }
+            }
             _ => {}
         }
     }
@@ -1922,6 +1994,11 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
     for (line_index, line) in lines.iter_mut().enumerate() {
+        if let PreparedStatement::Script(expression) = &mut line.statement {
+            expression.resolve(line_index, row_count, |name| {
+                definitions.get(name).and_then(|locations| locations.iter().rev().find(|&&location| location < line_index).or_else(|| locations.first()).copied())
+            });
+        }
         resolve_line_references(line, row_count, |name| {
             definitions.get(name).and_then(|locations| {
                 locations
@@ -2004,6 +2081,9 @@ pub(super) fn evaluate_comparison_expression(
     resolve_line_references(&mut prepared, rows.len(), |name| {
         final_bindings.get(name).copied()
     });
+    if let PreparedStatement::Script(expression) = &mut prepared.statement {
+        expression.resolve(rows.len(), rows.len(), |name| final_bindings.get(name).copied());
+    }
     let outcomes = rows
         .iter()
         .map(|row| row.outcome.clone())
@@ -2015,6 +2095,12 @@ pub(super) fn evaluate_comparison_expression(
             _ => None,
         })
         .collect::<Vec<_>>();
+    if let PreparedStatement::Script(expression) = &prepared.statement {
+        return match expression.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut script::WorkBudget::default()) {
+            Ok(value) => LineOutcome::Value(value),
+            Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
+        };
+    }
     evaluate_line(
         rows.len(),
         &prepared,
@@ -2141,6 +2227,7 @@ fn evaluate_line(
         PreparedStatement::Invalid => {
             return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
         }
+        PreparedStatement::Script(_) => unreachable!("script lines are evaluated by the script executor"),
         _ => {}
     }
 
@@ -2189,8 +2276,21 @@ fn evaluate_line(
         }
     }
 
-    let result = match &line.statement {
-        PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid => {
+    let result = evaluate_prepared_statement(&line.statement, line, values);
+
+    match result {
+        Ok(value) => LineOutcome::Value(value),
+        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
+    }
+}
+
+fn evaluate_prepared_statement(
+    statement: &PreparedStatement,
+    line: &PreparedLine,
+    values: &[Option<CalculationValue>],
+) -> Result<CalculationValue, DiagnosticKind> {
+    match statement {
+        PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid | PreparedStatement::Script(_) => {
             unreachable!("non-result line states returned above")
         }
         PreparedStatement::Expression(expression) => {
@@ -2290,11 +2390,6 @@ fn evaluate_line(
                 None => Err(DiagnosticKind::DependencyFailed { dependency_line }),
             }
         }
-    };
-
-    match result {
-        Ok(value) => LineOutcome::Value(value),
-        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
     }
 }
 
@@ -2303,6 +2398,13 @@ fn evaluate_prepared_expression(
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
 ) -> Result<CalculationValue, DiagnosticKind> {
+    if let Some(name) = &expression.simple_reference
+        && let Some(reference) = line.references.iter().find(|reference| &reference.name == name)
+        && let Some(value) = reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
+        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_))
+    {
+        return Ok(value.clone());
+    }
     let has_vector_reference = line.references.iter().any(|reference| {
         reference
             .target_line
@@ -2604,7 +2706,7 @@ mod tests {
         assert!(matches!(error(&evaluation, 6), DiagnosticKind::InvalidArithmetic));
         assert_eq!(scalar(&evaluation, 7), 50.0);
         assert_eq!(scalar(&evaluation, 8), 1.0_f64.atan2(2.0));
-        assert!(matches!(error(&evaluation, 9), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 9), DiagnosticKind::Script(message) if message.contains("collection")));
         assert!(matches!(error(&evaluation, 10), DiagnosticKind::InvalidExpression));
     }
 
