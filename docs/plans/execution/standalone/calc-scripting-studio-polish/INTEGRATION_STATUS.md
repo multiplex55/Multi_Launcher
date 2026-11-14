@@ -18,8 +18,9 @@
 | M3-A | Complete and pushed at `ed6c91fd6e83df0fecefddc38b45170344e5d464`. 56 unaffected cases passed and 6 final targeted cases passed. |
 | M3-B | Complete and pushed at `29abbc253090a74f9f738bd8df2f02ac8b893244`. 65 focused cases and 11 final targeted cases passed. |
 | M3-C | Complete and pushed at `110910179822ef3edb05da9f827882722944c160`. Native folded input remains to be exercised. |
-| M4-A | Complete in memory. 70 focused tests and six final targeted cases passed. |
-| M4-B through M6-A | Pending |
+| M4-A | Complete and pushed at `4966bdfdf68cf982a0e77e5880126dad70675b55`. 70 focused tests and six final targeted cases passed. |
+| M4-B | Complete at the automated level. 73 focused and 4 final targeted cases passed. |
+| M4-C through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -98,7 +99,7 @@
 | CP-06 | M3-A/C | Yes | Passed | Pending |
 | CP-07 | M3-A/C | Yes | Passed | Pending |
 | CP-08 | M3-B | Yes | Passed | Pending |
-| CP-09 | M4-B/C | Pending | Pending | Pending |
+| CP-09 | M4-B/C | Pad display and formatted copy | Passed for M4-B | Pending |
 | CP-10 | M3-C | Yes | Passed | Pending |
 | CP-11 | M3-C | Yes | Passed | Pending |
 | CP-12 | M3-A/C | Yes | Passed | Pending |

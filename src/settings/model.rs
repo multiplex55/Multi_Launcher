@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CalculationPadNumberMode {
+    #[default]
+    Auto,
+    Fixed,
+    Scientific,
+}
+
 /// Application-wide Calculation Pad source display preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CalculationPadDisplayPreferences {
@@ -16,13 +24,17 @@ pub struct CalculationPadDisplayPreferences {
     pub completion: bool,
     pub parameter_hints: bool,
     pub auto_close_delimiters: bool,
+    pub number_mode: CalculationPadNumberMode,
+    pub decimal_places: u8,
+    pub group_digits: bool,
+    pub percent: bool,
     pub wide_source_ratio: f32,
     pub stacked_source_ratio: f32,
 }
 
 impl Default for CalculationPadDisplayPreferences {
     fn default() -> Self {
-        Self { line_numbers: true, word_wrap: false, completion: true, parameter_hints: true, auto_close_delimiters: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
+        Self { line_numbers: true, word_wrap: false, completion: true, parameter_hints: true, auto_close_delimiters: false, number_mode: CalculationPadNumberMode::Auto, decimal_places: 2, group_digits: false, percent: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
     }
 }
 
@@ -36,6 +48,10 @@ impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
             preferences.completion = map.get("completion").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.parameter_hints = map.get("parameter_hints").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.auto_close_delimiters = map.get("auto_close_delimiters").and_then(|v| v.as_bool()).unwrap_or(false);
+            preferences.number_mode = map.get("number_mode").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            preferences.decimal_places = map.get("decimal_places").and_then(|v| v.as_u64()).filter(|v| *v <= 15).unwrap_or(2) as u8;
+            preferences.group_digits = map.get("group_digits").and_then(|v| v.as_bool()).unwrap_or(false);
+            preferences.percent = map.get("percent").and_then(|v| v.as_bool()).unwrap_or(false);
             let ratio = |name: &str, fallback| {
                 map.get(name).and_then(|v| v.as_f64())
                     .filter(|value| value.is_finite() && (0.05..=0.95).contains(value))
@@ -96,6 +112,10 @@ mod display_preference_tests {
         let invalid: CalculationPadDisplayPreferences = serde_json::from_value(serde_json::json!({"wide_source_ratio": 1.2, "stacked_source_ratio": "invalid"})).unwrap();
         assert_eq!(invalid.wide_source_ratio, 0.5);
         assert_eq!(invalid.stacked_source_ratio, 0.48);
+        let invalid: CalculationPadDisplayPreferences = serde_json::from_value(serde_json::json!({"number_mode":"future", "decimal_places":16, "group_digits":"yes"})).unwrap();
+        assert_eq!(invalid.number_mode, CalculationPadNumberMode::Auto);
+        assert_eq!(invalid.decimal_places, 2);
+        assert!(!invalid.group_digits);
         let mut settings = Settings::default();
         settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, auto_close_delimiters: true, ..Default::default() };
         let decoded: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();

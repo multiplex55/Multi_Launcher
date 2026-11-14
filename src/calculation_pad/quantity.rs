@@ -339,14 +339,15 @@ pub struct CalculatedQuantity {
 }
 
 impl CalculatedQuantity {
+    pub(crate) fn display_parts(&self) -> Option<(f64, String)> {
+        let value = self.base_value / self.display_units.factor().ok()?;
+        if !value.is_finite() || (value == 0.0 && self.base_value != 0.0) { return None; }
+        Some((value, self.display_units.formatted_unit()))
+    }
+
     pub(crate) fn formatted_result(&self) -> Option<String> {
-        let factor = self.display_units.factor().ok()?;
-        let value = self.base_value / factor;
-        if !value.is_finite() || (value == 0.0 && self.base_value != 0.0) {
-            return None;
-        }
+        let (value, unit) = self.display_parts()?;
         let formatted_value = format_number(value)?;
-        let unit = self.display_units.formatted_unit();
         if unit.is_empty() {
             Some(formatted_value)
         } else {

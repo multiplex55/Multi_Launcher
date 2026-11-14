@@ -12,6 +12,9 @@ use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::platform::app_data::AppDataRoot;
 use eframe::egui;
 
+#[path = "calculation_pad_format.rs"]
+mod result_format;
+
 #[path = "calculation_pad_editor.rs"]
 mod editor;
 use editor::{CompletionState, EditorTools, FoldRegion, Projection, SourcePositions, SyntaxCache, SyntaxKind};
@@ -359,7 +362,7 @@ struct HostEffects {
     edited_source: Option<String>,
     pad_view: Option<PadView>,
     input_commit: Option<InputCommit>,
-    watch_copy: Option<String>,
+    watch_copy: Option<(String, bool)>,
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
     inspector_selection: Option<LineId>,
     inspector_caret: Option<std::ops::Range<usize>>,
@@ -434,6 +437,7 @@ pub(super) struct InspectorPadContext {
 enum ResultCopyTarget {
     All,
     Line(LineId),
+    FormattedLine(LineId),
 }
 
 #[derive(Clone, Copy)]
@@ -1663,6 +1667,27 @@ impl CalculationPadDialog {
             ui.checkbox(&mut view.show_inputs, "Editable inputs");
             ui.checkbox(&mut view.show_watches, "Output watches");
         });
+        ui.menu_button("Number format", |ui| {
+            use crate::settings::CalculationPadNumberMode as Mode;
+            let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
+            let before = preferences;
+            let values = || evaluation.into_iter().flat_map(|result| result.lines.iter()).filter_map(|line| match &line.outcome {
+                LineOutcome::Value(value) => Some(value), _ => None,
+            });
+            let has_precision = values().any(result_format::supports_precision);
+            let has_percent = values().any(result_format::supports_percent);
+            ui.selectable_value(&mut preferences.number_mode, Mode::Auto, "Auto");
+            ui.add_enabled_ui(has_precision, |ui| {
+                ui.selectable_value(&mut preferences.number_mode, Mode::Fixed, "Fixed decimal");
+                ui.selectable_value(&mut preferences.number_mode, Mode::Scientific, "Scientific");
+                ui.add_enabled_ui(preferences.number_mode != Mode::Auto, |ui| {
+                    ui.add(egui::Slider::new(&mut preferences.decimal_places, 0..=15).text("Decimal places"));
+                });
+            });
+            ui.checkbox(&mut preferences.group_digits, "Group digits");
+            ui.add_enabled(has_percent, egui::Checkbox::new(&mut preferences.percent, "Percent for scalars"));
+            if preferences != before { effects.display_preferences = Some(preferences); }
+        });
         let ids = self.session.line_ids().unwrap_or_default();
         let revision = self.session.revision().unwrap_or_default();
         if view.show_inputs {
@@ -1750,7 +1775,7 @@ impl CalculationPadDialog {
                             match evaluation.and_then(|evaluation| evaluation.final_bindings.get(name)) {
                                 Some(binding) => match &binding.outcome {
                                     LineOutcome::Value(value) => {
-                                        ui.label(value.formatted_result().unwrap_or_else(|| "Unavailable".into()));
+                                        ui.label(result_format::display(value, self.display_preferences).unwrap_or_else(|| "Unavailable".into()));
                                         ui.weak(match value {
                                             crate::calculation_pad::CalculationValue::Scalar(_) => "scalar",
                                             crate::calculation_pad::CalculationValue::Boolean(_) => "boolean",
@@ -1759,7 +1784,8 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. } => "integer",
                                             _ => "quantity",
                                         });
-                                        if ui.small_button("Copy").clicked() { effects.watch_copy = Some(name.clone()); }
+                                        if ui.small_button("Copy").clicked() { effects.watch_copy = Some((name.clone(), false)); }
+                                        if ui.small_button("Copy formatted").clicked() { effects.watch_copy = Some((name.clone(), true)); }
                                     }
                                     LineOutcome::Error(error) => { ui.colored_label(ui.visuals().error_fg_color, error.to_string()); }
                                     _ => { ui.weak("Not executed"); }
@@ -2871,7 +2897,7 @@ impl CalculationPadDialog {
             );
         }
 
-        if let Some(name) = host.watch_copy.take()
+        if let Some((name, formatted)) = host.watch_copy.take()
             && !accepted_source_or_history && !transition_intent && !host_request_requested
             && !host.close_requested && !host.native_close_requested && self.session.pending_transition().is_none()
             && self.host_identity() == host.identity && host.document_basis == current_basis
@@ -2879,7 +2905,7 @@ impl CalculationPadDialog {
             && let Some(evaluation) = self.session.shared_evaluation()
             && let Some(binding) = evaluation.final_bindings.get(&name)
             && let LineOutcome::Value(value) = &binding.outcome
-            && let Some(text) = value.canonical_result()
+            && let Some(text) = if formatted { result_format::display(value, self.display_preferences) } else { value.canonical_result() }
         { delivered.push(CalculationPadDialogEffect::CopyText(text)); }
 
         if let Some(copy) = host.result_copy.take()
@@ -2887,6 +2913,11 @@ impl CalculationPadDialog {
             && self.open
             && copy.host == self.host_identity()
             && copy.viewport_id == host.viewport_id
+            && (!matches!(copy.target, ResultCopyTarget::FormattedLine(_))
+                || (!accepted_source_or_history && !transition_intent && !host_request_requested
+                    && !host.native_close_requested && self.session.pending_transition().is_none()
+                    && host.document_basis == current_basis
+                    && self.session.revision() == current_basis.map(|(_, _, revision)| revision)))
         {
             let copied = self.resolve_result_copy(copy);
             if let Some(effect) = copied {
@@ -3233,14 +3264,16 @@ impl CalculationPadDialog {
                 let (source, evaluation) = self.session.evaluation_with_source()?;
                 copy_all_results(source, evaluation)
             }
-            ResultCopyTarget::Line(line_id) => self
+            ResultCopyTarget::Line(line_id) | ResultCopyTarget::FormattedLine(line_id) => self
                 .session
                 .evaluation()?
                 .lines
                 .iter()
                 .find(|line| line.id == line_id)
                 .and_then(|line| match &line.outcome {
-                    LineOutcome::Value(value) => value.canonical_result(),
+                    LineOutcome::Value(value) => if matches!(intent.target, ResultCopyTarget::FormattedLine(_)) {
+                        result_format::display(value, self.display_preferences)
+                    } else { value.canonical_result() },
                     _ => None,
                 })?,
         };
@@ -4506,7 +4539,7 @@ impl CalculationPadDialog {
                     let formatted = match &line.outcome {
                         LineOutcome::Blank | LineOutcome::Comment => continue,
                         LineOutcome::Value(value) => {
-                            let formatted = value.formatted_result();
+                            let formatted = result_format::display(value, self.display_preferences);
                             if formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
                                 continue;
                             }
@@ -4583,6 +4616,14 @@ impl CalculationPadDialog {
                                             viewport_id,
                                             document_id,
                                             target: ResultCopyTarget::Line(line.id),
+                                        });
+                                    }
+                                    row_response = row_response.union(response);
+                                    let response = ui.small_button("Copy formatted");
+                                    if response.clicked() && let Some(document_id) = self.session.current_id() {
+                                        *result_copy = Some(ResultCopyIntent {
+                                            host: host_identity, viewport_id, document_id,
+                                            target: ResultCopyTarget::FormattedLine(line.id),
                                         });
                                     }
                                     row_response = row_response.union(response);
@@ -6745,6 +6786,54 @@ mod tests {
         assert!(summary.contains("r1 = v = [1, 2, 3] = [1, 2, 3]"));
         assert!(summary.contains("r2 = [2, 4, 6]"));
         assert!(summary.contains("v * 2 = [2, 4, 6]"));
+    }
+
+    #[test]
+    fn number_format_changes_presentation_without_reevaluation_or_canonical_copy_changes() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("x = 1000 / 3");
+        let document_id = dialog.test_current_document_id().unwrap();
+        let line = dialog.session.line_id(0).unwrap();
+        let _ = value(&mut dialog.session, 0);
+        let count = dialog.session.evaluation_count();
+        let revision = dialog.session.revision();
+        dialog.display_preferences.number_mode = crate::settings::CalculationPadNumberMode::Fixed;
+        dialog.display_preferences.decimal_places = 2;
+        dialog.display_preferences.group_digits = true;
+        let intent = |target| super::ResultCopyIntent {
+            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT, document_id, target,
+        };
+        let canonical = intent(super::ResultCopyTarget::Line(line));
+        let formatted = intent(super::ResultCopyTarget::FormattedLine(line));
+        assert_eq!(dialog.resolve_result_copy(canonical), Some(CalculationPadDialogEffect::CopyText("333.333".into())));
+        assert_eq!(dialog.resolve_result_copy(formatted), Some(CalculationPadDialogEffect::CopyText("333.33".into())));
+        assert_eq!(dialog.session.evaluation_count(), count);
+        assert_eq!(dialog.session.revision(), revision);
+    }
+
+    #[test]
+    fn formatted_copy_is_retained_only_for_the_painted_revision() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("x = 1 / 3");
+        let document_id = dialog.test_current_document_id().unwrap();
+        let line = dialog.session.line_id(0).unwrap();
+        let _ = value(&mut dialog.session, 0);
+        dialog.display_preferences.number_mode = crate::settings::CalculationPadNumberMode::Fixed;
+        dialog.display_preferences.decimal_places = 2;
+        let ctx = egui::Context::default();
+        let mut accepted = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        accepted.pass_accepted = true;
+        accepted.result_copy = Some(super::ResultCopyIntent { host: accepted.identity,
+            viewport_id: egui::ViewportId::ROOT, document_id, target: super::ResultCopyTarget::FormattedLine(line) });
+        assert_eq!(complete_host_effects(&mut dialog, &ctx, accepted), vec![CalculationPadDialogEffect::CopyText("0.33".into())]);
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true;
+        stale.edited_source = Some("x = 2 / 3".into());
+        stale.result_copy = Some(super::ResultCopyIntent { host: stale.identity,
+            viewport_id: egui::ViewportId::ROOT, document_id, target: super::ResultCopyTarget::FormattedLine(line) });
+        assert!(!complete_host_effects(&mut dialog, &ctx, stale).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(_))));
     }
 
     #[test]
