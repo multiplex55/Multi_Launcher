@@ -10,8 +10,9 @@
 | M0-A | Complete and pushed |
 | M0-B | Complete and pushed at `8249b28fa91bc603a4067db6b7d90cc4adad150a`, 8 focused baseline tests passed |
 | M1-A | Complete and pushed at `7ef7818fb2e1577d08b1bcbeb9fd33ff5530e347`, 29 focused tests passed after review fixes |
-| M1-B | Complete at the domain and GUI-test level, 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
-| M2-A through M6-A | Pending |
+| M1-B | Complete and pushed at `68bc7de9a5921b904b66c1fdb3d6dd6a1c64d52a`. 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
+| M2-A | Complete, 53 selected tests passed plus the corrected alias case. |
+| M2-B through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -36,6 +37,13 @@
 - The codec retains readable legacy stale drafts and history. The retained Refresh preview action re-admits now-supported exact source as one undoable operation. It leaves the saved file untouched until an explicit save.
 - Nextest passed 59/59 in the first batch and 73/73 after review corrections, including comment order and limits, reverse arrowheads, source/image export ownership, legacy Refresh preview, and Notes/non-flowchart regressions. The sharpened legacy codec guard then passed 1/1 in isolation. Batches used a 100-second execution watchdog. The batches with an app fixture used a process-local 16 MiB test-thread stack. The touched Notes app fixture now uses a temporary profile and already disables Paste Sequence shortcuts.
 - Review findings on exact-source activation, legacy guard specificity, trace traversal and header help were corrected. UI-7 remains scheduled for native verification.
+- A separate native build was mistakenly started after handing off M2-A. It was stopped as soon as the overlap was identified, before it produced a build for acceptance. The owned runner verified cleanup and output drain. The M2-A edits were preserved and work resumed after the build exited.
+
+## M2-A evidence
+
+- The document resolves named reads to the nearest preceding assignment and keeps earlier physical row values and dependency edges. A valid assignment with an invalid RHS publishes a failed latest binding. Comparison expression names use the final immutable map from the same session evaluation, while explicit result references still address their physical rows.
+- `CalculationEvaluation`, `SessionEvaluation` and `ComparisonContext` carry the internal binding map. The added crate-private fields change external struct-literal construction. There is no persistence format change at this checkpoint.
+- Nextest covered document, comparison, dependency and selected session tests. The initial fail-fast run hit the outdated duplicate-name expectation in the `pie` alias test. The other 53 selected tests passed. The corrected alias test passed in isolation, retaining the prior alias/forward-reference checks. The grammar README documents reassignment and failed latest bindings.
 
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
@@ -44,7 +52,7 @@
 | MMD-03 | M1-A | Yes | Passed | Pending |
 | MMD-04 | M1-A | Yes | Passed | Pending |
 | MMD-05 | M1-B | Yes | Passed | Pending |
-| CP-01 | M2-A/C/D | Pending | Pending | Pending |
+| CP-01 | M2-A/C/D | Sequential domain and comparison | Passed for M2-A | Pending |
 | CP-02 | M4-A/C | Pending | Pending | Pending |
 | CP-03 | M3-B, M4-C | Pending | Pending | Pending |
 | CP-04 | M3-B | Pending | Pending | Pending |

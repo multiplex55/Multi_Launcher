@@ -13,7 +13,7 @@ use super::persistence::{
 };
 use super::{IntegerMode, IntegerWidth, TypedInteger};
 use crate::platform::app_data::AppDataRoot;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,6 +34,8 @@ pub struct SessionLineResult {
 pub struct SessionEvaluation {
     pub revision: u64,
     pub lines: Vec<SessionLineResult>,
+    /// Physical rows holding the final bindings in this evaluation.
+    pub(crate) final_bindings: Arc<HashMap<String, usize>>,
     pub diagnostic: Option<DocumentDiagnostic>,
 }
 
@@ -453,6 +455,7 @@ impl CalculationPadSession {
             document_id: document.id,
             revision: document.revision,
             rows: rows.into(),
+            final_bindings: Arc::clone(&evaluation.final_bindings),
         })
     }
 
@@ -776,6 +779,7 @@ impl CalculationPadSession {
             current.cached_evaluation = Some(SessionEvaluation {
                 revision: current.revision,
                 lines,
+                final_bindings: Arc::new(evaluation.final_bindings),
                 diagnostic: evaluation.diagnostic,
             });
             #[cfg(test)]

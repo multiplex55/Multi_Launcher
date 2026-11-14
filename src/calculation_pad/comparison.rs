@@ -1,6 +1,6 @@
 //! Read-only comparison of two slots against one frozen evaluated Pad context.
 use super::{CalculationValue, DocumentId, DocumentIncarnation, LineId, LineOutcome};
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComparisonRow {
@@ -14,6 +14,7 @@ pub struct ComparisonContext {
     pub document_id: DocumentId,
     pub revision: u64,
     pub rows: Arc<[ComparisonRow]>,
+    pub(crate) final_bindings: Arc<HashMap<String, usize>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComparisonSlot {
@@ -162,7 +163,11 @@ impl ComparisonContext {
         fn side(context: &ComparisonContext, input: &ComparisonSlot) -> ComparisonSide {
             let outcome = match input {
                 ComparisonSlot::Expression(expression) => {
-                    super::document::evaluate_comparison_expression(expression, &context.rows)
+                    super::document::evaluate_comparison_expression(
+                        expression,
+                        &context.rows,
+                        &context.final_bindings,
+                    )
                 }
                 ComparisonSlot::Result(reference)
                     if reference.incarnation != context.incarnation
@@ -337,6 +342,34 @@ mod tests {
     }
 
     #[test]
+    fn comparison_uses_final_binding_and_keeps_selected_physical_value() {
+        let (_temp, mut session, context) = frozen("x = 2\nold = x\nx = x + 3\nr1\nx");
+        let first = ComparisonResultRef {
+            incarnation: context.incarnation,
+            document_id: context.document_id,
+            line_id: context.rows[0].id,
+        };
+        let result = context.compare(ComparisonRequest {
+            left: ComparisonSlot::Expression("x".into()),
+            right: ComparisonSlot::Result(first),
+        });
+        assert_eq!(result.left.formatted(), "5");
+        assert_eq!(result.right.formatted(), "2");
+        assert_eq!(compare(&context, "old", "r1").left.formatted(), "2");
+        let snapshot = session.dependency_snapshot().unwrap();
+        assert_eq!(snapshot.rows[1].dependencies, [snapshot.rows[0].id]);
+        assert_eq!(snapshot.rows[2].dependencies, [snapshot.rows[0].id]);
+        assert_eq!(snapshot.rows[4].dependencies, [snapshot.rows[2].id]);
+
+        session.replace_source("x = 8\nx = 1 / 0\nx").unwrap();
+        session.evaluation();
+        let failed = session.comparison_context().unwrap();
+        assert!(compare(&failed, "x", "r1").left.value.is_err());
+        assert_eq!(compare(&failed, "x", "r1").right.formatted(), "8");
+        assert_eq!(compare(&context, "x", "r1").left.formatted(), "5");
+    }
+
+    #[test]
     fn vector_comparison_reports_unsupported_ordering() {
         let (_temp, _session, context) = frozen("v = [1, 2]\n[3, 4]");
         let result = compare(&context, "v", "r2");
@@ -416,11 +449,11 @@ mod tests {
         ));
     }
     #[test]
-    fn comparison_preserves_duplicate_failed_names_and_unit_semantics() {
+    fn comparison_preserves_reassigned_failed_names_and_unit_semantics() {
         let (_temp, _session, context) = frozen("a = 1\na = 2\nb = 1 / 0\n10 m\n20 cm");
-        let duplicate = compare(&context, "a", "r4");
-        assert!(duplicate.left.value.is_err());
-        assert!(duplicate.right.value.is_ok());
+        let reassigned = compare(&context, "a", "r4");
+        assert_eq!(reassigned.left.formatted(), "2");
+        assert!(reassigned.right.value.is_ok());
         assert!(compare(&context, "b", "r4").left.value.is_err());
         let units = compare(&context, "r4", "r5");
         assert!(matches!(

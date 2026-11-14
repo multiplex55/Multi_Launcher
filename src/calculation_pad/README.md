@@ -29,9 +29,11 @@ in the Pad. Clearing search restores the ordinary groups.
   the modulo function, while bare `mod` remains an assignable/referencable
   name. Braces allow names that match an operator or constant, such as
   `{sin}`.
-* Duplicate assignments, unknown names, forward references, and references to
-  a failed result are errors on the affected line. A later valid line still
-  evaluates independently.
+* Assigning a name again creates a new binding. The right-hand side reads the
+  latest preceding binding, and later lines use the new one. A failed
+  assignment becomes the latest binding and causes dependent lines to fail.
+* Unknown names, forward references, and references to a failed result are
+  errors on the affected line. A later valid line still evaluates independently.
 
 `rN` refers to the result on the one-based physical source line `N`; comments
 and blank lines count. For example, `r2 * 4` uses the result from physical line

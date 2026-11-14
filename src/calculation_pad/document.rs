@@ -73,6 +73,7 @@ impl CalculationDocument {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
+                final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::DocumentTooLarge {
                     max_bytes: MAX_DOCUMENT_BYTES,
                 }),
@@ -84,13 +85,14 @@ impl CalculationDocument {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
+                final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::TooManyLines {
                     max_lines: MAX_SOURCE_LINES,
                 }),
             };
         }
 
-        // Alias fallback must see forward and duplicate declarations too, so
+        // Alias fallback must see forward declarations too, so
         // references keep the same diagnostics as ordinary named variables.
         let declared_names = declared_names(source);
         let mut total_identifiers = 0;
@@ -114,7 +116,6 @@ impl CalculationDocument {
         }
 
         let definitions = assignment_definitions(&prepared);
-        mark_duplicate_assignments(&mut prepared, &definitions);
         resolve_references(&mut prepared, &definitions);
         let cyclic_lines = cyclic_lines(&prepared);
 
@@ -140,6 +141,10 @@ impl CalculationDocument {
         CalculationEvaluation {
             source,
             lines: results,
+            final_bindings: definitions
+                .into_iter()
+                .filter_map(|(name, lines)| lines.last().copied().map(|line| (name, line)))
+                .collect(),
             diagnostic: None,
         }
     }
@@ -184,6 +189,8 @@ impl std::error::Error for EditError {}
 pub struct CalculationEvaluation<'a> {
     pub source: &'a str,
     pub lines: Vec<CalculationLineResult>,
+    /// The physical row of each name's latest binding, including failures.
+    pub(crate) final_bindings: HashMap<String, usize>,
     pub diagnostic: Option<DocumentDiagnostic>,
 }
 
@@ -288,7 +295,6 @@ pub enum DiagnosticKind {
         max_bytes: usize,
     },
     ReservedName(String),
-    DuplicateName(String),
     UnknownName(String),
     UnknownRowReference(String),
     ForwardReference {
@@ -347,7 +353,6 @@ impl fmt::Display for Diagnostic {
                 write!(formatter, "name exceeds the {max_bytes}-byte limit")
             }
             Kind::ReservedName(name) => write!(formatter, "{name} is a reserved name"),
-            Kind::DuplicateName(name) => write!(formatter, "{name} is assigned more than once"),
             Kind::UnknownName(name) => write!(formatter, "unknown name: {name}"),
             Kind::UnknownRowReference(reference) => {
                 write!(formatter, "no result is available for {reference}")
@@ -594,13 +599,6 @@ fn prepare_line(
             Some(index) => {
                 let left = trimmed[..index].trim();
                 let right = trimmed[index + 1..].trim();
-                if find_assignment_delimiter(right).is_some() {
-                    return PreparedLine::invalid(
-                        source_range,
-                        None,
-                        DiagnosticKind::InvalidAssignment,
-                    );
-                }
                 match parse_assignment_name(left) {
                     Ok(assignment) => {
                         let diagnostic = if is_row_reference_name(&assignment.canonical)
@@ -609,6 +607,8 @@ fn prepare_line(
                             Some(Diagnostic::new(DiagnosticKind::ReservedName(
                                 assignment.canonical.clone(),
                             )))
+                        } else if find_assignment_delimiter(right).is_some() {
+                            Some(Diagnostic::new(DiagnosticKind::InvalidAssignment))
                         } else {
                             None
                         };
@@ -1220,9 +1220,6 @@ fn declared_names(source: &str) -> HashSet<String> {
                 return None;
             }
             let index = find_assignment_delimiter(line)?;
-            if find_assignment_delimiter(&line[index + 1..]).is_some() {
-                return None;
-            }
             let assignment = parse_assignment_name(line[..index].trim()).ok()?;
             if is_row_reference_name(&assignment.canonical)
                 || (!assignment.braced && is_reserved_name(&assignment.canonical))
@@ -1907,7 +1904,12 @@ fn parse_row_reference(name: &str) -> RowReference {
 fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>> {
     let mut definitions = HashMap::<String, Vec<usize>>::new();
     for (line_index, line) in lines.iter().enumerate() {
-        if let Some(name) = &line.assignment_name {
+        if let Some(name) = &line.assignment_name
+            && !matches!(
+                line.diagnostic.as_ref().map(|diagnostic| &diagnostic.kind),
+                Some(DiagnosticKind::ReservedName(_))
+            )
+        {
             definitions
                 .entry(name.clone())
                 .or_default()
@@ -1917,34 +1919,26 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
     definitions
 }
 
-fn mark_duplicate_assignments(
-    lines: &mut [PreparedLine],
-    definitions: &HashMap<String, Vec<usize>>,
-) {
-    for (name, locations) in definitions {
-        if locations.len() < 2 {
-            continue;
-        }
-        for &line_index in locations {
-            set_diagnostic_if_missing(
-                &mut lines[line_index],
-                DiagnosticKind::DuplicateName(name.clone()),
-            );
-        }
-    }
-}
-
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
-    for line in lines {
-        resolve_line_references(line, definitions, row_count);
+    for (line_index, line) in lines.iter_mut().enumerate() {
+        resolve_line_references(line, row_count, |name| {
+            definitions.get(name).and_then(|locations| {
+                locations
+                    .iter()
+                    .rev()
+                    .find(|&&location| location < line_index)
+                    .or_else(|| locations.first())
+                    .copied()
+            })
+        });
     }
 }
 
 fn resolve_line_references(
     line: &mut PreparedLine,
-    definitions: &HashMap<String, Vec<usize>>,
     row_count: usize,
+    mut named_binding: impl FnMut(&str) -> Option<usize>,
 ) {
     let defer_scalar_diagnostic = defers_scalar_diagnostic(line);
     for reference_index in 0..line.references.len() {
@@ -1962,17 +1956,8 @@ fn resolve_line_references(
                 }
                 None
             }
-            ReferenceKind::Named => match definitions.get(&reference_name) {
-                Some(locations) if locations.len() == 1 => Some(locations[0]),
-                Some(_) => {
-                    if !defer_scalar_diagnostic {
-                        set_diagnostic_if_missing(
-                            line,
-                            DiagnosticKind::DuplicateName(reference_name),
-                        );
-                    }
-                    None
-                }
+            ReferenceKind::Named => match named_binding(&reference_name) {
+                Some(location) => Some(location),
                 None => {
                     if !defer_scalar_diagnostic {
                         set_diagnostic_if_missing(
@@ -2003,17 +1988,12 @@ fn resolve_line_references(
 pub(super) fn evaluate_comparison_expression(
     expression: &str,
     rows: &[super::comparison::ComparisonRow],
+    final_bindings: &HashMap<String, usize>,
 ) -> LineOutcome {
     if expression.contains(['\n', '\r']) || find_assignment_delimiter(expression).is_some() {
         return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
     }
-    let mut definitions = HashMap::<String, Vec<usize>>::new();
-    for (index, row) in rows.iter().enumerate() {
-        if let Some(name) = &row.assignment_name {
-            definitions.entry(name.clone()).or_default().push(index);
-        }
-    }
-    let declared_names = definitions.keys().cloned().collect();
+    let declared_names = final_bindings.keys().cloned().collect();
     let mut identifiers = 0;
     let mut prepared = prepare_line(
         0..expression.len(),
@@ -2021,7 +2001,9 @@ pub(super) fn evaluate_comparison_expression(
         &mut identifiers,
         &declared_names,
     );
-    resolve_line_references(&mut prepared, &definitions, rows.len());
+    resolve_line_references(&mut prepared, rows.len(), |name| {
+        final_bindings.get(name).copied()
+    });
     let outcomes = rows
         .iter()
         .map(|row| row.outcome.clone())
@@ -2656,22 +2638,10 @@ mod tests {
             error(&evaluation, 5),
             DiagnosticKind::UnknownRowReference(_)
         ));
-        assert!(matches!(
-            error(&evaluation, 6),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 7),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 8),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 9),
-            DiagnosticKind::DependencyFailed { dependency_line: 8 }
-        ));
+        assert_eq!(scalar(&evaluation, 6), 1.0);
+        assert_eq!(scalar(&evaluation, 7), 2.0);
+        assert_eq!(scalar(&evaluation, 8), 3.0);
+        assert_eq!(scalar(&evaluation, 9), 4.0);
         assert!(matches!(
             error(&evaluation, 10),
             DiagnosticKind::ReservedName(_)
@@ -2685,6 +2655,83 @@ mod tests {
             error(&cycle, 2),
             DiagnosticKind::DependencyFailed { dependency_line: 0 }
         ));
+    }
+
+    #[test]
+    fn sequential_assignments_use_the_preceding_binding_and_keep_physical_rows() {
+        let document = CalculationDocument::new("x = 2\nold = x\nx = x + 3\nr1\nx");
+        let evaluation = document.evaluate();
+        for (line, expected) in [2.0, 2.0, 5.0, 2.0, 5.0].into_iter().enumerate() {
+            assert_eq!(scalar(&evaluation, line), expected);
+        }
+        assert_eq!(evaluation.lines[1].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[2].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[3].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[4].dependency_indices, [2]);
+        assert_eq!(evaluation.final_bindings.get("x"), Some(&2));
+        assert_eq!(evaluation.final_bindings.get("old"), Some(&1));
+    }
+
+    #[test]
+    fn failed_reassignment_hides_the_previous_value_but_not_other_bindings() {
+        let document = CalculationDocument::new(concat!(
+            "x = 1\n",
+            "x =\n",
+            "x\n",
+            "x = 1 = 2\n",
+            "x\n",
+            "x = 8\n",
+            "x\n",
+            "{sin} = 5\n",
+            "sin = 9\n",
+            "{sin}\n",
+            "independent = 7",
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(
+            error(&evaluation, 1),
+            DiagnosticKind::InvalidExpression
+        ));
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::DependencyFailed { dependency_line: 1 }
+        ));
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::InvalidAssignment
+        ));
+        assert!(matches!(
+            error(&evaluation, 4),
+            DiagnosticKind::DependencyFailed { dependency_line: 3 }
+        ));
+        assert_eq!(scalar(&evaluation, 6), 8.0);
+        assert!(matches!(
+            error(&evaluation, 8),
+            DiagnosticKind::ReservedName(_)
+        ));
+        assert_eq!(scalar(&evaluation, 9), 5.0);
+        assert_eq!(scalar(&evaluation, 10), 7.0);
+        assert_eq!(evaluation.final_bindings.get("x"), Some(&5));
+        assert_eq!(evaluation.final_bindings.get("sin"), Some(&7));
+    }
+
+    #[test]
+    fn reassignment_preserves_exact_integer_and_quantity_types() {
+        let document = CalculationDocument::new(concat!(
+            "{雪} = u64(9007199254740993)\n",
+            "before = {雪}\n",
+            "{雪} = {雪} + u64(1)\n",
+            "{雪}\n",
+            "q = 1 m\n",
+            "q = q + 2 m\n",
+            "q"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(integer(&evaluation, 1).bit_pattern(), 9007199254740993);
+        assert_eq!(integer(&evaluation, 3).bit_pattern(), 9007199254740994);
+        assert_eq!(formatted(&evaluation, 6), "3 m");
+        assert_eq!(evaluation.lines[2].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[5].dependency_indices, [4]);
     }
 
     #[test]
@@ -3027,7 +3074,7 @@ mod tests {
         ));
         let document = CalculationDocument::new("pie = 1\npie = 2\npie\n");
         let evaluation = document.evaluate();
-        assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&evaluation, 2), 2.0);
     }
 
     #[test]
@@ -3076,12 +3123,13 @@ mod tests {
             assignment_name: Some("pi".into()),
             outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
         }];
+        let bindings = std::collections::HashMap::from([("pi".to_owned(), 0)]);
         assert_eq!(
-            super::evaluate_comparison_expression("pi + 1", &rows),
+            super::evaluate_comparison_expression("pi + 1", &rows, &bindings),
             LineOutcome::Value(CalculationValue::Scalar(8.0))
         );
         assert_eq!(
-            super::evaluate_comparison_expression("pie", &rows),
+            super::evaluate_comparison_expression("pie", &rows, &bindings),
             LineOutcome::Value(CalculationValue::Scalar(std::f64::consts::PI))
         );
     }

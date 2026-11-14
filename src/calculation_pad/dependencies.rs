@@ -149,6 +149,7 @@ mod tests {
         });
         let evaluation = SessionEvaluation {
             revision: 7,
+            final_bindings: Default::default(),
             lines: vec![
                 SessionLineResult {
                     id: ids[0],
