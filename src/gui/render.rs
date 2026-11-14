@@ -23188,6 +23188,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
         }
+        open_pad_result_menu(&ctx, &mut app, native, 0);
         let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
         assert!(enabled && clip.contains_rect(inspect));
         for pressed in [true, false] {
@@ -23279,6 +23280,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
         }
+        open_pad_result_menu(&ctx, &mut app, pad, 0);
         let (button, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
         assert!(enabled && clip.contains_rect(button));
         for pressed in [true, false] {
@@ -23733,6 +23735,25 @@ mod tests {
                     .drop_without_applying_deltas();
             });
         }
+    }
+
+    fn open_pad_result_menu(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        index: usize,
+    ) {
+        let row = app.calculation_pad_dialog.test_result_row(index).expect("result row is visible");
+        for pressed in [true, false] {
+            run_host_viewport_frame(ctx, app, viewport, vec![
+                egui::Event::PointerMoved(row.center()),
+                egui::Event::PointerButton {
+                    pos: row.center(), button: egui::PointerButton::Secondary,
+                    pressed, modifiers: egui::Modifiers::NONE,
+                },
+            ], false, false);
+        }
+        run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
     }
 
     fn open_pad_config_menu_root(ctx: &egui::Context, app: &mut LauncherApp) {
@@ -25188,6 +25209,7 @@ mod tests {
             false,
             false,
         );
+        open_pad_result_menu(&ctx, &mut app, root, 0);
         let (inspect, clip, enabled) = app
             .calculation_pad_dialog
             .test_inspect_button(0)
@@ -25218,6 +25240,7 @@ mod tests {
         for _ in 0..2 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        open_pad_result_menu(&ctx, &mut app, root, 0);
         let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
         assert!(enabled && clip.contains_rect(inspect));
         for pressed in [true, false] {
@@ -25513,6 +25536,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        open_pad_result_menu(&ctx, &mut app, root, 0);
         let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
         assert!(enabled && clip.contains_rect(inspect));
         for pressed in [true, false] {
@@ -26228,6 +26252,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        open_pad_result_menu(&ctx, &mut app, root, 1);
         let (inspect, clip, enabled) = app
             .calculation_pad_dialog
             .test_inspect_button(1)

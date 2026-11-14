@@ -224,7 +224,7 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_save_rect: Option<egui::Rect>,
     #[cfg(test)]
-    test_line_copy_rects: Vec<(usize, egui::Rect)>,
+    test_result_actions: Vec<(&'static str, egui::Rect, bool)>,
     #[cfg(test)]
     test_inspect_rects: Vec<(usize, egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
@@ -718,7 +718,7 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_save_rect: None,
             #[cfg(test)]
-            test_line_copy_rects: Vec::new(),
+            test_result_actions: Vec::new(),
             #[cfg(test)]
             test_inspect_rects: Vec::new(),
             #[cfg(test)]
@@ -4633,7 +4633,7 @@ impl CalculationPadDialog {
         ui.heading("Results");
 
         #[cfg(test)]
-        self.test_line_copy_rects.clear();
+        self.test_result_actions.clear();
         #[cfg(test)]
         self.test_inspect_rects.clear();
         #[cfg(test)]
@@ -4730,42 +4730,9 @@ impl CalculationPadDialog {
                                     let value_label = ui.label(formatted.as_deref().unwrap_or("unavailable"));
                                     #[cfg(test)] { text_rect = value_label.rect; }
                                     row_response = row_response.union(value_label);
-                                    if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
-                                        let inspect = ui.small_button("Inspect bits…");
-                                        #[cfg(test)]
-                                        self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
-                                        if inspect.clicked() {
-                                            *inspector_selection = Some(line.id);
-                                            *open_inspector = true;
-                                        }
-                                        row_response = row_response.union(inspect);
-                                    }
                                     if value.is_approximate() {
                                         row_response = row_response.union(ui.weak("approx."));
                                     }
-                                    let response = ui.small_button("Copy");
-                                    #[cfg(test)]
-                                    self.test_line_copy_rects
-                                        .push((line.line_index, response.rect));
-                                    if response.clicked()
-                                        && let Some(document_id) = self.session.current_id()
-                                    {
-                                        *result_copy = Some(ResultCopyIntent {
-                                            host: host_identity,
-                                            viewport_id,
-                                            document_id,
-                                            target: ResultCopyTarget::Line(line.id),
-                                        });
-                                    }
-                                    row_response = row_response.union(response);
-                                    let response = ui.small_button("Copy formatted");
-                                    if response.clicked() && let Some(document_id) = self.session.current_id() {
-                                        *result_copy = Some(ResultCopyIntent {
-                                            host: host_identity, viewport_id, document_id,
-                                            target: ResultCopyTarget::FormattedLine(line.id),
-                                        });
-                                    }
-                                    row_response = row_response.union(response);
                                 }
                                 LineOutcome::Error(error) => {
                                     let error_label = ui.colored_label(
@@ -4809,11 +4776,53 @@ impl CalculationPadDialog {
                             }, revision));
                             ui.close();
                         }
-                        if matches!(line.outcome, LineOutcome::Value(_)) {
-                            let select = ui.button("Select for comparison");
-                            #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
-                            if select.clicked() {
+                        let has_value = matches!(line.outcome, LineOutcome::Value(_));
+                        let select = ui.add_enabled(has_value, egui::Button::new("Select for comparison"));
+                        #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
+                        if select.clicked() {
+                            *inspector_selection = Some(line.id);
+                            ui.close();
+                        }
+                        let copy = ui.add_enabled(has_value, egui::Button::new("Copy"));
+                        if copy.clicked() && let Some(document_id) = self.session.current_id() {
+                            *result_copy = Some(ResultCopyIntent {
+                                host: host_identity,
+                                viewport_id,
+                                document_id,
+                                target: ResultCopyTarget::Line(line.id),
+                            });
+                            ui.close();
+                        }
+                        let copy_formatted = ui.add_enabled(has_value, egui::Button::new("Copy formatted"));
+                        if copy_formatted.clicked() && let Some(document_id) = self.session.current_id() {
+                            *result_copy = Some(ResultCopyIntent {
+                                host: host_identity,
+                                viewport_id,
+                                document_id,
+                                target: ResultCopyTarget::FormattedLine(line.id),
+                            });
+                            ui.close();
+                        }
+                        #[cfg(test)]
+                        self.test_result_actions.extend([
+                            ("Go to source", go_to_source.rect, go_to_source.enabled()),
+                            ("Select for comparison", select.rect, select.enabled()),
+                            ("Copy", copy.rect, copy.enabled()),
+                            ("Copy formatted", copy_formatted.rect, copy_formatted.enabled()),
+                        ]);
+                        if matches!(&line.outcome, LineOutcome::Value(
+                            crate::calculation_pad::CalculationValue::Integer(_)
+                                | crate::calculation_pad::CalculationValue::ExactBase { .. }
+                        )) {
+                            let inspect = ui.button("Inspect bits…");
+                            #[cfg(test)]
+                            {
+                                self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
+                                self.test_result_actions.push(("Inspect bits…", inspect.rect, inspect.enabled()));
+                            }
+                            if inspect.clicked() {
                                 *inspector_selection = Some(line.id);
+                                *open_inspector = true;
                                 ui.close();
                             }
                         }
@@ -6492,7 +6501,7 @@ mod tests {
 
     #[test]
     fn result_context_menu_navigates_value_error_and_row_background() {
-        for target in ["value", "error", "background"] {
+        for target in ["value", "label", "error", "background"] {
             let (_directory, _root, mut dialog) = fixture();
             let ctx = egui::Context::default();
             let size = egui::vec2(1000.0, 760.0);
@@ -6504,17 +6513,22 @@ mod tests {
             let initial_rows = &dialog.test_editor_geometry.as_ref().unwrap().3;
             assert!(initial_rows[index].1 > dialog.test_editor_clip.unwrap().bottom());
             let (_, body, text) = dialog.test_result_bodies.iter().find(|(line, _, _)| *line == index).copied().unwrap();
-            let point = if target == "background" {
-                egui::pos2(body.right() - 4.0, body.center().y)
-            } else {
-                text.center()
+            let point = match target {
+                "background" => egui::pos2(body.right() - 4.0, body.center().y),
+                "label" => dialog.test_result_row(index).unwrap().center(),
+                _ => text.center(),
             };
             right_click(&mut dialog, &ctx, size, point);
+            let actions = &dialog.test_result_actions;
+            assert_eq!(actions.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(),
+                vec!["Go to source", "Select for comparison", "Copy", "Copy formatted"]);
+            assert!(actions.windows(2).all(|pair| pair[0].1.bottom() <= pair[1].1.top()));
+            assert_eq!(actions.iter().map(|(_, _, enabled)| *enabled).collect::<Vec<_>>(),
+                vec![true, target != "error", target != "error", target != "error"]);
             let menu = dialog.test_go_to_source.expect("row context menu offers Go to source");
-            if target != "error" { assert!(dialog.test_select_comparison.is_some()); }
             click(&mut dialog, &ctx, size, menu.center());
             for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
-            let highlight = dialog.source_highlight.expect("navigation starts highlight");
+            let highlight = dialog.source_highlight.unwrap_or_else(|| panic!("navigation starts highlight for {target}"));
             assert_eq!(highlight.navigation.line, dialog.session.line_id(index).unwrap());
             let location = dialog.session.resolve_dependency_line(highlight.navigation.document, highlight.navigation.incarnation, highlight.navigation.line).unwrap();
             let expected = source[..location.source_range.start].chars().count();
@@ -7009,7 +7023,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_copy_buttons_return_single_result_and_source_order_summary() {
+    fn result_context_copy_returns_single_result_and_source_order_summary() {
         let (_directory, _root, mut dialog) = fixture();
         dialog.open();
         dialog.test_replace_source("total = 2 + 3\nr1 * 4\n1 / 0");
@@ -7020,12 +7034,12 @@ mod tests {
             frame(&mut dialog, &ctx, size, Vec::new());
         }
 
-        let line_copy = dialog
-            .test_line_copy_rects
-            .iter()
-            .find(|(line, _)| *line == 1)
-            .map(|(_, rect)| *rect)
-            .expect("a result row exposes an explicit copy button");
+        let row = dialog.test_result_row(1).expect("result row");
+        right_click(&mut dialog, &ctx, size, row.center());
+        let line_copy = dialog.test_result_actions.iter()
+            .find(|(name, _, enabled)| *name == "Copy" && *enabled)
+            .map(|(_, rect, _)| *rect)
+            .expect("context menu exposes Copy");
         assert_eq!(
             click(&mut dialog, &ctx, size, line_copy.center()),
             Some(CalculationPadDialogEffect::CopyText("20".into()))
@@ -7046,7 +7060,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_copy_buttons_return_pasteable_line_and_summary() {
+    fn vector_context_copy_returns_pasteable_line_and_summary() {
         let (_directory, _root, mut dialog) = fixture();
         dialog.open();
         dialog.test_replace_source("v = [1, 2, 3]\nv * 2");
@@ -7055,12 +7069,12 @@ mod tests {
         for _ in 0..3 {
             frame(&mut dialog, &ctx, size, Vec::new());
         }
-        let line_copy = dialog
-            .test_line_copy_rects
-            .iter()
-            .find(|(line, _)| *line == 1)
-            .map(|(_, rect)| *rect)
-            .expect("vector row exposes copy");
+        let row = dialog.test_result_row(1).expect("vector result row");
+        right_click(&mut dialog, &ctx, size, row.center());
+        let line_copy = dialog.test_result_actions.iter()
+            .find(|(name, _, enabled)| *name == "Copy" && *enabled)
+            .map(|(_, rect, _)| *rect)
+            .expect("vector context menu exposes Copy");
         assert_eq!(
             click(&mut dialog, &ctx, size, line_copy.center()),
             Some(CalculationPadDialogEffect::CopyText("[2, 4, 6]".into()))
@@ -7075,6 +7089,55 @@ mod tests {
         assert!(summary.contains("r1 = v = [1, 2, 3] = [1, 2, 3]"));
         assert!(summary.contains("r2 = [2, 4, 6]"));
         assert!(summary.contains("v * 2 = [2, 4, 6]"));
+    }
+
+    #[test]
+    fn error_result_context_copy_is_disabled() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        dialog.open();
+        dialog.test_replace_source("1 / 0");
+        for _ in 0..4 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let (_, _, text) = dialog.test_result_bodies.iter().find(|(line, _, _)| *line == 0).copied().unwrap();
+        right_click(&mut dialog, &ctx, size, text.center());
+        let (_, copy, enabled) = dialog.test_result_actions.iter()
+            .find(|(name, _, _)| *name == "Copy").copied().unwrap();
+        assert!(!enabled);
+        assert_eq!(click(&mut dialog, &ctx, size, copy.center()), None);
+        assert_eq!(dialog.test_source(), Some("1 / 0"));
+        assert!(dialog.selected_result.is_none());
+    }
+
+    #[test]
+    fn result_context_menu_formats_copy_and_selects_integer_for_comparison() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        dialog.open();
+        dialog.test_replace_source("u64(9007199254740993)\n1000 / 3");
+        dialog.display_preferences.number_mode = crate::settings::CalculationPadNumberMode::Fixed;
+        dialog.display_preferences.decimal_places = 2;
+        for _ in 0..4 { frame(&mut dialog, &ctx, size, Vec::new()); }
+
+        let row = dialog.test_result_row(1).unwrap();
+        right_click(&mut dialog, &ctx, size, row.center());
+        let formatted = dialog.test_result_actions.iter()
+            .find(|(name, _, enabled)| *name == "Copy formatted" && *enabled)
+            .map(|(_, rect, _)| *rect).unwrap();
+        assert_eq!(click(&mut dialog, &ctx, size, formatted.center()),
+            Some(CalculationPadDialogEffect::CopyText("333.33".into())));
+
+        let integer = dialog.test_result_row(0).unwrap();
+        click(&mut dialog, &ctx, size, integer.center());
+        assert_eq!(dialog.selected_result.map(|(_, _, _, line)| line), dialog.session.line_id(0));
+        right_click(&mut dialog, &ctx, size, integer.center());
+        assert_eq!(dialog.test_result_actions.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(),
+            vec!["Go to source", "Select for comparison", "Copy", "Copy formatted", "Inspect bits…"]);
+        assert!(dialog.test_result_actions.iter().all(|(_, _, enabled)| *enabled));
+        let select = dialog.test_select_comparison.unwrap();
+        click(&mut dialog, &ctx, size, select.center());
+        assert_eq!(dialog.inspector_context().selected_line, dialog.session.line_id(0));
     }
 
     #[test]

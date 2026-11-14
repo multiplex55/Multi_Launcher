@@ -7,7 +7,7 @@
 | M0-A | Complete | Parent `feat/calc-scripting-studio-polish` at `af58c63cef1e01e286e18531b1b7a43257f3589c`. Child `feat/calc-pad-config-menu-compound-assignments` starts from that exact tip. Direct-child baseline `1feeeb02c0b5beb5f880f2ee98c6d9033f014a13` pushed to origin and tracks the matching upstream. |
 | M0-B | Complete | Four representative baseline tests passed on the M0-A source snapshot. See below. |
 | M1-A | Complete | Config Menu uses retained host effects. Focus, copy, display, compact layout, save, dependency and pop-out checks passed. |
-| M1-B | Pending | Results context actions. |
+| M1-B | Complete | Ordered Results context actions preserve copy, comparison, navigation, and Inspect bits. |
 | M2-A | Pending | Typed compound assignment. |
 | M2-B | Pending | Loop, editor, session and comparison integration. |
 | M3-A | Pending | Focused review, verification and Windows smoke. |
@@ -27,3 +27,8 @@ Local evidence root is `target/calc-pad-config-menu-evidence`. The commands ran 
 - `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <eight exact UI tests>` initially passed 6 and failed 2 (exit 100, `m1a-run`). The editor focus failure led to retained focus-origin capture on menu activation. The retained Copy all test reached its payload assertion with `RUST_MIN_STACK=16777216` (`m1a-copy-isolated`). Its expected string was updated to match the existing canonical formatter. Effect count and discarded-pass assertions passed on rerun.
 - The same Nextest command with 18 exact UI tests and `RUST_MIN_STACK=16777216` passed 17 and failed 1 (exit 100, `m1a-correction-run`). The failure was `programmer_inspector_real_pad_selection_and_retained_bit_insert`, at the Ctrl+A replacement assertion before the Config Menu action. Running that exact test on the older executable `multi_launcher-6780e572eb679e65.exe` reproduced the identical source and expected value (exit 101, `m1a-inspect-prior-binary`). This cached executable has no recorded source SHA. The selection failure is retained for reporting with its existing assertions.
 - Compilation receipts are in `m1a-build` and `m1a-correction-build`. Both compiler exits were 0. Test receipts contain exact selectors and verified process cleanup and output drain. The execution watchdog was 100 seconds per batch.
+
+## Results context menu verification
+
+- `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <14 exact Results and Inspector tests>` passed 13 and failed 1, exit 100 (`m1b-run`). The navigation fixture clicked a disabled command before using a now-closed menu. Isolated runs and the fixture correction are recorded in `m1b-nav-isolated` and `m1b-nav-corrected`.
+- The final exact 15-test batch passed all 15, exit 0, with verified cleanup and output drain (`m1b-final-run/result.json`, `stderr.log`). It covers error Copy disabled, row label/value/background navigation, action order, canonical and formatted copy, Copy all source order, vectors, exact-integer Inspect bits, and stale or retired host rejection. Each execution used a 100-second watchdog with `RUST_MIN_STACK=16777216`.
