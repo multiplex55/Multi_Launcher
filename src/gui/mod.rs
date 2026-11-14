@@ -5,13 +5,10 @@ mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
 mod batch_rename_dialog;
-mod utility_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
-mod calculation_pad_dialog;
-mod programmer_inspector_dialog;
 mod calculation_dependency_dialog;
-mod explorer_tabs_dialog;
+mod calculation_pad_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
@@ -34,11 +31,12 @@ mod duplicate_finder_dialog;
 #[cfg(feature = "dev-smoke-binaries")]
 pub mod duplicate_finder_smoke;
 mod event_channel;
+mod explorer_tabs_dialog;
 mod fav_dialog;
 mod file_lock_dialog;
 mod file_search_dialog;
-mod file_search_window_host;
 pub mod file_search_preview_dialog;
+mod file_search_window_host;
 mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
@@ -48,6 +46,8 @@ pub(crate) mod hotfolder_runtime;
 mod hotkey_directory_dialog;
 #[cfg(windows)]
 mod native_keyboard;
+mod programmer_inspector_dialog;
+mod utility_window_host;
 #[cfg(feature = "perf-harness")]
 pub use hotfolder_runtime::HotFolderIdleFixture;
 mod image_compare_dialog;
@@ -73,10 +73,10 @@ mod multi_manager_actions;
 mod note_clipboard;
 mod note_find;
 mod note_find_preview;
+mod note_form_dialog;
 mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
-mod note_form_dialog;
 mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
@@ -86,6 +86,7 @@ pub(crate) mod pinboard;
 mod pinboard_windows;
 #[cfg(all(windows, feature = "dev-smoke-binaries"))]
 pub use pinboard_windows::run_pin_opacity_smoke;
+mod mouse_form_host;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -104,7 +105,6 @@ mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
 pub(crate) mod settings_window_host;
-mod mouse_form_host;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod snippet_prompt_dialog;
@@ -127,8 +127,8 @@ pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod utility_dialog_size;
-pub(crate) mod utility_presentation;
 pub(crate) mod utility_host;
+pub(crate) mod utility_presentation;
 mod utility_window_geometry;
 pub(crate) mod volume_data;
 mod volume_dialog;
@@ -1133,8 +1133,10 @@ pub struct LauncherApp {
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
-    pub(crate) pending_programmer_inspector_preference: Option<crate::settings::ProgrammerInspectorPreferences>,
-    pub(crate) pending_calculation_pad_display_preference: Option<crate::settings::CalculationPadDisplayPreferences>,
+    pub(crate) pending_programmer_inspector_preference:
+        Option<crate::settings::ProgrammerInspectorPreferences>,
+    pub(crate) pending_calculation_pad_display_preference:
+        Option<crate::settings::CalculationPadDisplayPreferences>,
     pub(crate) calculation_pad_display_unacknowledged: bool,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
@@ -1194,7 +1196,8 @@ pub struct LauncherApp {
     /// Latest immutable hotkey directory assembled from owner publications.
     pub(crate) hotkey_directory: Option<Arc<crate::hotkey::directory::Snapshot>>,
     pub(crate) hotkey_directory_dialog: hotkey_directory_dialog::HotkeyDirectoryDialog,
-    hotkey_directory_host: utility_window_host::UtilityWindowHost<hotkey_directory_dialog::HotkeyDirectoryDialog>,
+    hotkey_directory_host:
+        utility_window_host::UtilityWindowHost<hotkey_directory_dialog::HotkeyDirectoryDialog>,
     paste_sequence_document_revision: Arc<AtomicU64>,
     hotkey_directory_main_wake: Option<Sender<()>>,
     visible_flag: Arc<AtomicBool>,
@@ -1280,10 +1283,15 @@ pub struct LauncherApp {
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gestures_host: mouse_form_host::MouseGesturesHost,
-    gesture_binding_host: utility_window_host::UtilityWindowHost<mouse_gestures_dialog::BindingDialog>,
-    pending_gesture_binding_open: Option<(mouse_gestures_dialog::BindingOpenIntent, utility_host::AcceptedParentOpen<u64>)>,
+    gesture_binding_host:
+        utility_window_host::UtilityWindowHost<mouse_gestures_dialog::BindingDialog>,
+    pending_gesture_binding_open: Option<(
+        mouse_gestures_dialog::BindingOpenIntent,
+        utility_host::AcceptedParentOpen<u64>,
+    )>,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
-    gesture_window_picker_host: utility_window_host::UtilityWindowHost<mouse_gesture_settings_dialog::GestureWindowPicker>,
+    gesture_window_picker_host:
+        utility_window_host::UtilityWindowHost<mouse_gesture_settings_dialog::GestureWindowPicker>,
     pending_gesture_picker_open: Option<utility_host::AcceptedParentOpen<u64>>,
     mouse_settings_dialog: MouseSettingsDialog,
     theme_settings_dialog: ThemeSettingsDialogState,
@@ -1346,7 +1354,8 @@ pub struct LauncherApp {
     pub json_utility_dialog: JsonUtilityDialogState,
     json_utility_host: utility_window_host::JsonUtilityWindowHost,
     #[cfg(test)]
-    json_utility_test_clipboard: Option<Arc<crate::clipboard_modify::clipboard::fake::FakeClipboardBackend>>,
+    json_utility_test_clipboard:
+        Option<Arc<crate::clipboard_modify::clipboard::fake::FakeClipboardBackend>>,
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
@@ -1370,6 +1379,7 @@ pub struct LauncherApp {
     pub(crate) folder_size_dialog: FolderSizeDialogState,
     pub(crate) file_lock_dialog: FileLockDialogState,
     pub qr_dialog: QrDialogState,
+    qr_host: utility_window_host::QrWindowHost,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
@@ -1387,13 +1397,16 @@ pub struct LauncherApp {
     calendar_event_editor: CalendarEventEditor,
     calendar_event_details: CalendarEventDetails,
     calendar_popover_host: calendar_window_host::CalendarWindowHost<
-        CalendarPopover, calendar_popover::CalendarPopoverHostActions,
+        CalendarPopover,
+        calendar_popover::CalendarPopoverHostActions,
     >,
     calendar_editor_host: calendar_window_host::CalendarWindowHost<
-        CalendarEventEditor, calendar_event_editor::CalendarEditorHostActions,
+        CalendarEventEditor,
+        calendar_event_editor::CalendarEditorHostActions,
     >,
     calendar_details_host: calendar_window_host::CalendarWindowHost<
-        CalendarEventDetails, calendar_event_details::CalendarDetailsHostActions,
+        CalendarEventDetails,
+        calendar_event_details::CalendarDetailsHostActions,
     >,
     #[cfg(test)]
     calendar_events_path_override: Option<String>,
@@ -1694,8 +1707,12 @@ impl LauncherApp {
         self.pending_hotkey_directory_origin = Some(utility_host::ChildOpenOrigin::Root);
     }
 
-    pub(crate) fn request_hotkey_directory_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) {
-        self.pending_hotkey_directory_origin = Some(utility_host::ChildOpenOrigin::Parent(source.0.clone()));
+    pub(crate) fn request_hotkey_directory_from_settings(
+        &mut self,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) {
+        self.pending_hotkey_directory_origin =
+            Some(utility_host::ChildOpenOrigin::Parent(source.0.clone()));
     }
 
     pub(crate) fn paste_sequence_document_revision_notifier(
@@ -1718,7 +1735,8 @@ impl LauncherApp {
             window_size: self.window_size,
             pinned_panels: self.pinned_panels.clone(),
             file_search_ui_preferences,
-            calculation_pad_display: self.calculation_pad_display_unacknowledged
+            calculation_pad_display: self
+                .calculation_pad_display_unacknowledged
                 .then(|| self.calculation_pad_dialog.display_preferences()),
         }
     }
@@ -2196,7 +2214,11 @@ impl LauncherApp {
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.gesture_binding_host.cancel_docked_focus_request();
         self.mouse_gesture_settings_dialog.open();
-        self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, true);
+        self.mouse_gesture_settings_host.prepare_open(
+            &self.egui_ctx,
+            mouse_form_host::GESTURE_SETTINGS,
+            true,
+        );
         self.mouse_gesture_settings_host.request_focus();
         if !self.mouse_gesture_settings_host.is_popped_out() {
             self.request_launcher_visibility(true);
@@ -2208,7 +2230,11 @@ impl LauncherApp {
             let preferences = self.coordinate_tool.preferences().clone();
             self.mouse_settings_dialog.open(&preferences);
         }
-        self.mouse_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS, true);
+        self.mouse_settings_host.prepare_open(
+            &self.egui_ctx,
+            mouse_form_host::MOUSE_SETTINGS,
+            true,
+        );
         self.mouse_settings_host.request_focus();
         if !self.mouse_settings_host.is_popped_out() {
             self.request_launcher_visibility(true);
@@ -2858,7 +2884,7 @@ impl LauncherApp {
     ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
-            FileSearchUiCommand::OpenPreview { .. } => {},
+            FileSearchUiCommand::OpenPreview { .. } => {}
             FileSearchUiCommand::OpenFolderSize(path) => {
                 if ctx.viewport_id() == egui::ViewportId::ROOT {
                     self.folder_size_dialog.stage_prefill(ctx, path);
@@ -2885,7 +2911,10 @@ impl LauncherApp {
                 }) {
                     Ok(settings) => {
                         if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
-                            match serde_json::from_value::<crate::file_search::settings::FileSearchSettings>(value.clone()) {
+                            match serde_json::from_value::<
+                                crate::file_search::settings::FileSearchSettings,
+                            >(value.clone())
+                            {
                                 Ok(committed) => {
                                     // View preferences must not replace the executor
                                     // or cancel its current search.
@@ -2972,19 +3001,26 @@ impl LauncherApp {
         }
         let ctx = self.egui_ctx.clone();
         let settings_path = self.settings_path.clone();
-        self.theme_settings_dialog.start_host_session(&ctx, &settings_path);
+        self.theme_settings_dialog
+            .start_host_session(&ctx, &settings_path);
     }
 
     pub fn is_theme_settings_dialog_open(&self) -> bool {
         self.theme_settings_dialog.host_open
     }
 
-    pub(crate) fn open_theme_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) -> bool {
+    pub(crate) fn open_theme_from_settings(
+        &mut self,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) -> bool {
         self.pending_theme_settings_origin = Some(source.clone());
         false
     }
 
-    pub(crate) fn open_plugin_from_settings(&mut self, source: &settings_window_host::SettingsOpenOrigin) {
+    pub(crate) fn open_plugin_from_settings(
+        &mut self,
+        source: &settings_window_host::SettingsOpenOrigin,
+    ) {
         self.pending_plugin_settings_origin = Some(source.clone());
     }
 
@@ -3462,7 +3498,8 @@ impl LauncherApp {
         calculation_pad_dialog
             .initialize_recovery_preference(settings.calculation_pad_remember_source);
         calculation_pad_dialog.initialize_display_preferences(settings.calculation_pad_display);
-        let mut programmer_inspector_dialog = programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        let mut programmer_inspector_dialog =
+            programmer_inspector_dialog::ProgrammerInspectorDialog::default();
         programmer_inspector_dialog.initialize_preferences(settings.programmer_inspector);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
@@ -4232,6 +4269,7 @@ impl LauncherApp {
             activity_center: activity_center.clone(),
             activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
+            qr_host: Default::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
@@ -5128,12 +5166,19 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
             Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
-            Panel::ImagePanel => self.image_panels.iter().any(|panel| panel.open && panel.host.root_layer().is_some()),
+            Panel::ImagePanel => self
+                .image_panels
+                .iter()
+                .any(|panel| panel.open && panel.host.root_layer().is_some()),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
-            Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer().is_some(),
-            Panel::CalculationDependencyDialog => self.calculation_dependency_host.root_layer().is_some(),
+            Panel::ProgrammerInspectorDialog => {
+                self.programmer_inspector_host.root_layer().is_some()
+            }
+            Panel::CalculationDependencyDialog => {
+                self.calculation_dependency_host.root_layer().is_some()
+            }
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
@@ -5146,30 +5191,47 @@ impl LauncherApp {
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer().is_some(),
             Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
                 self.calendar_panel_root_layer(panel).is_some()
-            },
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.root_layer().is_some()
                     || self.xml_toolkit_dialog.needs_viewport_bootstrap()
-            },
+            }
             Panel::RegexTesterDialog => {
                 self.regex_tester_dialog.root_layer().is_some()
                     || self.regex_tester_dialog.needs_viewport_bootstrap()
-            },
+            }
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
-            Panel::MouseGesturesDialog => self.mouse_gestures_host
-                .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
-            Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
-            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(mouse_form_host::GESTURE_SETTINGS).is_some(),
+            Panel::MouseGesturesDialog => self
+                .mouse_gestures_host
+                .root_layer(mouse_form_host::MOUSE_GESTURES)
+                .is_some(),
+            Panel::MouseSettingsDialog => self
+                .mouse_settings_host
+                .root_layer(mouse_form_host::MOUSE_SETTINGS)
+                .is_some(),
+            Panel::MouseGestureSettingsDialog => self
+                .mouse_gesture_settings_host
+                .root_layer(mouse_form_host::GESTURE_SETTINGS)
+                .is_some(),
             Panel::NotesDialog => self.notes_dialog.host_layer_if_root().is_some(),
-            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root().is_some(),
-            Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root().is_some(),
-            Panel::DiagramStudioDialog => self.diagram_studio_dialog.owner_layer_if_root().is_some(),
-            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some()
-                || self.mkmacro_dialog.ordinary_child_root_layer().is_some(),
+            Panel::MarkdownStudioDialog => {
+                self.markdown_studio_dialog.host_layer_if_root().is_some()
+            }
+            Panel::QrDialog => self.qr_host.root_layer().is_some(),
+            Panel::CalculationPadDialog => {
+                self.calculation_pad_dialog.host_layer_if_root().is_some()
+            }
+            Panel::DiagramStudioDialog => {
+                self.diagram_studio_dialog.owner_layer_if_root().is_some()
+            }
+            Panel::MkMacroDialog => {
+                self.mkmacro_dialog.host_layer_if_root().is_some()
+                    || self.mkmacro_dialog.ordinary_child_root_layer().is_some()
+            }
             Panel::NotePanel => self
                 .note_panels
                 .iter()
@@ -5182,8 +5244,14 @@ impl LauncherApp {
         self.pin_list_open
             || self.ocr_surface_visible()
             || self.diff_dialog.host_layer_if_root().is_some()
-            || self.calculation_pad_dialog.examples_layer_if_root().is_some()
-            || self.diagram_studio_dialog.embedded_viewer_layer_if_root().is_some()
+            || self
+                .calculation_pad_dialog
+                .examples_layer_if_root()
+                .is_some()
+            || self
+                .diagram_studio_dialog
+                .embedded_viewer_layer_if_root()
+                .is_some()
             || Self::TRACKED_PANELS
                 .iter()
                 .copied()
@@ -5227,8 +5295,11 @@ impl LauncherApp {
         self.snippet_window_host.retire(&self.egui_ctx);
         self.snippet_dialog.end_session();
         self.panel_states.snippet_dialog = false;
-        self.panel_stack.retain(|panel| *panel != Panel::SnippetDialog);
-        if self.snippet_preview_editor_session.take().is_some() && self.snippet_prompt_dialog.is_preview_only() {
+        self.panel_stack
+            .retain(|panel| *panel != Panel::SnippetDialog);
+        if self.snippet_preview_editor_session.take().is_some()
+            && self.snippet_prompt_dialog.is_preview_only()
+        {
             let _ = self.cancel_snippet_prompt();
         }
     }
@@ -5242,14 +5313,17 @@ impl LauncherApp {
 
     fn snippet_prompt_has_root_presentation(&self) -> bool {
         self.snippet_prompt_dialog.is_open()
-            && (!self.hosted_snippet_preview_active() || self.snippet_window_host.root_layer().is_some())
-            && (!self.hosted_sequence_prompt_active() || self.paste_sequence_host.root_layer().is_some())
+            && (!self.hosted_snippet_preview_active()
+                || self.snippet_window_host.root_layer().is_some())
+            && (!self.hosted_sequence_prompt_active()
+                || self.paste_sequence_host.root_layer().is_some())
     }
 
     fn hosted_sequence_prompt_active(&self) -> bool {
         self.paste_sequence_dialog.open
             && self.paste_sequence_host.is_popped_out()
-            && self.sequence_prompt_editor_session == Some(self.paste_sequence_dialog.host_session_epoch())
+            && self.sequence_prompt_editor_session
+                == Some(self.paste_sequence_dialog.host_session_epoch())
             && self.snippet_prompt_dialog.is_sequence_preflight()
     }
 
@@ -5261,7 +5335,8 @@ impl LauncherApp {
         self.clipboard_history_host.retire(&self.egui_ctx);
         self.clipboard_dialog.open = false;
         self.panel_states.clipboard_dialog = false;
-        self.panel_stack.retain(|panel| *panel != Panel::ClipboardDialog);
+        self.panel_stack
+            .retain(|panel| *panel != Panel::ClipboardDialog);
     }
 
     fn close_clipboard_modify_session(&mut self) {
@@ -5278,9 +5353,45 @@ impl LauncherApp {
     fn close_front_dialog_from_root_input(&mut self) -> bool {
         if !self.pin_list_open
             && !self.ocr_surface_visible()
-            && self.panel_stack.iter().rev()
+            && self
+                .panel_stack
+                .iter()
+                .rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::CalculationDependencyDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog | Panel::MkMacroDialog | Panel::ThemeSettingsDialog | Panel::Plugins | Panel::HotkeyDirectoryDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| {
+                    matches!(
+                        panel,
+                        Panel::BatchRenameDialog
+                            | Panel::SearchReplaceDialog
+                            | Panel::ClipboardDialog
+                            | Panel::ClipboardModifyDialog
+                            | Panel::SnippetDialog
+                            | Panel::PasteSequenceDialog
+                            | Panel::JsonUtilityDialog
+                            | Panel::ProgrammerInspectorDialog
+                            | Panel::CalculationDependencyDialog
+                            | Panel::ExplorerTabsDialog
+                            | Panel::XmlToolkitDialog
+                            | Panel::RegexTesterDialog
+                            | Panel::TableUtilityDialog
+                            | Panel::TimerDialog
+                            | Panel::CalendarPopover
+                            | Panel::CalendarEventEditor
+                            | Panel::CalendarEventDetails
+                            | Panel::DateTimeStudioDialog
+                            | Panel::ImageCompareDialog
+                            | Panel::DuplicateFinderDialog
+                            | Panel::ZipExtractorDialog
+                            | Panel::FolderSizeDialog
+                            | Panel::FileLockDialog
+                            | Panel::RecordingDialog
+                            | Panel::MkMacroDialog
+                            | Panel::ThemeSettingsDialog
+                            | Panel::Plugins
+                            | Panel::HotkeyDirectoryDialog
+                    ) || (*panel == Panel::SnippetPromptDialog
+                        && self.snippet_prompt_has_host_companion())
+                })
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5292,7 +5403,8 @@ impl LauncherApp {
         self.json_utility_host.retire(&self.egui_ctx);
         self.json_utility_dialog.close();
         self.panel_states.json_utility_dialog = false;
-        self.panel_stack.retain(|panel| *panel != Panel::JsonUtilityDialog);
+        self.panel_stack
+            .retain(|panel| *panel != Panel::JsonUtilityDialog);
     }
 
     /// Close the top-most open dialog if any is visible.
@@ -5323,8 +5435,10 @@ impl LauncherApp {
         }
         if (panel == Panel::Settings
             && !self.settings_native_ui_owner_current(&self.egui_ctx, true))
-            || (matches!(panel, Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog)
-                && !self.mouse_form_root_close_allowed(&self.egui_ctx, panel))
+            || (matches!(
+                panel,
+                Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog
+            ) && !self.mouse_form_root_close_allowed(&self.egui_ctx, panel))
             || (panel == Panel::MouseGesturesDialog
                 && !self.mouse_gestures_root_close_allowed(&self.egui_ctx))
             || (panel == Panel::FileSearchDialog
@@ -5389,7 +5503,10 @@ impl LauncherApp {
             }
             return true;
         }
-        if !matches!(panel, Panel::Settings | Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog) {
+        if !matches!(
+            panel,
+            Panel::Settings | Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog
+        ) {
             self.retire_settings_navigation_for_panel(panel);
         }
         match panel {
@@ -5439,8 +5556,12 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.close_paste_sequence_dialog();
             }
-            Panel::HashGeneratorDialog => { self.hash_generator_dialog.request_close(); }
-            Panel::FileSearchPreviewDialog => { self.file_search_dialog.preview_dialog.request_close(); }
+            Panel::HashGeneratorDialog => {
+                self.hash_generator_dialog.request_close();
+            }
+            Panel::FileSearchPreviewDialog => {
+                self.file_search_dialog.preview_dialog.request_close();
+            }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
             }
@@ -5458,7 +5579,8 @@ impl LauncherApp {
                 self.panel_stack.insert(panel_index, panel);
             }
             Panel::MouseGestureSettingsDialog => {
-                self.mouse_gesture_settings_host.request_close(&self.egui_ctx);
+                self.mouse_gesture_settings_host
+                    .request_close(&self.egui_ctx);
                 self.panel_stack.insert(panel_index, panel);
             }
             Panel::MouseSettingsDialog => {
@@ -5564,11 +5686,13 @@ impl LauncherApp {
                 self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
+                self.qr_host.close_from_app(&self.egui_ctx);
                 self.qr_dialog.close();
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
+                self.regex_tester_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5591,19 +5715,23 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
+                self.xml_toolkit_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
+                self.table_utility_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
-                self.image_compare_dialog.end_session_with_host(&self.egui_ctx);
+                self.image_compare_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
+                self.duplicate_finder_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
             }
             Panel::FolderSizeDialog => {
@@ -5619,9 +5747,15 @@ impl LauncherApp {
                 self.panel_states.activity_dialog = false;
             }
             Panel::RecordingDialog => self.close_recording_setup(),
-            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
-            Panel::CalculationDependencyDialog => { self.calculation_dependency_dialog.request_close(); }
-            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
+            Panel::ProgrammerInspectorDialog => {
+                self.programmer_inspector_dialog.request_close();
+            }
+            Panel::CalculationDependencyDialog => {
+                self.calculation_dependency_dialog.request_close();
+            }
+            Panel::ExplorerTabsDialog => {
+                self.explorer_tabs_dialog.request_close();
+            }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -5708,13 +5842,15 @@ impl LauncherApp {
         self.panel_stack
             .retain(|panel| *panel != Panel::PasteSequenceDialog);
         if retain_prompt {
-            self.paste_sequence_dialog.set_autostart_when_ready(autostart);
+            self.paste_sequence_dialog
+                .set_autostart_when_ready(autostart);
             self.request_launcher_visibility(true);
         }
     }
 
     fn close_zip_extractor_dialog(&mut self) {
-        self.zip_extractor_dialog.remember_final_presentation(&self.egui_ctx);
+        self.zip_extractor_dialog
+            .remember_final_presentation(&self.egui_ctx);
         self.zip_extractor_dialog.retire_host(&self.egui_ctx);
         self.zip_extractor_dialog.clear_presentation();
         #[cfg(windows)]
@@ -5775,8 +5911,12 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.close_paste_sequence_dialog();
             }
-            Panel::HashGeneratorDialog => { self.hash_generator_dialog.request_close(); }
-            Panel::FileSearchPreviewDialog => { self.file_search_dialog.preview_dialog.request_close(); }
+            Panel::HashGeneratorDialog => {
+                self.hash_generator_dialog.request_close();
+            }
+            Panel::FileSearchPreviewDialog => {
+                self.file_search_dialog.preview_dialog.request_close();
+            }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
             }
@@ -5790,35 +5930,43 @@ impl LauncherApp {
             }
             Panel::MouseGesturesDialog => {
                 if self.mouse_gestures_dialog.open {
-                    self.mouse_gestures_host.remember_current(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
+                    self.mouse_gestures_host
+                        .remember_current(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 }
                 if self.mouse_gestures_dialog.binding_is_open() {
                     self.gesture_binding_host.close_from_app(&self.egui_ctx);
                     self.mouse_gestures_dialog.binding_dialog_mut().close();
                 }
                 self.mouse_gestures_dialog.open = false;
-                self.mouse_gestures_dialog.reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
-                self.mouse_gestures_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
+                self.mouse_gestures_dialog
+                    .reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
+                self.mouse_gestures_host
+                    .retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 self.panel_states.mouse_gestures_dialog = false;
             }
             Panel::MouseGestureSettingsDialog => {
                 if self.mouse_gesture_settings_dialog.open {
-                    self.mouse_gesture_settings_host.remember_current(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
+                    self.mouse_gesture_settings_host
+                        .remember_current(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
                 }
                 if self.mouse_gesture_settings_dialog.window_picker_is_open() {
-                    self.gesture_window_picker_host.close_from_app(&self.egui_ctx);
+                    self.gesture_window_picker_host
+                        .close_from_app(&self.egui_ctx);
                     self.mouse_gesture_settings_dialog.close_picker();
                 }
                 self.mouse_gesture_settings_dialog.open = false;
-                self.mouse_gesture_settings_host.retire(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
+                self.mouse_gesture_settings_host
+                    .retire(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS);
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
             Panel::MouseSettingsDialog => {
                 if self.mouse_settings_dialog.open {
-                    self.mouse_settings_host.remember_current(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
+                    self.mouse_settings_host
+                        .remember_current(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
                 }
                 self.mouse_settings_dialog.open = false;
-                self.mouse_settings_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
+                self.mouse_settings_host
+                    .retire(&self.egui_ctx, mouse_form_host::MOUSE_SETTINGS);
                 self.panel_states.mouse_settings_dialog = false;
             }
             Panel::HotkeyDirectoryDialog => {
@@ -5911,11 +6059,13 @@ impl LauncherApp {
                 self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
+                self.qr_host.close_from_app(&self.egui_ctx);
                 self.qr_dialog.close();
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
+                self.regex_tester_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5935,19 +6085,23 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
+                self.xml_toolkit_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
+                self.table_utility_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
-                self.image_compare_dialog.end_session_with_host(&self.egui_ctx);
+                self.image_compare_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
+                self.duplicate_finder_dialog
+                    .end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
             }
             Panel::FolderSizeDialog => {
@@ -5963,9 +6117,15 @@ impl LauncherApp {
                 self.panel_states.activity_dialog = false;
             }
             Panel::RecordingDialog => self.close_recording_setup(),
-            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
-            Panel::CalculationDependencyDialog => { self.calculation_dependency_dialog.request_close(); }
-            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
+            Panel::ProgrammerInspectorDialog => {
+                self.programmer_inspector_dialog.request_close();
+            }
+            Panel::CalculationDependencyDialog => {
+                self.calculation_dependency_dialog.request_close();
+            }
+            Panel::ExplorerTabsDialog => {
+                self.explorer_tabs_dialog.request_close();
+            }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -6090,7 +6250,7 @@ impl LauncherApp {
                 }
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
-            Panel::FileSearchPreviewDialog => {},
+            Panel::FileSearchPreviewDialog => {}
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
             Panel::MkMacroDialog => {
@@ -6125,7 +6285,7 @@ impl LauncherApp {
                 if !self.unused_assets_dialog.open {
                     self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
                 }
-            },
+            }
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::ScreenshotEditor => {}
@@ -6133,9 +6293,12 @@ impl LauncherApp {
             Panel::TodoDialog => self.todo_dialog.ensure_open(),
             Panel::TodoViewDialog => {
                 if !self.todo_view_dialog.open {
-                    self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+                    self.open_todo_view_from_origin(
+                        None,
+                        &utility_host::ChildOpenOrigin::<()>::Root,
+                    );
                 }
-            },
+            }
             Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
             Panel::ClipboardModifyDialog => {
                 if !self.clipboard_modify_dialog.open {
@@ -6151,12 +6314,12 @@ impl LauncherApp {
                 {
                     if !self.zip_extractor_dialog.open
                         && (self.archive_session.has_active_worker()
-                            || self.zip_creation_session.reopen().is_err()
-                        )
+                            || self.zip_creation_session.reopen().is_err())
                     {
                         return;
                     }
-                    self.zip_extractor_dialog.open_with_snapshot(self.archive_session.snapshot());
+                    self.zip_extractor_dialog
+                        .open_with_snapshot(self.archive_session.snapshot());
                     self.zip_extractor_dialog.update_creation_snapshot(
                         self.zip_creation_session.snapshot(),
                         self.zip_creation_session.has_active_worker(),
@@ -6165,7 +6328,7 @@ impl LauncherApp {
                 #[cfg(not(windows))]
                 self.zip_extractor_dialog.open();
             }
-            Panel::QrDialog => self.qr_dialog.open = true,
+            Panel::QrDialog => self.qr_dialog.ensure_open(),
             Panel::RegexTesterDialog => {
                 if !self.regex_tester_dialog.open {
                     self.regex_tester_dialog.open();
@@ -6234,7 +6397,7 @@ impl LauncherApp {
                     );
                     self.calendar_details_open = true;
                 }
-            },
+            }
             Panel::Editor => self.show_editor = true,
             Panel::Settings => {
                 if !self.show_settings {
@@ -6251,23 +6414,59 @@ impl LauncherApp {
             }
         }
         match panel {
-            Panel::FileLockDialog => self.file_lock_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::FolderSizeDialog => self.folder_size_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::ImageCompareDialog => self.image_compare_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::RecordingDialog => self.recording_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::TableUtilityDialog => self.table_utility_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::ZipExtractorDialog => self.zip_extractor_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::MkMacroDialog => self.mkmacro_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::RegexTesterDialog => self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::DiagramStudioDialog => self.diagram_studio_dialog.prepare_open_presentation(&self.egui_ctx),
+            Panel::FileLockDialog => self
+                .file_lock_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::DuplicateFinderDialog => self
+                .duplicate_finder_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::FolderSizeDialog => self
+                .folder_size_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::ImageCompareDialog => self
+                .image_compare_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::RecordingDialog => self
+                .recording_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::TableUtilityDialog => self
+                .table_utility_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::XmlToolkitDialog => self
+                .xml_toolkit_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::ZipExtractorDialog => self
+                .zip_extractor_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::MkMacroDialog => self
+                .mkmacro_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::MarkdownStudioDialog => self
+                .markdown_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::RegexTesterDialog => self
+                .regex_tester_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::DiagramStudioDialog => self
+                .diagram_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx),
             Panel::TimerDialog => self.timer_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.prepare_open_presentation(&self.egui_ctx),
-            Panel::FileSearchDialog => self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open),
-            Panel::MouseGesturesDialog => self.mouse_gestures_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES, self.mouse_gestures_dialog.open),
-            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.prepare_open(&self.egui_ctx, mouse_form_host::GESTURE_SETTINGS, self.mouse_gesture_settings_dialog.open),
+            Panel::DateTimeStudioDialog => self
+                .date_time_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx),
+            Panel::FileSearchDialog => self
+                .file_search_host
+                .prepare_open(&self.egui_ctx, self.file_search_dialog.open),
+            Panel::MouseGesturesDialog => self.mouse_gestures_host.prepare_open(
+                &self.egui_ctx,
+                mouse_form_host::MOUSE_GESTURES,
+                self.mouse_gestures_dialog.open,
+            ),
+            Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.prepare_open(
+                &self.egui_ctx,
+                mouse_form_host::GESTURE_SETTINGS,
+                self.mouse_gesture_settings_dialog.open,
+            ),
             _ => {}
         }
         if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
@@ -6281,12 +6480,15 @@ impl LauncherApp {
 
     fn request_explorer_tabs_focus(&mut self) {
         if self.explorer_tabs_host.root_layer().is_some()
-            && self.egui_ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && self
+                .egui_ctx
+                .memory(|memory| memory.top_modal_layer().is_none())
             && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())
             && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
                 != self.explorer_tabs_host.root_layer()
         {
-            self.egui_ctx.memory_mut(|memory| memory.surrender_focus(focused));
+            self.egui_ctx
+                .memory_mut(|memory| memory.surrender_focus(focused));
         }
         self.explorer_tabs_host.request_focus();
     }
@@ -6309,28 +6511,60 @@ impl LauncherApp {
         if panel == Panel::ThemeSettingsDialog {
             let was_open = self.theme_settings_dialog.host_open;
             self.open_theme_settings_dialog();
-            let presentation = self.theme_settings_host.open_from_origin(&self.egui_ctx, &self.theme_settings_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
-            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            let presentation = self.theme_settings_host.open_from_origin(
+                &self.egui_ctx,
+                &self.theme_settings_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if presentation == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::Plugins {
             let was_open = self.plugin_editor.host_open;
             self.plugin_editor.start_host();
-            let presentation = self.plugin_settings_host.open_from_origin(&self.egui_ctx, &self.plugin_editor, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
-            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            let presentation = self.plugin_settings_host.open_from_origin(
+                &self.egui_ctx,
+                &self.plugin_editor,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if presentation == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::HotkeyDirectoryDialog {
             let was_open = self.hotkey_directory_dialog.open;
             self.hotkey_directory_dialog.start_session();
-            let presentation = self.hotkey_directory_host.open_from_origin(&self.egui_ctx, &self.hotkey_directory_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
-            if presentation == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            let presentation = self.hotkey_directory_host.open_from_origin(
+                &self.egui_ctx,
+                &self.hotkey_directory_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if presentation == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
+        } else if panel == Panel::QrDialog {
+            self.qr_dialog.ensure_open();
+            self.qr_host.prepare_open(&self.egui_ctx, &self.qr_dialog);
+            self.qr_host.request_focus();
+            if !self.qr_host.is_popped_out() {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
-            self.calculation_pad_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.calculation_pad_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if let Some(layer) = self.calculation_pad_dialog.host_layer_if_root() {
                 self.egui_ctx.move_to_top(layer);
             }
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
-            self.date_time_studio_dialog.prepare_open_presentation(&self.egui_ctx);
-            if self.date_time_studio_dialog.presentation() == utility_host::UtilityPresentation::Docked {
+            self.date_time_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx);
+            if self.date_time_studio_dialog.presentation()
+                == utility_host::UtilityPresentation::Docked
+            {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::NotesDialog {
@@ -6340,7 +6574,8 @@ impl LauncherApp {
             self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
             self.mkmacro_dialog.open();
-            self.mkmacro_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.mkmacro_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if !self.mkmacro_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
@@ -6348,26 +6583,34 @@ impl LauncherApp {
             if !self.file_search_dialog.open {
                 self.file_search_dialog.open();
             }
-            self.file_search_host.prepare_open(&self.egui_ctx, self.file_search_dialog.open);
+            self.file_search_host
+                .prepare_open(&self.egui_ctx, self.file_search_dialog.open);
             self.file_search_host.request_focus();
         } else if panel == Panel::SnippetDialog {
             self.snippet_dialog.ensure_open();
-            self.snippet_window_host.prepare_open(&self.egui_ctx, &self.snippet_dialog);
+            self.snippet_window_host
+                .prepare_open(&self.egui_ctx, &self.snippet_dialog);
             self.snippet_window_host.request_focus();
         } else if panel == Panel::PasteSequenceDialog {
             let context = self.paste_sequence_invocation_context_for_open();
             self.paste_sequence_dialog.open_with_context(context);
-            self.paste_sequence_host.prepare_open(&self.egui_ctx, &self.paste_sequence_dialog);
+            self.paste_sequence_host
+                .prepare_open(&self.egui_ctx, &self.paste_sequence_dialog);
             self.paste_sequence_host.request_focus();
         } else if panel == Panel::ClipboardDialog {
             self.clipboard_dialog.ensure_open();
-            self.clipboard_history_host.prepare_open(&self.egui_ctx, &self.clipboard_dialog);
+            self.clipboard_history_host
+                .prepare_open(&self.egui_ctx, &self.clipboard_dialog);
             self.clipboard_history_host.request_focus();
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
-            self.clipboard_modify_host.prepare_open(&self.egui_ctx, &self.clipboard_modify_dialog);
+            self.clipboard_modify_host
+                .prepare_open(&self.egui_ctx, &self.clipboard_modify_dialog);
             self.clipboard_modify_host.request_focus();
-        } else if matches!(panel, Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) {
+        } else if matches!(
+            panel,
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails
+        ) {
             self.ensure_open(panel);
             let presentation = match panel {
                 Panel::CalendarPopover => self.calendar_popover_host.presentation(),
@@ -6393,35 +6636,40 @@ impl LauncherApp {
             }
         } else if panel == Panel::ImageCompareDialog {
             self.image_compare_dialog.open();
-            self.image_compare_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.image_compare_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             self.image_compare_dialog.request_host_focus();
             if !self.image_compare_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::DuplicateFinderDialog {
             self.duplicate_finder_dialog.open();
-            self.duplicate_finder_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.duplicate_finder_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             self.duplicate_finder_dialog.request_host_focus();
             if !self.duplicate_finder_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::FolderSizeDialog {
             self.folder_size_dialog.open();
-            self.folder_size_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.folder_size_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             self.folder_size_dialog.request_host_focus();
             if !self.folder_size_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::FileLockDialog {
             self.file_lock_dialog.ensure_open();
-            self.file_lock_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.file_lock_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             self.file_lock_dialog.request_host_focus();
             if !self.file_lock_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::RecordingDialog {
             self.recording_dialog.open();
-            self.recording_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.recording_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             self.recording_dialog.request_host_focus();
             if !self.recording_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
@@ -6434,19 +6682,22 @@ impl LauncherApp {
             }
         } else if panel == Panel::TableUtilityDialog {
             self.table_utility_dialog.open();
-            self.table_utility_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.table_utility_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if !self.table_utility_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::XmlToolkitDialog {
             self.xml_toolkit_dialog.open();
-            self.xml_toolkit_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.xml_toolkit_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if !self.xml_toolkit_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::RegexTesterDialog {
             self.regex_tester_dialog.open();
-            self.regex_tester_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.regex_tester_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if !self.regex_tester_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
@@ -6501,31 +6752,46 @@ impl LauncherApp {
         } else if panel == Panel::CalculationDependencyDialog {
             let was_open = self.calculation_dependency_dialog.open;
             self.calculation_dependency_dialog.open(None);
-            let desired = self.calculation_dependency_host.open_from_origin(&self.egui_ctx, &self.calculation_dependency_dialog, was_open, &utility_host::ChildOpenOrigin::<()>::Root);
-            if desired == Some(utility_host::UtilityPresentation::Docked) { self.request_launcher_visibility(true); }
+            let desired = self.calculation_dependency_host.open_from_origin(
+                &self.egui_ctx,
+                &self.calculation_dependency_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ExplorerTabsDialog {
             self.explorer_tabs_dialog.open();
-            self.explorer_tabs_host.prepare_open(&self.egui_ctx, &self.explorer_tabs_dialog);
+            self.explorer_tabs_host
+                .prepare_open(&self.egui_ctx, &self.explorer_tabs_dialog);
             self.request_explorer_tabs_focus();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();
             }
-            self.json_utility_host.prepare_open(&self.egui_ctx, &self.json_utility_dialog);
+            self.json_utility_host
+                .prepare_open(&self.egui_ctx, &self.json_utility_dialog);
             self.json_utility_host.request_focus();
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
-            self.batch_rename_host.prepare_open(&self.egui_ctx, &self.batch_rename_dialog);
+            self.batch_rename_host
+                .prepare_open(&self.egui_ctx, &self.batch_rename_dialog);
             self.batch_rename_host.request_focus();
         } else if panel == Panel::SearchReplaceDialog {
             if !self.search_replace_dialog.open {
                 self.ensure_open(panel);
             }
-            self.search_replace_host.prepare_open(&self.egui_ctx, &self.search_replace_dialog);
+            self.search_replace_host
+                .prepare_open(&self.egui_ctx, &self.search_replace_dialog);
             self.search_replace_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();
-            self.mouse_gestures_host.prepare_open(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES, true);
+            self.mouse_gestures_host.prepare_open(
+                &self.egui_ctx,
+                mouse_form_host::MOUSE_GESTURES,
+                true,
+            );
             self.mouse_gestures_host.request_focus();
         } else if panel == Panel::MouseSettingsDialog {
             self.open_mouse_settings_dialog();
@@ -6533,13 +6799,16 @@ impl LauncherApp {
             self.open_mouse_gesture_settings_dialog();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
-            self.diagram_studio_dialog.prepare_open_presentation(&self.egui_ctx);
-            if self.diagram_studio_dialog.open && !self.diagram_studio_dialog.owner_is_popped_out() {
+            self.diagram_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx);
+            if self.diagram_studio_dialog.open && !self.diagram_studio_dialog.owner_is_popped_out()
+            {
                 self.request_launcher_visibility(true);
             }
         } else if panel == Panel::MarkdownStudioDialog {
             self.markdown_studio_dialog.open();
-            self.markdown_studio_dialog.prepare_open_presentation(&self.egui_ctx);
+            self.markdown_studio_dialog
+                .prepare_open_presentation(&self.egui_ctx);
             if self.markdown_studio_dialog.open && !self.markdown_studio_dialog.is_popped_out() {
                 self.request_launcher_visibility(true);
             }
@@ -6661,8 +6930,14 @@ impl LauncherApp {
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
-        check!(programmer_inspector_dialog, Panel::ProgrammerInspectorDialog);
-        check!(calculation_dependency_dialog, Panel::CalculationDependencyDialog);
+        check!(
+            programmer_inspector_dialog,
+            Panel::ProgrammerInspectorDialog
+        );
+        check!(
+            calculation_dependency_dialog,
+            Panel::CalculationDependencyDialog
+        );
         check!(explorer_tabs_dialog, Panel::ExplorerTabsDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
@@ -6735,7 +7010,11 @@ impl LauncherApp {
 
     /// Open a note panel for the given slug, optionally using a template for new notes.
     pub fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
-        self.open_note_panel_from_origin(slug, template, &utility_host::ChildOpenOrigin::<()>::Root);
+        self.open_note_panel_from_origin(
+            slug,
+            template,
+            &utility_host::ChildOpenOrigin::<()>::Root,
+        );
     }
 
     fn open_note_panel_from_origin<S>(
@@ -7064,7 +7343,8 @@ impl LauncherApp {
         let spec = Self::calendar_host_spec(panel);
         match panel {
             Panel::CalendarPopover => {
-                self.calendar_popover_host.remember_on_close(&self.egui_ctx, &spec);
+                self.calendar_popover_host
+                    .remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_popover_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -7074,7 +7354,8 @@ impl LauncherApp {
                 self.panel_states.calendar_popover = false;
             }
             Panel::CalendarEventEditor => {
-                self.calendar_editor_host.remember_on_close(&self.egui_ctx, &spec);
+                self.calendar_editor_host
+                    .remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_editor_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -7084,7 +7365,8 @@ impl LauncherApp {
                 self.panel_states.calendar_event_editor = false;
             }
             Panel::CalendarEventDetails => {
-                self.calendar_details_host.remember_on_close(&self.egui_ctx, &spec);
+                self.calendar_details_host
+                    .remember_on_close(&self.egui_ctx, &spec);
                 self.calendar_details_host.retire(
                     &self.egui_ctx,
                     &spec,
@@ -7110,12 +7392,11 @@ impl LauncherApp {
         self.calendar_selected_date = Some(date.unwrap_or(today));
         self.calendar_selected_event = None;
         if !self.calendar_popover_open {
-            self.calendar_popover_host
-                .initialize(
-                    &self.egui_ctx,
-                    &Self::calendar_host_spec(Panel::CalendarPopover),
-                    utility_host::UtilityPresentation::Docked,
-                );
+            self.calendar_popover_host.initialize(
+                &self.egui_ctx,
+                &Self::calendar_host_spec(Panel::CalendarPopover),
+                utility_host::UtilityPresentation::Docked,
+            );
         }
         self.calendar_popover.begin_host_session();
         self.calendar_popover_open = true;
@@ -7225,8 +7506,11 @@ impl LauncherApp {
         self.calendar_event_editor.open_new_at(local)?;
         self.calendar_editor_open = true;
         self.calendar_editor_host.open_from_origin(
-            &self.egui_ctx, &Self::calendar_host_spec(Panel::CalendarEventEditor), false,
-            self.calendar_event_editor.host_session_epoch(), origin,
+            &self.egui_ctx,
+            &Self::calendar_host_spec(Panel::CalendarEventEditor),
+            false,
+            self.calendar_event_editor.host_session_epoch(),
+            origin,
         );
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);

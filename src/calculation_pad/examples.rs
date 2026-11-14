@@ -393,6 +393,35 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
         ],
     },
+    CalculationExampleGroup {
+        title: "Conditions and collections",
+        examples: &[
+            CalculationExample {
+                title: "Choose a value",
+                source: "if(2 > 1, 7, 1 / 0)",
+                explanation: "Only the selected branch is evaluated.",
+                expected: ExampleExpectation::Scalar(7.0),
+            },
+            CalculationExample {
+                title: "Sum a range",
+                source: "sum(range(1, 6))",
+                explanation: "Ranges exclude their stop and contain at most 1,024 values.",
+                expected: ExampleExpectation::Scalar(15.0),
+            },
+            CalculationExample {
+                title: "Population standard deviation",
+                source: "stdev([2, 2])",
+                explanation: "Standard deviation uses the population convention.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "Running total",
+                source: "total = 0\nfor amount in [10, 20, 30]:\n    total = total + amount\ntotal",
+                explanation: "A loop visits each value and keeps the final assignment.",
+                expected: ExampleExpectation::Scalar(60.0),
+            },
+        ],
+    },
 ];
 
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
@@ -517,7 +546,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 40);
+        assert_eq!(checked, 44);
     }
 
     #[test]

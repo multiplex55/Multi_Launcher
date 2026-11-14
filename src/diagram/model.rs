@@ -21,6 +21,8 @@ pub enum FlowDirection {
     TopDown,
     TopBottom,
     LeftRight,
+    RightLeft,
+    BottomTop,
 }
 
 impl FlowDirection {
@@ -29,6 +31,8 @@ impl FlowDirection {
             Self::TopDown => "TD",
             Self::TopBottom => "TB",
             Self::LeftRight => "LR",
+            Self::RightLeft => "RL",
+            Self::BottomTop => "BT",
         }
     }
 }

@@ -102,6 +102,10 @@ pub fn extract_style(source: &str) -> Result<(MermaidStyle, Option<std::ops::Ran
     for line in source.split_inclusive('\n') {
         let content = line.trim();
         if content.is_empty() { offset += line.len(); continue; }
+        if content.starts_with("%%") && !content.starts_with("%%{") {
+            offset += line.len();
+            continue;
+        }
         if !content.starts_with("%%{") { return Ok((MermaidStyle::default(), None)); }
         let body = content.strip_prefix("%%{init:").and_then(|s| s.strip_suffix("}%%"))
             .ok_or_else(|| (offset, "unsupported or malformed Mermaid init directive".to_owned()))?;

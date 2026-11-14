@@ -915,7 +915,7 @@ mod tests {
             .unwrap()
             .to_owned();
         let last_good_graph = original.session().unwrap().preview_graph().unwrap().clone();
-        let unsupported = "%% keep exact 🧭\r\nflowchart LR\r\nA --> B\r\n";
+        let unsupported = "%%{unsupported 🧭}%%\r\nflowchart LR\r\nA --> B\r\n";
         original.replace_source(unsupported).unwrap();
         let revision = original.session().unwrap().revision();
         let undo_depth = original.session().unwrap().undo_depth();

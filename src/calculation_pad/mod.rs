@@ -16,6 +16,7 @@ mod programmer;
 mod quantity;
 mod session;
 mod vector;
+mod worker;
 
 pub(crate) use bit_labels::{read_bit_labels, write_bit_labels};
 pub use comparison::{
@@ -38,7 +39,10 @@ pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, Ty
 pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
 pub use vector::CalculationVector;
+pub use document::CalculationSequence;
+pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, function_signature_help, FUNCTIONS};
 
+pub(crate) use persistence::{PadViewMetadata, PadInputReference};
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,
     MAX_SAVED_DOCUMENTS, MAX_STORED_DOCUMENT_BYTES, MAX_STORED_RECOVERY_BYTES, PadDocumentStore,
@@ -46,6 +50,6 @@ pub use persistence::{
     PadRecoveryWriter, PadStoreError,
 };
 pub use session::{
-    CalculationPadSession, InspectorInsertError, PendingTransition, SessionError,
+    CalculationPadSession, EvaluationStatus, InspectorInsertError, PendingTransition, SessionError,
     SessionEvaluation, SessionLineResult, TransitionDecision, TransitionOutcome,
 };

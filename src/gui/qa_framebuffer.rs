@@ -70,7 +70,7 @@ impl CaptureTarget {
     fn viewport_id(self) -> ViewportId {
         match self {
             Self::Root => ViewportId::ROOT,
-            Self::Qr => super::qr_dialog::viewport_id(),
+            Self::Qr => super::qr_dialog::viewport_id(1),
             Self::Diagram => super::diagram_studio::viewport_id(),
             Self::Regex => super::regex_tester_dialog::viewport_id(),
         }
@@ -1681,6 +1681,7 @@ pub(super) struct FramebufferProbe {
     reply_wait_armed: bool,
     latest_qr_observation: Option<QrRenderEvidence>,
     qr_acquired: bool,
+    qr_viewport: Option<ViewportId>,
     qr_capture_parent_logic_frame_id: Option<u64>,
     pending_reply: Option<PendingScreenshotReply>,
     receipt: CompletionReceipt,
@@ -1764,6 +1765,7 @@ impl FramebufferProbe {
             reply_wait_armed: false,
             latest_qr_observation: None,
             qr_acquired: false,
+            qr_viewport: None,
             qr_capture_parent_logic_frame_id: None,
             pending_reply: None,
             receipt,
@@ -1774,6 +1776,15 @@ impl FramebufferProbe {
             probe.arm_reply_wait()?;
         }
         Ok(probe)
+    }
+
+    fn selected_viewport(&self) -> ViewportId {
+        if self.target == CaptureTarget::Qr {
+            self.qr_viewport
+                .unwrap_or_else(|| self.target.viewport_id())
+        } else {
+            self.target.viewport_id()
+        }
     }
 
     fn begin_root_logic(&mut self, ctx: &egui::Context, eligibility: Option<SurfaceEligibility>) {
@@ -2004,7 +2015,7 @@ impl FramebufferProbe {
         self.issue_logic_frame_id = Some(self.logic_frame_id);
         self.phase = ProbePhase::Issued;
         ctx.send_viewport_cmd_to(
-            self.target.viewport_id(),
+            self.selected_viewport(),
             ViewportCommand::Screenshot(self.token.clone()),
         );
         // Glow services the action after the selected viewport's next paint.
@@ -2245,6 +2256,14 @@ impl FramebufferProbe {
             return;
         };
 
+        if self
+            .qr_viewport
+            .is_some_and(|id| id != observation.expected_viewport_id)
+        {
+            self.fail("QR session changed during screenshot capture");
+            return;
+        }
+        self.qr_viewport = Some(observation.expected_viewport_id);
         let qr_evidence = qr_render_evidence(self.logic_frame_id, &observation);
         self.latest_qr_observation = Some(qr_evidence.clone());
 
@@ -2317,7 +2336,7 @@ impl FramebufferProbe {
                     return;
                 }
                 let Some(image) =
-                    take_matching_screenshot_event(ctx, self.target.viewport_id(), &self.token)
+                    take_matching_screenshot_event(ctx, self.selected_viewport(), &self.token)
                 else {
                     return;
                 };
@@ -2754,6 +2773,7 @@ impl FramebufferProbe {
         self.reply_wait_armed = false;
         self.latest_qr_observation = None;
         self.qr_acquired = false;
+        self.qr_viewport = None;
         self.qr_capture_parent_logic_frame_id = None;
         self.pending_reply = None;
         self.retained_pass = None;
@@ -3913,7 +3933,7 @@ fn qr_render_evidence(
     observation: &QrViewportObservation,
 ) -> QrRenderEvidence {
     let actual_target = observation.callback_class == egui::ViewportClass::Immediate
-        && observation.child_viewport_id == super::qr_dialog::viewport_id();
+        && observation.child_viewport_id == observation.expected_viewport_id;
     let eligible = actual_target
         && observation.body_rendered
         && observation.still_open
@@ -3944,7 +3964,7 @@ fn qr_render_evidence(
 fn qr_eligibility_failure(observation: &QrViewportObservation) -> &'static str {
     if observation.callback_class != egui::ViewportClass::Immediate {
         "selected QR viewport callback was not an immediate native child"
-    } else if observation.child_viewport_id != super::qr_dialog::viewport_id() {
+    } else if observation.child_viewport_id != observation.expected_viewport_id {
         "selected QR viewport callback had an unexpected child identity"
     } else if !observation.body_rendered {
         "selected QR viewport did not render its dialog body"
@@ -6590,6 +6610,7 @@ mod tests {
             reply_wait_armed: false,
             latest_qr_observation: None,
             qr_acquired: false,
+            qr_viewport: None,
             qr_capture_parent_logic_frame_id: None,
             pending_reply: None,
             receipt: CompletionReceipt::new(&request, selected_reply_timeout(target)),
@@ -6704,7 +6725,8 @@ mod tests {
 
     fn test_qr_observation(completed_frame_nr: u64) -> QrViewportObservation {
         QrViewportObservation {
-            child_viewport_id: super::super::qr_dialog::viewport_id(),
+            child_viewport_id: super::super::qr_dialog::viewport_id(1),
+            expected_viewport_id: super::super::qr_dialog::viewport_id(1),
             callback_class: egui::ViewportClass::Immediate,
             callback_frame_nr: completed_frame_nr,
             callback_pass_nr: completed_frame_nr,

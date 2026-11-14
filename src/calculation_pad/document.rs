@@ -18,6 +18,138 @@ use super::quantity::{
     self, CalculatedQuantity, QuantityError, QuantityExpression, UnitParseEvidence, UnitProduct,
 };
 use super::vector::{self, VectorExpression};
+#[path = "script.rs"]
+pub(super) mod script;
+#[path = "loops.rs"]
+mod loops;
+pub use script::CalculationSequence;
+
+pub(crate) fn editor_loop_header(source: &str) -> bool {
+    loops::editor_iterator(source).is_some()
+}
+pub(crate) use script::{FUNCTIONS, function_signature_help};
+
+/// Names visible before the caret, without evaluating the document.
+pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
+    let Some(prefix) = source.get(..caret) else { return Vec::new(); };
+    let current_indent = prefix.rsplit('\n').next().unwrap_or("").chars().take_while(|c| *c == ' ').count();
+    let mut bindings: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut scopes: Vec<(usize, usize)> = Vec::new();
+    let lines: Vec<_> = prefix.split('\n').collect();
+    for (line_number, line) in lines.iter().take(lines.len().saturating_sub(1)).enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
+        let indent = line.chars().take_while(|ch| *ch == ' ').count();
+        while scopes.last().is_some_and(|(previous, _)| indent <= *previous) { scopes.pop(); }
+        if let Some(name) = loops::editor_iterator(trimmed) {
+            scopes.push((indent, line_number));
+            bindings.push((name, scopes.iter().map(|(_, id)| *id).collect()));
+        } else if let Some(delimiter) = find_assignment_delimiter(trimmed)
+            && let Ok(name) = parse_assignment_name(trimmed[..delimiter.left_end].trim())
+            && !is_row_reference_name(&name.canonical)
+                && (name.braced || !is_reserved_name(&name.canonical))
+                && find_assignment_delimiter(&trimmed[delimiter.right_start..]).is_none()
+            {
+                let display = if name.braced { format!("{{{}}}", name.canonical) } else { name.canonical };
+                bindings.push((display, scopes.iter().map(|(_, id)| *id).collect()));
+        }
+    }
+    while scopes.last().is_some_and(|(indent, _)| current_indent <= *indent) { scopes.pop(); }
+    let active: Vec<_> = scopes.iter().map(|(_, id)| *id).collect();
+    bindings.reverse();
+    let mut result = Vec::new();
+    for (name, scope) in bindings {
+        if active.starts_with(&scope) && !result.contains(&name) { result.push(name); }
+    }
+    result
+}
+
+pub(crate) fn watch_name(input: &str) -> Option<String> {
+    let parsed = parse_assignment_name(input.trim()).ok()?;
+    (!is_row_reference_name(&parsed.canonical)
+        && (parsed.braced || !is_reserved_name(&parsed.canonical))).then_some(parsed.canonical)
+}
+
+fn integer_literal_token(value: &str) -> bool {
+    let value = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
+    let (digits, radix) = if let Some(rest) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) { (rest, 16) }
+        else if let Some(rest) = value.strip_prefix("0b").or_else(|| value.strip_prefix("0B")) { (rest, 2) }
+        else if let Some(rest) = value.strip_prefix("0o").or_else(|| value.strip_prefix("0O")) { (rest, 8) }
+        else { (value, 10) };
+    digits.chars().any(|ch| ch.is_digit(radix)) && digits.chars().all(|ch| ch == '_' || ch.is_digit(radix))
+}
+
+/// A source-backed literal input; the editable range excludes constructor and unit text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiteralInput {
+    pub name: String,
+    pub line: usize,
+    pub value: String,
+    pub value_range: Range<usize>,
+    pub source_line: String,
+}
+
+pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
+    let mut result = Vec::new();
+    let mut offset = 0;
+    let has_loops = loops::contains_loop(source);
+    for (line, raw) in source.split_inclusive('\n').enumerate().take(MAX_SOURCE_LINES) {
+        let text = raw.trim_end_matches(['\r', '\n']);
+        let trimmed = text.trim();
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { offset += raw.len(); continue; }
+        if has_loops && text.len() != text.trim_start().len() { offset += raw.len(); continue; }
+        if let Some(delimiter) = find_assignment_delimiter(text)
+            && delimiter.operator == AssignmentOperator::Assign
+            && let Ok(name) = parse_assignment_name(text[..delimiter.left_end].trim())
+            && !is_row_reference_name(&name.canonical)
+            && (name.braced || !is_reserved_name(&name.canonical))
+        {
+            let rhs = &text[delimiter.right_start..];
+            let leading = rhs.len() - rhs.trim_start().len();
+            let expr = rhs.trim();
+            let (value, start, valid_shape) = if let Some(open) = expr.find('(') {
+                let constructor = &expr[..open];
+                let valid = matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
+                    && expr.ends_with(')');
+                let argument = if valid { &expr[open + 1..expr.len() - 1] } else { "" };
+                let value = argument.trim();
+                let start = open + 1 + argument.len() - argument.trim_start().len();
+                (value, start, valid && integer_literal_token(value))
+            } else {
+                let sign = usize::from(expr.starts_with('+') || expr.starts_with('-'));
+                let rest = &expr[sign..];
+                let base = rest.starts_with("0x") || rest.starts_with("0X") || rest.starts_with("0b") || rest.starts_with("0B") || rest.starts_with("0o") || rest.starts_with("0O");
+                let end = if base {
+                    sign + rest.char_indices().find_map(|(i, ch)| (i >= 2 && !(ch.is_ascii_hexdigit() || ch == '_')).then_some(i)).unwrap_or(rest.len())
+                } else { unit_conversion::parse_quantity_number_prefix(expr).map_or(0, |(_, end)| end) };
+                let suffix = expr[end..].trim();
+                let valid_number = end > 0 && (!base || integer_literal_token(&expr[..end]));
+                (&expr[..end], 0, valid_number && (suffix.is_empty() || suffix.chars().all(|ch| ch.is_alphabetic() || matches!(ch, '°' | 'µ' | 'μ' | '%'))))
+            };
+            if valid_shape {
+                let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
+                let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
+                if evaluation {
+                    let value_start = offset + delimiter.right_start + leading + start;
+                    result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
+                        value_range: value_start..value_start + value.len(), source_line: text.to_owned() });
+                }
+            }
+        }
+        offset += raw.len();
+    }
+    result
+}
+
+impl CalculationDocument {
+    fn evaluate_owned_literal(&self, needs_quantity: bool) -> bool {
+        self.evaluate().lines.first().is_some_and(|line| match &line.outcome {
+            LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) => true,
+            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }) => !needs_quantity,
+            _ => false,
+        })
+    }
+}
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -68,11 +200,48 @@ impl CalculationDocument {
 
     /// Reevaluates every source line from the current document contents.
     pub fn evaluate(&self) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(None)
+    }
+
+    pub(crate) fn evaluate_with_cancellation(
+        &self,
+        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(Some(cancellation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn requires_repeated_execution(&self) -> bool {
+        Self::source_requires_repeated_execution(&self.source)
+    }
+
+    pub(crate) fn source_requires_repeated_execution(source: &str) -> bool {
+        loops::contains_loop(source)
+            || source.lines().any(|line| {
+                let line = line.trim();
+                if line.is_empty() || is_full_line_comment(line) {
+                    return false;
+                }
+                let expression = find_assignment_delimiter(line)
+                    .map_or(line, |delimiter| line[delimiter.right_start..].trim());
+                script::uses_script_syntax(expression)
+                    || find_assignment_delimiter(line).is_some_and(|delimiter| {
+                        delimiter.operator != AssignmentOperator::Assign
+                            && split_to_keyword(expression).is_some()
+                    })
+            })
+    }
+
+    fn evaluate_inner(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> CalculationEvaluation<'_> {
         let source = self.source.as_str();
         if source.len() > MAX_DOCUMENT_BYTES {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
+                final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::DocumentTooLarge {
                     max_bytes: MAX_DOCUMENT_BYTES,
                 }),
@@ -84,13 +253,17 @@ impl CalculationDocument {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
+                final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::TooManyLines {
                     max_lines: MAX_SOURCE_LINES,
                 }),
             };
         }
+        if loops::contains_loop(source) {
+            return loops::evaluate(source, cancellation);
+        }
 
-        // Alias fallback must see forward and duplicate declarations too, so
+        // Alias fallback must see forward declarations too, so
         // references keep the same diagnostics as ordinary named variables.
         let declared_names = declared_names(source);
         let mut total_identifiers = 0;
@@ -114,7 +287,6 @@ impl CalculationDocument {
         }
 
         let definitions = assignment_definitions(&prepared);
-        mark_duplicate_assignments(&mut prepared, &definitions);
         resolve_references(&mut prepared, &definitions);
         let cyclic_lines = cyclic_lines(&prepared);
 
@@ -122,8 +294,40 @@ impl CalculationDocument {
         let mut values = vec![None; prepared.len()];
         let mut results = Vec::with_capacity(prepared.len());
 
+        let mut work = cancellation.map_or_else(
+            script::WorkBudget::default,
+            script::WorkBudget::with_cancellation,
+        );
+        let mut terminal = false;
         for (line_index, line) in prepared.iter().enumerate() {
-            let outcome = evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values);
+            let mut dependencies = line.dependencies.clone();
+            let outcome = if terminal
+                && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
+            {
+                LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted))
+            } else if let (Some(_), Some(diagnostic)) = (&line.compound, &line.diagnostic) {
+                LineOutcome::Error(diagnostic.clone())
+            } else if let Some(prior) = line.compound.as_ref().and_then(|compound| compound.prior)
+                && !matches!(outcomes.get(prior), Some(LineOutcome::Value(_)))
+            {
+                LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed { dependency_line: prior }))
+            } else if let PreparedStatement::Script(expression) = &line.statement {
+                let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
+                match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
+            } else {
+                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values)
+            };
+            if matches!(
+                outcome,
+                LineOutcome::Error(Diagnostic { kind: DiagnosticKind::WorkLimit | DiagnosticKind::Canceled })
+            ) {
+                terminal = true;
+            }
+            if matches!(outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })) {
+                dependencies.clear();
+            }
+            dependencies.sort_unstable();
+            dependencies.dedup();
             if let LineOutcome::Value(value) = &outcome {
                 values[line_index] = Some(value.clone());
             }
@@ -132,7 +336,8 @@ impl CalculationDocument {
                 line_index,
                 source_range: line.source_range.clone(),
                 assignment_name: line.assignment_name.clone(),
-                dependency_indices: line.dependencies.clone(),
+                dependency_indices: dependencies,
+                loop_iteration: None,
                 outcome,
             });
         }
@@ -140,6 +345,17 @@ impl CalculationDocument {
         CalculationEvaluation {
             source,
             lines: results,
+            final_bindings: definitions
+                .into_iter()
+                .filter_map(|(name, lines)| {
+                    lines.into_iter().rev().find(|&line| {
+                        !matches!(
+                            outcomes[line],
+                            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })
+                        )
+                    }).map(|line| (name, FinalBinding { line_index: line, outcome: outcomes[line].clone() }))
+                })
+                .collect(),
             diagnostic: None,
         }
     }
@@ -184,7 +400,15 @@ impl std::error::Error for EditError {}
 pub struct CalculationEvaluation<'a> {
     pub source: &'a str,
     pub lines: Vec<CalculationLineResult>,
+    /// The physical row of each name's latest binding, including failures.
+    pub(crate) final_bindings: HashMap<String, FinalBinding>,
     pub diagnostic: Option<DocumentDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FinalBinding {
+    pub(crate) line_index: usize,
+    pub(crate) outcome: LineOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +420,8 @@ pub struct CalculationLineResult {
     pub assignment_name: Option<String>,
     /// Zero-based physical source line indexes this line depends on.
     pub dependency_indices: Vec<usize>,
+    /// Iteration path for the last execution of a row inside a loop.
+    pub loop_iteration: Option<Vec<usize>>,
     pub outcome: LineOutcome,
 }
 
@@ -210,6 +436,8 @@ pub enum LineOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
     Scalar(f64),
+    Boolean(bool),
+    Sequence(CalculationSequence),
     Vector(vector::CalculationVector),
     /// An exact fixed-width integer result with explicit width and signedness.
     Integer(TypedInteger),
@@ -232,6 +460,8 @@ impl CalculationValue {
     pub fn formatted_result(&self) -> Option<String> {
         match self {
             Self::Scalar(value) => format_number(*value),
+            Self::Boolean(value) => Some(value.to_string()),
+            Self::Sequence(value) => Some(value.display()),
             Self::Vector(value) => value.formatted_result(),
             Self::Integer(value) => Some(value.formatted_decimal()),
             Self::DimensionalQuantity(value) => value.formatted_result(),
@@ -242,11 +472,19 @@ impl CalculationValue {
         }
     }
 
+    /// Complete parseable value for clipboard operations.
+    pub fn canonical_result(&self) -> Option<String> {
+        match self {
+            Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
+            _ => self.formatted_result(),
+        }
+    }
+
     pub fn is_approximate(&self) -> bool {
         match self {
             Self::DimensionalQuantity(value) => value.is_approximate(),
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
-            Self::Scalar(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
+            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
         }
     }
 }
@@ -288,7 +526,6 @@ pub enum DiagnosticKind {
         max_bytes: usize,
     },
     ReservedName(String),
-    DuplicateName(String),
     UnknownName(String),
     UnknownRowReference(String),
     ForwardReference {
@@ -305,6 +542,12 @@ pub enum DiagnosticKind {
     ExpectedExactBase(String),
     InvalidExpression,
     InvalidArithmetic,
+    Script(String),
+    WorkLimit,
+    Canceled,
+    NotExecuted,
+    LoopError { iteration: Vec<usize>, cause: Box<DiagnosticKind> },
+    LoopIterationLimit,
     Vector(String),
     InvalidBaseNumber,
     InvalidPrefixedInteger {
@@ -347,7 +590,6 @@ impl fmt::Display for Diagnostic {
                 write!(formatter, "name exceeds the {max_bytes}-byte limit")
             }
             Kind::ReservedName(name) => write!(formatter, "{name} is a reserved name"),
-            Kind::DuplicateName(name) => write!(formatter, "{name} is assigned more than once"),
             Kind::UnknownName(name) => write!(formatter, "unknown name: {name}"),
             Kind::UnknownRowReference(reference) => {
                 write!(formatter, "no result is available for {reference}")
@@ -381,6 +623,19 @@ impl fmt::Display for Diagnostic {
             Kind::InvalidExpression => formatter.write_str("invalid expression"),
             Kind::InvalidArithmetic => formatter
                 .write_str("division or remainder by zero, or non-finite arithmetic result"),
+            Kind::Script(message) => formatter.write_str(message),
+            Kind::WorkLimit => formatter.write_str("evaluation work limit exceeded"),
+            Kind::Canceled => formatter.write_str("evaluation canceled"),
+            Kind::NotExecuted => formatter.write_str("not executed"),
+            Kind::LoopError { iteration, cause } => {
+                if iteration.is_empty() {
+                    write!(formatter, "loop: {}", Diagnostic::new((**cause).clone()))
+                } else {
+                    let path = iteration.iter().map(usize::to_string).collect::<Vec<_>>().join(".");
+                    write!(formatter, "iteration {path}: {}", Diagnostic::new((**cause).clone()))
+                }
+            }
+            Kind::LoopIterationLimit => formatter.write_str("loop iteration limit exceeded"),
             Kind::Vector(message) => write!(formatter, "{message}"),
             Kind::InvalidBaseNumber => formatter.write_str("invalid unsigned base value"),
             Kind::InvalidPrefixedInteger { radix } => {
@@ -430,6 +685,7 @@ impl std::error::Error for Diagnostic {}
 struct PreparedLine {
     source_range: Range<usize>,
     assignment_name: Option<String>,
+    compound: Option<CompoundBinding>,
     statement: PreparedStatement,
     references: Vec<PreparedReference>,
     dependencies: Vec<usize>,
@@ -437,10 +693,48 @@ struct PreparedLine {
 }
 
 #[derive(Debug)]
+struct CompoundBinding {
+    prior: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentOperator {
+    Assign,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Power,
+}
+
+impl AssignmentOperator {
+    fn symbol(self) -> Option<char> {
+        match self {
+            Self::Assign => None,
+            Self::Add => Some('+'),
+            Self::Subtract => Some('-'),
+            Self::Multiply => Some('*'),
+            Self::Divide => Some('/'),
+            Self::Remainder => Some('%'),
+            Self::Power => Some('^'),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssignmentDelimiter {
+    left_end: usize,
+    right_start: usize,
+    operator: AssignmentOperator,
+}
+
+#[derive(Debug)]
 enum PreparedStatement {
     Blank,
     Comment,
     Expression(Box<PreparedExpression>),
+    Script(Box<script::ScriptExpression>),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -462,6 +756,7 @@ enum PreparedStatement {
 
 #[derive(Debug)]
 struct PreparedExpression {
+    simple_reference: Option<String>,
     vector: Option<Result<VectorExpression, DiagnosticKind>>,
     explicit_vector: bool,
     scalar: Option<PreparedScalar>,
@@ -581,6 +876,16 @@ fn prepare_line(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
 ) -> PreparedLine {
+    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false)
+}
+
+fn prepare_line_internal(
+    source_range: Range<usize>,
+    source_line: &str,
+    total_identifiers: &mut usize,
+    declared_names: &HashSet<String>,
+    internal_template: bool,
+) -> PreparedLine {
     let trimmed = source_line.trim();
     if trimmed.is_empty() {
         return PreparedLine::simple(source_range, PreparedStatement::Blank);
@@ -589,18 +894,11 @@ fn prepare_line(
         return PreparedLine::simple(source_range, PreparedStatement::Comment);
     }
 
-    let (assignment_name, expression, assignment_diagnostic) =
+    let (assignment_name, expression, assignment_diagnostic, compound) =
         match find_assignment_delimiter(trimmed) {
-            Some(index) => {
-                let left = trimmed[..index].trim();
-                let right = trimmed[index + 1..].trim();
-                if find_assignment_delimiter(right).is_some() {
-                    return PreparedLine::invalid(
-                        source_range,
-                        None,
-                        DiagnosticKind::InvalidAssignment,
-                    );
-                }
+            Some(delimiter) => {
+                let left = trimmed[..delimiter.left_end].trim();
+                let right = trimmed[delimiter.right_start..].trim();
                 match parse_assignment_name(left) {
                     Ok(assignment) => {
                         let diagnostic = if is_row_reference_name(&assignment.canonical)
@@ -609,21 +907,24 @@ fn prepare_line(
                             Some(Diagnostic::new(DiagnosticKind::ReservedName(
                                 assignment.canonical.clone(),
                             )))
+                        } else if find_assignment_delimiter(right).is_some() {
+                            Some(Diagnostic::new(DiagnosticKind::InvalidAssignment))
                         } else {
                             None
                         };
-                        (Some(assignment.canonical), right, diagnostic)
+                        (Some(assignment.canonical), right, diagnostic, delimiter.operator.symbol())
                     }
                     Err(kind) => {
                         return PreparedLine::invalid(source_range, None, kind);
                     }
                 }
             }
-            None => (None, trimmed, None),
+            None => (None, trimmed, None, None),
         };
 
     if let Some(diagnostic) = assignment_diagnostic {
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::Invalid,
@@ -639,14 +940,103 @@ fn prepare_line(
             DiagnosticKind::InvalidExpression,
         );
     }
-    if expression.len() > MAX_EXPRESSION_BYTES {
+    let expression_limit = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    if expression.len() > expression_limit {
         return PreparedLine::invalid(
             source_range,
             assignment_name,
             DiagnosticKind::ExpressionTooLong {
-                max_bytes: MAX_EXPRESSION_BYTES,
+                max_bytes: expression_limit,
             },
         );
+    }
+
+    if let Some(operator) = compound {
+        if let Err(kind) = script::validate_source(expression) {
+            return PreparedLine::invalid(source_range, assignment_name, kind);
+        }
+        let Some(name) = assignment_name.as_deref() else {
+            return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::InvalidAssignment);
+        };
+        let target = format!("{{{name}}}");
+        if split_to_keyword(expression).is_some() {
+            let previous_identifiers = *total_identifiers;
+            let rhs = prepare_line_internal(
+                0..expression.len(), expression, total_identifiers, declared_names, true,
+            );
+            if let Some(diagnostic) = rhs.diagnostic.clone() {
+                return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
+            }
+            let rhs_expression = match rhs.statement {
+                PreparedStatement::Script(expression) => *expression,
+                _ => script::ScriptExpression::Legacy {
+                    line: Box::new(rhs),
+                    slots: Vec::new(),
+                    alias: parse_simple_reference(expression).map(|reference| reference.name),
+                },
+            };
+            let mut template = format!("{target} {operator} ");
+            let mut slots = Vec::new();
+            script::add_slot(&mut template, &mut slots, rhs_expression, expression, declared_names);
+            let mut template_names = declared_names.clone();
+            template_names.extend(slots.iter().map(|(name, _)| name.clone()));
+            let mut template_identifiers = 0;
+            let mut outer = prepare_line_internal(
+                source_range.clone(), &template, &mut template_identifiers, &template_names, true,
+            );
+            if let Some(diagnostic) = outer.diagnostic.take() {
+                return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
+            }
+            // The private slot replaces the RHS and does not count as a source identifier.
+            let additional = template_identifiers.saturating_sub(1);
+            if total_identifiers.saturating_sub(previous_identifiers).saturating_add(additional) > MAX_DEPENDENCIES_PER_LINE {
+                return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES_PER_LINE });
+            }
+            if total_identifiers.saturating_add(additional) > MAX_DEPENDENCIES {
+                return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+            }
+            *total_identifiers += additional;
+            return PreparedLine {
+                source_range,
+                assignment_name,
+                compound: Some(CompoundBinding { prior: None }),
+                statement: PreparedStatement::Script(Box::new(script::ScriptExpression::Legacy {
+                    line: Box::new(outer),
+                    slots,
+                    alias: None,
+                })),
+                references: Vec::new(),
+                dependencies: Vec::new(),
+                diagnostic: None,
+            };
+        }
+        let composed = format!("{target} {operator} ({expression})");
+        let mut prepared = prepare_line_internal(
+            source_range, &composed, total_identifiers, declared_names, true,
+        );
+        prepared.assignment_name = assignment_name;
+        prepared.compound = Some(CompoundBinding { prior: None });
+        return prepared;
+    }
+
+    if script::uses_script_syntax(expression) {
+        let identifiers = match script::validate_source(expression) {
+            Ok(count) => count,
+            Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
+        };
+        if total_identifiers.saturating_add(identifiers) > MAX_DEPENDENCIES {
+            return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+        }
+        *total_identifiers += identifiers;
+        return match script::prepare(expression, declared_names) {
+            Ok(expression) => PreparedLine {
+                compound: None,
+                source_range, assignment_name,
+                statement: PreparedStatement::Script(Box::new(expression)),
+                references: Vec::new(), dependencies: Vec::new(), diagnostic: None,
+            },
+            Err(kind) => PreparedLine::invalid(source_range, assignment_name, kind),
+        };
     }
 
     // Exact base conversions have their own u128 grammar. Dispatch them before
@@ -655,6 +1045,7 @@ fn prepare_line(
     if let Some(base_conversion) = parse_base_conversion(expression) {
         return match base_conversion {
             Ok((value, base)) => PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::BaseConversion { value, base },
@@ -730,9 +1121,11 @@ fn prepare_line(
                     .map(|name| prepared_reference(name))
                     .collect();
                 PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                        simple_reference: None,
                         vector: Some(Ok(expression)),
                         explicit_vector: true,
                         scalar: None,
@@ -766,6 +1159,7 @@ fn prepare_line(
         if let Some(reference) = parse_simple_reference(source) {
             if let Some(base) = NumericBase::from_alias(destination) {
                 return PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::BaseReference { destination: base },
@@ -776,6 +1170,7 @@ fn prepare_line(
             }
             if let Some(unit) = unit_conversion::unit_by_alias(destination) {
                 return PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::PhysicalReference {
@@ -792,6 +1187,7 @@ fn prepare_line(
                     let attempt = quantity::parse_expression(source);
                     match attempt.expression {
                         Some(expression) => PreparedLine {
+                            compound: None,
                             source_range,
                             assignment_name,
                             statement: PreparedStatement::QuantityTarget { expression, target },
@@ -822,6 +1218,7 @@ fn prepare_line(
 
         if unit_conversion::parse_conversion(expression).is_ok() {
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::PhysicalConversion(expression.to_owned()),
@@ -852,6 +1249,7 @@ fn prepare_line(
                 );
             };
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::QuantityTarget {
@@ -872,6 +1270,7 @@ fn prepare_line(
                 (attempt.expression, quantity::parse_unit_target(destination))
         {
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::QuantityTarget {
@@ -888,6 +1287,7 @@ fn prepare_line(
             };
         }
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::PhysicalConversion(expression.to_owned()),
@@ -917,9 +1317,11 @@ fn prepare_line(
             .map(|name| prepared_reference(name))
             .collect();
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                simple_reference: None,
                 vector: None,
                 explicit_vector: false,
                 scalar: None,
@@ -957,9 +1359,11 @@ fn prepare_line(
                 .map(|name| prepared_reference(name))
                 .collect();
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+                    simple_reference: None,
                     vector: None,
                     explicit_vector: false,
                     scalar: None,
@@ -1039,9 +1443,11 @@ fn prepare_line(
         }
     }
     PreparedLine {
+        compound: None,
         source_range,
         assignment_name,
         statement: PreparedStatement::Expression(Box::new(PreparedExpression {
+            simple_reference: parse_simple_reference(expression).map(|reference| reference.name),
             vector,
             explicit_vector: false,
             scalar,
@@ -1064,6 +1470,7 @@ impl PreparedLine {
         Self {
             source_range,
             assignment_name: None,
+            compound: None,
             statement,
             references: Vec::new(),
             dependencies: Vec::new(),
@@ -1079,6 +1486,7 @@ impl PreparedLine {
         Self {
             source_range,
             assignment_name,
+            compound: None,
             statement: PreparedStatement::Invalid,
             references: Vec::new(),
             dependencies: Vec::new(),
@@ -1087,13 +1495,33 @@ impl PreparedLine {
     }
 }
 
-fn find_assignment_delimiter(expression: &str) -> Option<usize> {
+fn find_assignment_delimiter(expression: &str) -> Option<AssignmentDelimiter> {
     let mut in_braces = false;
     for (index, character) in expression.char_indices() {
         match character {
             '{' => in_braces = true,
             '}' => in_braces = false,
-            '=' if !in_braces => return Some(index),
+            '=' if !in_braces => {
+                let before = expression[..index].chars().next_back();
+                let after = expression[index + 1..].chars().next();
+                if matches!(before, Some('=' | '!' | '<' | '>')) || after == Some('=') {
+                    continue;
+                }
+                let operator = match before {
+                    Some('+') => AssignmentOperator::Add,
+                    Some('-') => AssignmentOperator::Subtract,
+                    Some('*') => AssignmentOperator::Multiply,
+                    Some('/') => AssignmentOperator::Divide,
+                    Some('%') => AssignmentOperator::Remainder,
+                    Some('^') => AssignmentOperator::Power,
+                    _ => AssignmentOperator::Assign,
+                };
+                return Some(AssignmentDelimiter {
+                    left_end: index - usize::from(operator != AssignmentOperator::Assign),
+                    right_start: index + 1,
+                    operator,
+                });
+            }
             _ => {}
         }
     }
@@ -1219,11 +1647,8 @@ fn declared_names(source: &str) -> HashSet<String> {
             if is_full_line_comment(line) {
                 return None;
             }
-            let index = find_assignment_delimiter(line)?;
-            if find_assignment_delimiter(&line[index + 1..]).is_some() {
-                return None;
-            }
-            let assignment = parse_assignment_name(line[..index].trim()).ok()?;
+            let delimiter = find_assignment_delimiter(line)?;
+            let assignment = parse_assignment_name(line[..delimiter.left_end].trim()).ok()?;
             if is_row_reference_name(&assignment.canonical)
                 || (!assignment.braced && is_reserved_name(&assignment.canonical))
             {
@@ -1907,7 +2332,12 @@ fn parse_row_reference(name: &str) -> RowReference {
 fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>> {
     let mut definitions = HashMap::<String, Vec<usize>>::new();
     for (line_index, line) in lines.iter().enumerate() {
-        if let Some(name) = &line.assignment_name {
+        if let Some(name) = &line.assignment_name
+            && !matches!(
+                line.diagnostic.as_ref().map(|diagnostic| &diagnostic.kind),
+                Some(DiagnosticKind::ReservedName(_))
+            )
+        {
             definitions
                 .entry(name.clone())
                 .or_default()
@@ -1917,34 +2347,42 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
     definitions
 }
 
-fn mark_duplicate_assignments(
-    lines: &mut [PreparedLine],
-    definitions: &HashMap<String, Vec<usize>>,
-) {
-    for (name, locations) in definitions {
-        if locations.len() < 2 {
-            continue;
-        }
-        for &line_index in locations {
-            set_diagnostic_if_missing(
-                &mut lines[line_index],
-                DiagnosticKind::DuplicateName(name.clone()),
-            );
-        }
-    }
-}
-
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
-    for line in lines {
-        resolve_line_references(line, definitions, row_count);
+    for (line_index, line) in lines.iter_mut().enumerate() {
+        let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
+        let compound_name = compound_name.as_deref();
+        let prior = compound_name.and_then(|name| {
+            definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
+        });
+        if let Some(compound) = &mut line.compound {
+            compound.prior = prior;
+            if let Some(prior) = prior {
+                line.dependencies.push(prior);
+            } else if let Some(name) = compound_name {
+                set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
+            }
+        }
+        let named_binding = |name: &str| {
+            if compound_name == Some(name) {
+                return prior;
+            }
+            definitions.get(name).and_then(|locations| {
+                locations.iter().rev().find(|&&location| location < line_index)
+                    .or_else(|| locations.first()).copied()
+            })
+        };
+        if let PreparedStatement::Script(expression) = &mut line.statement {
+            expression.resolve(line_index, row_count, named_binding);
+        }
+        resolve_line_references(line, row_count, named_binding);
     }
 }
 
 fn resolve_line_references(
     line: &mut PreparedLine,
-    definitions: &HashMap<String, Vec<usize>>,
     row_count: usize,
+    mut named_binding: impl FnMut(&str) -> Option<usize>,
 ) {
     let defer_scalar_diagnostic = defers_scalar_diagnostic(line);
     for reference_index in 0..line.references.len() {
@@ -1962,17 +2400,8 @@ fn resolve_line_references(
                 }
                 None
             }
-            ReferenceKind::Named => match definitions.get(&reference_name) {
-                Some(locations) if locations.len() == 1 => Some(locations[0]),
-                Some(_) => {
-                    if !defer_scalar_diagnostic {
-                        set_diagnostic_if_missing(
-                            line,
-                            DiagnosticKind::DuplicateName(reference_name),
-                        );
-                    }
-                    None
-                }
+            ReferenceKind::Named => match named_binding(&reference_name) {
+                Some(location) => Some(location),
                 None => {
                     if !defer_scalar_diagnostic {
                         set_diagnostic_if_missing(
@@ -2003,43 +2432,65 @@ fn resolve_line_references(
 pub(super) fn evaluate_comparison_expression(
     expression: &str,
     rows: &[super::comparison::ComparisonRow],
+    final_bindings: &HashMap<String, FinalBinding>,
 ) -> LineOutcome {
     if expression.contains(['\n', '\r']) || find_assignment_delimiter(expression).is_some() {
         return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
     }
-    let mut definitions = HashMap::<String, Vec<usize>>::new();
-    for (index, row) in rows.iter().enumerate() {
-        if let Some(name) = &row.assignment_name {
-            definitions.entry(name.clone()).or_default().push(index);
-        }
-    }
-    let declared_names = definitions.keys().cloned().collect();
+    let declared_names = final_bindings.keys().cloned().collect();
     let mut identifiers = 0;
     let mut prepared = prepare_line(
-        0..expression.len(),
-        expression,
-        &mut identifiers,
-        &declared_names,
+        0..expression.len(), expression, &mut identifiers, &declared_names,
     );
-    resolve_line_references(&mut prepared, &definitions, rows.len());
-    let outcomes = rows
-        .iter()
-        .map(|row| row.outcome.clone())
-        .collect::<Vec<_>>();
-    let values = rows
-        .iter()
-        .map(|row| match &row.outcome {
+    if let Some(diagnostic) = prepared.diagnostic.take() {
+        return LineOutcome::Error(diagnostic);
+    }
+    let statement = std::mem::replace(&mut prepared.statement, PreparedStatement::Invalid);
+    let mut expression_tree = match statement {
+        PreparedStatement::Script(expression) => *expression,
+        PreparedStatement::Blank => return LineOutcome::Blank,
+        PreparedStatement::Comment => return LineOutcome::Comment,
+        statement => {
+            prepared.statement = statement;
+            script::ScriptExpression::Legacy {
+                line: Box::new(prepared),
+                slots: Vec::new(),
+                alias: parse_simple_reference(expression.trim()).map(|reference| reference.name),
+            }
+        }
+    };
+    let mut names = final_bindings.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let slots = names.iter().enumerate().map(|(index, name)| {
+        (name.clone(), MAX_SOURCE_LINES + index)
+    }).collect::<HashMap<_, _>>();
+    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); MAX_SOURCE_LINES];
+    let mut values = vec![None; MAX_SOURCE_LINES];
+    for (index, row) in rows.iter().enumerate() {
+        outcomes[index] = row.outcome.clone();
+        if let LineOutcome::Value(value) = &row.outcome { values[index] = Some(value.clone()); }
+    }
+    for name in &names {
+        let binding = &final_bindings[name];
+        outcomes.push(binding.outcome.clone());
+        values.push(match &binding.outcome {
             LineOutcome::Value(value) => Some(value.clone()),
             _ => None,
-        })
-        .collect::<Vec<_>>();
-    evaluate_line(
-        rows.len(),
-        &prepared,
-        &vec![false; rows.len() + 1],
-        &outcomes,
-        &values,
-    )
+        });
+    }
+    expression_tree.resolve(rows.len(), rows.len(), |name| slots.get(name).copied());
+    let mut work = script::WorkBudget::default();
+    work.runtime_line = Some(rows.len());
+    match expression_tree.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut work) {
+        Ok(value) => LineOutcome::Value(value),
+        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= MAX_SOURCE_LINES => {
+            let name = &names[dependency_line - MAX_SOURCE_LINES];
+            LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed {
+                dependency_line: final_bindings[name].line_index,
+            }))
+        }
+        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
+    }
 }
 
 fn defers_scalar_diagnostic(line: &PreparedLine) -> bool {
@@ -2159,6 +2610,7 @@ fn evaluate_line(
         PreparedStatement::Invalid => {
             return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
         }
+        PreparedStatement::Script(_) => unreachable!("script lines are evaluated by the script executor"),
         _ => {}
     }
 
@@ -2207,8 +2659,21 @@ fn evaluate_line(
         }
     }
 
-    let result = match &line.statement {
-        PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid => {
+    let result = evaluate_prepared_statement(&line.statement, line, values);
+
+    match result {
+        Ok(value) => LineOutcome::Value(value),
+        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
+    }
+}
+
+fn evaluate_prepared_statement(
+    statement: &PreparedStatement,
+    line: &PreparedLine,
+    values: &[Option<CalculationValue>],
+) -> Result<CalculationValue, DiagnosticKind> {
+    match statement {
+        PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid | PreparedStatement::Script(_) => {
             unreachable!("non-result line states returned above")
         }
         PreparedStatement::Expression(expression) => {
@@ -2308,11 +2773,6 @@ fn evaluate_line(
                 None => Err(DiagnosticKind::DependencyFailed { dependency_line }),
             }
         }
-    };
-
-    match result {
-        Ok(value) => LineOutcome::Value(value),
-        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
     }
 }
 
@@ -2321,6 +2781,13 @@ fn evaluate_prepared_expression(
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
 ) -> Result<CalculationValue, DiagnosticKind> {
+    if let Some(name) = &expression.simple_reference
+        && let Some(reference) = line.references.iter().find(|reference| &reference.name == name)
+        && let Some(value) = reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
+        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_))
+    {
+        return Ok(value.clone());
+    }
     let has_vector_reference = line.references.iter().any(|reference| {
         reference
             .target_line
@@ -2622,7 +3089,7 @@ mod tests {
         assert!(matches!(error(&evaluation, 6), DiagnosticKind::InvalidArithmetic));
         assert_eq!(scalar(&evaluation, 7), 50.0);
         assert_eq!(scalar(&evaluation, 8), 1.0_f64.atan2(2.0));
-        assert!(matches!(error(&evaluation, 9), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 9), DiagnosticKind::Script(message) if message.contains("collection")));
         assert!(matches!(error(&evaluation, 10), DiagnosticKind::InvalidExpression));
     }
 
@@ -2656,22 +3123,10 @@ mod tests {
             error(&evaluation, 5),
             DiagnosticKind::UnknownRowReference(_)
         ));
-        assert!(matches!(
-            error(&evaluation, 6),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 7),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 8),
-            DiagnosticKind::DuplicateName(_)
-        ));
-        assert!(matches!(
-            error(&evaluation, 9),
-            DiagnosticKind::DependencyFailed { dependency_line: 8 }
-        ));
+        assert_eq!(scalar(&evaluation, 6), 1.0);
+        assert_eq!(scalar(&evaluation, 7), 2.0);
+        assert_eq!(scalar(&evaluation, 8), 3.0);
+        assert_eq!(scalar(&evaluation, 9), 4.0);
         assert!(matches!(
             error(&evaluation, 10),
             DiagnosticKind::ReservedName(_)
@@ -2685,6 +3140,179 @@ mod tests {
             error(&cycle, 2),
             DiagnosticKind::DependencyFailed { dependency_line: 0 }
         ));
+    }
+
+    #[test]
+    fn compound_assignments_follow_preceding_bindings_and_preserve_source() {
+        let source = "x = 2\r\nx += 3\r\nx *= 4\r\nx /= 2\r\nx %= 6\r\nx ^= 2\r\nx\r\n";
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for (line, expected) in [2.0, 5.0, 20.0, 10.0, 4.0, 16.0, 16.0].into_iter().enumerate() {
+            assert_eq!(scalar(&evaluation, line), expected);
+            assert_eq!(&source[evaluation.lines[line].source_range.clone()], source.split("\r\n").nth(line).unwrap());
+        }
+        assert_eq!(evaluation.lines[1].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[5].dependency_indices, [4]);
+        assert_eq!(evaluation.final_bindings["x"].line_index, 5);
+        let document = CalculationDocument::new("{顧客 名} = 4\n{顧客 名} -= 1\n{顧客 名}\nneg = -7\nneg %= 3");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 2), 3.0);
+        assert_eq!(scalar(&evaluation, 4), -1.0);
+    }
+
+    #[test]
+    fn compound_assignments_check_prior_and_preserve_rhs_precedence() {
+        let document = CalculationDocument::new(concat!(
+            "missing += 1\nmissing = 9\n",
+            "x = 2\nx *= 2 + 3\nx += x\n",
+            "x = 1 / 0\nx += if(true, 2, 1 / 0)\nx\n",
+            "y = 3\ny += if(true, 4, 1 / 0)\n",
+            "z = 8\nz /= 0\nz\n",
+            "bad + = 1\n",
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(error(&evaluation, 0), DiagnosticKind::UnknownName(name) if name == "missing"));
+        assert_eq!(scalar(&evaluation, 3), 10.0);
+        assert_eq!(scalar(&evaluation, 4), 20.0);
+        assert!(matches!(error(&evaluation, 6), DiagnosticKind::DependencyFailed { dependency_line: 5 }));
+        assert!(matches!(error(&evaluation, 7), DiagnosticKind::DependencyFailed { dependency_line: 6 }));
+        assert_eq!(scalar(&evaluation, 9), 7.0);
+        assert!(matches!(evaluation.lines[11].outcome, LineOutcome::Error(_)));
+        assert!(matches!(error(&evaluation, 12), DiagnosticKind::DependencyFailed { dependency_line: 11 }));
+        assert!(matches!(error(&evaluation, 13), DiagnosticKind::InvalidAssignment));
+    }
+
+    #[test]
+    fn compound_assignments_reuse_typed_arithmetic_and_reject_invalid_forms() {
+        let document = CalculationDocument::new(concat!(
+            "n = u128(9007199254740993)\nn += 9007199254740993\nn\n",
+            "small = u8(255)\nsmall += 1\n",
+            "typed = u8(7)\ntyped /= 2\n",
+            "v = [1, 2]\nv += [3, 4]\n",
+            "q = 1 m\nq += 2 m\n",
+            "u = 2\nu ^= 3\n",
+            "r1 += 1\nsin += 1\n",
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(integer(&evaluation, 2).bit_pattern(), 18014398509481986);
+        assert!(matches!(error(&evaluation, 4), DiagnosticKind::Programmer(_)));
+        assert!(matches!(error(&evaluation, 6), DiagnosticKind::Programmer(ProgrammerError::UnsupportedOperation)));
+        assert_eq!(formatted(&evaluation, 8), "[4, 6]");
+        assert_eq!(formatted(&evaluation, 10), "3 m");
+        assert_eq!(scalar(&evaluation, 12), 8.0);
+        assert!(matches!(error(&evaluation, 13), DiagnosticKind::ReservedName(_)));
+        assert!(matches!(error(&evaluation, 14), DiagnosticKind::ReservedName(_)));
+        assert!(!super::literal_inputs("x = 1\nx += 2").iter().any(|input| input.line == 1));
+        let source = "x = 1\nx += 2\n";
+        assert!(super::editor_bindings(source, source.len()).contains(&"x".to_owned()));
+    }
+
+    #[test]
+    fn compound_assignments_handle_conversion_rhs_and_contextual_names() {
+        let compound = CalculationDocument::new(concat!(
+            "q = 1 m\nq += 15 cm to m\nq\n",
+            "true = 4\ntrue += 3\ntrue\n",
+            "and = 7\nand *= 2\nand\n",
+            "{sin} = 2\n{sin} += 3\n{sin}\n"
+        ));
+        let explicit = CalculationDocument::new("q = 1 m\nconverted = 15 cm to m\nq = q + converted");
+        let actual = compound.evaluate();
+        let expected = explicit.evaluate();
+        assert_eq!(value(&actual, 1), value(&expected, 2));
+        assert_eq!(value(&actual, 2), value(&actual, 1));
+        assert_eq!(scalar(&actual, 5), 7.0);
+        assert_eq!(scalar(&actual, 8), 14.0);
+        assert_eq!(scalar(&actual, 11), 5.0);
+        assert!(CalculationDocument::source_requires_repeated_execution("q = 1 m\nq += 15 cm to m"));
+        assert!(!CalculationDocument::source_requires_repeated_execution("q = 1 m\nq += 2 m"));
+    }
+
+    #[test]
+    fn compound_assignment_nesting_matches_explicit_expression() {
+        let rhs = format!("{}1{}", "(".repeat(MAX_EXPRESSION_NESTING), ")".repeat(MAX_EXPRESSION_NESTING));
+        let compound = CalculationDocument::new(format!("x = 1\nx += {rhs}"));
+        let explicit = CalculationDocument::new(format!("x = 1\nx = x + ({rhs})"));
+        assert_eq!(compound.evaluate().lines[1].outcome, explicit.evaluate().lines[1].outcome);
+        let too_deep = format!("{}1{}", "(".repeat(MAX_EXPRESSION_NESTING + 1), ")".repeat(MAX_EXPRESSION_NESTING + 1));
+        let document = CalculationDocument::new(format!("x = 1\nx += {too_deep}"));
+        assert!(matches!(error(&document.evaluate(), 1), DiagnosticKind::NestingTooDeep { .. }));
+    }
+
+    #[test]
+    fn sequential_assignments_use_the_preceding_binding_and_keep_physical_rows() {
+        let document = CalculationDocument::new("x = 2\nold = x\nx = x + 3\nr1\nx");
+        let evaluation = document.evaluate();
+        for (line, expected) in [2.0, 2.0, 5.0, 2.0, 5.0].into_iter().enumerate() {
+            assert_eq!(scalar(&evaluation, line), expected);
+        }
+        assert_eq!(evaluation.lines[1].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[2].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[3].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[4].dependency_indices, [2]);
+        assert_eq!(evaluation.final_bindings.get("x").map(|binding| binding.line_index), Some(2));
+        assert_eq!(evaluation.final_bindings.get("old").map(|binding| binding.line_index), Some(1));
+    }
+
+    #[test]
+    fn failed_reassignment_hides_the_previous_value_but_not_other_bindings() {
+        let document = CalculationDocument::new(concat!(
+            "x = 1\n",
+            "x =\n",
+            "x\n",
+            "x = 1 = 2\n",
+            "x\n",
+            "x = 8\n",
+            "x\n",
+            "{sin} = 5\n",
+            "sin = 9\n",
+            "{sin}\n",
+            "independent = 7",
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(
+            error(&evaluation, 1),
+            DiagnosticKind::InvalidExpression
+        ));
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::DependencyFailed { dependency_line: 1 }
+        ));
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::InvalidAssignment
+        ));
+        assert!(matches!(
+            error(&evaluation, 4),
+            DiagnosticKind::DependencyFailed { dependency_line: 3 }
+        ));
+        assert_eq!(scalar(&evaluation, 6), 8.0);
+        assert!(matches!(
+            error(&evaluation, 8),
+            DiagnosticKind::ReservedName(_)
+        ));
+        assert_eq!(scalar(&evaluation, 9), 5.0);
+        assert_eq!(scalar(&evaluation, 10), 7.0);
+        assert_eq!(evaluation.final_bindings.get("x").map(|binding| binding.line_index), Some(5));
+        assert_eq!(evaluation.final_bindings.get("sin").map(|binding| binding.line_index), Some(7));
+    }
+
+    #[test]
+    fn reassignment_preserves_exact_integer_and_quantity_types() {
+        let document = CalculationDocument::new(concat!(
+            "{雪} = u64(9007199254740993)\n",
+            "before = {雪}\n",
+            "{雪} = {雪} + u64(1)\n",
+            "{雪}\n",
+            "q = 1 m\n",
+            "q = q + 2 m\n",
+            "q"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(integer(&evaluation, 1).bit_pattern(), 9007199254740993);
+        assert_eq!(integer(&evaluation, 3).bit_pattern(), 9007199254740994);
+        assert_eq!(formatted(&evaluation, 6), "3 m");
+        assert_eq!(evaluation.lines[2].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[5].dependency_indices, [4]);
     }
 
     #[test]
@@ -3027,7 +3655,7 @@ mod tests {
         ));
         let document = CalculationDocument::new("pie = 1\npie = 2\npie\n");
         let evaluation = document.evaluate();
-        assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&evaluation, 2), 2.0);
     }
 
     #[test]
@@ -3076,12 +3704,19 @@ mod tests {
             assignment_name: Some("pi".into()),
             outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
         }];
+        let bindings = std::collections::HashMap::from([(
+            "pi".to_owned(),
+            super::FinalBinding {
+                line_index: 0,
+                outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
+            },
+        )]);
         assert_eq!(
-            super::evaluate_comparison_expression("pi + 1", &rows),
+            super::evaluate_comparison_expression("pi + 1", &rows, &bindings),
             LineOutcome::Value(CalculationValue::Scalar(8.0))
         );
         assert_eq!(
-            super::evaluate_comparison_expression("pie", &rows),
+            super::evaluate_comparison_expression("pie", &rows, &bindings),
             LineOutcome::Value(CalculationValue::Scalar(std::f64::consts::PI))
         );
     }
