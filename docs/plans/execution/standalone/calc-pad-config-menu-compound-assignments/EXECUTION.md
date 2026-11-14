@@ -10,7 +10,17 @@
 | M1-B | Complete | Ordered Results context actions preserve copy, comparison, navigation, and Inspect bits. |
 | M2-A | Complete | Six operators use typed arithmetic and a prior-only target. Physical source bytes and results are preserved. |
 | M2-B | Complete | Runtime binding checks, cycle handling, editor assistance, comparison, persistence and loop tests. |
-| M3-A | Pending | Focused review, verification and Windows smoke. |
+| M3-A | Complete with native smoke unverified | Final focused tests passed. The Windows executable launched, but capture failed before interaction. |
+
+| Checkpoint | Commit |
+| --- | --- |
+| M0-A | `1feeeb02c0b5beb5f880f2ee98c6d9033f014a13` |
+| M0-B | Baseline evidence included with M1-A |
+| M1-A | `ff003fc0d6184a518b951e0eb45e905315f3bddc` |
+| M1-B | `b444aa2513ee6e7b0a87250eeb66664c2b579f5a` |
+| M2-A | `c970b6393e025c95a710a22b8ba859fb9f9f77b0` |
+| M2-B | `25c7ba25c975f1d4621f07c05b4b958022441123` |
+| M3-A | Commit containing this closeout is the next-Goal base |
 
 All checkpoints use the original checkout and its child branch.
 
@@ -43,3 +53,19 @@ Local evidence root is `target/calc-pad-config-menu-evidence`. The commands ran 
 - The first prepared snapshot passed eight exact domain tests using the owned libtest binary (`m2b-first-run`, exit 0). The editor test filter was corrected to the editor module nested under the dialog for the final batch.
 - `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <eleven focused loop, session, comparison, document and editor tests>` passed all 11, exit 0 (`m2b-final-run/result.json`, `stderr.log`). Cleanup and output drain verified.
 - Reviewed the cumulative change independently. Two findings were addressed before the final batch. Compound statements are rejected in a loop's iterable expression. Compounds whose only possible prior is conditional on loop execution use runtime binding and forward-reference diagnostics. Their speculative dependency edges cannot create a static cycle. The focused regressions also cover rollback, cancellation, exact arithmetic, frozen comparison rows and final bindings, literal input exclusion, completion order, and byte-exact named save and reopen.
+
+## Final verification and native smoke
+
+- `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <34 focused tests>` passed all 34, exit 0, with verified cleanup and output drain and a 100-second deadline. The exact selector and results are in `m3a-final-run/result.json` and `stderr.log`.
+- `rustfmt --edition 2024 --config skip_children=true --emit stdout <changed Rust file>` parsed all eight changed Rust files. `git diff --check af58c63c..HEAD` passed. Evidence in `m3a-format.log`. Compiler warnings in pre-existing code are logged in the build and test receipts. The independent reviewer rechecked the two corrected findings and reported no remaining blockers.
+- `cargo build -p multi_launcher --bin multi_launcher --profile fast-dev` exited 0 at source `25c7ba25c975f1d4621f07c05b4b958022441123`. The containment wrapper recorded descendants at root exit and verified cleanup and output drain. Evidence in `m3a-native-build/result.json`. SHA-256 of `target/fast-dev/multi_launcher.exe` is `AE1A73A7455768945B6F924C8152EC605AE04FBF5F358083A0CF10A3BB1D623D`.
+- The isolated profile specifies a 620-point docked Pad and disables both Paste Sequences shortcuts (`native/profile.json`). The sandbox launch ran, but its window was absent from the capture surface. The interactive launch exposed the expected window. Initial capture and one refreshed retry both timed out with `window capture timed out: timed out waiting on channel`. Both owned processes closed and were verified absent. See `native/launch.json`, `native/attempt-2-launch.json`, and the corresponding `attempt-1-cleanup.json` and `attempt-2-cleanup.json`. There are no screenshots because the initial capture failed. The smoke ended before the first UI input.
+
+| Windows scenario | Status | Planned input and expected state |
+| --- | --- | --- |
+| Compact docked and popped-out Config Menu | UNVERIFIED | Open Pad, activate the document, display, tools, Copy all and Dock/Pop Out actions and check reachability and state. |
+| Results context actions | UNVERIFIED | Enter `a = 5\na * 4\n1 / 0`, right-click rows 2 and 3, check order, payload, navigation and action gating. |
+| Scalar and bounded loop compounds | UNVERIFIED | Enter the operator-chain and range accumulator fixtures and verify final values 16 and 6. |
+| Named save and reopen | UNVERIFIED | Save the loop fixture under a disposable name, reopen it and check source and results. |
+
+The temporary diagram test fixture was removed after testing. Its SHA and absence are recorded in `temporary-fixture-cleanup.json`. A fresh test build at this branch still requires the base branch's moved fixture to be made available at its old path.
