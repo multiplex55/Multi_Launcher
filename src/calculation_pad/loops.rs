@@ -88,6 +88,11 @@ fn header(source: &str) -> Option<Result<LoopHeader, DiagnosticKind>> {
             "for header requires a trailing colon".into(),
         )));
     };
+    if find_assignment_delimiter(expression)
+        .is_some_and(|delimiter| delimiter.operator != AssignmentOperator::Assign)
+    {
+        return Some(Err(DiagnosticKind::InvalidExpression));
+    }
     let assignment = match parse_assignment_name(name.trim()) {
         Ok(assignment) => assignment,
         Err(error) => return Some(Err(error)),
@@ -198,6 +203,8 @@ fn block(
 
 struct Execution {
     expressions: Vec<Option<script::ScriptExpression>>,
+    compound_targets: Vec<Option<String>>,
+    cyclic_candidates: Vec<bool>,
     parse_errors: Vec<Option<DiagnosticKind>>,
     rows: Vec<CalculationLineResult>,
     execution_counts: Vec<usize>,
@@ -227,6 +234,29 @@ impl Execution {
             return Err(Fault {
                 line,
                 kind: kind.clone(),
+                iteration: path.to_vec(),
+            });
+        }
+        if let Some(name) = &self.compound_targets[line] {
+            let Some(binding) = self.bindings.get(name) else {
+                return Err(Fault {
+                    line,
+                    kind: DiagnosticKind::UnknownName(name.clone()),
+                    iteration: path.to_vec(),
+                });
+            };
+            if !matches!(binding.outcome, LineOutcome::Value(_)) {
+                return Err(Fault {
+                    line,
+                    kind: DiagnosticKind::DependencyFailed { dependency_line: binding.line },
+                    iteration: path.to_vec(),
+                });
+            }
+        }
+        if path.is_empty() && self.cyclic_candidates[line] {
+            return Err(Fault {
+                line,
+                kind: DiagnosticKind::CyclicDependency,
                 iteration: path.to_vec(),
             });
         }
@@ -621,6 +651,7 @@ fn evaluate_limited(
     let mut canceled = false;
     let mut prepared = Vec::with_capacity(lines.len());
     let mut expressions = Vec::with_capacity(lines.len());
+    let mut compound_targets = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
         let range = offset..offset + line.len();
         let original = &source[range.clone()];
@@ -639,6 +670,7 @@ fn evaluate_limited(
                 DiagnosticKind::NotExecuted,
             ));
             expressions.push(None);
+            compound_targets.push(None);
             continue;
         }
         let text = original.trim();
@@ -692,6 +724,7 @@ fn evaluate_limited(
                 }
             }
         };
+        compound_targets.push(item.compound.as_ref().and(item.assignment_name.clone()));
         expressions.push(compiled);
         prepared.push(item);
     }
@@ -748,14 +781,16 @@ fn evaluate_limited(
     for &line in &loop_rows {
         prepared[line].dependencies.clear();
     }
-    let mut parse_errors = parse_errors;
-    let cyclic = cyclic_lines(&prepared);
-    for (line, is_cyclic) in cyclic.into_iter().enumerate() {
-        if is_cyclic && !loop_rows.contains(&line) && parse_errors[line].is_none() {
-            // Keep legacy source-cycle diagnostics for ordinary top-level rows.
-            parse_errors[line] = Some(DiagnosticKind::CyclicDependency);
+    for (line, target) in compound_targets.iter().enumerate() {
+        let Some(name) = target else { continue; };
+        let has_unconditional_prior = definitions.get(name).is_some_and(|locations| {
+            locations.iter().any(|&prior| prior < line && !loop_rows.contains(&prior))
+        });
+        if !has_unconditional_prior {
+            prepared[line].dependencies.clear();
         }
     }
+    let cyclic_candidates = cyclic_lines(&prepared);
     let binding_rows = definitions
         .values()
         .flatten()
@@ -788,6 +823,8 @@ fn evaluate_limited(
     work.runtime_definitions = Some(Arc::new(definitions));
     let mut execution = Execution {
         expressions,
+        compound_targets,
+        cyclic_candidates,
         parse_errors,
         execution_counts: vec![0; rows.len()],
         rows,
@@ -860,6 +897,140 @@ mod tests {
         let result = nested.evaluate();
         assert_eq!(scalar(&result, 4), 21.0);
         assert_eq!(result.lines[3].loop_iteration, Some(vec![2, 2]));
+    }
+
+    #[test]
+    fn compound_assignments_use_each_iteration_binding_and_preserve_rows() {
+        let source = "total = 0\r\nfor n in range(1, 4):\r\n    total += n\r\ntotal";
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 0), 0.0);
+        assert_eq!(scalar(&result, 2), 6.0);
+        assert_eq!(scalar(&result, 3), 6.0);
+        assert_eq!(result.lines[2].loop_iteration, Some(vec![3]));
+        assert_eq!(result.lines[2].dependency_indices, [1, 2]);
+        assert_eq!(&source[result.lines[2].source_range.clone()], "    total += n");
+        assert_eq!(result.final_bindings["total"].line_index, 2);
+
+        let nested = CalculationDocument::new(concat!(
+            "{顧客 名} = 0\n",
+            "for x in [1, 2]:\n",
+            "    for y in [3, 4]:\n",
+            "        {顧客 名} += x * y\n",
+            "{顧客 名}"
+        ));
+        let result = nested.evaluate();
+        assert_eq!(scalar(&result, 4), 21.0);
+        assert_eq!(result.lines[3].loop_iteration, Some(vec![2, 2]));
+        assert!(result.lines[3].dependency_indices.contains(&3));
+    }
+
+    #[test]
+    fn compound_loop_guards_missing_and_failed_prior_before_rhs() {
+        let missing = CalculationDocument::new(concat!(
+            "missing += if(true, 1 / 0, 1)\n",
+            "missing = 5\n",
+            "for n in [1]:\n",
+            "    later += 1\n",
+            "later = 9"
+        ));
+        let result = missing.evaluate();
+        assert!(matches!(&result.lines[0].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::UnknownName(name) }) if name == "missing"));
+        assert!(matches!(&result.lines[3].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::LoopError { cause, .. } })
+                if matches!(cause.as_ref(), DiagnosticKind::UnknownName(name) if name == "later")));
+
+        let failed = CalculationDocument::new("x = 1 / 0\nfor n in [1]:\n    x += 1 / 0\nx");
+        let result = failed.evaluate();
+        assert!(matches!(&result.lines[2].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::LoopError { cause, .. } })
+                if matches!(cause.as_ref(), DiagnosticKind::DependencyFailed { dependency_line: 0 })));
+        assert!(matches!(&result.lines[3].outcome, LineOutcome::Error(_)));
+    }
+
+    #[test]
+    fn compound_loop_document_preserves_real_cycles_and_prior_diagnostics() {
+        let cyclic = CalculationDocument::new(concat!(
+            "x = 1\nx += y\ny = x + 1\n",
+            "for n in range(0):\n    n"
+        ));
+        let result = cyclic.evaluate();
+        assert!(matches!(&result.lines[1].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::CyclicDependency })));
+        let missing = CalculationDocument::new(concat!(
+            "x += y\ny = x + 1\n",
+            "for n in range(0):\n    n"
+        ));
+        let result = missing.evaluate();
+        assert!(matches!(&result.lines[0].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::UnknownName(name) }) if name == "x"));
+        assert!(matches!(&result.lines[1].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::DependencyFailed { dependency_line: 0 } })));
+
+        let unpublished = CalculationDocument::new(concat!(
+            "for n in range(0):\n    x = 1\n",
+            "x += y\ny = x"
+        ));
+        let result = unpublished.evaluate();
+        assert!(matches!(&result.lines[2].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::UnknownName(name) }) if name == "x"));
+        assert!(matches!(&result.lines[3].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::DependencyFailed { dependency_line: 2 } })));
+
+        let published = CalculationDocument::new(concat!(
+            "for n in [1]:\n    x = 1\n",
+            "x += y\ny = x"
+        ));
+        let result = published.evaluate();
+        assert!(matches!(&result.lines[2].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::ForwardReference { dependency_line: 3, .. } })));
+        assert!(matches!(&result.lines[3].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::DependencyFailed { dependency_line: 2 } })));
+    }
+
+    #[test]
+    fn loop_header_rejects_compound_assignment() {
+        let document = CalculationDocument::new(concat!(
+            "n = 0\nx = [1, 2]\n",
+            "for n in x += [3, 4]:\n    n\nx"
+        ));
+        let result = document.evaluate();
+        assert!(matches!(&result.lines[2].outcome, LineOutcome::Error(_)));
+        assert!(matches!(&result.lines[4].outcome, LineOutcome::Value(CalculationValue::Vector(vector))
+            if vector.components() == [1.0, 2.0]));
+    }
+
+    #[test]
+    fn compound_loop_rolls_back_failure_and_handles_empty_and_typed_values() {
+        let failed = CalculationDocument::new(concat!(
+            "total = 0\nfor divisor in [2, 0, 4]:\n",
+            "    total += 10 / divisor\nafter = total\nindependent = 7"
+        ));
+        let result = failed.evaluate();
+        assert_eq!(scalar(&result, 0), 0.0);
+        assert!(matches!(&result.lines[2].outcome,
+            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::LoopError { iteration, .. } }) if iteration == &[2]));
+        assert!(matches!(&result.lines[3].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&result, 4), 7.0);
+
+        let zero = CalculationDocument::new("x = 3\nfor n in range(0):\n    x += 1\nx");
+        assert_eq!(scalar(&zero.evaluate(), 3), 3.0);
+        let typed = CalculationDocument::new(concat!(
+            "count = u64(9007199254740993)\n",
+            "for n in [1, 2]:\n",
+            "    count += 1\n",
+            "count"
+        ));
+        let result = typed.evaluate();
+        assert!(matches!(&result.lines[3].outcome, LineOutcome::Value(CalculationValue::Integer(value))
+            if value.bit_pattern() == 9007199254740995));
+
+        let fresh = CalculationDocument::new(concat!(
+            "total = 0\nfor n in [1, 2]:\n",
+            "    n += 2\n    total += if(n > 0, n, 1 / 0)\ntotal"
+        ));
+        assert_eq!(scalar(&fresh.evaluate(), 4), 7.0);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 | M1-A | Complete | Config Menu uses retained host effects. Focus, copy, display, compact layout, save, dependency and pop-out checks passed. |
 | M1-B | Complete | Ordered Results context actions preserve copy, comparison, navigation, and Inspect bits. |
 | M2-A | Complete | Six operators use typed arithmetic and a prior-only target. Physical source bytes and results are preserved. |
-| M2-B | Pending | Loop, editor, session and comparison integration. |
+| M2-B | Complete | Runtime binding checks, cycle handling, editor assistance, comparison, persistence and loop tests. |
 | M3-A | Pending | Focused review, verification and Windows smoke. |
 
 All checkpoints use the original checkout and its child branch.
@@ -37,3 +37,9 @@ Local evidence root is `target/calc-pad-config-menu-evidence`. The commands ran 
 
 - The first prepared snapshot passed five exact document tests using the owned libtest binary, exit 0 (`m2a-first-run`).
 - `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <nine focused document tests>` passed all 9, exit 0, with verified cleanup and output drain (`m2a-final-run/result.json`, `stderr.log`). The batch covers all six operators, grouped and lazy right-hand sides, conversions, prior-only binding, failure propagation, byte-exact CRLF and Unicode, word operators, fixed-width exact literals and overflow, vectors and quantities. The private expression uses the existing explicit operation's nesting limit.
+
+## Loop and session verification
+
+- The first prepared snapshot passed eight exact domain tests using the owned libtest binary (`m2b-first-run`, exit 0). The editor test filter was corrected to the editor module nested under the dialog for the final batch.
+- `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <eleven focused loop, session, comparison, document and editor tests>` passed all 11, exit 0 (`m2b-final-run/result.json`, `stderr.log`). Cleanup and output drain verified.
+- Reviewed the cumulative change independently. Two findings were addressed before the final batch. Compound statements are rejected in a loop's iterable expression. Compounds whose only possible prior is conditional on loop execution use runtime binding and forward-reference diagnostics. Their speculative dependency edges cannot create a static cycle. The focused regressions also cover rollback, cancellation, exact arithmetic, frozen comparison rows and final bindings, literal input exclusion, completion order, and byte-exact named save and reopen.

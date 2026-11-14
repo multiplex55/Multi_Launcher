@@ -1375,6 +1375,40 @@ mod tests {
     }
 
     #[test]
+    fn compound_loop_session_preserves_source_history_bindings_and_inspector() {
+        let (_directory, root, mut session) = fixture();
+        let source = "{顧客 名} = u64(9007199254740993)\r\nfor n in [1, 2]:\r\n    {顧客 名} += 1\r\n{顧客 名}";
+        session.replace_source(source).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert_eq!(integer(&mut session, 3).bit_pattern(), 9007199254740995);
+        let result = session.shared_evaluation().unwrap();
+        assert_eq!(result.final_bindings["顧客 名"].line_index, 2);
+        let graph = session.dependency_snapshot().unwrap();
+        assert_eq!(graph.rows[2].dependencies, [ids[2]]);
+        assert_eq!(session.inspector_source(ids[2]).unwrap().value.bit_pattern(), 9007199254740995);
+        let inputs = super::super::document::literal_inputs(source);
+        assert_eq!(inputs.iter().map(|input| input.line).collect::<Vec<_>>(), vec![0]);
+        assert!(session.input_replacement(session.revision().unwrap(), ids[2], "    {顧客 名} += 1", "9").is_err());
+
+        session.replace_line(ids[0], "{顧客 名} = u64(9007199254740994)").unwrap();
+        assert_eq!(integer(&mut session, 3).bit_pattern(), 9007199254740996);
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+        assert_eq!(integer(&mut session, 3).bit_pattern(), 9007199254740995);
+        assert!(session.redo());
+        assert_eq!(integer(&mut session, 3).bit_pattern(), 9007199254740996);
+        let edited = session.source().unwrap().to_owned();
+        assert!(edited.contains("\r\n"));
+        session.save_as("compound loop").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.source(), Some(edited.as_str()));
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        assert_eq!(integer(&mut reopened, 3).bit_pattern(), 9007199254740996);
+    }
+
+    #[test]
     fn literal_inputs_are_source_bound_and_one_undo_restores_shadowed_assignment() {
         let (_dir, _root, mut session) = fixture();
         session.replace_source("x = 2\nx = u64(4)\ndistance = 3 m\nformula = x + 1\nfor i in range(2):\n    local = 3").unwrap();

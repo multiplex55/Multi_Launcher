@@ -8,7 +8,7 @@ recomputes after an edit, undo, or redo changes that revision. Ordinary small
 calculations use the cached synchronous path; repeated script work runs in a
 bounded background evaluation, with pending results identified in the UI.
 
-The Pad's **Examples & reference** window has a pinned search and executable
+The Pad's **Config Menu → Tools → Examples & reference** window has a pinned search and executable
 examples with expected results. Use **Pop Out** to keep it in a separate native
 window, or **Dock** to return it to the launcher; its search and scroll position
 are retained when moving between presentations. Search matches group names,
@@ -46,6 +46,13 @@ in the Pad. Clearing search restores the ordinary groups.
 * Assigning a name again creates a new binding. The right-hand side reads the
   latest preceding binding, and later lines use the new one. A failed
   assignment becomes the latest binding and causes dependent lines to fail.
+* Compound assignments `+=`, `-=`, `*=`, `/=`, `%=`, and `^=`
+  update an already bound name using its latest preceding value. The entire
+  right-hand expression is the second operand, so `x *= 2 + 3` multiplies
+  `x` by five. They use the same type, unit, precision and error rules as
+  the corresponding arithmetic operators. `%=` uses signed remainder and
+  `^=` raises to a power. Typed integer division with `/=` is unsupported,
+  as with ordinary typed integer `/`.
 * Unknown names, forward references, and references to a failed result are
   errors on the affected line. A later valid line still evaluates independently.
 
@@ -61,7 +68,7 @@ successful nonempty loop.
 ```text
 total = 0
 for amount in [10, 20, 30]:
-    total = total + amount
+    total += amount
 total
 ```
 
@@ -235,20 +242,20 @@ hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
 
 ## Source editor and Results
 
-**Line numbers** starts on and counts physical lines, including blanks and
-comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
+In **Config Menu → Source display**, **Line numbers** starts on and counts
+physical lines, including blanks and comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
 end of long lines, or enable wrapping to fit the Source pane. Drag the divider
 to resize Source and Results. The launcher remembers both display toggles and
 the separate divider positions for side-by-side and stacked layouts.
 
-Use **Editor options** to turn completions and parameter hints on or off, enable
+Use **Config Menu → Editor options** to turn completions and parameter hints on or off, enable
 optional delimiter auto-closing, and fold loop bodies or `# region` / `# endregion`
 comment sections. Completions are accepted with Tab or Enter; Escape dismisses
 the list. Folding changes only the editor view: source, physical row references,
 and saved text remain intact. Ctrl+F opens Find, Ctrl+H opens Replace, and
 Ctrl+G goes to a physical line. Replace All is one undoable source edit.
 
-The **View** menu independently shows **Editable inputs** and **Output watches**.
+**Config Menu → View** independently shows **Editable inputs** and **Output watches**.
 Both start hidden. Choose a top-level literal assignment as an input, edit its
 value and select **Apply**; invalid or unfinished values stay in the field until
 corrected or reset. Assignments with the same name are listed by source line.
@@ -258,15 +265,17 @@ script evaluation, the panels show pending or failed status instead of an old
 value. Save a named Pad to retain its input and watch selections; Save As copies
 them. The optional remembered-source recovery remains source-only.
 
-**Number format** starts at Auto. Fixed decimal and scientific modes offer 0–15
+**Config Menu → Number format** starts at Auto. Fixed decimal and scientific modes offer 0–15
 decimal places; digit grouping and percent presentation are also available where
 applicable. These controls change presentation rather than source or evaluated
-values. Ordinary **Copy** and **Copy all** retain canonical results; use the
-explicit **Copy formatted** action for displayed grouping, percent, or precision.
+values. **Config Menu → Copy all** retains canonical results.
 
 Results show values and diagnostics. Blank and comment lines still count toward
-`rN`, so visible result labels can have gaps. Right-click a value or error row
-and choose **Go to source** to focus the editor and briefly highlight its line.
+`rN`, so visible result labels can have gaps. Right-click a result row for
+**Go to source**, **Select for comparison**, **Copy**, and **Copy formatted**.
+Copy uses the canonical result and Copy formatted uses the displayed grouping,
+percent, or precision. Error rows offer Go to source. Exact integer rows also
+offer **Inspect bits…**.
 
 ## Remembered source
 
@@ -300,7 +309,7 @@ evaluation.
 
 ## Dependency Explorer
 
-Choose **Dependencies…** to browse the current cached evaluation. Select a
+Choose **Config Menu → Tools → Dependencies…** to browse the current cached evaluation. Select a
 physical `rN` row or named assignment in the chooser to see its source and exact
 result or diagnostic. **Upstream inputs** and **Downstream dependents** show
 **Direct** relationships and expandable **Transitive** relationships. Select a
