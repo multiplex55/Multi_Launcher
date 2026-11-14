@@ -25069,6 +25069,35 @@ mod tests {
     }
 
     #[test]
+    fn docked_pad_completion_escape_dismisses_before_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("total = 20\ntot");
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+        let editor = egui::Id::new("calculation-pad-source");
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new("total = 20\ntot".chars().count()))));
+        state.store(&ctx, editor);
+        for _ in 0..2 { run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false); }
+        assert!(app.calculation_pad_dialog.test_completion_visible());
+        run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
+        assert!(app.calculation_pad_dialog.open);
+        assert!(!app.calculation_pad_dialog.test_close_pending());
+        assert!(!app.calculation_pad_dialog.test_completion_visible());
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("total = 20\ntot"));
+        run_host_viewport_frame(&ctx, &mut app, root, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
+        assert!(!app.calculation_pad_dialog.test_completion_visible());
+        run_host_viewport_frame(&ctx, &mut app, root, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
+        assert!(app.calculation_pad_dialog.test_close_pending());
+    }
+
+    #[test]
     fn programmer_inspector_real_pad_selection_and_retained_bit_insert() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();

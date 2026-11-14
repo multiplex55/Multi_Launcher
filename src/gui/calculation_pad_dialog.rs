@@ -592,8 +592,40 @@ impl CalculationPadDialog {
                 || ctx.memory(|memory| memory.focused())
                     .and_then(|id| ctx.read_response(id))
                     .is_some_and(|response| response.layer_id == Self::root_host_layer_id())
+                || ctx.memory(|memory| memory.focused().is_none()
+                    && [egui::Id::new("calculation-pad-source"), egui::Id::new("calculation-pad-find"),
+                        egui::Id::new("calculation-pad-replace"), egui::Id::new("calculation-pad-goto")]
+                        .into_iter().any(|id| memory.had_focus_last_frame(id)))
                 || (self.editor_tool_focus_pending && ctx.memory(|memory| memory.focused().is_none())))
     }
+
+    fn stage_completion_escape(&self, ctx: &egui::Context, effects: &mut HostEffects) {
+        let editor = egui::Id::new("calculation-pad-source");
+        let owned = ctx.memory(|memory| memory.has_focus(editor)
+            || (memory.focused().is_none() && memory.had_focus_last_frame(editor)));
+        if !self.completion.visible || !owned || !ctx.input(|input| input.focused)
+            || egui::Popup::is_any_open(ctx)
+            || !ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        { return; }
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        let caret = egui::widgets::text_edit::TextEditState::load(ctx, editor)
+            .and_then(|state| state.cursor.char_range())
+            .and_then(|range| self.session.source().and_then(|source| {
+                let projection = self.fold_projection(source, &self.folds).1;
+                projection.byte_at_character(range.primary.index.0)
+                    .and_then(|byte| projection.source_byte(byte))
+            }));
+        let mut completion = self.completion.clone();
+        completion.visible = false;
+        completion.dismissed = self.session.revision().zip(caret);
+        effects.completion = Some(completion);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_completion_visible(&self) -> bool { self.completion.visible }
+
+    #[cfg(test)]
+    pub(super) fn test_close_pending(&self) -> bool { self.session.pending_transition().is_some() }
 
     pub(super) fn examples_layer_if_root(&self) -> Option<egui::LayerId> {
         if !self.open || !self.examples_open {
@@ -1146,6 +1178,7 @@ impl CalculationPadDialog {
                                 ctx.memory(|memory| memory.top_modal_layer().is_some());
                             let surface_allowed = root_input_allowed && !modal_open;
                             body_authorized = pass_authorized && surface_allowed;
+                            if body_authorized { self.stage_completion_escape(ctx, &mut effects); }
                             self.draw_host_contents(
                                 ui,
                                 ctx,
@@ -1219,12 +1252,11 @@ impl CalculationPadDialog {
                             || child.memory(|memory| memory.focused())
                                 .and_then(|id| child_ctx.read_response(id))
                                 .is_some_and(|response| response.layer_id == child.layer_id());
-                        let completion_escape = actions_allowed && !popup_open && self.completion.visible
-                            && child.memory(|memory| memory.has_focus(egui::Id::new("calculation-pad-source")))
-                            && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         let local_editor_escape = actions_allowed && !popup_open && self.editor_tools.open
                             && (independent || local_tools_focus)
                             && child.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                        let mut effects = self.empty_host_effects(viewport_id);
+                        if actions_allowed { self.stage_completion_escape(&child_ctx, &mut effects); }
                         let keyboard_close_requested = if actions_allowed && !popup_open {
                             child.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -1234,20 +1266,6 @@ impl CalculationPadDialog {
                             false
                         };
 
-                        let mut effects = self.empty_host_effects(viewport_id);
-                        if completion_escape {
-                            let mut completion = self.completion.clone();
-                            completion.visible = false;
-                            let caret = egui::widgets::text_edit::TextEditState::load(&child_ctx, egui::Id::new("calculation-pad-source"))
-                                .and_then(|state| state.cursor.char_range())
-                                .and_then(|range| self.session.source().and_then(|source| {
-                                    let projection = self.fold_projection(source, &self.folds).1;
-                                    projection.byte_at_character(range.primary.index.0)
-                                        .and_then(|byte| projection.source_byte(byte))
-                                }));
-                            completion.dismissed = self.session.revision().zip(caret);
-                            effects.completion = Some(completion);
-                        }
                         if local_editor_escape {
                             let mut tools = self.editor_tools.clone();
                             tools.open = false;
@@ -5563,6 +5581,30 @@ mod tests {
             assert_eq!(egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap().cursor.char_range(), selection);
             output.drop_without_applying_deltas();
         }
+    }
+
+    #[test]
+    fn popout_completion_escape_keeps_source_open_and_dismissed() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(1000.0, 700.0);
+        dialog.open();
+        dialog.test_replace_source("total = 20\ntot");
+        dialog.test_popout_pad(&ctx);
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let editor = dialog.test_editor_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new("total = 20\ntot".chars().count()))));
+        state.store(&ctx, editor);
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(dialog.completion.visible);
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(dialog.open && dialog.session.pending_transition().is_none());
+        assert!(!dialog.completion.visible);
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(!dialog.completion.visible);
+        assert_eq!(dialog.test_source(), Some("total = 20\ntot"));
     }
 
     #[test]
