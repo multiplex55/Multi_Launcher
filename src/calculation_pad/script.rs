@@ -711,7 +711,7 @@ fn parse(
     })
 }
 
-fn add_slot(
+pub(super) fn add_slot(
     template: &mut String,
     slots: &mut Vec<(String, ScriptExpression)>,
     node: ScriptExpression,
@@ -913,6 +913,7 @@ impl ScriptExpression {
                     return Ok(value.clone());
                 }
                 let surrogate = PreparedLine {
+                    compound: None,
                     source_range: line.source_range.clone(),
                     assignment_name: None,
                     statement: PreparedStatement::Invalid,

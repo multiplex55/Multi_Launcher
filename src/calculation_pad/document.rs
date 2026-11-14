@@ -44,11 +44,11 @@ pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
         if let Some(name) = loops::editor_iterator(trimmed) {
             scopes.push((indent, line_number));
             bindings.push((name, scopes.iter().map(|(_, id)| *id).collect()));
-        } else if let Some(index) = find_assignment_delimiter(trimmed)
-            && let Ok(name) = parse_assignment_name(trimmed[..index].trim())
+        } else if let Some(delimiter) = find_assignment_delimiter(trimmed)
+            && let Ok(name) = parse_assignment_name(trimmed[..delimiter.left_end].trim())
             && !is_row_reference_name(&name.canonical)
                 && (name.braced || !is_reserved_name(&name.canonical))
-                && find_assignment_delimiter(&trimmed[index + 1..]).is_none()
+                && find_assignment_delimiter(&trimmed[delimiter.right_start..]).is_none()
             {
                 let display = if name.braced { format!("{{{}}}", name.canonical) } else { name.canonical };
                 bindings.push((display, scopes.iter().map(|(_, id)| *id).collect()));
@@ -98,12 +98,13 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
         let trimmed = text.trim();
         if trimmed.is_empty() || is_full_line_comment(trimmed) { offset += raw.len(); continue; }
         if has_loops && text.len() != text.trim_start().len() { offset += raw.len(); continue; }
-        if let Some(index) = find_assignment_delimiter(text)
-            && let Ok(name) = parse_assignment_name(text[..index].trim())
+        if let Some(delimiter) = find_assignment_delimiter(text)
+            && delimiter.operator == AssignmentOperator::Assign
+            && let Ok(name) = parse_assignment_name(text[..delimiter.left_end].trim())
             && !is_row_reference_name(&name.canonical)
             && (name.braced || !is_reserved_name(&name.canonical))
         {
-            let rhs = &text[index + 1..];
+            let rhs = &text[delimiter.right_start..];
             let leading = rhs.len() - rhs.trim_start().len();
             let expr = rhs.trim();
             let (value, start, valid_shape) = if let Some(open) = expr.find('(') {
@@ -129,7 +130,7 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
                 let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
                 let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
                 if evaluation {
-                    let value_start = offset + index + 1 + leading + start;
+                    let value_start = offset + delimiter.right_start + leading + start;
                     result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
                         value_range: value_start..value_start + value.len(), source_line: text.to_owned() });
                 }
@@ -222,8 +223,12 @@ impl CalculationDocument {
                     return false;
                 }
                 let expression = find_assignment_delimiter(line)
-                    .map_or(line, |position| line[position + 1..].trim());
+                    .map_or(line, |delimiter| line[delimiter.right_start..].trim());
                 script::uses_script_syntax(expression)
+                    || find_assignment_delimiter(line).is_some_and(|delimiter| {
+                        delimiter.operator != AssignmentOperator::Assign
+                            && split_to_keyword(expression).is_some()
+                    })
             })
     }
 
@@ -300,6 +305,12 @@ impl CalculationDocument {
                 && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
             {
                 LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted))
+            } else if let (Some(_), Some(diagnostic)) = (&line.compound, &line.diagnostic) {
+                LineOutcome::Error(diagnostic.clone())
+            } else if let Some(prior) = line.compound.as_ref().and_then(|compound| compound.prior)
+                && !matches!(outcomes.get(prior), Some(LineOutcome::Value(_)))
+            {
+                LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed { dependency_line: prior }))
             } else if let PreparedStatement::Script(expression) = &line.statement {
                 let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
                 match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
@@ -674,10 +685,48 @@ impl std::error::Error for Diagnostic {}
 struct PreparedLine {
     source_range: Range<usize>,
     assignment_name: Option<String>,
+    compound: Option<CompoundBinding>,
     statement: PreparedStatement,
     references: Vec<PreparedReference>,
     dependencies: Vec<usize>,
     diagnostic: Option<Diagnostic>,
+}
+
+#[derive(Debug)]
+struct CompoundBinding {
+    prior: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentOperator {
+    Assign,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Power,
+}
+
+impl AssignmentOperator {
+    fn symbol(self) -> Option<char> {
+        match self {
+            Self::Assign => None,
+            Self::Add => Some('+'),
+            Self::Subtract => Some('-'),
+            Self::Multiply => Some('*'),
+            Self::Divide => Some('/'),
+            Self::Remainder => Some('%'),
+            Self::Power => Some('^'),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssignmentDelimiter {
+    left_end: usize,
+    right_start: usize,
+    operator: AssignmentOperator,
 }
 
 #[derive(Debug)]
@@ -845,11 +894,11 @@ fn prepare_line_internal(
         return PreparedLine::simple(source_range, PreparedStatement::Comment);
     }
 
-    let (assignment_name, expression, assignment_diagnostic) =
+    let (assignment_name, expression, assignment_diagnostic, compound) =
         match find_assignment_delimiter(trimmed) {
-            Some(index) => {
-                let left = trimmed[..index].trim();
-                let right = trimmed[index + 1..].trim();
+            Some(delimiter) => {
+                let left = trimmed[..delimiter.left_end].trim();
+                let right = trimmed[delimiter.right_start..].trim();
                 match parse_assignment_name(left) {
                     Ok(assignment) => {
                         let diagnostic = if is_row_reference_name(&assignment.canonical)
@@ -863,18 +912,19 @@ fn prepare_line_internal(
                         } else {
                             None
                         };
-                        (Some(assignment.canonical), right, diagnostic)
+                        (Some(assignment.canonical), right, diagnostic, delimiter.operator.symbol())
                     }
                     Err(kind) => {
                         return PreparedLine::invalid(source_range, None, kind);
                     }
                 }
             }
-            None => (None, trimmed, None),
+            None => (None, trimmed, None, None),
         };
 
     if let Some(diagnostic) = assignment_diagnostic {
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::Invalid,
@@ -901,6 +951,74 @@ fn prepare_line_internal(
         );
     }
 
+    if let Some(operator) = compound {
+        if let Err(kind) = script::validate_source(expression) {
+            return PreparedLine::invalid(source_range, assignment_name, kind);
+        }
+        let Some(name) = assignment_name.as_deref() else {
+            return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::InvalidAssignment);
+        };
+        let target = format!("{{{name}}}");
+        if split_to_keyword(expression).is_some() {
+            let previous_identifiers = *total_identifiers;
+            let rhs = prepare_line_internal(
+                0..expression.len(), expression, total_identifiers, declared_names, true,
+            );
+            if let Some(diagnostic) = rhs.diagnostic.clone() {
+                return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
+            }
+            let rhs_expression = match rhs.statement {
+                PreparedStatement::Script(expression) => *expression,
+                _ => script::ScriptExpression::Legacy {
+                    line: Box::new(rhs),
+                    slots: Vec::new(),
+                    alias: parse_simple_reference(expression).map(|reference| reference.name),
+                },
+            };
+            let mut template = format!("{target} {operator} ");
+            let mut slots = Vec::new();
+            script::add_slot(&mut template, &mut slots, rhs_expression, expression, declared_names);
+            let mut template_names = declared_names.clone();
+            template_names.extend(slots.iter().map(|(name, _)| name.clone()));
+            let mut template_identifiers = 0;
+            let mut outer = prepare_line_internal(
+                source_range.clone(), &template, &mut template_identifiers, &template_names, true,
+            );
+            if let Some(diagnostic) = outer.diagnostic.take() {
+                return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
+            }
+            // The private slot replaces the RHS and does not count as a source identifier.
+            let additional = template_identifiers.saturating_sub(1);
+            if total_identifiers.saturating_sub(previous_identifiers).saturating_add(additional) > MAX_DEPENDENCIES_PER_LINE {
+                return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES_PER_LINE });
+            }
+            if total_identifiers.saturating_add(additional) > MAX_DEPENDENCIES {
+                return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+            }
+            *total_identifiers += additional;
+            return PreparedLine {
+                source_range,
+                assignment_name,
+                compound: Some(CompoundBinding { prior: None }),
+                statement: PreparedStatement::Script(Box::new(script::ScriptExpression::Legacy {
+                    line: Box::new(outer),
+                    slots,
+                    alias: None,
+                })),
+                references: Vec::new(),
+                dependencies: Vec::new(),
+                diagnostic: None,
+            };
+        }
+        let composed = format!("{target} {operator} ({expression})");
+        let mut prepared = prepare_line_internal(
+            source_range, &composed, total_identifiers, declared_names, true,
+        );
+        prepared.assignment_name = assignment_name;
+        prepared.compound = Some(CompoundBinding { prior: None });
+        return prepared;
+    }
+
     if script::uses_script_syntax(expression) {
         let identifiers = match script::validate_source(expression) {
             Ok(count) => count,
@@ -912,6 +1030,7 @@ fn prepare_line_internal(
         *total_identifiers += identifiers;
         return match script::prepare(expression, declared_names) {
             Ok(expression) => PreparedLine {
+                compound: None,
                 source_range, assignment_name,
                 statement: PreparedStatement::Script(Box::new(expression)),
                 references: Vec::new(), dependencies: Vec::new(), diagnostic: None,
@@ -926,6 +1045,7 @@ fn prepare_line_internal(
     if let Some(base_conversion) = parse_base_conversion(expression) {
         return match base_conversion {
             Ok((value, base)) => PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::BaseConversion { value, base },
@@ -1001,6 +1121,7 @@ fn prepare_line_internal(
                     .map(|name| prepared_reference(name))
                     .collect();
                 PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::Expression(Box::new(PreparedExpression {
@@ -1038,6 +1159,7 @@ fn prepare_line_internal(
         if let Some(reference) = parse_simple_reference(source) {
             if let Some(base) = NumericBase::from_alias(destination) {
                 return PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::BaseReference { destination: base },
@@ -1048,6 +1170,7 @@ fn prepare_line_internal(
             }
             if let Some(unit) = unit_conversion::unit_by_alias(destination) {
                 return PreparedLine {
+                    compound: None,
                     source_range,
                     assignment_name,
                     statement: PreparedStatement::PhysicalReference {
@@ -1064,6 +1187,7 @@ fn prepare_line_internal(
                     let attempt = quantity::parse_expression(source);
                     match attempt.expression {
                         Some(expression) => PreparedLine {
+                            compound: None,
                             source_range,
                             assignment_name,
                             statement: PreparedStatement::QuantityTarget { expression, target },
@@ -1094,6 +1218,7 @@ fn prepare_line_internal(
 
         if unit_conversion::parse_conversion(expression).is_ok() {
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::PhysicalConversion(expression.to_owned()),
@@ -1124,6 +1249,7 @@ fn prepare_line_internal(
                 );
             };
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::QuantityTarget {
@@ -1144,6 +1270,7 @@ fn prepare_line_internal(
                 (attempt.expression, quantity::parse_unit_target(destination))
         {
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::QuantityTarget {
@@ -1160,6 +1287,7 @@ fn prepare_line_internal(
             };
         }
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::PhysicalConversion(expression.to_owned()),
@@ -1189,6 +1317,7 @@ fn prepare_line_internal(
             .map(|name| prepared_reference(name))
             .collect();
         return PreparedLine {
+            compound: None,
             source_range,
             assignment_name,
             statement: PreparedStatement::Expression(Box::new(PreparedExpression {
@@ -1230,6 +1359,7 @@ fn prepare_line_internal(
                 .map(|name| prepared_reference(name))
                 .collect();
             return PreparedLine {
+                compound: None,
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::Expression(Box::new(PreparedExpression {
@@ -1313,6 +1443,7 @@ fn prepare_line_internal(
         }
     }
     PreparedLine {
+        compound: None,
         source_range,
         assignment_name,
         statement: PreparedStatement::Expression(Box::new(PreparedExpression {
@@ -1339,6 +1470,7 @@ impl PreparedLine {
         Self {
             source_range,
             assignment_name: None,
+            compound: None,
             statement,
             references: Vec::new(),
             dependencies: Vec::new(),
@@ -1354,6 +1486,7 @@ impl PreparedLine {
         Self {
             source_range,
             assignment_name,
+            compound: None,
             statement: PreparedStatement::Invalid,
             references: Vec::new(),
             dependencies: Vec::new(),
@@ -1362,7 +1495,7 @@ impl PreparedLine {
     }
 }
 
-fn find_assignment_delimiter(expression: &str) -> Option<usize> {
+fn find_assignment_delimiter(expression: &str) -> Option<AssignmentDelimiter> {
     let mut in_braces = false;
     for (index, character) in expression.char_indices() {
         match character {
@@ -1371,9 +1504,23 @@ fn find_assignment_delimiter(expression: &str) -> Option<usize> {
             '=' if !in_braces => {
                 let before = expression[..index].chars().next_back();
                 let after = expression[index + 1..].chars().next();
-                if !matches!(before, Some('=' | '!' | '<' | '>')) && after != Some('=') {
-                    return Some(index);
+                if matches!(before, Some('=' | '!' | '<' | '>')) || after == Some('=') {
+                    continue;
                 }
+                let operator = match before {
+                    Some('+') => AssignmentOperator::Add,
+                    Some('-') => AssignmentOperator::Subtract,
+                    Some('*') => AssignmentOperator::Multiply,
+                    Some('/') => AssignmentOperator::Divide,
+                    Some('%') => AssignmentOperator::Remainder,
+                    Some('^') => AssignmentOperator::Power,
+                    _ => AssignmentOperator::Assign,
+                };
+                return Some(AssignmentDelimiter {
+                    left_end: index - usize::from(operator != AssignmentOperator::Assign),
+                    right_start: index + 1,
+                    operator,
+                });
             }
             _ => {}
         }
@@ -1500,8 +1647,8 @@ fn declared_names(source: &str) -> HashSet<String> {
             if is_full_line_comment(line) {
                 return None;
             }
-            let index = find_assignment_delimiter(line)?;
-            let assignment = parse_assignment_name(line[..index].trim()).ok()?;
+            let delimiter = find_assignment_delimiter(line)?;
+            let assignment = parse_assignment_name(line[..delimiter.left_end].trim()).ok()?;
             if is_row_reference_name(&assignment.canonical)
                 || (!assignment.braced && is_reserved_name(&assignment.canonical))
             {
@@ -2203,21 +2350,32 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
     for (line_index, line) in lines.iter_mut().enumerate() {
-        if let PreparedStatement::Script(expression) = &mut line.statement {
-            expression.resolve(line_index, row_count, |name| {
-                definitions.get(name).and_then(|locations| locations.iter().rev().find(|&&location| location < line_index).or_else(|| locations.first()).copied())
-            });
-        }
-        resolve_line_references(line, row_count, |name| {
-            definitions.get(name).and_then(|locations| {
-                locations
-                    .iter()
-                    .rev()
-                    .find(|&&location| location < line_index)
-                    .or_else(|| locations.first())
-                    .copied()
-            })
+        let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
+        let compound_name = compound_name.as_deref();
+        let prior = compound_name.and_then(|name| {
+            definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
         });
+        if let Some(compound) = &mut line.compound {
+            compound.prior = prior;
+            if let Some(prior) = prior {
+                line.dependencies.push(prior);
+            } else if let Some(name) = compound_name {
+                set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
+            }
+        }
+        let named_binding = |name: &str| {
+            if compound_name == Some(name) {
+                return prior;
+            }
+            definitions.get(name).and_then(|locations| {
+                locations.iter().rev().find(|&&location| location < line_index)
+                    .or_else(|| locations.first()).copied()
+            })
+        };
+        if let PreparedStatement::Script(expression) = &mut line.statement {
+            expression.resolve(line_index, row_count, named_binding);
+        }
+        resolve_line_references(line, row_count, named_binding);
     }
 }
 
@@ -2982,6 +3140,102 @@ mod tests {
             error(&cycle, 2),
             DiagnosticKind::DependencyFailed { dependency_line: 0 }
         ));
+    }
+
+    #[test]
+    fn compound_assignments_follow_preceding_bindings_and_preserve_source() {
+        let source = "x = 2\r\nx += 3\r\nx *= 4\r\nx /= 2\r\nx %= 6\r\nx ^= 2\r\nx\r\n";
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for (line, expected) in [2.0, 5.0, 20.0, 10.0, 4.0, 16.0, 16.0].into_iter().enumerate() {
+            assert_eq!(scalar(&evaluation, line), expected);
+            assert_eq!(&source[evaluation.lines[line].source_range.clone()], source.split("\r\n").nth(line).unwrap());
+        }
+        assert_eq!(evaluation.lines[1].dependency_indices, [0]);
+        assert_eq!(evaluation.lines[5].dependency_indices, [4]);
+        assert_eq!(evaluation.final_bindings["x"].line_index, 5);
+        let document = CalculationDocument::new("{顧客 名} = 4\n{顧客 名} -= 1\n{顧客 名}\nneg = -7\nneg %= 3");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 2), 3.0);
+        assert_eq!(scalar(&evaluation, 4), -1.0);
+    }
+
+    #[test]
+    fn compound_assignments_check_prior_and_preserve_rhs_precedence() {
+        let document = CalculationDocument::new(concat!(
+            "missing += 1\nmissing = 9\n",
+            "x = 2\nx *= 2 + 3\nx += x\n",
+            "x = 1 / 0\nx += if(true, 2, 1 / 0)\nx\n",
+            "y = 3\ny += if(true, 4, 1 / 0)\n",
+            "z = 8\nz /= 0\nz\n",
+            "bad + = 1\n",
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(error(&evaluation, 0), DiagnosticKind::UnknownName(name) if name == "missing"));
+        assert_eq!(scalar(&evaluation, 3), 10.0);
+        assert_eq!(scalar(&evaluation, 4), 20.0);
+        assert!(matches!(error(&evaluation, 6), DiagnosticKind::DependencyFailed { dependency_line: 5 }));
+        assert!(matches!(error(&evaluation, 7), DiagnosticKind::DependencyFailed { dependency_line: 6 }));
+        assert_eq!(scalar(&evaluation, 9), 7.0);
+        assert!(matches!(evaluation.lines[11].outcome, LineOutcome::Error(_)));
+        assert!(matches!(error(&evaluation, 12), DiagnosticKind::DependencyFailed { dependency_line: 11 }));
+        assert!(matches!(error(&evaluation, 13), DiagnosticKind::InvalidAssignment));
+    }
+
+    #[test]
+    fn compound_assignments_reuse_typed_arithmetic_and_reject_invalid_forms() {
+        let document = CalculationDocument::new(concat!(
+            "n = u128(9007199254740993)\nn += 9007199254740993\nn\n",
+            "small = u8(255)\nsmall += 1\n",
+            "typed = u8(7)\ntyped /= 2\n",
+            "v = [1, 2]\nv += [3, 4]\n",
+            "q = 1 m\nq += 2 m\n",
+            "u = 2\nu ^= 3\n",
+            "r1 += 1\nsin += 1\n",
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(integer(&evaluation, 2).bit_pattern(), 18014398509481986);
+        assert!(matches!(error(&evaluation, 4), DiagnosticKind::Programmer(_)));
+        assert!(matches!(error(&evaluation, 6), DiagnosticKind::Programmer(ProgrammerError::UnsupportedOperation)));
+        assert_eq!(formatted(&evaluation, 8), "[4, 6]");
+        assert_eq!(formatted(&evaluation, 10), "3 m");
+        assert_eq!(scalar(&evaluation, 12), 8.0);
+        assert!(matches!(error(&evaluation, 13), DiagnosticKind::ReservedName(_)));
+        assert!(matches!(error(&evaluation, 14), DiagnosticKind::ReservedName(_)));
+        assert!(!super::literal_inputs("x = 1\nx += 2").iter().any(|input| input.line == 1));
+        let source = "x = 1\nx += 2\n";
+        assert!(super::editor_bindings(source, source.len()).contains(&"x".to_owned()));
+    }
+
+    #[test]
+    fn compound_assignments_handle_conversion_rhs_and_contextual_names() {
+        let compound = CalculationDocument::new(concat!(
+            "q = 1 m\nq += 15 cm to m\nq\n",
+            "true = 4\ntrue += 3\ntrue\n",
+            "and = 7\nand *= 2\nand\n",
+            "{sin} = 2\n{sin} += 3\n{sin}\n"
+        ));
+        let explicit = CalculationDocument::new("q = 1 m\nconverted = 15 cm to m\nq = q + converted");
+        let actual = compound.evaluate();
+        let expected = explicit.evaluate();
+        assert_eq!(value(&actual, 1), value(&expected, 2));
+        assert_eq!(value(&actual, 2), value(&actual, 1));
+        assert_eq!(scalar(&actual, 5), 7.0);
+        assert_eq!(scalar(&actual, 8), 14.0);
+        assert_eq!(scalar(&actual, 11), 5.0);
+        assert!(CalculationDocument::source_requires_repeated_execution("q = 1 m\nq += 15 cm to m"));
+        assert!(!CalculationDocument::source_requires_repeated_execution("q = 1 m\nq += 2 m"));
+    }
+
+    #[test]
+    fn compound_assignment_nesting_matches_explicit_expression() {
+        let rhs = format!("{}1{}", "(".repeat(MAX_EXPRESSION_NESTING), ")".repeat(MAX_EXPRESSION_NESTING));
+        let compound = CalculationDocument::new(format!("x = 1\nx += {rhs}"));
+        let explicit = CalculationDocument::new(format!("x = 1\nx = x + ({rhs})"));
+        assert_eq!(compound.evaluate().lines[1].outcome, explicit.evaluate().lines[1].outcome);
+        let too_deep = format!("{}1{}", "(".repeat(MAX_EXPRESSION_NESTING + 1), ")".repeat(MAX_EXPRESSION_NESTING + 1));
+        let document = CalculationDocument::new(format!("x = 1\nx += {too_deep}"));
+        assert!(matches!(error(&document.evaluate(), 1), DiagnosticKind::NestingTooDeep { .. }));
     }
 
     #[test]

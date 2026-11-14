@@ -662,7 +662,7 @@ fn evaluate_limited(
         let rhs = if headers[index].is_some() {
             expression
         } else {
-            find_assignment_delimiter(text).map_or(text, |position| text[position + 1..].trim())
+            find_assignment_delimiter(text).map_or(text, |delimiter| text[delimiter.right_start..].trim())
         };
         let compiled = if item.diagnostic.is_some() || text.is_empty() || is_full_line_comment(text)
         {
@@ -674,6 +674,7 @@ fn evaluate_limited(
                 statement => {
                     let references = item.references.clone();
                     let legacy = PreparedLine {
+                        compound: None,
                         source_range: item.source_range.clone(),
                         assignment_name: None,
                         statement,
@@ -684,7 +685,9 @@ fn evaluate_limited(
                     Some(script::ScriptExpression::Legacy {
                         line: Box::new(legacy),
                         slots: Vec::new(),
-                        alias: parse_simple_reference(rhs).map(|reference| reference.name),
+                        alias: if item.compound.is_some() { None } else {
+                            parse_simple_reference(rhs).map(|reference| reference.name)
+                        },
                     })
                 }
             }
