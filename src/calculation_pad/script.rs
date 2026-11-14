@@ -118,6 +118,8 @@ impl CalculationSequence {
 pub(crate) struct WorkBudget {
     used: usize,
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) runtime_line: Option<usize>,
+    pub(super) runtime_definitions: Option<Arc<HashMap<String, Vec<usize>>>>,
 }
 impl WorkBudget {
     pub(crate) fn charge(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
@@ -142,6 +144,8 @@ impl WorkBudget {
         Self {
             used: 0,
             cancellation: Some(cancellation),
+            runtime_line: None,
+            runtime_definitions: None,
         }
     }
 }
@@ -734,7 +738,8 @@ impl ScriptExpression {
     ) {
         match self {
             Self::Boolean { name, target } => {
-                *target = named_binding(name).filter(|target| *target < line_index);
+                *target = named_binding(name)
+                    .filter(|target| *target < line_index || *target >= super::MAX_SOURCE_LINES);
             }
             Self::Legacy { line, slots, .. } => {
                 for (_, child) in slots.iter_mut() {
@@ -784,7 +789,7 @@ impl ScriptExpression {
             Self::Boolean { name, target } => {
                 if let Some(target) = target {
                     dependencies.push(*target);
-                    return value_at(name, *target, line_index, outcomes, values);
+                    return value_at(name, *target, line_index, outcomes, values, work, true);
                 }
                 Ok(CalculationValue::Boolean(name == "true"))
             }
@@ -820,7 +825,7 @@ impl ScriptExpression {
                         });
                     };
                     dependencies.push(target);
-                    let value = value_at(&reference.name, target, line_index, outcomes, values)?;
+                    let value = value_at(&reference.name, target, line_index, outcomes, values, work, false)?;
                     reference.target_line = Some(all_values.len());
                     all_values.push(Some(value));
                 }
@@ -928,11 +933,36 @@ fn value_at(
     line_index: usize,
     outcomes: &[LineOutcome],
     values: &[Option<CalculationValue>],
+    work: &WorkBudget,
+    boolean_literal: bool,
 ) -> Result<CalculationValue, DiagnosticKind> {
-    if target == line_index {
+    let physical_line = work.runtime_line.unwrap_or(line_index);
+    let runtime_binding = work.runtime_line.is_some() && target >= super::MAX_SOURCE_LINES;
+    if runtime_binding && matches!(
+        outcomes.get(target),
+        Some(LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted }))
+    ) {
+        if boolean_literal && (name == "true" || name == "false") {
+            return Ok(CalculationValue::Boolean(name == "true"));
+        }
+        if let Some(location) = work.runtime_definitions.as_ref()
+            .and_then(|definitions| definitions.get(name))
+            .and_then(|locations| locations.iter().find(|&&location| location >= physical_line))
+        {
+            if *location == physical_line {
+                return Err(DiagnosticKind::SelfReference(name.to_owned()));
+            }
+            return Err(DiagnosticKind::ForwardReference {
+                reference: name.to_owned(),
+                dependency_line: *location,
+            });
+        }
+        return Err(DiagnosticKind::UnknownName(name.to_owned()));
+    }
+    if !runtime_binding && target == physical_line {
         return Err(DiagnosticKind::SelfReference(name.to_owned()));
     }
-    if target > line_index {
+    if !runtime_binding && target > physical_line {
         return Err(DiagnosticKind::ForwardReference {
             reference: name.to_owned(),
             dependency_line: target,

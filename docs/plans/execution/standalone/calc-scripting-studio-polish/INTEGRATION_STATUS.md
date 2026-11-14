@@ -12,8 +12,9 @@
 | M1-A | Complete and pushed at `7ef7818fb2e1577d08b1bcbeb9fd33ff5530e347`, 29 focused tests passed after review fixes |
 | M1-B | Complete and pushed at `68bc7de9a5921b904b66c1fdb3d6dd6a1c64d52a`. 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
 | M2-A | Complete and pushed at `6406529aacf75c16de0cb900d5121f711ee3a0a2`, 53 selected tests passed plus the corrected alias case. |
-| M2-B | Complete, 60 focused tests passed plus the corrected typed composition fixture. |
-| M2-C through M6-A | Pending |
+| M2-B | Complete and pushed at `79016f86dd2720e7ecce38d3cd0f438e6c998a07`, 60 focused tests passed plus the corrected typed composition fixture. |
+| M2-C | Complete, 72 focused tests passed. |
+| M2-D through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -53,6 +54,12 @@
 - The initial compile found a missing Dependency Explorer type-label match, which was corrected. The first compiled batch passed 59/61. Its two outdated expectations were updated for the new unary collection signature and the three added executable examples. The next batch passed 60/61. The remaining new fixture accidentally used a shadowed Boolean name as a scalar condition. After changing those fixture conditions to comparisons, its exact rerun passed, including direct unit/base conversion and skipped malformed exponent assertions.
 - Review corrections covered unique lowered expression slots, exact prefixed integers, contextual programmer operators, existing alias behavior, checked work, median precision and full sequence copy. Runtime batches used the 100-second watchdog. Loop execution and current-revision worker integration remain in M2-C and M2-D.
 
+## M2-C evidence
+
+- Calc Pad parses space-indented multi-line `for` blocks into bounded prepared statements. A block reads its iterable once and publishes its final results on success. Local failure discards attempted values, marks intended output names failed, preserves unrelated bindings, and distinguishes attempted from nonexecuted physical rows. Zero iterations preserve earlier bindings.
+- Limits are 8 nesting levels, 10,000 cumulative loop iterations and 50,000 work units, in addition to the existing source limits and 1,024 generated element cap. The pure evaluator observes cancellation. Named results carry their own typed outcomes and source provenance. Dependency Explorer labels loop rows and their source-line projection.
+- Nextest ran focused Calc document, loop, comparison, dependency, session, examples and Dependency Explorer tests. Initial 66/66 passed. Review remediation expanded coverage of malformed and empty blocks, contextual names, attempted rollback, nested physical reads, global limits and final failed bindings. A stale example count and an admission bug were fixed after the 69/71 batch. The corrected batch passed 72/72 within the 100-second watchdog.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -74,6 +81,6 @@
 | CP-12 | M3-A/C | Pending | Pending | Pending |
 | CP-13 | M2-B | Yes | Passed | Pending |
 | CP-14 | M2-B | Yes | Passed | Pending |
-| CP-15 | M2-C/D | Pending | Pending | Pending |
-| CP-16 | M2-B/C | Range expressions | Passed for M2-B | Pending |
+| CP-15 | M2-C/D | Domain execution | Passed for M2-C | Pending |
+| CP-16 | M2-B/C | Yes | Passed | Pending |
 | QR-01 | M5-A | Pending | Pending | Pending |

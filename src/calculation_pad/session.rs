@@ -1,7 +1,7 @@
 //! Editable Calculation Pad session with bounded history and dirty handling.
 
 use super::document::{
-    CalculationDocument, CalculationValue, DocumentDiagnostic, EditError, LineOutcome,
+    CalculationDocument, CalculationValue, DocumentDiagnostic, EditError, FinalBinding, LineOutcome,
     MAX_DOCUMENT_BYTES, MAX_SOURCE_LINES,
 };
 use super::inspector::{
@@ -27,6 +27,7 @@ pub struct SessionLineResult {
     pub source_range: std::ops::Range<usize>,
     pub assignment_name: Option<String>,
     pub dependency_indices: Vec<usize>,
+    pub loop_iteration: Option<Vec<usize>>,
     pub outcome: LineOutcome,
 }
 
@@ -35,7 +36,7 @@ pub struct SessionEvaluation {
     pub revision: u64,
     pub lines: Vec<SessionLineResult>,
     /// Physical rows holding the final bindings in this evaluation.
-    pub(crate) final_bindings: Arc<HashMap<String, usize>>,
+    pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
     pub diagnostic: Option<DocumentDiagnostic>,
 }
 
@@ -772,6 +773,7 @@ impl CalculationPadSession {
                             source_range: line.source_range,
                             assignment_name: line.assignment_name,
                             dependency_indices: line.dependency_indices,
+                            loop_iteration: line.loop_iteration,
                             outcome: line.outcome,
                         })
                 })

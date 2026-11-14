@@ -51,6 +51,21 @@ and blank lines count. For example, `r2 * 4` uses the result from physical line
 2. A reference must point to an earlier line. Self, forward, missing, and
 cyclic references are diagnosed.
 
+Loops visit a vector or `range` sequence in order. Indent each body consistently
+with spaces. Assignments and the iterator retain their final values after a
+successful nonempty loop.
+
+```text
+total = 0
+for amount in [10, 20, 30]:
+    total = total + amount
+total
+```
+
+Loops allow up to eight nesting levels and 10,000 iterations per evaluation.
+The shared evaluation budget is 50,000 work units. If a loop fails, its
+assignments do not publish partial results and later references report an error.
+
 ## Scalar expressions
 
 Scalar expressions use the `exmex` expression grammar with finite `f64`

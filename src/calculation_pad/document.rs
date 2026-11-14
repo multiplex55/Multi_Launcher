@@ -20,6 +20,8 @@ use super::quantity::{
 use super::vector::{self, VectorExpression};
 #[path = "script.rs"]
 pub(super) mod script;
+#[path = "loops.rs"]
+mod loops;
 pub use script::CalculationSequence;
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -71,6 +73,33 @@ impl CalculationDocument {
 
     /// Reevaluates every source line from the current document contents.
     pub fn evaluate(&self) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(None)
+    }
+
+    pub(crate) fn evaluate_with_cancellation(
+        &self,
+        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(Some(cancellation))
+    }
+
+    pub(crate) fn requires_repeated_execution(&self) -> bool {
+        loops::contains_loop(&self.source)
+            || self.source.lines().any(|line| {
+                let line = line.trim();
+                if line.is_empty() || is_full_line_comment(line) {
+                    return false;
+                }
+                let expression = find_assignment_delimiter(line)
+                    .map_or(line, |position| line[position + 1..].trim());
+                script::uses_script_syntax(expression)
+            })
+    }
+
+    fn evaluate_inner(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> CalculationEvaluation<'_> {
         let source = self.source.as_str();
         if source.len() > MAX_DOCUMENT_BYTES {
             return CalculationEvaluation {
@@ -93,6 +122,9 @@ impl CalculationDocument {
                     max_lines: MAX_SOURCE_LINES,
                 }),
             };
+        }
+        if loops::contains_loop(source) {
+            return loops::evaluate(source, cancellation);
         }
 
         // Alias fallback must see forward declarations too, so
@@ -126,15 +158,32 @@ impl CalculationDocument {
         let mut values = vec![None; prepared.len()];
         let mut results = Vec::with_capacity(prepared.len());
 
-        let mut work = script::WorkBudget::default();
+        let mut work = cancellation.map_or_else(
+            script::WorkBudget::default,
+            script::WorkBudget::with_cancellation,
+        );
+        let mut terminal = false;
         for (line_index, line) in prepared.iter().enumerate() {
             let mut dependencies = line.dependencies.clone();
-            let outcome = if let PreparedStatement::Script(expression) = &line.statement {
+            let outcome = if terminal
+                && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
+            {
+                LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted))
+            } else if let PreparedStatement::Script(expression) = &line.statement {
                 let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
                 match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
             } else {
                 evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values)
             };
+            if matches!(
+                outcome,
+                LineOutcome::Error(Diagnostic { kind: DiagnosticKind::WorkLimit | DiagnosticKind::Canceled })
+            ) {
+                terminal = true;
+            }
+            if matches!(outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })) {
+                dependencies.clear();
+            }
             dependencies.sort_unstable();
             dependencies.dedup();
             if let LineOutcome::Value(value) = &outcome {
@@ -146,6 +195,7 @@ impl CalculationDocument {
                 source_range: line.source_range.clone(),
                 assignment_name: line.assignment_name.clone(),
                 dependency_indices: dependencies,
+                loop_iteration: None,
                 outcome,
             });
         }
@@ -155,7 +205,14 @@ impl CalculationDocument {
             lines: results,
             final_bindings: definitions
                 .into_iter()
-                .filter_map(|(name, lines)| lines.last().copied().map(|line| (name, line)))
+                .filter_map(|(name, lines)| {
+                    lines.into_iter().rev().find(|&line| {
+                        !matches!(
+                            outcomes[line],
+                            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })
+                        )
+                    }).map(|line| (name, FinalBinding { line_index: line, outcome: outcomes[line].clone() }))
+                })
                 .collect(),
             diagnostic: None,
         }
@@ -202,8 +259,14 @@ pub struct CalculationEvaluation<'a> {
     pub source: &'a str,
     pub lines: Vec<CalculationLineResult>,
     /// The physical row of each name's latest binding, including failures.
-    pub(crate) final_bindings: HashMap<String, usize>,
+    pub(crate) final_bindings: HashMap<String, FinalBinding>,
     pub diagnostic: Option<DocumentDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FinalBinding {
+    pub(crate) line_index: usize,
+    pub(crate) outcome: LineOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +278,8 @@ pub struct CalculationLineResult {
     pub assignment_name: Option<String>,
     /// Zero-based physical source line indexes this line depends on.
     pub dependency_indices: Vec<usize>,
+    /// Iteration path for the last execution of a row inside a loop.
+    pub loop_iteration: Option<Vec<usize>>,
     pub outcome: LineOutcome,
 }
 
@@ -338,6 +403,9 @@ pub enum DiagnosticKind {
     Script(String),
     WorkLimit,
     Canceled,
+    NotExecuted,
+    LoopError { iteration: Vec<usize>, cause: Box<DiagnosticKind> },
+    LoopIterationLimit,
     Vector(String),
     InvalidBaseNumber,
     InvalidPrefixedInteger {
@@ -416,6 +484,16 @@ impl fmt::Display for Diagnostic {
             Kind::Script(message) => formatter.write_str(message),
             Kind::WorkLimit => formatter.write_str("evaluation work limit exceeded"),
             Kind::Canceled => formatter.write_str("evaluation canceled"),
+            Kind::NotExecuted => formatter.write_str("not executed"),
+            Kind::LoopError { iteration, cause } => {
+                if iteration.is_empty() {
+                    write!(formatter, "loop: {}", Diagnostic::new((**cause).clone()))
+                } else {
+                    let path = iteration.iter().map(usize::to_string).collect::<Vec<_>>().join(".");
+                    write!(formatter, "iteration {path}: {}", Diagnostic::new((**cause).clone()))
+                }
+            }
+            Kind::LoopIterationLimit => formatter.write_str("loop iteration limit exceeded"),
             Kind::Vector(message) => write!(formatter, "{message}"),
             Kind::InvalidBaseNumber => formatter.write_str("invalid unsigned base value"),
             Kind::InvalidPrefixedInteger { radix } => {
@@ -2065,7 +2143,7 @@ fn resolve_line_references(
 pub(super) fn evaluate_comparison_expression(
     expression: &str,
     rows: &[super::comparison::ComparisonRow],
-    final_bindings: &HashMap<String, usize>,
+    final_bindings: &HashMap<String, FinalBinding>,
 ) -> LineOutcome {
     if expression.contains(['\n', '\r']) || find_assignment_delimiter(expression).is_some() {
         return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
@@ -2073,41 +2151,57 @@ pub(super) fn evaluate_comparison_expression(
     let declared_names = final_bindings.keys().cloned().collect();
     let mut identifiers = 0;
     let mut prepared = prepare_line(
-        0..expression.len(),
-        expression,
-        &mut identifiers,
-        &declared_names,
+        0..expression.len(), expression, &mut identifiers, &declared_names,
     );
-    resolve_line_references(&mut prepared, rows.len(), |name| {
-        final_bindings.get(name).copied()
-    });
-    if let PreparedStatement::Script(expression) = &mut prepared.statement {
-        expression.resolve(rows.len(), rows.len(), |name| final_bindings.get(name).copied());
+    if let Some(diagnostic) = prepared.diagnostic.take() {
+        return LineOutcome::Error(diagnostic);
     }
-    let outcomes = rows
-        .iter()
-        .map(|row| row.outcome.clone())
-        .collect::<Vec<_>>();
-    let values = rows
-        .iter()
-        .map(|row| match &row.outcome {
+    let statement = std::mem::replace(&mut prepared.statement, PreparedStatement::Invalid);
+    let mut expression_tree = match statement {
+        PreparedStatement::Script(expression) => *expression,
+        PreparedStatement::Blank => return LineOutcome::Blank,
+        PreparedStatement::Comment => return LineOutcome::Comment,
+        statement => {
+            prepared.statement = statement;
+            script::ScriptExpression::Legacy {
+                line: Box::new(prepared),
+                slots: Vec::new(),
+                alias: parse_simple_reference(expression.trim()).map(|reference| reference.name),
+            }
+        }
+    };
+    let mut names = final_bindings.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let slots = names.iter().enumerate().map(|(index, name)| {
+        (name.clone(), MAX_SOURCE_LINES + index)
+    }).collect::<HashMap<_, _>>();
+    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); MAX_SOURCE_LINES];
+    let mut values = vec![None; MAX_SOURCE_LINES];
+    for (index, row) in rows.iter().enumerate() {
+        outcomes[index] = row.outcome.clone();
+        if let LineOutcome::Value(value) = &row.outcome { values[index] = Some(value.clone()); }
+    }
+    for name in &names {
+        let binding = &final_bindings[name];
+        outcomes.push(binding.outcome.clone());
+        values.push(match &binding.outcome {
             LineOutcome::Value(value) => Some(value.clone()),
             _ => None,
-        })
-        .collect::<Vec<_>>();
-    if let PreparedStatement::Script(expression) = &prepared.statement {
-        return match expression.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut script::WorkBudget::default()) {
-            Ok(value) => LineOutcome::Value(value),
-            Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
-        };
+        });
     }
-    evaluate_line(
-        rows.len(),
-        &prepared,
-        &vec![false; rows.len() + 1],
-        &outcomes,
-        &values,
-    )
+    expression_tree.resolve(rows.len(), rows.len(), |name| slots.get(name).copied());
+    let mut work = script::WorkBudget::default();
+    work.runtime_line = Some(rows.len());
+    match expression_tree.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut work) {
+        Ok(value) => LineOutcome::Value(value),
+        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= MAX_SOURCE_LINES => {
+            let name = &names[dependency_line - MAX_SOURCE_LINES];
+            LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed {
+                dependency_line: final_bindings[name].line_index,
+            }))
+        }
+        Err(kind) => LineOutcome::Error(Diagnostic::new(kind)),
+    }
 }
 
 fn defers_scalar_diagnostic(line: &PreparedLine) -> bool {
@@ -2770,8 +2864,8 @@ mod tests {
         assert_eq!(evaluation.lines[2].dependency_indices, [0]);
         assert_eq!(evaluation.lines[3].dependency_indices, [0]);
         assert_eq!(evaluation.lines[4].dependency_indices, [2]);
-        assert_eq!(evaluation.final_bindings.get("x"), Some(&2));
-        assert_eq!(evaluation.final_bindings.get("old"), Some(&1));
+        assert_eq!(evaluation.final_bindings.get("x").map(|binding| binding.line_index), Some(2));
+        assert_eq!(evaluation.final_bindings.get("old").map(|binding| binding.line_index), Some(1));
     }
 
     #[test]
@@ -2813,8 +2907,8 @@ mod tests {
         ));
         assert_eq!(scalar(&evaluation, 9), 5.0);
         assert_eq!(scalar(&evaluation, 10), 7.0);
-        assert_eq!(evaluation.final_bindings.get("x"), Some(&5));
-        assert_eq!(evaluation.final_bindings.get("sin"), Some(&7));
+        assert_eq!(evaluation.final_bindings.get("x").map(|binding| binding.line_index), Some(5));
+        assert_eq!(evaluation.final_bindings.get("sin").map(|binding| binding.line_index), Some(7));
     }
 
     #[test]
@@ -3225,7 +3319,13 @@ mod tests {
             assignment_name: Some("pi".into()),
             outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
         }];
-        let bindings = std::collections::HashMap::from([("pi".to_owned(), 0)]);
+        let bindings = std::collections::HashMap::from([(
+            "pi".to_owned(),
+            super::FinalBinding {
+                line_index: 0,
+                outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
+            },
+        )]);
         assert_eq!(
             super::evaluate_comparison_expression("pi + 1", &rows, &bindings),
             LineOutcome::Value(CalculationValue::Scalar(8.0))

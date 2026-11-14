@@ -15,6 +15,7 @@ pub struct DependencyRow {
     pub source: String,
     pub assignment_name: Option<String>,
     pub outcome: LineOutcome,
+    pub loop_iteration: Option<Vec<usize>>,
     pub dependencies: Vec<LineId>,
     pub dependents: Vec<LineId>,
 }
@@ -63,6 +64,7 @@ impl DependencySnapshot {
                 source: source.get(line.source_range.clone())?.to_owned(),
                 assignment_name: line.assignment_name.clone(),
                 outcome: line.outcome.clone(),
+                loop_iteration: line.loop_iteration.clone(),
                 dependencies: indices
                     .into_iter()
                     .map(|index| evaluation.lines[index].id)
@@ -157,6 +159,7 @@ mod tests {
                     source_range: 0..1,
                     assignment_name: None,
                     dependency_indices: vec![1, 1, 0],
+                    loop_iteration: None,
                     outcome: outcome.clone(),
                 },
                 SessionLineResult {
@@ -165,6 +168,7 @@ mod tests {
                     source_range: 2..3,
                     assignment_name: None,
                     dependency_indices: vec![0],
+                    loop_iteration: None,
                     outcome: outcome.clone(),
                 },
                 SessionLineResult {
@@ -173,6 +177,7 @@ mod tests {
                     source_range: 4..5,
                     assignment_name: None,
                     dependency_indices: vec![1],
+                    loop_iteration: None,
                     outcome: outcome.clone(),
                 },
                 SessionLineResult {
@@ -181,6 +186,7 @@ mod tests {
                     source_range: 6..7,
                     assignment_name: None,
                     dependency_indices: vec![],
+                    loop_iteration: None,
                     outcome: LineOutcome::Blank,
                 },
             ],

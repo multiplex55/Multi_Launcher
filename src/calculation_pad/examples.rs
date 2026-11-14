@@ -92,6 +92,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 explanation: "Standard deviation uses the population convention.",
                 expected: ExampleExpectation::Scalar(0.0),
             },
+            CalculationExample {
+                title: "Running total",
+                source: "total = 0\nfor amount in [10, 20, 30]:\n    total = total + amount\ntotal",
+                explanation: "A loop visits each value and keeps the final assignment.",
+                expected: ExampleExpectation::Scalar(60.0),
+            },
         ],
     },
     CalculationExampleGroup {
@@ -540,7 +546,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 43);
+        assert_eq!(checked, 44);
     }
 
     #[test]

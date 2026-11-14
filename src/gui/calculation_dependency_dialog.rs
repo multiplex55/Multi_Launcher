@@ -166,6 +166,10 @@ impl CalculationDependencyDialog {
                     });
                 if let Some(row) = selected.and_then(|id| snapshot.rows.iter().find(|row| row.id == id)) {
                     ui.strong(row_label(row)).on_hover_text(&row.source);
+                    if let Some(iteration) = &row.loop_iteration {
+                        let path = iteration.iter().map(usize::to_string).collect::<Vec<_>>().join(".");
+                        ui.weak(format!("Source-line projection of the last execution, iteration {path}. An input may refer to an earlier iteration."));
+                    }
                     ui.add(egui::Label::new(egui::RichText::new(&row.source).monospace()).truncate())
                         .on_hover_text(&row.source);
                     match &row.outcome {

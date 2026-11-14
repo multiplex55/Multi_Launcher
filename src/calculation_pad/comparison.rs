@@ -14,7 +14,7 @@ pub struct ComparisonContext {
     pub document_id: DocumentId,
     pub revision: u64,
     pub rows: Arc<[ComparisonRow]>,
-    pub(crate) final_bindings: Arc<HashMap<String, usize>>,
+    pub(crate) final_bindings: Arc<HashMap<String, super::document::FinalBinding>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComparisonSlot {
@@ -369,6 +369,28 @@ mod tests {
         assert!(compare(&failed, "x", "r1").left.value.is_err());
         assert_eq!(compare(&failed, "x", "r1").right.formatted(), "8");
         assert_eq!(compare(&context, "x", "r1").left.formatted(), "5");
+    }
+
+    #[test]
+    fn failed_loop_binding_is_distinct_from_an_unexecuted_physical_row() {
+        let (_temp, _session, context) =
+            frozen("for x in [0]:\n    failed = 1 / x\n    later = 7\nlater");
+        assert!(matches!(
+            context.rows[2].outcome,
+            LineOutcome::Error(super::super::Diagnostic {
+                kind: super::super::DiagnosticKind::NotExecuted
+            })
+        ));
+        let binding = &context.final_bindings["later"];
+        assert!(matches!(
+            binding.outcome,
+            LineOutcome::Error(super::super::Diagnostic {
+                kind: super::super::DiagnosticKind::LoopError { .. }
+            })
+        ));
+        assert!(compare(&context, "later", "r3").left.value.is_err());
+        assert!(compare(&context, "later", "r3").right.value.is_err());
+        assert!(compare(&context, "if(true, 1, later)", "1").left.value.is_ok());
     }
 
     #[test]
