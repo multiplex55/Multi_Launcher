@@ -160,9 +160,8 @@ pub(super) fn scan_source(source: &str) -> Vec<SourcePiece> {
         let mut quoted = false;
         let mut edge_label = false;
         let mut depth = 0usize;
-        let mut column = 0;
         let mut start_column = 0;
-        for (pos, ch) in line.char_indices() {
+        for (column, (pos, ch)) in line.char_indices().enumerate() {
             match ch {
                 '"' if !edge_label => quoted = !quoted,
                 '|' if !quoted && depth == 0 => edge_label = !edge_label,
@@ -180,7 +179,6 @@ pub(super) fn scan_source(source: &str) -> Vec<SourcePiece> {
                 }
                 _ => {}
             }
-            column += 1;
         }
         pieces.push(SourcePiece {
             kind: SourcePieceKind::Statement,

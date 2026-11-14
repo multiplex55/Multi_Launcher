@@ -1783,11 +1783,10 @@ impl CalculationPadDialog {
                 ui.label("Output watches");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut view.watch_entry).desired_width(100.0).hint_text("Name"));
-                    if ui.button("Pin").clicked() {
-                        if let Some(name) = crate::calculation_pad::watch_name(&view.watch_entry)
-                            && view.watches.len() < 64 && !view.watches.contains(&name)
-                        { view.watches.push(name); view.watch_entry.clear(); }
-                    }
+                    if ui.button("Pin").clicked()
+                        && let Some(name) = crate::calculation_pad::watch_name(&view.watch_entry)
+                        && view.watches.len() < 64 && !view.watches.contains(&name)
+                    { view.watches.push(name); view.watch_entry.clear(); }
                 });
                 egui::ScrollArea::vertical().id_salt("pad-watches").max_height(100.0).show(ui, |ui| {
                     let mut remove = None;
@@ -2285,12 +2284,11 @@ impl CalculationPadDialog {
         if host.edited_source.is_none()
             && host.editor_history_action.is_none()
             && self.session.pending_transition().is_none()
+            && let Some(replacement) = host.editor_replacement.take()
         {
-            if let Some(replacement) = host.editor_replacement.take() {
-                host.edited_source = Some(replacement);
-                host.inspector_caret = None;
-                host.editor_primary_caret = None;
-            }
+            host.edited_source = Some(replacement);
+            host.inspector_caret = None;
+            host.editor_primary_caret = None;
         }
         let needs_repaint = host.edited_source.is_some()
             || host.save_as_name.is_some()
@@ -4374,10 +4372,10 @@ impl CalculationPadDialog {
                     _ => false,
                 })
             });
-        if authorized_pass && response.has_focus() && cursor_interaction {
-            if let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+        if authorized_pass && response.has_focus() && cursor_interaction
+            && let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
                 .and_then(|state| state.cursor.char_range())
-            {
+        {
                 let to_byte = |index: usize| projection.byte_at_character(index)
                     .and_then(|byte| projection.source_byte(byte));
                 if let (Some(a), Some(b)) = (
@@ -4387,7 +4385,6 @@ impl CalculationPadDialog {
                     *inspector_caret = Some(a.min(b)..a.max(b));
                     *editor_primary_caret = Some(a);
                 }
-            }
         }
         #[cfg(test)]
         {

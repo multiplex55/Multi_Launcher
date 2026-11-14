@@ -826,7 +826,7 @@ impl PadDocumentStore {
     pub(super) fn save_as_with_metadata(
         &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
-        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, |path, bytes| save_atomic(path, bytes))
+        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, save_atomic)
     }
 
     pub(super) fn save_as_with_writer(

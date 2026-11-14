@@ -46,14 +46,12 @@ pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
             bindings.push((name, scopes.iter().map(|(_, id)| *id).collect()));
         } else if let Some(index) = find_assignment_delimiter(trimmed)
             && let Ok(name) = parse_assignment_name(trimmed[..index].trim())
-        {
-            if !is_row_reference_name(&name.canonical)
+            && !is_row_reference_name(&name.canonical)
                 && (name.braced || !is_reserved_name(&name.canonical))
                 && find_assignment_delimiter(&trimmed[index + 1..]).is_none()
             {
                 let display = if name.braced { format!("{{{}}}", name.canonical) } else { name.canonical };
                 bindings.push((display, scopes.iter().map(|(_, id)| *id).collect()));
-            }
         }
     }
     while scopes.last().is_some_and(|(indent, _)| current_indent <= *indent) { scopes.pop(); }

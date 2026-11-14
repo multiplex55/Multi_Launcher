@@ -366,10 +366,10 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
             && source[end..].trim_start().starts_with('(')
         {
             let open = end + source[end..].len() - source[end..].trim_start().len();
-            if let Ok(close) = matching(source, open) {
-                if split_arguments(&source[open + 1..close]).is_ok_and(|args| args.len() == 1) {
-                    return true;
-                }
+            if let Ok(close) = matching(source, open)
+                && split_arguments(&source[open + 1..close]).is_ok_and(|args| args.len() == 1)
+            {
+                return true;
             }
         }
     }

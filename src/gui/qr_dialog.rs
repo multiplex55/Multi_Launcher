@@ -830,7 +830,7 @@ mod tests {
                     match command {
                         QrHostCommand::Closed => state.close(),
                         QrHostCommand::Apply(actions) => {
-                            state.commit(&ctx, actions);
+                            state.commit(&ctx, *actions);
                         }
                     }
                 }

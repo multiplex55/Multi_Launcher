@@ -14066,7 +14066,7 @@ impl LauncherApp {
                             .retain(|panel| *panel != super::Panel::QrDialog);
                     }
                     super::utility_window_host::QrHostCommand::Apply(actions) => {
-                        if self.qr_dialog.commit(ctx, actions) {
+                        if self.qr_dialog.commit(ctx, *actions) {
                             ctx.request_repaint();
                         }
                     }

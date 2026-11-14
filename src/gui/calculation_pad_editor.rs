@@ -31,15 +31,14 @@ pub(super) fn fold_regions(source: &str) -> Vec<FoldRegion> {
         let trimmed = text.trim();
         if trimmed == "# region" || trimmed.starts_with("# region ") {
             stack.push((index, end));
-        } else if trimmed == "# endregion" {
-            if let Some((header, hidden_start)) = stack.pop()
-                && hidden_start < end
-            {
-                regions.push(FoldRegion {
-                    header,
-                    hidden: hidden_start..end,
-                });
-            }
+        } else if trimmed == "# endregion"
+            && let Some((header, hidden_start)) = stack.pop()
+            && hidden_start < end
+        {
+            regions.push(FoldRegion {
+                header,
+                hidden: hidden_start..end,
+            });
         }
         if crate::calculation_pad::editor_loop_header(trimmed) {
             let indent = text.len() - text.trim_start().len();
@@ -340,17 +339,14 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
     let braced = line
         .rfind('{')
         .filter(|start| !line[*start..].contains('}'));
-    let start = braced.map_or_else(
-        || {
+    let start = braced.unwrap_or_else(|| {
             line.char_indices()
                 .rev()
                 .find_map(|(index, ch)| {
                     (!(ch.is_alphanumeric() || ch == '_')).then_some(index + ch.len_utf8())
                 })
                 .unwrap_or(0)
-        },
-        |index| index,
-    );
+    });
     let fragment = &line[start..];
     if fragment.is_empty() {
         return Vec::new();

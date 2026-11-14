@@ -304,8 +304,8 @@ impl Execution {
             LineOutcome::Value(value) => Some(value.clone()),
             _ => None,
         };
-        if let Some(name) = &row.assignment_name {
-            if self.binding_rows.contains(&line)
+        if let Some(name) = &row.assignment_name
+            && self.binding_rows.contains(&line)
                 && self.slots.contains_key(name)
                 && !matches!(
                     &outcome,
@@ -323,7 +323,6 @@ impl Execution {
                 }
                 self.bindings
                     .insert(name.clone(), Binding { line, outcome });
-            }
         }
     }
 

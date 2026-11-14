@@ -3036,7 +3036,7 @@ impl HostedUtilityDialog for super::calculation_dependency_dialog::CalculationDe
 pub(super) type QrWindowHost = UtilityWindowHost<super::qr_dialog::QrDialogState>;
 pub(super) enum QrHostCommand {
     Closed,
-    Apply(super::qr_dialog::QrActions),
+    Apply(Box<super::qr_dialog::QrActions>),
 }
 impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
     const KEY: &'static str = "qr-generator";
@@ -3131,7 +3131,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
         if actions.close {
             vec![QrHostCommand::Closed]
         } else {
-            vec![QrHostCommand::Apply(actions)]
+            vec![QrHostCommand::Apply(Box::new(actions))]
         }
     }
     #[cfg(test)]
