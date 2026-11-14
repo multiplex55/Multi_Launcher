@@ -3746,32 +3746,36 @@ impl CalculationPadDialog {
         deferred_projected_input: &mut Option<Vec<egui::Event>>,
     ) {
         let (regions, mut projection) = self.fold_projection(source, &self.folds);
-        // Place the pointer against the layout the user saw. Process later keyboard
-        // events only after that pointer placement has been retained.
-        if authorized_pass && !self.folds.collapsed.is_empty() {
-            let editor_rect = ui.ctx().read_response(editor_id).map(|response| response.rect);
+        // Only an actual selection gesture changes the caret; passive hover does not.
+        let editor_rect = ui.ctx().read_response(editor_id).map(|response| response.rect);
+        let dragging_editor = ui.ctx().is_being_dragged(editor_id);
+        let pointer_gesture = ui.input(|input| input.events.iter().any(|event| match event {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, .. } =>
+                dragging_editor || editor_rect.is_some_and(|rect| rect.contains(*pos)),
+            egui::Event::PointerMoved(_) => dragging_editor,
+            _ => false,
+        }));
+        // Retain pointer placement on the projection the user saw, then replay
+        // only editor input against the resulting canonical caret.
+        if authorized_pass && !self.folds.collapsed.is_empty() && pointer_gesture {
             let deferred = ui.input_mut(|input| {
-                let last_pointer = input.events.iter().rposition(|event| matches!(event,
-                    egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }))?;
-                let points_at_editor = input.events[..=last_pointer].iter().rev().find_map(|event| match event {
-                    egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => Some(*pos),
-                    _ => None,
-                }).is_some_and(|pos| editor_rect.is_some_and(|rect| rect.contains(pos)));
-                if !points_at_editor { return None; }
-                let first_edit = input.events.iter().position(|event| matches!(event,
+                let has_edit = input.events.iter().any(|event| matches!(event,
                     egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
-                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }))?;
-                if first_edit <= last_pointer {
-                    // Interleaved pointer and edits cannot be replayed at the same
-                    // coordinates after a layout change. Leave pointer placement safe.
-                    input.events.retain(|event| !matches!(event,
+                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+                if !has_edit { return Vec::new(); }
+                let mut deferred = Vec::new();
+                input.events.retain(|event| {
+                    let editor_event = matches!(event,
                         egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
-                        | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
-                    return None;
-                }
-                Some(input.events.split_off(last_pointer + 1))
+                        | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter | egui::Key::Tab
+                            | egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown
+                            | egui::Key::Home | egui::Key::End | egui::Key::A | egui::Key::Z, .. });
+                    if editor_event { deferred.push(event.clone()); }
+                    !editor_event
+                });
+                deferred
             });
-            if let Some(events) = deferred { *deferred_projected_input = Some(events); }
+            if !deferred.is_empty() { *deferred_projected_input = Some(deferred); }
         }
         let clipboard_requested = ui.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Copy | egui::Event::Cut)));
         let original_state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id);
@@ -3807,7 +3811,7 @@ impl CalculationPadDialog {
             let modifying = events.iter().any(|event| matches!(event,
                 egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
                 | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
-            let pointer_and_edit = modifying && events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
+            let pointer_and_edit = modifying && pointer_gesture;
             let edit_or_copy = events.iter().any(|event| matches!(event,
                 egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
                 | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. }));
@@ -3845,12 +3849,9 @@ impl CalculationPadDialog {
             }
         }
         if authorized_pass && editor_selection.is_none() && !self.folds.collapsed.is_empty() {
-            let (pointer, edit) = ui.input(|input| (
-                input.events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. })),
-                input.events.iter().any(|event| matches!(event, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
-                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. })),
-            ));
-            if pointer && edit {
+            let edit = ui.input(|input| input.events.iter().any(|event| matches!(event, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_)
+                    | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. })));
+            if pointer_gesture && edit {
                 folds.collapsed.clear();
                 let next = self.fold_projection(source, folds).1;
                 if let (Some(selection), Some(mut state)) = (persistent_selection, original_state.clone())
@@ -3990,8 +3991,8 @@ impl CalculationPadDialog {
         {
             let range = primary.min(secondary)..primary.max(secondary);
             let typed = ui.input(|input| {
-                if input.events.iter().any(|event| match event {
-                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => true,
+                if pointer_gesture || input.events.iter().any(|event| match event {
+                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) => true,
                     egui::Event::Text(text) => text.chars().count() != 1,
                     egui::Event::Key { key, pressed: true, modifiers, .. } => modifiers.command
                         || matches!(key, egui::Key::Backspace | egui::Key::Delete | egui::Key::ArrowLeft
@@ -4043,8 +4044,9 @@ impl CalculationPadDialog {
             let indent = line.len() - line.trim_start_matches(' ').len();
             let add_level = crate::calculation_pad::editor_loop_header(line.trim());
             if (indent > 0 || add_level)
+                && !pointer_gesture
                 && !ui.input(|input| input.events.iter().any(|event| match event {
-                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::Text(_) | egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => true,
+                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::Text(_) => true,
                     egui::Event::Key { key, pressed: true, modifiers, .. } =>
                         *key != egui::Key::Enter || *modifiers != egui::Modifiers::NONE,
                     _ => false,
@@ -5490,6 +5492,11 @@ mod tests {
         frame(&mut dialog, &ctx, size, vec![egui::Event::Text("X".into())]);
         assert!(dialog.test_source().unwrap().contains("雪 = 2\n# endregion"));
         assert!(dialog.test_source().unwrap().ends_with("total = 3X"));
+        assert_eq!(dialog.folds.collapsed.len(), 1);
+        let hover = dialog.test_editor_rect.unwrap().center();
+        frame(&mut dialog, &ctx, size, vec![egui::Event::Text("Y".into()), egui::Event::PointerMoved(hover)]);
+        frame(&mut dialog, &ctx, size, vec![egui::Event::PointerMoved(hover), egui::Event::Text("Z".into())]);
+        assert!(dialog.test_source().unwrap().ends_with("total = 3XYZ"));
         assert_eq!(dialog.folds.collapsed.len(), 1);
         frame(&mut dialog, &ctx, size, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
         assert!(dialog.folds.collapsed.is_empty());
