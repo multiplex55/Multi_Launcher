@@ -22785,6 +22785,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, pad, Some("Tools"));
         let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
         assert!(enabled && clip.contains_rect(button));
         for pressed in [true, false] {
@@ -22808,6 +22809,7 @@ mod tests {
         for _ in 0..3 {
             run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, pad, Some("Tools"));
         let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
         assert!(enabled && clip.contains_rect(button));
         for pressed in [true, false] {
@@ -22832,6 +22834,7 @@ mod tests {
         for _ in 0..3 {
             run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, pad, Some("Tools"));
         let (button, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
         assert!(enabled && clip.contains_rect(button));
         for pressed in [true, false] {
@@ -22893,6 +22896,7 @@ mod tests {
         for _ in 0..4 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
         let (open, clip, enabled) = app.calculation_pad_dialog.test_dependency_open().unwrap();
         assert!(enabled && clip.contains_rect(open));
         for pressed in [true, false] {
@@ -23034,6 +23038,7 @@ mod tests {
         for _ in 0..3 {
             run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
         }
+        open_pad_config_menu_root(&ctx, &mut app);
         let copy = app
             .calculation_pad_dialog
             .test_copy_all_button_rect()
@@ -23065,6 +23070,7 @@ mod tests {
         for _ in 0..2 {
             run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
         }
+        open_pad_config_menu_root(&ctx, &mut app);
         let copy = app
             .calculation_pad_dialog
             .test_copy_all_button_rect()
@@ -23091,7 +23097,7 @@ mod tests {
             RootDialogEffect::CopyText {
                 owner: DialogCopyOwner::CalculationPad,
                 text,
-            } if text.contains("r1 answer = 42")
+            } if text.contains("r1 = answer = 40 + 2 = 42")
         ));
         let repeated = app.complete_retained_tool_dialogs(&ctx);
         app.dispatch_root_dialog_effects(&ctx, repeated);
@@ -23205,6 +23211,7 @@ mod tests {
         for _ in 0..3 {
             run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, native, Some("Tools"));
         let reference = app
             .calculation_pad_dialog
             .test_examples_button_rect()
@@ -23725,6 +23732,42 @@ mod tests {
                     .0
                     .drop_without_applying_deltas();
             });
+        }
+    }
+
+    fn open_pad_config_menu_root(ctx: &egui::Context, app: &mut LauncherApp) {
+        for _ in 0..3 {
+            if !egui::Popup::is_any_open(ctx) { break; }
+            run_tool_dialog_frame(ctx, app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false).drop_without_applying_deltas();
+        }
+        let menu = app.calculation_pad_dialog.test_config_menu_rect().expect("Config Menu is visible");
+        for pressed in [true, false] {
+            run_tool_dialog_frame(ctx, app, tool_dialog_pointer_events(menu, pressed), false).drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+    }
+
+    fn open_pad_config_menu(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        group: Option<&str>,
+    ) {
+        for _ in 0..3 {
+            if !egui::Popup::is_any_open(ctx) { break; }
+            run_host_viewport_frame(ctx, app, viewport, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false, false);
+        }
+        let menu = app.calculation_pad_dialog.test_config_menu_rect().expect("Config Menu is visible");
+        for pressed in [true, false] {
+            run_host_viewport_frame(ctx, app, viewport, tool_dialog_pointer_events(menu, pressed), false, false);
+        }
+        run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+        if let Some(group) = group {
+            let rect = app.calculation_pad_dialog.test_config_group_rect(group).expect("menu group is visible");
+            for pressed in [true, false] {
+                run_host_viewport_frame(ctx, app, viewport, tool_dialog_pointer_events(rect, pressed), false, false);
+            }
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
         }
     }
 
@@ -25767,6 +25810,7 @@ mod tests {
         for _ in 0..3 {
             run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
+        open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
         let (reopen, clip, enabled) = app
             .calculation_pad_dialog
             .test_inspector_reopen()
@@ -25935,6 +25979,7 @@ mod tests {
                 .selected_line
                 .is_none()
         );
+        open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
         let (open, clip, enabled) = app.calculation_pad_dialog.test_inspector_reopen().unwrap();
         assert!(enabled && clip.contains_rect(open));
         for pressed in [true, false] {
@@ -26082,6 +26127,7 @@ mod tests {
                 false,
             );
         }
+        open_pad_config_menu(&ctx, &mut app, root, Some("Tools"));
         let (open, _, _) = app.calculation_pad_dialog.test_inspector_reopen().unwrap();
         for pressed in [true, false] {
             run_host_viewport_frame(

@@ -167,6 +167,7 @@ pub(crate) struct CalculationPadDialog {
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
     display_preferences: crate::settings::CalculationPadDisplayPreferences,
+    config_editor_focus: Option<(PadHostIdentity, (DocumentIncarnation, DocumentId, u64), egui::text::CCursorRange)>,
     split_preview: Option<SplitPreview>,
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
@@ -210,6 +211,10 @@ pub(crate) struct CalculationPadDialog {
     test_editor_clip: Option<egui::Rect>,
     #[cfg(test)]
     test_display_controls: Option<(egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_config_menu: Option<egui::Rect>,
+    #[cfg(test)]
+    test_config_groups: Vec<(&'static str, egui::Rect)>,
     #[cfg(test)]
     test_editor_geometry: Option<(f32, f32, f32, Vec<(usize, f32)>)>,
     #[cfg(test)]
@@ -374,6 +379,7 @@ struct HostEffects {
     source_editor_id: Option<egui::Id>,
     display_preferences: Option<crate::settings::CalculationPadDisplayPreferences>,
     display_selection: Option<egui::text::CCursorRange>,
+    config_editor_focus: Option<Option<egui::text::CCursorRange>>,
     editor_tools: Option<EditorTools>,
     completion: Option<CompletionState>,
     completion_cursor: Option<egui::text::CCursorRange>,
@@ -505,6 +511,7 @@ impl CalculationPadDialog {
             source_editor_id: None,
             display_preferences: None,
             display_selection: None,
+            config_editor_focus: None,
             editor_tools: None,
             completion: None,
             completion_cursor: None,
@@ -654,6 +661,7 @@ impl CalculationPadDialog {
             recovery_writer: PadRecoveryWriter::new(PadRecoveryStore::new(root)),
             remember_source: false,
             display_preferences: Default::default(),
+            config_editor_focus: None,
             split_preview: None,
             recovery_attempted: false,
             last_recovery_identity: None,
@@ -697,6 +705,10 @@ impl CalculationPadDialog {
             test_editor_clip: None,
             #[cfg(test)]
             test_display_controls: None,
+            #[cfg(test)]
+            test_config_menu: None,
+            #[cfg(test)]
+            test_config_groups: Vec::new(),
             #[cfg(test)]
             test_editor_geometry: None,
             #[cfg(test)]
@@ -1112,6 +1124,12 @@ impl CalculationPadDialog {
             self.test_discard_rect = None;
             self.test_keep_editing_rect = None;
             self.test_save_rect = None;
+            self.test_copy_all_rect = None;
+            self.test_display_controls = None;
+            self.test_config_menu = None;
+            self.test_config_groups.clear();
+            self.test_dependency_open = None;
+            self.test_inspector_reopen = None;
             self.test_editor_id = None;
             self.test_editor_rect = None;
             self.test_examples_button_rect = None;
@@ -1559,6 +1577,7 @@ impl CalculationPadDialog {
         source: &str,
         tools: &mut EditorTools,
         effects: &mut HostEffects,
+        popup_owns_input: bool,
     ) {
         let find_id = egui::Id::new("calculation-pad-find");
         let replace_id = egui::Id::new("calculation-pad-replace");
@@ -1570,7 +1589,7 @@ impl CalculationPadDialog {
         }) || focused.and_then(|id| ui.ctx().read_response(id))
             .is_some_and(|response| response.layer_id == ui.layer_id())
             || (self.editor_tool_focus_pending && focused.is_none());
-        if ui.is_enabled() && pad_focused && self.session.pending_transition().is_none() {
+        if ui.is_enabled() && pad_focused && !popup_owns_input && self.session.pending_transition().is_none() {
             let shortcut = ui.input_mut(|input| {
                 if input.consume_key(egui::Modifiers::COMMAND, egui::Key::F) { Some('f') }
                 else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::H) { Some('h') }
@@ -1594,7 +1613,7 @@ impl CalculationPadDialog {
                 effects.editor_tool_focus = Some(target);
             }
         }
-        if ui.is_enabled() && pad_focused
+        if ui.is_enabled() && pad_focused && !popup_owns_input
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             tools.open = false;
@@ -1699,36 +1718,191 @@ impl CalculationPadDialog {
         }
     }
 
+    fn config_menu_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        source: &str,
+        evaluation: Option<&crate::calculation_pad::SessionEvaluation>,
+        view: &mut PadView,
+        folds: &FoldState,
+        fold_request: &mut Option<(LineId, bool)>,
+        identity: PadHostIdentity,
+        viewport_id: egui::ViewportId,
+        effects: &mut HostEffects,
+    ) {
+        let editor_id = egui::Id::new("calculation-pad-source");
+        let editor_selection = ui.memory(|memory| memory.has_focus(editor_id))
+            .then(|| egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .and_then(|state| state.cursor.char_range()))
+            .flatten();
+        ui.horizontal_wrapped(|ui| {
+            let _menu = ui.menu_button("Config Menu", |ui| {
+                let _document = ui.menu_button("Document", |ui| {
+                    if ui.button("New").clicked() {
+                        effects.intent = Some(DialogIntent::New);
+                        ui.close();
+                    }
+                    if ui.button("Open").clicked() {
+                        effects.intent = Some(DialogIntent::OpenChooser);
+                        ui.close();
+                    }
+                    let save = ui.add_enabled(
+                        self.session.pending_transition().is_none(),
+                        egui::Button::new("Save"),
+                    );
+                    #[cfg(test)]
+                    if ui.is_visible() && !ui.is_sizing_pass() {
+                        self.test_save_rect = Some(save.rect);
+                    }
+                    if save.clicked() {
+                        effects.intent = Some(DialogIntent::Save);
+                        ui.close();
+                    }
+                    if ui.button("Save As…").clicked() {
+                        effects.intent = Some(DialogIntent::OpenSaveAs);
+                        ui.close();
+                    }
+                });
+                #[cfg(test)]
+                self.test_config_groups.push(("Document", _document.response.rect));
+
+                let _tools = ui.menu_button("Tools", |ui| {
+                    let examples = ui.button("Examples & reference");
+                    #[cfg(test)]
+                    if ui.is_visible() && !ui.is_sizing_pass() {
+                        self.test_examples_button_rect = Some(examples.rect);
+                        self.test_examples_button_ownership = Some((ui.clip_rect(), examples.enabled()));
+                    }
+                    if examples.clicked() {
+                        effects.intent = Some(DialogIntent::OpenExamples);
+                        ui.close();
+                    }
+                    let dependencies = ui.button("Dependencies…");
+                    #[cfg(test)]
+                    { self.test_dependency_open = Some((dependencies.rect, ui.clip_rect(), dependencies.enabled())); }
+                    if dependencies.clicked() {
+                        effects.open_dependencies = true;
+                        ui.close();
+                    }
+                    let inspector = ui.button("Programmer Inspector…");
+                    #[cfg(test)]
+                    { self.test_inspector_reopen = Some((inspector.rect, ui.clip_rect(), inspector.enabled())); }
+                    if inspector.clicked() {
+                        effects.open_inspector = true;
+                        ui.close();
+                    }
+                });
+                #[cfg(test)]
+                self.test_config_groups.push(("Tools", _tools.response.rect));
+
+                ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
+                    ui.menu_button("View", |ui| {
+                        ui.checkbox(&mut view.show_inputs, "Editable inputs");
+                        ui.checkbox(&mut view.show_watches, "Output watches");
+                    });
+                    ui.menu_button("Number format", |ui| {
+                        use crate::settings::CalculationPadNumberMode as Mode;
+                        let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
+                        let before = preferences;
+                        let values = || evaluation.into_iter().flat_map(|result| result.lines.iter()).filter_map(|line| match &line.outcome {
+                            LineOutcome::Value(value) => Some(value), _ => None,
+                        });
+                        let has_precision = values().any(result_format::supports_precision);
+                        let has_percent = values().any(result_format::supports_percent);
+                        ui.selectable_value(&mut preferences.number_mode, Mode::Auto, "Auto");
+                        ui.add_enabled_ui(has_precision, |ui| {
+                            ui.selectable_value(&mut preferences.number_mode, Mode::Fixed, "Fixed decimal");
+                            ui.selectable_value(&mut preferences.number_mode, Mode::Scientific, "Scientific");
+                            ui.add_enabled_ui(preferences.number_mode != Mode::Auto, |ui| {
+                                ui.add(egui::Slider::new(&mut preferences.decimal_places, 0..=15).text("Decimal places"));
+                            });
+                        });
+                        ui.checkbox(&mut preferences.group_digits, "Group digits");
+                        ui.add_enabled(has_percent, egui::Checkbox::new(&mut preferences.percent, "Percent for scalars"));
+                        if preferences != before { effects.display_preferences = Some(preferences); }
+                    });
+                });
+                let _display = ui.menu_button("Source display", |ui| {
+                    let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
+                    let numbers = ui.checkbox(&mut preferences.line_numbers, "Line numbers");
+                    let wrap = ui.checkbox(&mut preferences.word_wrap, "Word wrap");
+                    #[cfg(test)]
+                    { self.test_display_controls = Some((numbers.rect, wrap.rect)); }
+                    if numbers.changed() || wrap.changed() { effects.display_preferences = Some(preferences); }
+                });
+                #[cfg(test)]
+                self.test_config_groups.push(("Source display", _display.response.rect));
+
+                ui.menu_button("Editor options", |ui| {
+                    let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
+                    let before = preferences;
+                    ui.checkbox(&mut preferences.completion, "Completions");
+                    ui.checkbox(&mut preferences.parameter_hints, "Parameter hints");
+                    ui.checkbox(&mut preferences.auto_close_delimiters, "Auto-close delimiters");
+                    if preferences != before { effects.display_preferences = Some(preferences); }
+                    let regions = editor::fold_regions(source);
+                    if !regions.is_empty() {
+                        ui.separator();
+                        egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                            for region in &regions {
+                                if let Some(id) = self.session.line_id(region.header) {
+                                    let mut closed = folds.collapsed.contains(&id);
+                                    let text = source.lines().nth(region.header).unwrap_or("").trim();
+                                    if ui.checkbox(&mut closed, format!("Fold line {}: {text}", region.header + 1)).changed() {
+                                        *fold_request = Some((id, closed));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+                let mut remember_source = self.remember_source;
+                if ui.checkbox(&mut remember_source, "Remember last source").changed() {
+                    effects.intent = Some(DialogIntent::SetRememberSource(remember_source));
+                }
+                let copy = ui.button("Copy all");
+                #[cfg(test)]
+                { self.test_copy_all_rect = Some(copy.rect); }
+                if copy.clicked() && let Some(document_id) = self.session.current_id() {
+                    effects.result_copy = Some(ResultCopyIntent {
+                        host: identity,
+                        viewport_id,
+                        document_id,
+                        target: ResultCopyTarget::All,
+                    });
+                    ui.close();
+                }
+                let (host_button, requested_host) =
+                    super::utility_host::presentation_button(ui, identity.host, true);
+                #[cfg(test)]
+                if ui.is_visible() && !ui.is_sizing_pass() {
+                    self.test_host_button_rect = Some(host_button.rect);
+                }
+                if host_button.clicked() {
+                    effects.host_request = Some(requested_host);
+                    ui.close();
+                }
+            });
+            if _menu.response.is_pointer_button_down_on() {
+                effects.config_editor_focus = Some(editor_selection);
+            }
+            #[cfg(test)]
+            if ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_config_menu = Some(_menu.response.rect);
+            }
+            let title = self.session.current_name().unwrap_or("Untitled");
+            ui.label(title);
+            if self.session.is_dirty() {
+                ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
+            }
+        });
+    }
+
     fn panels_ui(
         &self, ui: &mut egui::Ui, source: &str,
         evaluation: Option<&crate::calculation_pad::SessionEvaluation>,
         view: &mut PadView, effects: &mut HostEffects,
     ) {
-        ui.menu_button("View", |ui| {
-            ui.checkbox(&mut view.show_inputs, "Editable inputs");
-            ui.checkbox(&mut view.show_watches, "Output watches");
-        });
-        ui.menu_button("Number format", |ui| {
-            use crate::settings::CalculationPadNumberMode as Mode;
-            let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
-            let before = preferences;
-            let values = || evaluation.into_iter().flat_map(|result| result.lines.iter()).filter_map(|line| match &line.outcome {
-                LineOutcome::Value(value) => Some(value), _ => None,
-            });
-            let has_precision = values().any(result_format::supports_precision);
-            let has_percent = values().any(result_format::supports_percent);
-            ui.selectable_value(&mut preferences.number_mode, Mode::Auto, "Auto");
-            ui.add_enabled_ui(has_precision, |ui| {
-                ui.selectable_value(&mut preferences.number_mode, Mode::Fixed, "Fixed decimal");
-                ui.selectable_value(&mut preferences.number_mode, Mode::Scientific, "Scientific");
-                ui.add_enabled_ui(preferences.number_mode != Mode::Auto, |ui| {
-                    ui.add(egui::Slider::new(&mut preferences.decimal_places, 0..=15).text("Decimal places"));
-                });
-            });
-            ui.checkbox(&mut preferences.group_digits, "Group digits");
-            ui.add_enabled(has_percent, egui::Checkbox::new(&mut preferences.percent, "Percent for scalars"));
-            if preferences != before { effects.display_preferences = Some(preferences); }
-        });
         let ids = self.session.line_ids().unwrap_or_default();
         let revision = self.session.revision().unwrap_or_default();
         if view.show_inputs {
@@ -1900,22 +2074,34 @@ impl CalculationPadDialog {
                 .id_salt("calculation-pad-window-content")
                 .max_height(content_rect.height())
                 .show(ui, |ui| {
-                    if actions_allowed && self.session.pending_transition().is_none() {
+                    if actions_allowed && self.session.pending_transition().is_none()
+                        && !egui::Popup::is_any_open(ctx)
+                    {
                         effects.editor_history_action =
                             self.take_editor_history_shortcut(ui, editor_id);
                     }
                     let source = self.session.source().unwrap_or_default().to_owned();
                     let evaluation = self.session.shared_evaluation();
                     let mut view = self.pad_view.clone();
+                    let mut folds = self.folds.clone();
+                    let mut fold_request = None;
+                    let popup_was_open = egui::Popup::is_any_open(ui.ctx());
+                    self.config_menu_ui(
+                        ui, &source, evaluation.as_deref(), &mut view, &folds,
+                        &mut fold_request, identity, viewport_id, effects,
+                    );
+                    let popup_owns_input = popup_was_open || egui::Popup::is_any_open(ui.ctx());
+                    if !popup_owns_input && effects.config_editor_focus.is_none() {
+                        effects.config_editor_focus = Some(None);
+                    }
                     ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
                         self.panels_ui(ui, &source, evaluation.as_deref(), &mut view, effects);
                     });
                     if view != self.pad_view || effects.input_commit.is_some() { effects.pad_view = Some(view); }
                     let mut tools = effects.editor_tools.clone().unwrap_or_else(|| self.editor_tools.clone());
-                    self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects);
+                    self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input);
                     if tools != self.editor_tools { effects.editor_tools = Some(tools); }
                     let mut completion = effects.completion.clone().unwrap_or_else(|| self.completion.clone());
-                    let mut folds = self.folds.clone();
                     let mut staged_save_as_name = self.save_as_name.clone();
                     self.contents_ui(
                         ui,
@@ -1933,7 +2119,6 @@ impl CalculationPadDialog {
                         &mut effects.inspector_caret,
                         &mut effects.editor_primary_caret,
                         &mut effects.open_inspector,
-                        &mut effects.open_dependencies,
                         &mut effects.dependency_applied,
                         &mut effects.result_navigation,
                         &mut effects.selected_result,
@@ -1943,6 +2128,8 @@ impl CalculationPadDialog {
                         &mut completion,
                         &mut effects.completion_cursor,
                         &mut folds,
+                        fold_request,
+                        popup_owns_input,
                         &mut effects.projection_state,
                         &mut effects.source_clipboard,
                         &mut effects.deferred_projected_input,
@@ -1950,6 +2137,13 @@ impl CalculationPadDialog {
                         identity,
                         viewport_id,
                     );
+                    if effects.display_preferences.is_some()
+                        && popup_owns_input
+                        && let Some((host, basis, selection)) = self.config_editor_focus
+                        && host == identity && Some(basis) == effects.document_basis
+                    {
+                        effects.display_selection = Some(selection);
+                    }
                     if completion != self.completion { effects.completion = Some(completion); }
                     if folds != self.folds { effects.folds = Some(folds); }
                     if staged_save_as_name != self.save_as_name {
@@ -2234,6 +2428,12 @@ impl CalculationPadDialog {
             .zip(self.session.current_id())
             .zip(self.session.revision())
             .map(|((incarnation, document), revision)| (incarnation, document, revision));
+        if let Some(selection) = host.config_editor_focus.take() {
+            self.config_editor_focus = selection.and_then(|selection| {
+                (host.document_basis == current_basis)
+                    .then_some((host.identity, current_basis?, selection))
+            });
+        }
         // A pending batch gets exactly one retained opportunity on its owning host.
         if self.deferred_projected_input.is_some() {
             self.deferred_projected_input = None;
@@ -3332,7 +3532,6 @@ impl CalculationPadDialog {
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         editor_primary_caret: &mut Option<usize>,
         open_inspector: &mut bool,
-        open_dependencies: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
         selected_result: &mut Option<LineId>,
@@ -3342,6 +3541,8 @@ impl CalculationPadDialog {
         completion: &mut CompletionState,
         completion_cursor: &mut Option<egui::text::CCursorRange>,
         folds: &mut FoldState,
+        fold_request: Option<(LineId, bool)>,
+        popup_owns_input: bool,
         projection_state: &mut Option<egui::widgets::text_edit::TextEditState>,
         source_clipboard: &mut Option<String>,
         deferred_projected_input: &mut Option<Vec<egui::Event>>,
@@ -3349,71 +3550,6 @@ impl CalculationPadDialog {
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("New").clicked() {
-                *intent = Some(DialogIntent::New);
-            }
-            if ui.button("Open").clicked() {
-                *intent = Some(DialogIntent::OpenChooser);
-            }
-            let save = ui.add_enabled(
-                self.session.pending_transition().is_none(),
-                egui::Button::new("Save"),
-            );
-            #[cfg(test)]
-            if ui.is_visible() && !ui.is_sizing_pass() {
-                self.test_save_rect = Some(save.rect);
-            }
-            if save.clicked() {
-                *intent = Some(DialogIntent::Save);
-            }
-            if ui.button("Save As…").clicked() {
-                *intent = Some(DialogIntent::OpenSaveAs);
-            }
-            let examples = ui.button("Examples & reference");
-            #[cfg(test)]
-            if ui.is_visible() && !ui.is_sizing_pass() {
-                self.test_examples_button_rect = Some(examples.rect);
-                self.test_examples_button_ownership = Some((ui.clip_rect(), examples.enabled()));
-            }
-            if examples.clicked() {
-                *intent = Some(DialogIntent::OpenExamples);
-            }
-            let dependencies = ui.button("Dependencies…");
-            #[cfg(test)] { self.test_dependency_open = Some((dependencies.rect, ui.clip_rect(), dependencies.enabled())); }
-            if dependencies.clicked() { *open_dependencies = true; }
-            let inspector = ui.button("Programmer Inspector…");
-            #[cfg(test)]
-            {
-                self.test_inspector_reopen =
-                    Some((inspector.rect, ui.clip_rect(), inspector.enabled()));
-            }
-            if inspector.clicked() {
-                *open_inspector = true;
-            }
-            let (host_button, requested_host) =
-                super::utility_host::presentation_button(ui, host_identity.host, true);
-            #[cfg(test)]
-            if ui.is_visible() && !ui.is_sizing_pass() {
-                self.test_host_button_rect = Some(host_button.rect);
-            }
-            if host_button.clicked() {
-                *host_request = Some(requested_host);
-            }
-            ui.separator();
-            let mut remember_source = self.remember_source;
-            if ui
-                .checkbox(&mut remember_source, "Remember last source")
-                .changed()
-            {
-                *intent = Some(DialogIntent::SetRememberSource(remember_source));
-            }
-            let title = self.session.current_name().unwrap_or("Untitled");
-            ui.label(title);
-            if self.session.is_dirty() {
-                ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
-            }
-        });
 
         if let Some(error) = self.error.as_deref() {
             ui.horizontal_wrapped(|ui| {
@@ -3491,6 +3627,8 @@ impl CalculationPadDialog {
                             completion,
                             completion_cursor,
                             folds,
+                            fold_request,
+                            popup_owns_input,
                             projection_state,
                             source_clipboard,
                             deferred_projected_input,
@@ -3546,6 +3684,8 @@ impl CalculationPadDialog {
                 completion,
                 completion_cursor,
                 folds,
+                fold_request,
+                popup_owns_input,
                 projection_state,
                 source_clipboard,
                 deferred_projected_input,
@@ -3757,6 +3897,8 @@ impl CalculationPadDialog {
         completion: &mut CompletionState,
         completion_cursor: &mut Option<egui::text::CCursorRange>,
         folds: &mut FoldState,
+        fold_request: Option<(LineId, bool)>,
+        popup_owns_input: bool,
         projection_state: &mut Option<egui::widgets::text_edit::TextEditState>,
         source_clipboard: &mut Option<String>,
         deferred_projected_input: &mut Option<Vec<egui::Event>>,
@@ -3928,41 +4070,18 @@ impl CalculationPadDialog {
             }
         }
         let mut visible_source = projection.visible.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("Source");
-            let mut preferences = display_preferences.unwrap_or(self.display_preferences);
-            let numbers = ui.checkbox(&mut preferences.line_numbers, "Line numbers");
-            let wrap = ui.checkbox(&mut preferences.word_wrap, "Word wrap");
-            #[cfg(test)]
-            { self.test_display_controls = Some((numbers.rect, wrap.rect)); }
-            let mut assistance_changed = false;
-            ui.menu_button("Editor options", |ui| {
-                assistance_changed |= ui.checkbox(&mut preferences.completion, "Completions").changed();
-                assistance_changed |= ui.checkbox(&mut preferences.parameter_hints, "Parameter hints").changed();
-                assistance_changed |= ui.checkbox(&mut preferences.auto_close_delimiters, "Auto-close delimiters").changed();
-                if !regions.is_empty() {
-                    ui.separator();
-                    for region in &regions {
-                        if let Some(id) = self.session.line_id(region.header) {
-                            let mut closed = folds.collapsed.contains(&id);
-                            let text = source.lines().nth(region.header).unwrap_or("").trim();
-                            if ui.checkbox(&mut closed, format!("Fold line {}: {text}", region.header + 1)).changed() {
-                                folds.collapsed.retain(|existing| *existing != id);
-                                let selection_overlaps = editor_selection.or(persistent_selection).and_then(|selection| {
-                                    let a = projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte))?;
-                                    let b = projection.byte_at_character(selection.secondary.index.0).and_then(|byte| projection.source_byte(byte))?;
-                                    Some(a.min(b) < region.hidden.end && a.max(b) >= region.hidden.start)
-                                }).unwrap_or(false);
-                                if closed && !selection_overlaps { folds.collapsed.push(id); }
-                            }
-                        }
-                    }
-                }
-            });
-            if numbers.changed() || wrap.changed() || assistance_changed {
-                *display_preferences = Some(preferences);
-            }
-        });
+        ui.heading("Source");
+        if let Some((id, closed)) = fold_request
+            && let Some(region) = regions.iter().find(|region| self.session.line_id(region.header) == Some(id))
+        {
+            folds.collapsed.retain(|existing| *existing != id);
+            let selection_overlaps = editor_selection.or(persistent_selection).and_then(|selection| {
+                let a = projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte))?;
+                let b = projection.byte_at_character(selection.secondary.index.0).and_then(|byte| projection.source_byte(byte))?;
+                Some(a.min(b) < region.hidden.end && a.max(b) >= region.hidden.start)
+            }).unwrap_or(false);
+            if closed && !selection_overlaps { folds.collapsed.push(id); }
+        }
         let preferences = display_preferences.unwrap_or(self.display_preferences);
         let focused = authorized_pass && ui.memory(|memory| memory.has_focus(editor_id));
         let caret = editor_selection.and_then(|range| projection.source_character(source, range.primary.index.0))
@@ -3983,7 +4102,7 @@ impl CalculationPadDialog {
                 (*key == egui::Key::Z && modifiers.command) || matches!(key, egui::Key::Backspace | egui::Key::Delete),
             _ => false,
         }));
-        if completion.visible && !conflicting_edit {
+        if completion.visible && !conflicting_edit && !popup_owns_input {
             if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 completion.visible = false;
                 completion.dismissed = caret.map(|caret| (revision, caret));
@@ -4060,6 +4179,7 @@ impl CalculationPadDialog {
             let indent = line.len() - line.trim_start_matches(' ').len();
             let add_level = crate::calculation_pad::editor_loop_header(line.trim());
             if (indent > 0 || add_level)
+                && !popup_owns_input
                 && !pointer_gesture
                 && !ui.input(|input| input.events.iter().any(|event| match event {
                     egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy | egui::Event::Ime(_) | egui::Event::Text(_) => true,
@@ -4510,24 +4630,7 @@ impl CalculationPadDialog {
         selected_result: &mut Option<LineId>,
         result_scroll: &mut Option<ResultScrollUpdate>,
     ) {
-        ui.horizontal(|ui| {
-            ui.heading("Results");
-            let response = ui.button("Copy all");
-            #[cfg(test)]
-            {
-                self.test_copy_all_rect = Some(response.rect);
-            }
-            if response.clicked()
-                && let Some(document_id) = self.session.current_id()
-            {
-                *result_copy = Some(ResultCopyIntent {
-                    host: host_identity,
-                    viewport_id,
-                    document_id,
-                    target: ResultCopyTarget::All,
-                });
-            }
-        });
+        ui.heading("Results");
 
         #[cfg(test)]
         self.test_line_copy_rects.clear();
@@ -5016,6 +5119,16 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_is_dirty(&self) -> bool {
         self.session.is_dirty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_config_menu_rect(&self) -> Option<egui::Rect> {
+        self.test_config_menu
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_config_group_rect(&self, name: &str) -> Option<egui::Rect> {
+        self.test_config_groups.iter().find(|(group, _)| *group == name).map(|(_, rect)| *rect)
     }
 
     #[cfg(test)]
@@ -6347,6 +6460,26 @@ mod tests {
         frame(dialog, ctx, size, click_events(point, false))
     }
 
+    fn open_config_menu(
+        dialog: &mut CalculationPadDialog,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        group: Option<&str>,
+    ) {
+        for _ in 0..3 {
+            if !egui::Popup::is_any_open(ctx) { break; }
+            frame(dialog, ctx, size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        }
+        let menu = dialog.test_config_menu_rect().expect("Config Menu is visible");
+        click(dialog, ctx, size, menu.center());
+        frame(dialog, ctx, size, Vec::new());
+        if let Some(group) = group {
+            let rect = dialog.test_config_group_rect(group).expect("menu group is visible");
+            click(dialog, ctx, size, rect.center());
+            frame(dialog, ctx, size, Vec::new());
+        }
+    }
+
     fn right_click(dialog: &mut CalculationPadDialog, ctx: &egui::Context, size: egui::Vec2, point: egui::Pos2) {
         for pressed in [true, false] {
             frame(dialog, ctx, size, vec![
@@ -6635,6 +6768,24 @@ mod tests {
     }
 
     #[test]
+    fn config_menu_escape_keeps_editor_tools_and_document_open() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(640.0, 480.0);
+        dialog.open();
+        dialog.test_replace_source("value = 4\nvalue");
+        dialog.editor_tools.open = true;
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        open_config_menu(&mut dialog, &ctx, size, None);
+        assert!(egui::Popup::is_any_open(&ctx));
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(dialog.open);
+        assert!(dialog.editor_tools.open);
+        assert_eq!(dialog.test_source(), Some("value = 4\nvalue"));
+    }
+
+    #[test]
     fn display_toggle_preserves_selection_only_when_editor_was_focused() {
         let (_directory, _root, mut dialog) = fixture();
         let ctx = egui::Context::default();
@@ -6649,12 +6800,14 @@ mod tests {
         let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap();
         state.cursor.set_char_range(Some(selection));
         state.store(&ctx, editor_id);
+        open_config_menu(&mut dialog, &ctx, size, Some("Source display"));
         let toggle = dialog.test_display_controls.unwrap().0;
         click(&mut dialog, &ctx, size, toggle.center());
         frame(&mut dialog, &ctx, size, Vec::new());
         assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
         assert_eq!(egui::widgets::text_edit::TextEditState::load(&ctx, editor_id).unwrap().cursor.char_range(), Some(selection));
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("other-widget")));
+        open_config_menu(&mut dialog, &ctx, size, Some("Source display"));
         let toggle = dialog.test_display_controls.unwrap().1;
         click(&mut dialog, &ctx, size, toggle.center());
         frame(&mut dialog, &ctx, size, Vec::new());
@@ -6684,6 +6837,7 @@ mod tests {
         frame(&mut dialog, &ctx, size, Vec::new());
         assert!(egui::scroll_area::State::load(&ctx, scroll_id).unwrap().offset.x > 0.0);
 
+        open_config_menu(&mut dialog, &ctx, size, Some("Source display"));
         let wrap = dialog.test_display_controls.unwrap().1;
         assert!(matches!(click(&mut dialog, &ctx, size, wrap.center()), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
         for _ in 0..2 { frame(&mut dialog, &ctx, size, Vec::new()); }
@@ -6692,6 +6846,7 @@ mod tests {
         assert_eq!(egui::scroll_area::State::load(&ctx, scroll_id).unwrap().offset.x, 0.0);
         assert_eq!(wrapped_rows.iter().map(|(line, _)| *line).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
         assert!(wrapped_rows[1].1 - wrapped_rows[0].1 > rows[1].1 - rows[0].1);
+        open_config_menu(&mut dialog, &ctx, size, Some("Source display"));
         let numbers = dialog.test_display_controls.unwrap().0;
         assert!(matches!(click(&mut dialog, &ctx, size, numbers.center()), Some(CalculationPadDialogEffect::SaveDisplayPreferences(_))));
         assert!(!dialog.display_preferences.line_numbers);
@@ -6832,8 +6987,9 @@ mod tests {
             .map(|(_, _, text)| *text)
             .unwrap();
         assert!(value_label.left() > row_label.right());
+        open_config_menu(&mut dialog, &ctx, size, Some("Source display"));
         let (line_numbers, word_wrap) = dialog.test_display_controls.unwrap();
-        assert!(word_wrap.left() > line_numbers.right());
+        assert!(word_wrap.top() >= line_numbers.bottom());
         assert_eq!(dialog.session.line_ids().unwrap(), ids);
         let evaluation = dialog.session.evaluation().unwrap();
         assert_eq!(evaluation.lines.len(), 8);
@@ -6875,6 +7031,7 @@ mod tests {
             Some(CalculationPadDialogEffect::CopyText("20".into()))
         );
 
+        open_config_menu(&mut dialog, &ctx, size, None);
         let all_copy = dialog
             .test_copy_all_rect
             .expect("results toolbar exposes explicit Copy all");
@@ -6908,6 +7065,7 @@ mod tests {
             click(&mut dialog, &ctx, size, line_copy.center()),
             Some(CalculationPadDialogEffect::CopyText("[2, 4, 6]".into()))
         );
+        open_config_menu(&mut dialog, &ctx, size, None);
         let all_copy = dialog.test_copy_all_rect.expect("copy all is available");
         let Some(CalculationPadDialogEffect::CopyText(summary)) =
             click(&mut dialog, &ctx, size, all_copy.center())
@@ -7076,6 +7234,7 @@ mod tests {
         dialog.open();
         dialog.test_replace_source("keep this draft");
         for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        open_config_menu(&mut dialog, &ctx, size, None);
         let popout_button = dialog.test_host_button_rect.unwrap();
         click(&mut dialog, &ctx, size, popout_button.center());
         for _ in 0..3 { immediate_viewport_frame(&mut dialog, &ctx, Vec::new()); }
@@ -7542,6 +7701,7 @@ mod tests {
             dialog.session.evaluation_count(),
             copy_all_session(&mut dialog.session),
         );
+        open_config_menu(&mut dialog, &ctx, initial_size, None);
         let popout_button = dialog
             .test_host_button_rect
             .expect("the docked host offers Pop out");
@@ -7559,6 +7719,7 @@ mod tests {
         assert!(dialog.host_state.embedded_root_layer().is_some());
         assert!(!dialog.host_state.bootstrap_pending());
         assert!(dialog.needs_root_ui_when_hidden());
+        open_config_menu(&mut dialog, &ctx, initial_size, None);
         let dock_button = dialog
             .test_host_button_rect
             .expect("the embedded popout offers Dock back");
@@ -7599,6 +7760,7 @@ mod tests {
             frame(&mut dialog, &ctx, size, Vec::new());
         }
 
+        open_config_menu(&mut dialog, &ctx, size, None);
         let popout_button = dialog
             .test_host_button_rect
             .expect("the docked pad offers a popout action");
@@ -7703,6 +7865,7 @@ mod tests {
         for _ in 0..3 {
             frame(&mut dialog, &ctx, size, Vec::new());
         }
+        open_config_menu(&mut dialog, &ctx, size, Some("Tools"));
         let examples_button = dialog
             .test_examples_button_rect()
             .expect("the main pad has an Examples & reference action");
@@ -7873,6 +8036,7 @@ mod tests {
         assert_eq!(dialog.test_source(), Some("amount = 2\namount"));
         assert!(dialog.test_is_dirty());
 
+        open_config_menu(&mut dialog, &ctx, size, Some("Document"));
         let save = dialog.test_save_button_rect().expect("Save is visible");
         frame(&mut dialog, &ctx, size, click_events(save.center(), true));
         assert_eq!(
@@ -8013,6 +8177,7 @@ mod tests {
             .test_window_rect
             .expect("dialog has real window geometry");
         let editor = dialog.test_editor_rect.expect("source TextEdit is visible");
+        open_config_menu(&mut dialog, &ctx, size, None);
         let copy = dialog.test_copy_all_rect.expect("copy remains reachable");
         assert!(screen.contains_rect(window));
         assert!(editor.is_positive());
@@ -8020,7 +8185,7 @@ mod tests {
         assert!(screen.contains(editor.center()));
         assert!(screen.contains(copy.center()));
         assert!(window.intersects(editor));
-        assert!(window.intersects(copy));
+        assert!(screen.intersects(copy));
     }
 
     #[test]
