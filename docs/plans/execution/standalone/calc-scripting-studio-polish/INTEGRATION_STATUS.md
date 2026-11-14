@@ -21,8 +21,10 @@
 | M4-A | Complete and pushed at `4966bdfdf68cf982a0e77e5880126dad70675b55`. 70 focused tests and six final targeted cases passed. |
 | M4-B | Complete and pushed at `8df4f947190a4caf0632d29cd8613433dc5baa0c`. 73 focused and 4 final targeted cases passed. |
 | M4-C | Complete and pushed at `1bde28061bb62465b5832fa20a2feb2f3bb1c581`. 123 focused and 9 final relevant cases passed. |
-| M5-A | Complete at the automated level. Final affected QR cases passed in the 46-test integration run. UI-8 is pending. |
-| M6-A | Pending |
+| M5-A | Complete and pushed at `06ba8cfa9327c6adde4b1ed9effe5a26b6a6f320`. Final affected QR cases passed in the 46-test integration run. |
+| M6-A-R1 | Complete and pushed at `1d7bf67cc73c6865e6b04a1081cc57904b507faf`. Folded typing with passive pointer movement passed in both event orders. |
+| M6-A-R2 | Complete and pushed at `fe3ef8c381b771ecc7f82bec6fefb2584993c1dc`. Introduced Clippy warnings corrected. The 14 directly affected cases passed. |
+| M6-A | LIMITED. Delivered code and documentation with passing scoped automated verification. Windows native acceptance remains incomplete. |
 
 ## M1-A evidence
 
@@ -97,29 +99,56 @@
 - QR uses the shared utility host with the existing geometry and presentation key. Source, correction, Advanced, validation and cached raster follow the same session across host moves. Retained commands own clipboard and file effects, and the QA capture adapter observes the live native child.
 - The first batch passed 15/17 and exposed two launcher close-routing failures. The QA-enabled correction passed both routing cases and 25/26 overall, with one focus assertion remaining. The second correction passed 28/28 in 13.349 seconds of Nextest runtime, including focus, failure-preserving Cut, raster availability and QR-specific QA probes. The process runner verified teardown and output drain in each execution batch with the 100-second cap.
 
+## Final automated verification
+
+- The cumulative reviewer confirmed that current-source evaluation and presentation/persistence paths retain their ownership. Findings on fresh QR Undo and folded typing during mouse movement were corrected, then independently rechecked.
+- The final QA-feature run passed 46/46 targeted Nextest cases in 14.522 seconds. Its selector covers revised QR and QA capture behavior, root close/focus, Calc bindings, loops, worker, editor, format and v1 persistence, and native-flowchart parser, layout and comment-preserving transactions at the domain level. The 100-second watchdog verified cleanup and output drain.
+- A selective rustfmt attempt spliced structural edits and failed at compilation. The affected files were restored or rebuilt from canonical formatter output, then rechecked for syntax and unexpected semantic changes. Three QR integration files carry whole-file formatting as a result. QR/Calc settings writes during app fixtures were detected and the local ignored settings file was restored to its exact pre-test SHA-256.
+- Touched-file rustfmt with edition 2024 and skip_children checked 33 first-party files. Thirteen matched rustfmt exactly. Sixteen have residual discrepancies overlapping Goal edits, recorded in the final formatting receipt.
+- Evidence directory is the task's `calc-scripting` visualization directory. See `m6-final-r1-build`, `m6-final-r1-list`, `m6-final-r1-run`, `m6-lint-fix-run`, `m6-clippy-recheck`, `m6-format-lint-fix/receipt.json`, and `final-working-tree-source-sha256.json`.
+
+- First-party Clippy exited 0 for library and app targets with the QA feature. The targeted cleanup removed 11 library warnings. The rerun retained 114 library and three binary warnings at pre-existing sites. The 14-case post-cleanup Nextest batch passed in 1.119 seconds with verified process teardown and drain.
+
+## Windows native verification
+
+The Windows build from `1d7bf67cc73c6865e6b04a1081cc57904b507faf` ran in a disposable profile with both Paste Sequence shortcuts disabled before construction. See the external `native-smoke-notes.md` and the `m6-native-process-r2` and `m6-native-keyboard` process receipts.
+
+| Scenario | Outcome |
+| --- | --- |
+| UI-1 | Partial. H2 small-script results and source Undo/Redo verified. Input-panel edit, watch and comparison unverified. |
+| UI-2 | Unverified. Completion, parameter hints and theme interactions pending. |
+| UI-3 | Partial. Ctrl+F opened Find and found one match. Match selection, folding, navigation, replace/undo and copying unverified. |
+| UI-4 | Unverified. Panel edits, Save As/reopen and compact layout pending. |
+| UI-5 | Unverified. Copy and Copy formatted are exposed. Display modes and clipboard contents pending. |
+| UI-6 | Unverified. Controlled cancellation and host-switch/reopen interaction pending. |
+| UI-7 | Partial. Native Diagram Studio opens. Its canvas, visual round trip and legacy preview are unverified. |
+| UI-8 | Partial. Exact docked payload, native pop-out, independent launcher query, native close and remembered pop-out verified. Detached content/correction, docking back, clipboard and PNG save/cancel are unverified. |
+
+The sandboxed launch received Windows desktop access denied. An authorized current-desktop launch allowed keyboard and ROOT accessibility checks. Windows Graphics Capture repeatedly timed out, and detached utility accessibility exposed only title bars. Both successful native runs exited with verified process cleanup and output drain.
+
 ## Requirement matrix
 
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
-| MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
-| MMD-02 | M1-A | Yes | Passed | Pending |
-| MMD-03 | M1-A | Yes | Passed | Pending |
-| MMD-04 | M1-A | Yes | Passed | Pending |
-| MMD-05 | M1-B | Yes | Passed | Pending |
-| CP-01 | M2-A/C/D | Yes | Passed | Pending |
-| CP-02 | M4-A/C | Yes | Passed | Pending |
-| CP-03 | M3-B, M4-C | Yes | Passed | Pending |
-| CP-04 | M3-B | Yes | Passed | Pending |
-| CP-05 | M4-A/C | Yes | Passed | Pending |
-| CP-06 | M3-A/C | Yes | Passed | Pending |
-| CP-07 | M3-A/C | Yes | Passed | Pending |
-| CP-08 | M3-B | Yes | Passed | Pending |
-| CP-09 | M4-B/C | Yes | Passed | Pending |
-| CP-10 | M3-C | Yes | Passed | Pending |
-| CP-11 | M3-C | Yes | Passed | Pending |
-| CP-12 | M3-A/C | Yes | Passed | Pending |
-| CP-13 | M2-B | Yes | Passed | Pending |
-| CP-14 | M2-B | Yes | Passed | Pending |
-| CP-15 | M2-C/D | Yes | Passed | Pending |
-| CP-16 | M2-B/C | Yes | Passed | Pending |
-| QR-01 | M5-A | Yes | Passed | Pending |
+| MMD-01 | M1-A, M1-B | Yes | Passed | Unverified |
+| MMD-02 | M1-A | Yes | Passed | Unverified |
+| MMD-03 | M1-A | Yes | Passed | Unverified |
+| MMD-04 | M1-A | Yes | Passed | Unverified |
+| MMD-05 | M1-B | Yes | Passed | Unverified |
+| CP-01 | M2-A/C/D | Yes | Passed | Partial, UI-1 |
+| CP-02 | M4-A/C | Yes | Passed | Unverified |
+| CP-03 | M3-B, M4-C | Yes | Passed | Unverified |
+| CP-04 | M3-B | Yes | Passed | Unverified |
+| CP-05 | M4-A/C | Yes | Passed | Unverified |
+| CP-06 | M3-A/C | Yes | Passed | Partial, UI-3 |
+| CP-07 | M3-A/C | Yes | Passed | Unverified |
+| CP-08 | M3-B | Yes | Passed | Unverified |
+| CP-09 | M4-B/C | Yes | Passed | Unverified |
+| CP-10 | M3-C | Yes | Passed | Unverified |
+| CP-11 | M3-C | Yes | Passed | Unverified |
+| CP-12 | M3-A/C | Yes | Passed | Unverified |
+| CP-13 | M2-B | Yes | Passed | Partial, UI-1 |
+| CP-14 | M2-B | Yes | Passed | Partial, UI-1 |
+| CP-15 | M2-C/D | Yes | Passed | Partial, UI-1 |
+| CP-16 | M2-B/C | Yes | Passed | Partial, UI-1 |
+| QR-01 | M5-A | Yes | Passed | Partial, UI-8 |

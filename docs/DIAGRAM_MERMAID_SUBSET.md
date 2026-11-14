@@ -36,15 +36,21 @@ the grammar below.
 
 ## Grammar
 
-Whitespace around tokens is allowed. Each statement occupies one physical line. A document starts with one header:
+Whitespace around tokens is allowed. Start with `flowchart` or its alias
+`graph`, followed by `TD`, `TB`, `BT`, `LR`, or `RL`. Statements can be on
+separate lines or separated by semicolons; a header may share a line with a
+statement. Semicolons inside quoted node labels or pipe-delimited edge labels
+remain label text. Ordinary full-line `%%` comments are accepted. A blank or
+comment-only draft is an empty top-down graph.
 
 ```text
-flowchart TD
-flowchart TB
-flowchart LR
+%% Keep this introduction
+graph RL; A["Start; ready"] -->|yes| B["Work"]; B --> C["Finish"]
 ```
 
-Blank source is an empty top-down graph. `TD`, `TB`, and `LR` are retained distinctly. `BT` and `RL` are recognized Mermaid directions but unsupported here.
+All five direction choices participate in native layout, including bottom-to-top
+and right-to-left. Explicit auto-layout changes positions; unrelated edits keep
+manual positions.
 
 Node identifiers begin with an ASCII letter or underscore and continue with ASCII letters, digits, underscores, or single hyphens. Consecutive hyphens are reserved for Mermaid edge syntax, and the exact lowercase ID `end` is reserved. IDs are case-sensitive. Node and subgraph IDs share one namespace, so their IDs must be distinct. A bare ID is a node reference; references create a default rectangular node when no declaration exists. Explicit declarations use one of these quoted forms:
 
@@ -63,7 +69,9 @@ Start --> Wait
 Wait -->|ready| Choice
 ```
 
-Edges are separate statements. Chains, undirected or bidirectional arrows, semicolons, and extra trailing tokens are unsupported.
+Supported directed arrows can be chained, for example `A --> B --> C`;
+each arrow creates an edge. Undirected or bidirectional arrows and extra
+trailing tokens are unsupported.
 
 Flat groups have explicit IDs and quoted labels:
 
@@ -80,7 +88,15 @@ Subgraphs may not nest. Every opened group needs one `end`. A node belongs to th
 
 Quoted labels are read as Mermaid text, not JSON strings. Backslash has no quote-escape meaning. Encode a quote with `#quot;`; the parser also recognizes `#amp;`, `#lt;`, `#gt;`, `#apos;`, and decimal Unicode entities such as `#128161;`. Valid entities are decoded once. A literal hash that resembles an entity is emitted as `#35;`, so text such as `#quot;` remains literal after a format/parse roundtrip. `|` in an edge label is emitted as `#124;` so it cannot close the pipe-delimited label. Labels can contain Unicode, spaces, brackets, braces, parentheses, and hashes.
 
-The formatter emits normalized quoted labels and LF line endings. This subset does not emit canvas positions or the domain's internal edge IDs; the native document preserves that metadata. Parsed edges receive deterministic IDs in connection order; the document session reconciles IDs across source edits. Mermaid formatting also groups members inside their explicit subgraph. Ordering that would require interleaving one group's members with unrelated nodes is normalized into a single group block. Nonempty group blocks follow their first member's node order; empty groups are emitted after node declarations.
+The canonical graph formatter emits normalized quoted labels and LF line endings.
+Visual edits preserve ordinary comment text and order, keeping comments whose
+target was deleted as standalone blocks. Source export copies the exact current
+draft; opening or editing a comment-only draft does not normalize it until a
+visual edit is explicitly made. This subset does not emit canvas positions or the domain's internal edge IDs; the native document preserves that metadata. Parsed edges receive deterministic IDs in connection order; the document session reconciles IDs across source edits. Mermaid formatting also groups members inside their explicit subgraph. Ordering that would require interleaving one group's members with unrelated nodes is normalized into a single group block. Nonempty group blocks follow their first member's node order; empty groups are emitted after node declarations.
+
+For an older saved flowchart that still shows a stale preview, use **Refresh
+preview** after opening it to reparse the exact draft with the current grammar.
+This creates an undoable edit. Save explicitly to update the file.
 
 ## Unsupported and invalid source
 
@@ -94,7 +110,7 @@ as Visual…** is a separate operation and requires a current native flowchart
 without groups. It creates a new Visual Canvas `.mld` and leaves the Mermaid
 document and its exact source intact.
 
-The parser rejects unsupported constructs rather than ignoring them. Examples include comments and directives other than the bounded leading color init, styling beyond the node color subset, class/click statements, callbacks, nested groups, chains, semicolon-separated statements, other diagram kinds, unquoted shape labels, and unrecognized arrow forms. The source owner keeps the original draft intact and blocks graph-to-source mutations while the current text is invalid or unsupported.
+The parser rejects unsupported constructs rather than ignoring them. Examples include directives other than the bounded leading color init, styling beyond the node color subset, class/click statements, callbacks, nested groups, other diagram kinds, unquoted shape labels, and unrecognized arrow forms. The source owner keeps the original draft intact and blocks graph-to-source mutations while the current text is invalid or unsupported.
 
 Diagnostics carry a byte range into the original source plus one-based line and Unicode-scalar column. CRLF input is accepted; formatting normalizes it. Ranges always start and end at UTF-8 character boundaries.
 

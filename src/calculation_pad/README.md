@@ -4,7 +4,9 @@ The Calculation Pad engine evaluates a source document one physical line at a
 time. It retains the original text, blank lines, comments, line order, and
 line-ending bytes. Direct document evaluation always reads the current source.
 The UI session caches its evaluation for the current source revision and
-recomputes after an edit, undo, or redo changes that revision.
+recomputes after an edit, undo, or redo changes that revision. Ordinary small
+calculations use the cached synchronous path; repeated script work runs in a
+bounded background evaluation, with pending results identified in the UI.
 
 The Pad's **Examples & reference** window has a pinned search and executable
 examples with expected results. Use **Pop Out** to keep it in a separate native
@@ -35,11 +37,12 @@ in the Pad. Clearing search restores the ordinary groups.
 * Braced names such as `{顧客名}` may contain other Unicode characters and
   spaces. Braces and line breaks are not allowed inside a name. Names are
   limited to 128 UTF-8 bytes.
-* Bare operator/function/constant names and `rN` row-reference names are
-  reserved for assignments. `mod` is a contextual exception: `mod(` starts
-  the modulo function, while bare `mod` remains an assignable/referencable
-  name. Braces allow names that match an operator or constant, such as
-  `{sin}`.
+* Existing scalar function and constant names such as `sin` and `PI`, and
+  `rN` row-reference names, are reserved for assignments. Braces allow names
+  such as `{sin}`. New words such as `if`, `range`, `sum`, and `for` are
+  contextual; for example, `range(` starts a call, while bare `range` may be
+  a binding. Likewise, `mod(` starts the modulo function while bare `mod`
+  remains an assignable name.
 * Assigning a name again creates a new binding. The right-hand side reads the
   latest preceding binding, and later lines use the new one. A failed
   assignment becomes the latest binding and causes dependent lines to fail.
@@ -237,6 +240,29 @@ comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
 end of long lines, or enable wrapping to fit the Source pane. Drag the divider
 to resize Source and Results. The launcher remembers both display toggles and
 the separate divider positions for side-by-side and stacked layouts.
+
+Use **Editor options** to turn completions and parameter hints on or off, enable
+optional delimiter auto-closing, and fold loop bodies or `# region` / `# endregion`
+comment sections. Completions are accepted with Tab or Enter; Escape dismisses
+the list. Folding changes only the editor view: source, physical row references,
+and saved text remain intact. Ctrl+F opens Find, Ctrl+H opens Replace, and
+Ctrl+G goes to a physical line. Replace All is one undoable source edit.
+
+The **View** menu independently shows **Editable inputs** and **Output watches**.
+Both start hidden. Choose a top-level literal assignment as an input, edit its
+value and select **Apply**; invalid or unfinished values stay in the field until
+corrected or reset. Assignments with the same name are listed by source line.
+Watches can be pinned, reordered, removed, and copied; each follows the final
+binding of its name, including an error or missing value. During background
+script evaluation, the panels show pending or failed status instead of an old
+value. Save a named Pad to retain its input and watch selections; Save As copies
+them. The optional remembered-source recovery remains source-only.
+
+**Number format** starts at Auto. Fixed decimal and scientific modes offer 0–15
+decimal places; digit grouping and percent presentation are also available where
+applicable. These controls change presentation rather than source or evaluated
+values. Ordinary **Copy** and **Copy all** retain canonical results; use the
+explicit **Copy formatted** action for displayed grouping, percent, or precision.
 
 Results show values and diagnostics. Blank and comment lines still count toward
 `rN`, so visible result labels can have gaps. Right-click a value or error row

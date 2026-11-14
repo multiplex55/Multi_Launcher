@@ -240,12 +240,20 @@ workflows.
 The file-search plugin's **Global** and **Directory** choices select its search
 roots independently.
 
+Search for `qr` in the launcher and select **Open QR Generator**. Enter or paste text and
+choose an error-correction level under **Advanced**; the preview updates from
+the current text. **Copy Text**, **Copy QR**, and **Save PNG** are explicit
+actions. Dock or pop out the live generator without losing its text or selected
+correction level; a fresh QR command starts a new draft.
+
 ### 2) Calculator (with history)
 - `= 12*7 + 19`
 - `= history` (or `calc list`) to open the calculator history panel.
 
-For the Calculation Pad's Programmer Inspector and labels-only import/export,
-see the [Calculation Pad guide](src/calculation_pad/README.md#programmer-inspector-and-comparison).
+Search for `calc pad` to open **Calculation Pad** for reusable documents with assignments,
+conditions, bounded loops, input controls, and named output watches. The
+[Calculation Pad guide](src/calculation_pad/README.md) covers the language,
+editor, formatting, Programmer Inspector, and persistence.
 
 ### 3) Convert things quickly
 - Unit conversion:
@@ -1249,7 +1257,10 @@ viewer, mode, tool and zoom controls are in the action strip. In Mermaid
 use **View** to restore source when hidden. The Visual document places Align and
 Distribute above the canvas, with a resizable, independently scrolling right
 properties sidebar. **Show properties** and **Hide properties** reopen or
-collapse it.
+collapse it. Native flowcharts accept `flowchart` or `graph`, the TD/TB/BT/LR/RL
+directions, semicolon-separated statements, supported arrow chains, and ordinary
+full-line `%%` comments. See the [Mermaid subset guide](docs/DIAGRAM_MERMAID_SUBSET.md)
+for supported forms and source preservation.
 
 Connector **From** and **To** choices show the object's own text and ID. With
 exactly two eligible objects selected, **Add connector** connects them; otherwise
