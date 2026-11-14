@@ -24,7 +24,7 @@
 | M5-A | Complete and pushed at `06ba8cfa9327c6adde4b1ed9effe5a26b6a6f320`. Final affected QR cases passed in the 46-test integration run. |
 | M6-A-R1 | Complete and pushed at `1d7bf67cc73c6865e6b04a1081cc57904b507faf`. Folded typing with passive pointer movement passed in both event orders. |
 | M6-A-R2 | Complete and pushed at `fe3ef8c381b771ecc7f82bec6fefb2584993c1dc`. Introduced Clippy warnings corrected. The 14 directly affected cases passed. |
-| M6-A | LIMITED. Seven of eight Windows scenarios passed. UI-6 remains partial. |
+| M6-A | IMPLEMENTED / NATIVE ACCEPTANCE LIMITED. Seven of eight Windows scenarios passed. Native in-flight supersession and divider drag persistence remain unverified. |
 
 ## M1-A evidence
 
@@ -149,6 +149,41 @@ The closeout began at `b4e2592602b5deac23eb8a1b8362de56fff6c554`. Only the ledge
 Three directly affected post-fix tests passed in 0.951 seconds, including the new docked and pop-out Escape regressions. Three selected retained-host lifecycle cases also passed in 0.306 seconds as automated evidence. See `ui-closeout-fix-run/stderr.log` and `ui-closeout-lifecycle-run/stderr.log`. These results do not substitute for the detached Windows close decisions.
 
 The UI-6 lifecycle follow-up used the existing executable at source commit `7c8f7fe10` from ledger tip `02349afea`. The test profile disabled both Paste Sequence hotkeys and Remember last source. A window-only application capture provided detached close-control coordinates, and root framebuffers and saved-file reads verified the outcomes. The process exited 0 with cleanup and output drain verified in `ui6-lifecycle-process/result.json`. Native in-flight supersession is the only remaining UI-6 gap. A pass requires observing the older revision pending when replacement is submitted. No work limits or production source were changed.
+
+## Final verification and handoff
+
+**IMPLEMENTED / NATIVE ACCEPTANCE LIMITED.** This verification-only pass used branch `feat/calc-scripting-studio-polish` at `7dc4fc5ae73a10bda6063962ed274c0bb9ff42ca`, also the upstream tip at entry. The checkout was clean and ahead/behind was 0/0. The executable was the existing Windows `fast-dev` build with `qa-framebuffer-capture`, sourced at `7c8f7fe10c549531999031474ce2e48153d5160a`, SHA-256 `B49E1571D761382FAC6AF8E66ABBD3264A9FD540BDF423838604036AAAE8BD95`. All intervening commits changed only this ledger. Both owned-process receipts show exit 0, verified cleanup, and verified output drain. The disposable profile disabled both Paste Sequence shortcuts. The verification made no production code changes.
+
+| Check | Status | Observation |
+| --- | --- | --- |
+| Git and prior evidence | PASS | Start HEAD and upstream matched. The only source change since the original polish build was the Escape correction already verified in the preceding closeout. |
+| Reassignment and loop | PASS | The exact script below produced r2 subtotal 10, r3 reassigned subtotal 11, r6 sum_items 6, and r7 answer 17. This verifies that the final expression uses the latest subtotal. |
+| Editable inputs and output watches | PASS | Opened View, enabled both panels, selected price on line 1, and pinned answer. Applied 8 in the input control. Source changed from price 5 to 8, subtotal rows became 16 and 17, loop sum remained 6, and answer in Results and the watch became 23. |
+| Undo/Redo | PASS | With focus in Source, Ctrl+Z restored price 5 and answer 17. Ctrl+Shift+Z restored price 8 and answer 23. The input control and watch reflected both steps. |
+| Layout and compact reopen | PASS | The 1150 × 850 launcher displayed Source and Results side by side. Restarted the same disposable profile at 640 × 560 and observed the stacked layout with the remembered source, then closed and reopened the Pad and observed both panes and answer 23. The compact layout used its ordinary scroll areas. The resize handle drag was not confirmed; the compact launcher size was set via the disposable profile before restart. |
+| Native divider adjustment and independent persistence | UNVERIFIED | Attempted visible divider drags in both layouts. Screenshots showed the same divider positions and the profile ratios remained 0.50 wide and 0.48 stacked. A native-window retry reported the pointer was over the launcher. This did not establish that a divider drag reached its widget. No application defect was isolated, and persistence of user-adjusted ratios across close/reopen or restart remains unverified. |
+| Focused divider tests | PASS | Used the retained QA test binary. Three selected tests passed in 0.247 seconds, exit 0. Their output and process receipt are indexed below. |
+| UI-2, UI-3, detached lifecycle and CP-10 | PREVIOUSLY VERIFIED | Reviewed the evidence indexed in Windows acceptance closeout and its lifecycle follow-up. It remains applicable at the tested source revision. |
+| UI-6B native in-flight supersession | UNVERIFIED | The previous Windows runs showed the old script hitting its work limit before replacement. UI-6A worker supersession passed deterministically. There was no new native attempt in this verification-only pass. |
+
+```text
+price = 5
+subtotal = price * 2
+subtotal = subtotal + 1
+sum_items = 0
+for n in range(1, 4):
+    sum_items = sum_items + n
+answer = subtotal + sum_items
+```
+
+Evidence paths below are relative to the existing `calc-scripting` visualization directory.
+
+- `final-calc-verification/initial/framebuffer-001.png` is the baseline script and numerical results. `framebuffer-002.png` through `framebuffer-005.png` are input/watch before Apply, after Apply, after Undo, and after Redo. `framebuffer-006.png` and `framebuffer-007.png` through `framebuffer-010.png` record the wide divider baseline and unchanged observations after attempts.
+- `final-calc-verification/compact/framebuffer-001.png` is the stacked layout after restart, `framebuffer-002.png` through `framebuffer-004.png` show the unchanged divider after attempts, and `framebuffer-005.png` shows the compact Pad after close/reopen.
+- `final-calc-verification-process/result.json` and `final-calc-verification-process-compact/result.json` identify the process, executable, profile, and teardown. `final-calc-divider-run/result.json` holds the exact arguments, exit code and watchdog receipt. `final-calc-divider-run/stderr.log` records the three individual passes. The selected command was `cargo nextest run --binaries-metadata <evidence>/ui-closeout-fix-build/stdout.log -E 'test(splitters_drag_in_both_layouts_and_save_once_on_release) | test(splitter_retains_discarded_motion_and_move_coalesced_with_release) | test(split_preview_rejects_retired_passes_and_clamps_extremes)' --no-tests fail --no-fail-fast --retries 0 --test-threads 1`.
+- Prior UI-2 evidence is under `ui-closeout/retest` and `ui-closeout/assist`. UI-3 highlights are in `ui-closeout/assist/framebuffer-009.png`, `framebuffer-011.png`, and `framebuffer-014.png`. Detached lifecycle evidence is in `ui6-lifecycle/captures` and `ui6-lifecycle/root-captures`. The prior worker and acceptance test logs and exact command receipts remain in `ui-closeout-worker-run`, `ui-closeout-fix-run`, and `ui-closeout-lifecycle-run`.
+
+Recommend closing as **IMPLEMENTED / NATIVE ACCEPTANCE LIMITED** with the two remaining native observations retained. The manual divider check is to drag each orientation mouse-down to mouse-up, then confirm both distinct adjusted positions after Pad reopen and application restart. Native UI-6B requires visible Pending for the old revision when its replacement is submitted. The actual post-reporting tip is recorded in the external handoff receipt rather than inside its own commit.
 
 ## Requirement matrix
 
