@@ -5751,8 +5751,11 @@ impl LauncherApp {
         let pinned = self
             .pinned_panels
             .contains(&super::Panel::CalculationDependencyDialog);
+        let (identity, status) = self.calculation_pad_dialog.dependency_evaluation_state();
         let runtime = super::calculation_dependency_dialog::DependencyRuntime {
             snapshot: self.calculation_pad_dialog.dependency_context(),
+            identity,
+            status,
             pad_host: self.calculation_pad_dialog.dependency_host(),
             pinned,
         };
@@ -13652,6 +13655,8 @@ impl LauncherApp {
         } else {
             None
         };
+        let (current_dependency_identity, current_dependency_status) =
+            self.calculation_pad_dialog.dependency_evaluation_state();
         let mut dependency_show_root = false;
         if let Some(completion) = self
             .calculation_dependency_host
@@ -13667,13 +13672,13 @@ impl LauncherApp {
                     }
                     CalculationDependencyHostCommand::Apply(actions) => {
                         let pad_host = actions.pad_host;
-                        if let Some(nav) = self
+                        if let Some((nav, revision)) = self
                             .calculation_dependency_dialog
-                            .commit(actions, current_dependency_context.as_deref())
+                            .commit(actions, current_dependency_context.as_deref(), current_dependency_identity, &current_dependency_status)
                             && let Some(pad_host) = pad_host
                             && !self.confirm_modal.is_open()
                             && !self.action_sheet.is_open()
-                            && self.calculation_pad_dialog.navigate_dependency(nav, pad_host, ctx)
+                            && self.calculation_pad_dialog.navigate_dependency(nav, revision, pad_host, ctx)
                             && self.calculation_pad_dialog.host_layer_if_root().is_some()
                         {
                             effects.push(RootDialogEffect::ShowRoot);

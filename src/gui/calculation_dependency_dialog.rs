@@ -2,7 +2,7 @@
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
 use crate::calculation_pad::{
-    DependencySnapshot, DocumentId, DocumentIncarnation, LineId, LineOutcome,
+    DependencySnapshot, DocumentId, DocumentIncarnation, EvaluationStatus, LineId, LineOutcome,
 };
 use eframe::egui;
 use std::sync::Arc;
@@ -24,12 +24,14 @@ pub(crate) struct CalculationDependencyDialog {
 }
 pub(super) struct DependencyRuntime {
     pub snapshot: Option<Arc<DependencySnapshot>>,
+    pub identity: Option<(DocumentId, DocumentIncarnation)>,
+    pub status: EvaluationStatus,
     pub pad_host: Option<super::utility_host::HostIdentity>,
     pub pinned: bool,
 }
 #[derive(Default)]
 pub(super) struct DependencyActions {
-    pub basis: Option<(DocumentId, DocumentIncarnation)>,
+    pub basis: Option<(DocumentId, DocumentIncarnation, u64)>,
     pub pad_host: Option<super::utility_host::HostIdentity>,
     pub host_request: Option<UtilityPresentation>,
     pub close: bool,
@@ -72,13 +74,15 @@ impl CalculationDependencyDialog {
         &mut self,
         actions: DependencyActions,
         snapshot: Option<&DependencySnapshot>,
-    ) -> Option<DependencyNavigation> {
+        identity: Option<(DocumentId, DocumentIncarnation)>,
+        status: &EvaluationStatus,
+    ) -> Option<(DependencyNavigation, u64)> {
         if actions.host_request.is_some() || actions.close {
             return None;
         }
         if let Some(id) = actions.selected
             && snapshot.is_some_and(|s| {
-                actions.basis == Some((s.document_id, s.incarnation))
+                actions.basis == Some((s.document_id, s.incarnation, s.revision))
                     && s.rows.iter().any(|row| row.id == id)
             })
         {
@@ -89,17 +93,20 @@ impl CalculationDependencyDialog {
                 s.document_id == doc
                     && s.incarnation == inc
                     && s.rows.iter().any(|row| row.id == id)
-            })
+            }) && !(identity == Some((doc, inc))
+                && matches!(status, EvaluationStatus::Pending | EvaluationStatus::Failed(_)))
         }) {
             self.selected = None;
         }
+        let basis = actions.basis;
         actions.navigate.filter(|nav| {
             snapshot.is_some_and(|s| {
-                s.document_id == nav.document
+                basis == Some((s.document_id, s.incarnation, s.revision))
+                    && s.document_id == nav.document
                     && s.incarnation == nav.incarnation
                     && s.rows.iter().any(|row| row.id == nav.line)
             })
-        })
+        }).and_then(|navigation| basis.map(|(_, _, revision)| (navigation, revision)))
     }
     pub(super) fn render_host(
         &mut self,
@@ -116,7 +123,7 @@ impl CalculationDependencyDialog {
             basis: runtime
                 .snapshot
                 .as_ref()
-                .map(|s| (s.document_id, s.incarnation)),
+                .map(|s| (s.document_id, s.incarnation, s.revision)),
             pad_host: runtime.pad_host,
             ..Default::default()
         };
@@ -140,7 +147,11 @@ impl CalculationDependencyDialog {
             }
             ui.add_enabled_ui(active, |ui| {
                 let Some(snapshot) = runtime.snapshot.as_deref() else {
-                    ui.label("Calculation Pad is unavailable. Open a Pad document to browse dependencies.");
+                    match &runtime.status {
+                        EvaluationStatus::Pending if runtime.identity.is_some() => { ui.label("Calculation is pending. Dependencies will appear when results are ready."); }
+                        EvaluationStatus::Failed(message) if runtime.identity.is_some() => { ui.colored_label(ui.visuals().error_fg_color, message); }
+                        _ => { ui.label("Calculation Pad is unavailable. Open a Pad document to browse dependencies."); }
+                    }
                     return;
                 };
                 if let Some(diagnostic) = &snapshot.diagnostic {
@@ -318,11 +329,11 @@ mod tests {
         session.evaluation();
         let deleted = session.dependency_snapshot().unwrap();
         let actions = DependencyActions {
-            basis: Some((old.document, old.incarnation)),
+            basis: Some((old.document, old.incarnation, first.revision)),
             navigate: Some(old),
             ..Default::default()
         };
-        assert!(dialog.commit(actions, Some(&deleted)).is_none());
+        assert!(dialog.commit(actions, Some(&deleted), Some((deleted.document_id, deleted.incarnation)), &EvaluationStatus::Ready).is_none());
         assert!(dialog.selected.is_none());
         session.request_open(old.document).unwrap();
         session
@@ -332,13 +343,42 @@ mod tests {
         let reopened = session.dependency_snapshot().unwrap();
         assert_ne!(reopened.incarnation, old.incarnation);
         let actions = DependencyActions {
-            basis: Some((old.document, old.incarnation)),
+            basis: Some((old.document, old.incarnation, first.revision)),
             selected: Some(old.line),
             navigate: Some(old),
             ..Default::default()
         };
-        assert!(dialog.commit(actions, Some(&reopened)).is_none());
+        assert!(dialog.commit(actions, Some(&reopened), Some((reopened.document_id, reopened.incarnation)), &EvaluationStatus::Ready).is_none());
         assert!(dialog.selected.is_none());
+    }
+
+    #[test]
+    fn dependency_actions_require_revision_and_pending_preserves_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(dir.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("a = 1\nb = a + 1").unwrap();
+        session.evaluation();
+        let before = session.dependency_snapshot().unwrap();
+        let selected = before.rows[0].id;
+        let target = before.rows[1].id;
+        let mut dialog = CalculationDependencyDialog::default();
+        dialog.open(Some((before.document_id, before.incarnation, selected)));
+        assert!(dialog.commit(DependencyActions::default(), None,
+            Some((before.document_id, before.incarnation)), &EvaluationStatus::Pending).is_none());
+        assert_eq!(dialog.test_selected(), Some(selected));
+        session.replace_source("a = 2\nb = a + 1").unwrap();
+        session.evaluation();
+        let after = session.dependency_snapshot().unwrap();
+        assert_eq!(after.rows[1].id, target);
+        let actions = DependencyActions {
+            basis: Some((before.document_id, before.incarnation, before.revision)),
+            selected: Some(target),
+            navigate: Some(DependencyNavigation { document: before.document_id, incarnation: before.incarnation, line: target }),
+            ..Default::default()
+        };
+        assert!(dialog.commit(actions, Some(&after), Some((after.document_id, after.incarnation)), &EvaluationStatus::Ready).is_none());
+        assert_eq!(dialog.test_selected(), Some(selected));
     }
 
     #[test]
@@ -352,6 +392,8 @@ mod tests {
         session.evaluation();
         let runtime = DependencyRuntime {
             snapshot: session.dependency_snapshot(),
+            identity: session.current_id().zip(session.document_incarnation()),
+            status: session.evaluation_status(),
             pad_host: None,
             pinned: false,
         };

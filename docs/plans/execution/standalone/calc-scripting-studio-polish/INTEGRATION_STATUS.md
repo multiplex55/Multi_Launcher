@@ -13,8 +13,9 @@
 | M1-B | Complete and pushed at `68bc7de9a5921b904b66c1fdb3d6dd6a1c64d52a`. 73 focused tests passed plus 1 exact codec rerun. UI-7 pending. |
 | M2-A | Complete and pushed at `6406529aacf75c16de0cb900d5121f711ee3a0a2`, 53 selected tests passed plus the corrected alias case. |
 | M2-B | Complete and pushed at `79016f86dd2720e7ecce38d3cd0f438e6c998a07`, 60 focused tests passed plus the corrected typed composition fixture. |
-| M2-C | Complete, 72 focused tests passed. |
-| M2-D through M6-A | Pending |
+| M2-C | Complete and pushed at `2d5c6c563159004f5a4dba97d7610253b75f604e`, 72 focused tests passed. |
+| M2-D | Complete at the automated level. Final affected navigation cases passed 3/3. UI-6 pending. |
+| M3-A through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -60,6 +61,12 @@
 - Limits are 8 nesting levels, 10,000 cumulative loop iterations and 50,000 work units, in addition to the existing source limits and 1,024 generated element cap. The pure evaluator observes cancellation. Named results carry their own typed outcomes and source provenance. Dependency Explorer labels loop rows and their source-line projection.
 - Nextest ran focused Calc document, loop, comparison, dependency, session, examples and Dependency Explorer tests. Initial 66/66 passed. Review remediation expanded coverage of malformed and empty blocks, contextual names, attempted rollback, nested physical reads, global limits and final failed bindings. A stale example count and an admission bug were fixed after the 69/71 batch. The corrected batch passed 72/72 within the 100-second watchdog.
 
+## M2-D evidence
+
+- The Pad session owns one evaluator with one replaceable pending request. Source/document identity and revision fence publication, with cancellation of superseded requests and completion-driven repaint. Small legacy documents stay synchronously cached. The same evaluator and checked row projection serve both paths.
+- Current Results, clipboard actions, Inspector and Dependency Explorer use accepted snapshots. Pending/failed states are explicit, stale comparison copy is disabled, and dependency actions retain their exact source revision and original full-line selection behavior.
+- The initial focused batch passed 51/51. The review-corrected batch passed 52/53 and caught a full-line selection regression. The final affected integration and two retained navigation cases passed 3/3 after separating selection mode from revision validation. Tests cover coalescing, cancellation, worker panic recovery, Save As/reopen identity, stale comparison copy and pending dependency behavior. UI-6 remains scheduled for native verification.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -67,7 +74,7 @@
 | MMD-03 | M1-A | Yes | Passed | Pending |
 | MMD-04 | M1-A | Yes | Passed | Pending |
 | MMD-05 | M1-B | Yes | Passed | Pending |
-| CP-01 | M2-A/C/D | Sequential domain and comparison | Passed for M2-A | Pending |
+| CP-01 | M2-A/C/D | Yes | Passed | Pending |
 | CP-02 | M4-A/C | Pending | Pending | Pending |
 | CP-03 | M3-B, M4-C | Pending | Pending | Pending |
 | CP-04 | M3-B | Pending | Pending | Pending |
@@ -81,6 +88,6 @@
 | CP-12 | M3-A/C | Pending | Pending | Pending |
 | CP-13 | M2-B | Yes | Passed | Pending |
 | CP-14 | M2-B | Yes | Passed | Pending |
-| CP-15 | M2-C/D | Domain execution | Passed for M2-C | Pending |
+| CP-15 | M2-C/D | Yes | Passed | Pending |
 | CP-16 | M2-B/C | Yes | Passed | Pending |
 | QR-01 | M5-A | Pending | Pending | Pending |

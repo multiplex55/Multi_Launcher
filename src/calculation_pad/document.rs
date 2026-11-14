@@ -83,9 +83,14 @@ impl CalculationDocument {
         self.evaluate_inner(Some(cancellation))
     }
 
+    #[cfg(test)]
     pub(crate) fn requires_repeated_execution(&self) -> bool {
-        loops::contains_loop(&self.source)
-            || self.source.lines().any(|line| {
+        Self::source_requires_repeated_execution(&self.source)
+    }
+
+    pub(crate) fn source_requires_repeated_execution(source: &str) -> bool {
+        loops::contains_loop(source)
+            || source.lines().any(|line| {
                 let line = line.trim();
                 if line.is_empty() || is_full_line_comment(line) {
                     return false;

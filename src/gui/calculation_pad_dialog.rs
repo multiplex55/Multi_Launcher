@@ -125,7 +125,7 @@ pub(crate) struct CalculationPadDialog {
     inspector_selection_generation: u64,
     inspector_caret_generation: u64,
     inspector_context: std::sync::Arc<InspectorPadContext>,
-    inspector_context_key: Option<(DocumentIncarnation, DocumentId, u64, Option<LineId>, u64)>,
+    inspector_context_key: Option<(DocumentIncarnation, DocumentId, u64, Option<LineId>, u64, bool)>,
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
     display_preferences: crate::settings::CalculationPadDisplayPreferences,
@@ -276,7 +276,8 @@ struct DependencyEditorUpdate {
 struct SourceNavigation {
     host: PadHostIdentity,
     navigation: super::calculation_dependency_dialog::DependencyNavigation,
-    result_revision: Option<u64>,
+    revision: u64,
+    result_navigation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1374,12 +1375,17 @@ impl CalculationPadDialog {
         source_focus_allowed: bool,
         effects: &mut HostEffects,
     ) {
+        let repaint = ctx.clone();
+        self.session.enable_background_evaluation(move || {
+            repaint.request_repaint_of(egui::ViewportId::ROOT);
+            repaint.request_repaint_of(pad_viewport_id());
+        });
         if self.dependency_navigation.is_some_and(|pending| {
             let nav = pending.navigation;
             pending.host != self.host_identity()
                 || self.session.current_id() != Some(nav.document)
                 || self.session.document_incarnation() != Some(nav.incarnation)
-                || pending.result_revision.is_some_and(|revision| self.session.revision() != Some(revision))
+                || self.session.revision() != Some(pending.revision)
                 || !self.open
                 || !self
                     .session
@@ -1405,13 +1411,13 @@ impl CalculationPadDialog {
                             self.take_editor_history_shortcut(ui, editor_id);
                     }
                     let source = self.session.source().unwrap_or_default().to_owned();
-                    let evaluation = self.session.evaluation().cloned();
+                    let evaluation = self.session.shared_evaluation();
                     let mut staged_save_as_name = self.save_as_name.clone();
                     self.contents_ui(
                         ui,
                         editor_id,
                         source,
-                        evaluation.as_ref(),
+                        evaluation.as_deref(),
                         source_focus_allowed,
                         &mut staged_save_as_name,
                         &mut effects.source_focus_requested,
@@ -1722,6 +1728,7 @@ impl CalculationPadDialog {
             host.open_dependencies = false;
             host.dependency_applied = None;
             host.result_navigation = None;
+            host.result_copy = None;
         }
 
         let needs_repaint = host.edited_source.is_some()
@@ -1905,6 +1912,21 @@ impl CalculationPadDialog {
             }
         }
         self.sync_inspector_context();
+        if host.open_inspector || host.open_dependencies {
+            match self.session.evaluation_status() {
+                crate::calculation_pad::EvaluationStatus::Pending => {
+                    self.notice = Some("Calculation is pending. Try again when the results are ready.".into());
+                    host.open_inspector = false;
+                    host.open_dependencies = false;
+                }
+                crate::calculation_pad::EvaluationStatus::Failed(message) => {
+                    self.error = Some(message);
+                    host.open_inspector = false;
+                    host.open_dependencies = false;
+                }
+                _ => {}
+            }
+        }
         if host.open_inspector && !host.close_requested && host.host_request.is_none()
             && host.document_basis.map(|(incarnation, document, _)| (incarnation, document))
                 == self.session.document_incarnation().zip(self.session.current_id())
@@ -1953,7 +1975,8 @@ impl CalculationPadDialog {
             self.dependency_navigation = Some(SourceNavigation {
                 host: host.identity,
                 navigation: nav,
-                result_revision: Some(revision),
+                revision,
+                result_navigation: true,
             });
             ctx.request_repaint_of(host.viewport_id);
         }
@@ -1961,7 +1984,8 @@ impl CalculationPadDialog {
             && self.dependency_navigation == Some(SourceNavigation {
                 host: host.identity,
                 navigation: update.navigation,
-                result_revision: update.result_navigation.then_some(update.revision),
+                revision: update.revision,
+                result_navigation: update.result_navigation,
             })
             && self.session.revision() == Some(update.revision)
             && self.host_identity() == host.identity
@@ -2133,6 +2157,13 @@ impl CalculationPadDialog {
             let copied = self.resolve_result_copy(copy);
             if let Some(effect) = copied {
                 delivered.push(effect);
+            } else {
+                match self.session.evaluation_status() {
+                    crate::calculation_pad::EvaluationStatus::Pending =>
+                        self.notice = Some("Calculation is pending. Try Copy when the results are ready.".into()),
+                    crate::calculation_pad::EvaluationStatus::Failed(message) => self.error = Some(message),
+                    _ => {}
+                }
             }
         }
 
@@ -2193,6 +2224,8 @@ impl CalculationPadDialog {
             self.inspector_caret = None;
             self.inspector_caret_generation = self.inspector_caret_generation.wrapping_add(1);
         }
+        self.session.evaluation();
+        let evaluation_ready = self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Ready;
         let key =
             identity
                 .zip(self.session.revision())
@@ -2205,6 +2238,7 @@ impl CalculationPadDialog {
                             .as_ref()
                             .map(|selection| selection.line),
                         self.inspector_selection_generation,
+                        evaluation_ready,
                     )
                 });
         let mut context = None;
@@ -2213,7 +2247,6 @@ impl CalculationPadDialog {
                 .inspector_selection
                 .as_ref()
                 .map(|selection| selection.line);
-            self.session.evaluation();
             let candidate = selected.and_then(|line| self.session.inspector_source(line));
             let comparison = self
                 .inspector_context
@@ -2266,6 +2299,17 @@ impl CalculationPadDialog {
         self.session.dependency_snapshot()
     }
 
+    pub(super) fn dependency_evaluation_state(
+        &self,
+    ) -> (Option<(DocumentId, DocumentIncarnation)>, crate::calculation_pad::EvaluationStatus) {
+        if !self.open || self.host_close_requested || self.open_chooser || self.save_as_open
+            || self.session.pending_transition().is_some()
+        {
+            return (None, crate::calculation_pad::EvaluationStatus::Inactive);
+        }
+        (self.session.current_id().zip(self.session.document_incarnation()), self.session.evaluation_status())
+    }
+
     pub(super) fn dependency_host(&self) -> Option<super::utility_host::HostIdentity> {
         (self.open
             && !self.host_close_requested
@@ -2295,16 +2339,18 @@ impl CalculationPadDialog {
     pub(super) fn navigate_dependency(
         &mut self,
         nav: super::calculation_dependency_dialog::DependencyNavigation,
+        revision: u64,
         source_host: super::utility_host::HostIdentity,
         ctx: &egui::Context,
     ) -> bool {
-        if !self.can_navigate_source(nav, source_host) {
+        if self.session.revision() != Some(revision) || !self.can_navigate_source(nav, source_host) {
             return false;
         }
         self.dependency_navigation = Some(SourceNavigation {
             host: self.host_identity(),
             navigation: nav,
-            result_revision: None,
+            revision,
+            result_navigation: false,
         });
         let viewport = if source_host.host == PadHost::Popout {
             pad_viewport_id()
@@ -2837,7 +2883,7 @@ impl CalculationPadDialog {
             let nav = pending.navigation;
             (authorized_pass
                 && pending.host == self.host_identity()
-                && pending.result_revision.is_none_or(|revision| self.session.revision() == Some(revision))
+                && self.session.revision() == Some(pending.revision)
                 && self.open
                 && !self.open_chooser
                 && !self.save_as_open
@@ -2845,7 +2891,7 @@ impl CalculationPadDialog {
             .then(|| {
                 self.session
                     .resolve_dependency_line(nav.document, nav.incarnation, nav.line)
-                    .map(|location| (nav, location, pending.result_revision.is_some()))
+                    .map(|location| (nav, location, pending.result_navigation))
             })
             .flatten()
         });
@@ -3101,7 +3147,11 @@ impl CalculationPadDialog {
             .max_height(max_height)
             .show(ui, |ui| {
                 let Some(evaluation) = evaluation else {
-                    ui.label("Open the pad to start a calculation.");
+                    match self.session.evaluation_status() {
+                        crate::calculation_pad::EvaluationStatus::Pending => { ui.label("Calculating…"); }
+                        crate::calculation_pad::EvaluationStatus::Failed(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
+                        _ => { ui.label("Open the pad to start a calculation."); }
+                    }
                     return;
                 };
                 if let Some(diagnostic) = evaluation.diagnostic.as_ref() {
@@ -3854,7 +3904,7 @@ mod tests {
             dialog.session.can_redo(),
             dialog.session.evaluation_count(),
         );
-        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(dialog.navigate_dependency(nav, snapshot.revision, host, &ctx));
         assert!(
             !dialog.focus_source,
             "queued navigation does not force focus before retention"
@@ -3908,16 +3958,16 @@ mod tests {
             ),
             before
         );
-        assert!(dialog.navigate_dependency(nav, host, &ctx));
+        assert!(dialog.navigate_dependency(nav, snapshot.revision, host, &ctx));
         assert!(!dialog.focus_source);
         dialog.host_state.transition(super::PadHost::Popout);
         assert!(
             !dialog.focus_source,
             "a queued request cannot focus a retired host"
         );
-        assert!(!dialog.navigate_dependency(nav, host, &ctx));
+        assert!(!dialog.navigate_dependency(nav, snapshot.revision, host, &ctx));
         dialog.host_state.transition(super::PadHost::Docked);
-        assert!(!dialog.navigate_dependency(nav, host, &ctx));
+        assert!(!dialog.navigate_dependency(nav, snapshot.revision, host, &ctx));
     }
 
     #[test]
@@ -4578,7 +4628,7 @@ mod tests {
         };
         let revision = dialog.session.revision().unwrap();
         let identity = dialog.host_identity();
-        dialog.dependency_navigation = Some(super::SourceNavigation { host: identity, navigation: nav, result_revision: Some(revision) });
+        dialog.dependency_navigation = Some(super::SourceNavigation { host: identity, navigation: nav, revision, result_navigation: true });
         let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host.pass_accepted = true;
         host.host_request = Some(super::PadHost::Popout);

@@ -1,7 +1,7 @@
 //! Editable Calculation Pad session with bounded history and dirty handling.
 
 use super::document::{
-    CalculationDocument, CalculationValue, DocumentDiagnostic, EditError, FinalBinding, LineOutcome,
+    CalculationDocument, CalculationEvaluation, CalculationValue, DocumentDiagnostic, EditError, FinalBinding, LineOutcome,
     MAX_DOCUMENT_BYTES, MAX_SOURCE_LINES,
 };
 use super::inspector::{
@@ -12,6 +12,7 @@ use super::persistence::{
     StoredDocument,
 };
 use super::{IntegerMode, IntegerWidth, TypedInteger};
+use super::worker::{EvaluationStamp, EvaluationWorker, Request as EvaluationRequest};
 use crate::platform::app_data::AppDataRoot;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -38,6 +39,41 @@ pub struct SessionEvaluation {
     /// Physical rows holding the final bindings in this evaluation.
     pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
     pub diagnostic: Option<DocumentDiagnostic>,
+}
+
+pub(super) fn project_evaluation(
+    evaluation: CalculationEvaluation<'_>,
+    line_ids: &[LineId],
+    revision: u64,
+) -> Result<SessionEvaluation, String> {
+    if evaluation.diagnostic.is_none() && evaluation.lines.len() != line_ids.len() {
+        return Err("Calculation results do not match the current source lines.".into());
+    }
+    let lines = evaluation
+        .lines
+        .into_iter()
+        .map(|line| {
+            let id = line_ids
+                .get(line.line_index)
+                .copied()
+                .ok_or_else(|| "Calculation result refers to an unknown source line.".to_owned())?;
+            Ok(SessionLineResult {
+                id,
+                line_index: line.line_index,
+                source_range: line.source_range,
+                assignment_name: line.assignment_name,
+                dependency_indices: line.dependency_indices,
+                loop_iteration: line.loop_iteration,
+                outcome: line.outcome,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SessionEvaluation {
+        revision,
+        lines,
+        final_bindings: Arc::new(evaluation.final_bindings),
+        diagnostic: evaluation.diagnostic,
+    })
 }
 
 #[derive(Debug)]
@@ -234,7 +270,7 @@ struct ActiveDocument {
     next_line_id: u64,
     revision: u64,
     baseline: DocumentBaseline,
-    cached_evaluation: Option<SessionEvaluation>,
+    cached_evaluation: Option<Arc<SessionEvaluation>>,
     dependency_snapshot: Option<Arc<super::dependencies::DependencySnapshot>>,
     #[cfg(test)]
     dependency_build_count: usize,
@@ -359,6 +395,18 @@ pub struct CalculationPadSession {
     current: Option<ActiveDocument>,
     pending: Option<PendingAction>,
     history: EditHistory,
+    evaluation_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    evaluation_worker: Option<EvaluationWorker>,
+    scheduled_evaluation: Option<EvaluationStamp>,
+    evaluation_failure: Option<(EvaluationStamp, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvaluationStatus {
+    Ready,
+    Pending,
+    Failed(String),
+    Inactive,
 }
 
 impl CalculationPadSession {
@@ -373,6 +421,54 @@ impl CalculationPadSession {
             current: Some(ActiveDocument::new_blank()),
             pending: None,
             history: EditHistory::default(),
+            evaluation_wake: None,
+            evaluation_worker: None,
+            scheduled_evaluation: None,
+            evaluation_failure: None,
+        }
+    }
+
+    /// Enable nonblocking script evaluation for the owning GUI session.
+    pub(crate) fn enable_background_evaluation(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        if self.evaluation_wake.is_none() {
+            self.evaluation_wake = Some(Arc::new(wake));
+        }
+    }
+
+    fn evaluation_stamp(&self) -> Option<EvaluationStamp> {
+        self.current.as_ref().map(|current| EvaluationStamp {
+            document: current.id,
+            incarnation: current.incarnation,
+            revision: current.revision,
+        })
+    }
+
+    pub(crate) fn retire_background_evaluation(&mut self) {
+        if let Some(worker) = &self.evaluation_worker {
+            worker.retire();
+        }
+        self.scheduled_evaluation = None;
+        self.evaluation_failure = None;
+    }
+
+    pub fn evaluation_status(&self) -> EvaluationStatus {
+        let Some(stamp) = self.evaluation_stamp() else {
+            return EvaluationStatus::Inactive;
+        };
+        if let Some((failed, message)) = &self.evaluation_failure
+            && *failed == stamp
+        {
+            return EvaluationStatus::Failed(message.clone());
+        }
+        if self
+            .current
+            .as_ref()
+            .and_then(|current| current.cached_evaluation.as_ref())
+            .is_some_and(|evaluation| evaluation.revision == stamp.revision)
+        {
+            EvaluationStatus::Ready
+        } else {
+            EvaluationStatus::Pending
         }
     }
 
@@ -633,6 +729,7 @@ impl CalculationPadSession {
             .revision
             .checked_add(1)
             .ok_or(SessionError::RevisionExhausted)?;
+        self.retire_background_evaluation();
         let current = self
             .current
             .as_mut()
@@ -668,6 +765,7 @@ impl CalculationPadSession {
             .checked_add(1)
             .ok_or(SessionError::RevisionExhausted)?;
 
+        self.retire_background_evaluation();
         self.history.record(before, after);
         let current = self
             .current
@@ -720,6 +818,7 @@ impl CalculationPadSession {
         let Some(entry) = self.history.undo.pop_back() else {
             return false;
         };
+        self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.before);
             current.revision = next_revision;
@@ -741,6 +840,7 @@ impl CalculationPadSession {
         let Some(entry) = self.history.redo.pop_back() else {
             return false;
         };
+        self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.after);
             current.revision = next_revision;
@@ -751,6 +851,69 @@ impl CalculationPadSession {
 
     /// Returns owned line outcomes, recomputing only after a source revision changes.
     pub fn evaluation(&mut self) -> Option<&SessionEvaluation> {
+        let stamp = self.evaluation_stamp()?;
+        if let Some(completion) = self
+            .evaluation_worker
+            .as_ref()
+            .and_then(EvaluationWorker::take)
+            && completion.stamp == stamp
+        {
+            self.scheduled_evaluation = None;
+            match completion.result {
+                Ok(result) => {
+                    if let Some(current) = self.current.as_mut() {
+                        current.cached_evaluation = Some(Arc::new(result));
+                        current.dependency_snapshot = None;
+                        #[cfg(test)]
+                        {
+                            current.evaluation_count += 1;
+                        }
+                    }
+                }
+                Err(message) => self.evaluation_failure = Some((stamp, message)),
+            }
+        }
+        let needs_evaluation = self
+            .current
+            .as_ref()?
+            .cached_evaluation
+            .as_ref()
+            .is_none_or(|evaluation| evaluation.revision != stamp.revision);
+        if needs_evaluation && self.evaluation_wake.is_some() {
+            if self.scheduled_evaluation == Some(stamp)
+                || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
+            {
+                return None;
+            }
+            let current = self.current.as_ref()?;
+            if CalculationDocument::source_requires_repeated_execution(&current.source) {
+                if self.scheduled_evaluation != Some(stamp)
+                    && self
+                        .evaluation_failure
+                        .as_ref()
+                        .is_none_or(|(failed, _)| *failed != stamp)
+                {
+                    if self.evaluation_worker.is_none() {
+                        let wake = Arc::clone(self.evaluation_wake.as_ref()?);
+                        match EvaluationWorker::start(wake) {
+                            Ok(worker) => self.evaluation_worker = Some(worker),
+                            Err(error) => {
+                                self.evaluation_failure = Some((stamp, error));
+                                return None;
+                            }
+                        }
+                    }
+                    let current = self.current.as_ref()?;
+                    self.evaluation_worker.as_ref()?.submit(EvaluationRequest {
+                        stamp,
+                        source: current.source.clone(),
+                        line_ids: current.line_ids.clone(),
+                    });
+                    self.scheduled_evaluation = Some(stamp);
+                }
+                return None;
+            }
+        }
         let current = self.current.as_mut()?;
         if current
             .cached_evaluation
@@ -759,44 +922,31 @@ impl CalculationPadSession {
         {
             let document = CalculationDocument::new(current.source.clone());
             let evaluation = document.evaluate();
-            let lines = evaluation
-                .lines
-                .into_iter()
-                .filter_map(|line| {
-                    current
-                        .line_ids
-                        .get(line.line_index)
-                        .copied()
-                        .map(|id| SessionLineResult {
-                            id,
-                            line_index: line.line_index,
-                            source_range: line.source_range,
-                            assignment_name: line.assignment_name,
-                            dependency_indices: line.dependency_indices,
-                            loop_iteration: line.loop_iteration,
-                            outcome: line.outcome,
-                        })
-                })
-                .collect();
-            current.cached_evaluation = Some(SessionEvaluation {
-                revision: current.revision,
-                lines,
-                final_bindings: Arc::new(evaluation.final_bindings),
-                diagnostic: evaluation.diagnostic,
-            });
+            match project_evaluation(evaluation, &current.line_ids, current.revision) {
+                Ok(result) => current.cached_evaluation = Some(Arc::new(result)),
+                Err(message) => {
+                    self.evaluation_failure = Some((stamp, message));
+                    return None;
+                }
+            }
             #[cfg(test)]
             {
                 current.evaluation_count += 1;
             }
         }
-        current.cached_evaluation.as_ref()
+        current.cached_evaluation.as_deref()
     }
 
     /// Returns the source and its evaluation from the same current revision.
     pub(crate) fn evaluation_with_source(&mut self) -> Option<(&str, &SessionEvaluation)> {
         self.evaluation()?;
         let current = self.current.as_ref()?;
-        Some((&current.source, current.cached_evaluation.as_ref()?))
+        Some((&current.source, current.cached_evaluation.as_deref()?))
+    }
+
+    pub(crate) fn shared_evaluation(&mut self) -> Option<Arc<SessionEvaluation>> {
+        self.evaluation()?;
+        self.current.as_ref()?.cached_evaluation.clone()
     }
 
     pub fn cached_evaluation_revision(&self) -> Option<u64> {
@@ -857,6 +1007,7 @@ impl CalculationPadSession {
             current.line_ids.clone(),
             current.next_line_id,
         )?;
+        self.retire_background_evaluation();
         let current = self
             .current
             .as_mut()
@@ -891,6 +1042,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Open(id));
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_background_evaluation();
         self.current = Some(ActiveDocument::from_loaded(loaded));
         self.history.clear();
         Ok(TransitionOutcome::Applied)
@@ -905,6 +1057,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Close);
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
         Ok(TransitionOutcome::Applied)
@@ -919,6 +1072,7 @@ impl CalculationPadSession {
         if self.is_saved() {
             return Err(SessionError::RecoveryScratchRequired);
         }
+        self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
         Ok(())
@@ -957,6 +1111,7 @@ impl CalculationPadSession {
             PendingAction::Open(id) => Some(ActiveDocument::from_loaded(self.store.open(id)?)),
             PendingAction::Close => None,
         };
+        self.retire_background_evaluation();
         self.current = current;
         self.pending = None;
         self.history.clear();
@@ -964,6 +1119,7 @@ impl CalculationPadSession {
     }
 
     fn install_new(&mut self) {
+        self.retire_background_evaluation();
         self.current = Some(ActiveDocument::new_blank());
         self.history.clear();
     }
@@ -1361,6 +1517,48 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().join("app-data"));
         let session = CalculationPadSession::new(&root);
         (directory, root, session)
+    }
+
+    #[test]
+    fn background_results_follow_save_as_and_document_incarnation() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        let (wake, wakes) = mpsc::channel();
+        session.enable_background_evaluation(move || {
+            let _ = wake.send(());
+        });
+        session
+            .replace_source("total = 0\nfor x in range(4):\n    total = total + x\ntotal")
+            .unwrap();
+        let initial = session.current_id().unwrap();
+        assert!(session.evaluation().is_none());
+        assert_eq!(
+            session.evaluation_status(),
+            super::EvaluationStatus::Pending
+        );
+        wakes.recv_timeout(Duration::from_secs(10)).unwrap();
+        session.save_as("worker identity").unwrap();
+        let saved = session.current_id().unwrap();
+        assert_ne!(initial, saved);
+        assert!(session.evaluation().is_none());
+        wakes.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(scalar(&mut session, 3), 6.0);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        assert_eq!(session.comparison_context().unwrap().document_id, saved);
+        let incarnation = session.document_incarnation().unwrap();
+        assert_eq!(
+            session.request_close().unwrap(),
+            super::TransitionOutcome::Applied
+        );
+        assert_eq!(
+            session.request_open(saved).unwrap(),
+            super::TransitionOutcome::Applied
+        );
+        assert_ne!(session.document_incarnation(), Some(incarnation));
+        assert!(session.evaluation().is_none());
+        wakes.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(scalar(&mut session, 3), 6.0);
     }
 
     fn scalar(session: &mut CalculationPadSession, line_index: usize) -> f64 {

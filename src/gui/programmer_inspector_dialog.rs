@@ -1308,10 +1308,11 @@ impl ProgrammerInspectorDialog {
                                 && context.document_id == result.context.document_id
                                 && context.revision == result.context.revision
                         });
-                        if !current_context
-                            || result.request != current_request
-                            || draft.comparison_selection_generation
-                                != Some(runtime.context.selection_generation)
+                        let comparison_current = current_context
+                            && result.request == current_request
+                            && draft.comparison_selection_generation
+                                == Some(runtime.context.selection_generation);
+                        if !comparison_current
                         {
                             ui.colored_label(
                                 ui.visuals().warn_fg_color,
@@ -1330,7 +1331,7 @@ impl ProgrammerInspectorDialog {
                                 {
                                     ui.weak("approx.");
                                 }
-                                let response = ui.small_button("Copy result");
+                                let response = ui.add_enabled(comparison_current, egui::Button::new("Copy result").small());
                                 #[cfg(test)]
                                 test_controls.push((
                                     format!("comparison-copy-{name}"),
@@ -1550,6 +1551,41 @@ mod tests {
     use super::*;
     use crate::calculation_pad::{CalculationPadSession, TypedInteger};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn stale_comparison_results_cannot_be_copied_while_current_results_are_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = CalculationPadSession::new(&AppDataRoot::from_path(temp.path().join("pad")));
+        session.replace_source("1\n2").unwrap();
+        session.evaluation();
+        let comparison = session.comparison_context().unwrap();
+        let mut dialog = ProgrammerInspectorDialog::default();
+        dialog.open();
+        dialog.draft.comparison_left = ComparisonSlot::Expression("1".into());
+        dialog.draft.comparison_right = ComparisonSlot::Expression("2".into());
+        dialog.draft.comparison_selection_generation = Some(0);
+        dialog.draft.comparison_result = Some(Arc::new(comparison.compare(dialog.draft.comparison_request())));
+        let ctx = egui::Context::default();
+        for current in [Some(Arc::new(comparison)), None] {
+            let is_current = current.is_some();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 1200.0))),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let runtime = InspectorRuntime {
+                    context: Arc::new(InspectorPadContext { comparison: current.clone(), ..Default::default() }),
+                    root: ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT),
+                    host: HostIdentity { host: UtilityPresentation::Docked, generation: 0 },
+                    pinned: false,
+                };
+                dialog.render_host(&ctx, &runtime, true, true, Some(ui), UtilityPresentation::Docked);
+            });
+            assert_eq!(dialog.test_control("comparison-copy-Left").unwrap().2, is_current);
+            assert_eq!(dialog.test_control("comparison-copy-Right").unwrap().2, is_current);
+            output.drop_without_applying_deltas();
+        }
+    }
 
     #[test]
     fn inspector_label_file_import_export_is_labels_only_and_confirmed() {

@@ -16,6 +16,7 @@ mod programmer;
 mod quantity;
 mod session;
 mod vector;
+mod worker;
 
 pub(crate) use bit_labels::{read_bit_labels, write_bit_labels};
 pub use comparison::{
@@ -47,6 +48,6 @@ pub use persistence::{
     PadRecoveryWriter, PadStoreError,
 };
 pub use session::{
-    CalculationPadSession, InspectorInsertError, PendingTransition, SessionError,
+    CalculationPadSession, EvaluationStatus, InspectorInsertError, PendingTransition, SessionError,
     SessionEvaluation, SessionLineResult, TransitionDecision, TransitionOutcome,
 };
