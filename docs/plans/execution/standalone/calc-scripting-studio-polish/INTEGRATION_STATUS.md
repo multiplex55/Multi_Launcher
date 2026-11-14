@@ -14,8 +14,9 @@
 | M2-A | Complete and pushed at `6406529aacf75c16de0cb900d5121f711ee3a0a2`, 53 selected tests passed plus the corrected alias case. |
 | M2-B | Complete and pushed at `79016f86dd2720e7ecce38d3cd0f438e6c998a07`, 60 focused tests passed plus the corrected typed composition fixture. |
 | M2-C | Complete and pushed at `2d5c6c563159004f5a4dba97d7610253b75f604e`, 72 focused tests passed. |
-| M2-D | Complete at the automated level. Final affected navigation cases passed 3/3. UI-6 pending. |
-| M3-A through M6-A | Pending |
+| M2-D | Complete and pushed at `6066a7e88b701b4262fcbc549dfd226f1bcab528`. Final affected navigation cases passed 3/3. UI-6 pending. |
+| M3-A | Complete at the automated level. 56 unaffected cases passed and 6 final targeted cases passed. |
+| M3-B through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -67,6 +68,12 @@
 - Current Results, clipboard actions, Inspector and Dependency Explorer use accepted snapshots. Pending/failed states are explicit, stale comparison copy is disabled, and dependency actions retain their exact source revision and original full-line selection behavior.
 - The initial focused batch passed 51/51. The review-corrected batch passed 52/53 and caught a full-line selection regression. The final affected integration and two retained navigation cases passed 3/3 after separating selection mode from revision validation. Tests cover coalescing, cancellation, worker panic recovery, Save As/reopen identity, stale comparison copy and pending dependency behavior. UI-6 remains scheduled for native verification.
 
+## M3-A evidence
+
+- Pad-local Ctrl+F/H/G opens literal search, replacement or physical-line navigation. The editor maps UTF-8 source offsets to caret positions while retaining CRLF and final newlines. Replace All is a single session-owned source transaction. Source/result selection and diagnostics use retained, revision-checked navigation with one-shot scrolling.
+- Review corrections let source navigation work while evaluation is pending, fence queued actions during host retirement, preserve native widget focus and make Escape dismiss the focused tools. The reference catalogue keeps its existing first group and appends the new examples.
+- The first run passed 51/55 and exposed four reference-catalogue order regressions. Restoring its order passed those cases. The next run passed 56/57 and caught immediate Escape after Ctrl+H. The final six targeted cases passed, including the keyboard sequence, live-source navigation, retirement, and detached launcher query.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -79,13 +86,13 @@
 | CP-03 | M3-B, M4-C | Pending | Pending | Pending |
 | CP-04 | M3-B | Pending | Pending | Pending |
 | CP-05 | M4-A/C | Pending | Pending | Pending |
-| CP-06 | M3-A/C | Pending | Pending | Pending |
-| CP-07 | M3-A/C | Pending | Pending | Pending |
+| CP-06 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
+| CP-07 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
 | CP-08 | M3-B | Pending | Pending | Pending |
 | CP-09 | M4-B/C | Pending | Pending | Pending |
 | CP-10 | M3-C | Pending | Pending | Pending |
 | CP-11 | M3-C | Pending | Pending | Pending |
-| CP-12 | M3-A/C | Pending | Pending | Pending |
+| CP-12 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
 | CP-13 | M2-B | Yes | Passed | Pending |
 | CP-14 | M2-B | Yes | Passed | Pending |
 | CP-15 | M2-C/D | Yes | Passed | Pending |

@@ -11012,6 +11012,7 @@ impl LauncherApp {
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self.calculation_pad_dialog.editor_tools_own_root_escape(&ctx)
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
