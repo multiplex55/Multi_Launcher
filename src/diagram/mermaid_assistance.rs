@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use super::mermaid::{
-    MAX_MERMAID_SOURCE_BYTES, assistance_edge_target_span, assistance_symbols, preflight_source,
+    MAX_MERMAID_SOURCE_BYTES, SourcePieceKind, assistance_edge_target_span, assistance_symbols,
+    parse_header, preflight_source, scan_source,
 };
 use super::model::{MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES};
 
@@ -52,29 +53,38 @@ pub fn mermaid_assistance_at(source: &str, cursor_byte: usize) -> Option<Mermaid
         .map_or(source.len(), |offset| cursor_byte + offset);
     let raw_line = &source[line_start..line_end];
     let content_end = raw_line.strip_suffix('\r').map_or(raw_line.len(), str::len);
-    let line = &raw_line[..content_end];
-    let cursor = cursor_byte.saturating_sub(line_start).min(content_end);
+    let physical_line = &raw_line[..content_end];
+    let physical_cursor = cursor_byte.saturating_sub(line_start).min(content_end);
 
-    if line.trim_start().starts_with("%%") || cursor_is_inside_literal(line, cursor) {
+    if physical_line.trim_start().starts_with("%%")
+        || cursor_is_inside_literal(physical_line, physical_cursor)
+    {
         return None;
     }
+
+    let pieces = scan_source(physical_line);
+    let current = pieces
+        .iter()
+        .find(|piece| piece.range.start <= physical_cursor && physical_cursor <= piece.range.end);
+    let range = current.map_or(physical_cursor..physical_cursor, |piece| {
+        piece.range.clone()
+    });
+    let line_start = line_start + range.start;
+    let line = &physical_line[range.clone()];
+    let cursor = physical_cursor - range.start;
 
     let Some((header_start, header_end)) = first_nonempty_line(source) else {
         return header_assistance(line_start, line, cursor)
             .and_then(|assistance| bounded_assistance(source, assistance));
     };
-    if line_start == header_start && line_start + content_end == header_end {
+    if line_start == header_start && line_start + line.len() == header_end {
         return header_assistance(line_start, line, cursor)
             .and_then(|assistance| bounded_assistance(source, assistance));
     }
     if line_start < header_end {
         return None;
     }
-    let header_text = source[header_start..header_end].trim();
-    if !matches!(
-        header_text,
-        "flowchart TD" | "flowchart TB" | "flowchart LR"
-    ) {
+    if parse_header(&source[header_start..header_end], header_start, 1).is_err() {
         return None;
     }
 
@@ -138,7 +148,8 @@ pub fn mermaid_assistance_at(source: &str, cursor_byte: usize) -> Option<Mermaid
                 format!("subgraph {group_id}[\"Group\"]{newline}end"),
                 replacement.clone(),
             ));
-        } else if has_open_subgraph(&source[..line_start]) && !has_closing_end(&source[line_end..])
+        } else if has_open_subgraph(&source[..line_start])
+            && !has_closing_end(&source[line_start + line.len()..])
         {
             suggestions.push(suggestion("End subgraph".into(), "end".into(), replacement));
         }
@@ -208,7 +219,7 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
     if trimmed.is_empty() {
         return Some(MermaidAssistance {
             context: MermaidAssistanceContext::Header,
-            suggestions: ["TD", "TB", "LR"]
+            suggestions: ["TD", "TB", "LR", "RL", "BT"]
                 .into_iter()
                 .map(|direction| {
                     suggestion(
@@ -230,7 +241,8 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
         .map_or(line.len(), |offset| token_start + offset);
     let first_token = &line[token_start..token_end];
     if first_token != "flowchart"
-        && "flowchart".starts_with(first_token)
+        && first_token != "graph"
+        && ("flowchart".starts_with(first_token) || "graph".starts_with(first_token))
         && cursor >= token_start
         && cursor <= token_end
         && !first_token.is_empty()
@@ -238,7 +250,7 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
         let range = line_start + token_start..line_start + token_end;
         return Some(MermaidAssistance {
             context: MermaidAssistanceContext::Header,
-            suggestions: ["TD", "TB", "LR"]
+            suggestions: ["TD", "TB", "LR", "RL", "BT"]
                 .into_iter()
                 .map(|direction| {
                     suggestion(
@@ -251,7 +263,7 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
         });
     }
 
-    if first_token != "flowchart" {
+    if first_token != "flowchart" && first_token != "graph" {
         return None;
     }
     let direction_start = token_end;
@@ -262,12 +274,12 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
         let replacement = line_start + token_start..line_start + token_end;
         return Some(MermaidAssistance {
             context: MermaidAssistanceContext::Direction,
-            suggestions: ["TD", "TB", "LR"]
+            suggestions: ["TD", "TB", "LR", "RL", "BT"]
                 .into_iter()
                 .map(|direction| {
                     suggestion(
                         direction.into(),
-                        format!("flowchart {direction}"),
+                        format!("{first_token} {direction}"),
                         replacement.clone(),
                     )
                 })
@@ -294,7 +306,7 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
     if direction_fragment.is_empty() {
         return Some(MermaidAssistance {
             context: MermaidAssistanceContext::Direction,
-            suggestions: ["TD", "TB", "LR"]
+            suggestions: ["TD", "TB", "LR", "RL", "BT"]
                 .into_iter()
                 .map(|direction| {
                     suggestion(
@@ -306,14 +318,16 @@ fn header_assistance(line_start: usize, line: &str, cursor: usize) -> Option<Mer
                 .collect(),
         });
     }
-    let complete_direction = matches!(direction_fragment, "TD" | "TB" | "LR");
-    let matching_directions = ["TD", "TB", "LR"].into_iter().filter(|direction| {
-        if complete_direction {
-            *direction != direction_fragment
-        } else {
-            direction.starts_with(direction_prefix)
-        }
-    });
+    let complete_direction = matches!(direction_fragment, "TD" | "TB" | "LR" | "RL" | "BT");
+    let matching_directions = ["TD", "TB", "LR", "RL", "BT"]
+        .into_iter()
+        .filter(|direction| {
+            if complete_direction {
+                *direction != direction_fragment
+            } else {
+                direction.starts_with(direction_prefix)
+            }
+        });
     let suggestions = matching_directions
         .map(|direction| {
             suggestion(
@@ -345,16 +359,13 @@ fn suggestion(
 }
 
 fn first_nonempty_line(source: &str) -> Option<(usize, usize)> {
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        let content = content.strip_suffix('\r').unwrap_or(content);
-        if !content.trim().is_empty() {
-            return Some((offset, offset + content.len()));
-        }
-        offset += line.len();
-    }
-    None
+    scan_source(source)
+        .into_iter()
+        .find(|piece| {
+            piece.kind == SourcePieceKind::Statement
+                && !source[piece.range.clone()].trim().is_empty()
+        })
+        .map(|piece| (piece.range.start, piece.range.end))
 }
 
 fn cursor_is_inside_literal(line: &str, cursor: usize) -> bool {
@@ -391,10 +402,11 @@ fn next_group_id(ids: &[String]) -> String {
 
 fn has_open_subgraph(source: &str) -> bool {
     let mut open = false;
-    for line in source.split(['\n', '\r']).map(str::trim) {
-        if line.starts_with("%%") {
+    for piece in scan_source(source) {
+        if piece.kind != SourcePieceKind::Statement {
             continue;
         }
+        let line = source[piece.range].trim();
         if line == "end" {
             open = false;
         } else if line == "subgraph"
@@ -408,7 +420,9 @@ fn has_open_subgraph(source: &str) -> bool {
 }
 
 fn has_closing_end(source: &str) -> bool {
-    source.split(['\n', '\r']).any(|line| line.trim() == "end")
+    scan_source(source).into_iter().any(|piece| {
+        piece.kind == SourcePieceKind::Statement && source[piece.range].trim() == "end"
+    })
 }
 
 fn source_newline(source: &str) -> &'static str {
@@ -438,7 +452,7 @@ mod tests {
                 .iter()
                 .map(|suggestion| suggestion.insertion.as_str())
                 .collect::<Vec<_>>(),
-            ["TD", "TB", "LR"]
+            ["TD", "TB", "LR", "RL", "BT"]
         );
 
         let complete = "flowchart TD";
@@ -450,7 +464,7 @@ mod tests {
                 .iter()
                 .map(|suggestion| suggestion.insertion.as_str())
                 .collect::<Vec<_>>(),
-            ["TB", "LR"]
+            ["TB", "LR", "RL", "BT"]
         );
         let (replaced, _) = apply_mermaid_assistance(complete, &direction.suggestions[0]).unwrap();
         assert_eq!(replaced, "flowchart TB");
@@ -565,6 +579,53 @@ mod tests {
                 .suggestions
                 .iter()
                 .any(|suggestion| suggestion.label == "End subgraph")
+        );
+    }
+
+    #[test]
+    fn mermaid_assistance_handles_semicolons_and_later_chain_targets() {
+        let source = "%% note\r\ngraph RL; Beta[\"東京; today\"]; Start --> Other --> Be";
+        let assistance = mermaid_assistance_at(source, source.len()).unwrap();
+        assert_eq!(assistance.context, MermaidAssistanceContext::EdgeTarget);
+        let beta = assistance
+            .suggestions
+            .iter()
+            .find(|item| item.insertion == "Beta")
+            .unwrap();
+        let (updated, _) = apply_mermaid_assistance(source, beta).unwrap();
+        assert_eq!(
+            updated,
+            "%% note\r\ngraph RL; Beta[\"東京; today\"]; Start --> Other --> Beta"
+        );
+        assert!(parse_mermaid(&updated).is_ok());
+
+        let source = "graph TD; A; ";
+        let assistance = mermaid_assistance_at(source, source.len()).unwrap();
+        assert_eq!(assistance.context, MermaidAssistanceContext::Statement);
+
+        let source = "graph\tRL; subgraph G[\"Group\"]; ";
+        let assistance = mermaid_assistance_at(source, source.len()).unwrap();
+        assert!(
+            assistance
+                .suggestions
+                .iter()
+                .any(|item| item.label == "End subgraph")
+        );
+        assert!(
+            !assistance
+                .suggestions
+                .iter()
+                .any(|item| item.label == "Subgraph")
+        );
+
+        let source = "graph  TD; subgraph G[\"Group\"]; ; end";
+        let cursor = source.find("; ;").unwrap() + 2;
+        let assistance = mermaid_assistance_at(source, cursor).unwrap();
+        assert!(
+            !assistance
+                .suggestions
+                .iter()
+                .any(|item| item.label == "End subgraph")
         );
     }
 

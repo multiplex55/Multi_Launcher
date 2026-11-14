@@ -1298,7 +1298,7 @@ mod tests {
     fn diagram_session_retains_invalid_draft_and_blocks_every_visual_edit() {
         let mut session = DiagramSession::new();
         session.replace_source(TWO_PARALLEL_EDGES).unwrap();
-        let unsupported = "%% keep exactly\r\nflowchart LR\r\nA --> B\r\n";
+        let unsupported = "%%{unsupported}%%\r\nflowchart LR\r\nA --> B\r\n";
         session.replace_source(unsupported).unwrap();
         let revision = session.revision();
         let history = session.undo_depth();

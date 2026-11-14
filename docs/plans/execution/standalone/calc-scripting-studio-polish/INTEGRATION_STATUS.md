@@ -8,8 +8,15 @@
 | Checkpoint | State |
 | --- | --- |
 | M0-A | Complete and pushed |
-| M0-B | Complete, 8 focused baseline tests passed |
-| M1-A through M6-A | Pending |
+| M0-B | Complete and pushed at `8249b28fa91bc603a4067db6b7d90cc4adad150a`, 8 focused baseline tests passed |
+| M1-A | Complete, 29 focused tests passed after review fixes |
+| M1-B through M6-A | Pending |
+
+## M1-A evidence
+
+- Editable flowchart parsing now uses original source spans for semicolon statements and bounded arrow chains. It accepts `graph`, ordinary comments and direction tokens RL/BT. The normal editable geometry and comment-safe visual round trip are owned by M1-B.
+- The selected parser, assistance, style, stale-draft, codec and renderer batches passed 28/28 initially and 29/29 after review corrections. Cases include Unicode/CRLF diagnostics, quoted and pipe labels, color style separators, the edge limit reached mid-chain, and non-flowchart preview regressions. Each batch used the 100-second watchdog with verified cleanup and output drain.
+- Independent review fixes cover hex colors, header whitespace, and subgraph assistance at semicolon boundaries. A remaining Unicode subgraph-whitespace assistance case is assigned to M1-B. Touched-file rustfmt checks confirmed inherited formatting differences in `document.rs`, `model.rs`, `session.rs`, and `style.rs`.
 
 ## Affected baseline
 
@@ -24,10 +31,10 @@
 
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
-| MMD-01 | M1-A, M1-B | Pending | Pending | Pending |
-| MMD-02 | M1-A | Pending | Pending | Pending |
-| MMD-03 | M1-A | Pending | Pending | Pending |
-| MMD-04 | M1-A | Pending | Pending | Pending |
+| MMD-01 | M1-A, M1-B | Parser only | Parser passed | Pending |
+| MMD-02 | M1-A | Yes | Passed | Pending |
+| MMD-03 | M1-A | Yes | Passed | Pending |
+| MMD-04 | M1-A | Yes | Passed | Pending |
 | MMD-05 | M1-B | Pending | Pending | Pending |
 | CP-01 | M2-A/C/D | Pending | Pending | Pending |
 | CP-02 | M4-A/C | Pending | Pending | Pending |

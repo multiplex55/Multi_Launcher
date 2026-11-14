@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn diagram_document_layout_rejects_invalid_source_and_pending_replacement() {
         let mut document = DiagramDocumentController::new();
-        document.replace_source("%% unsupported\n").unwrap();
+        document.replace_source("%%{unsupported}%%\n").unwrap();
         assert_eq!(
             document.session().unwrap().status().preview,
             PreviewState::Stale

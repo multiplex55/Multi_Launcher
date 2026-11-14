@@ -956,7 +956,7 @@ mod tests {
         let mut session = session_with_history();
         let previous_supported_source = session.draft().to_owned();
         session
-            .replace_source("%% retain these bytes\r\nflowchart TD\r\nA --> B\r\n")
+            .replace_source("%%{unsupported}%%\r\nflowchart TD\r\nA --> B\r\n")
             .unwrap();
         let expected_revision = session.revision();
         let expected_allocator = session.next_edge_id();
@@ -978,7 +978,7 @@ mod tests {
         assert!(decoded.redo().unwrap());
         assert_eq!(
             decoded.draft(),
-            "%% retain these bytes\r\nflowchart TD\r\nA --> B\r\n"
+            "%%{unsupported}%%\r\nflowchart TD\r\nA --> B\r\n"
         );
         assert!(decoded.revision() > expected_revision);
     }
@@ -1088,11 +1088,11 @@ mod tests {
     #[test]
     fn diagram_codec_preserves_invalid_draft_without_a_last_good_preview() {
         let mut no_preview = encode_as_value(&DiagramSession::new());
-        no_preview["current"]["draft"] = serde_json::Value::String("%% unsupported".into());
+        no_preview["current"]["draft"] = serde_json::Value::String("%%{unsupported}%%".into());
         no_preview["current"]["last_good"] = serde_json::Value::Null;
         let bytes = serde_json::to_vec(&no_preview).unwrap();
         let decoded = decode_session(&bytes).unwrap();
-        assert_eq!(decoded.draft(), "%% unsupported");
+        assert_eq!(decoded.draft(), "%%{unsupported}%%");
         assert_eq!(decoded.status().preview, PreviewState::NoPreview);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&decoded.encode().unwrap()).unwrap(),
