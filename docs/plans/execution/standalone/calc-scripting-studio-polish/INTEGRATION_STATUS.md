@@ -24,7 +24,7 @@
 | M5-A | Complete and pushed at `06ba8cfa9327c6adde4b1ed9effe5a26b6a6f320`. Final affected QR cases passed in the 46-test integration run. |
 | M6-A-R1 | Complete and pushed at `1d7bf67cc73c6865e6b04a1081cc57904b507faf`. Folded typing with passive pointer movement passed in both event orders. |
 | M6-A-R2 | Complete and pushed at `fe3ef8c381b771ecc7f82bec6fefb2584993c1dc`. Introduced Clippy warnings corrected. The 14 directly affected cases passed. |
-| M6-A | LIMITED. Delivered code and documentation with passing scoped automated verification. Windows native acceptance remains incomplete. |
+| M6-A | LIMITED. Follow-up passed UI-1, UI-4, UI-5, UI-7 and UI-8. UI-2, UI-3 and UI-6 retain the limits below. |
 
 ## M1-A evidence
 
@@ -111,44 +111,44 @@
 
 ## Windows native verification
 
-The Windows build from `1d7bf67cc73c6865e6b04a1081cc57904b507faf` ran in a disposable profile with both Paste Sequence shortcuts disabled before construction. See the external `native-smoke-notes.md` and the `m6-native-process-r2` and `m6-native-keyboard` process receipts.
+The follow-up rebuilt the pushed tip `2e265c91ab9dc3c5068f3e5b1b2c61b92c7c2f9f` with the `fast-dev` profile and `qa-framebuffer-capture` feature. The executable SHA-256 was `E7879FA77F9F51E5BFCA8BEC15B0C87F12AB1E35433AA6E2E94D080798698E63`. The disposable profile disabled both Paste Sequence shortcuts before construction. App framebuffer captures and window-relative input provided evidence where Windows Graphics Capture and detached accessibility could not.
 
 | Scenario | Outcome |
 | --- | --- |
-| UI-1 | Partial. H2 small-script results and source Undo/Redo verified. Input-panel edit, watch and comparison unverified. |
-| UI-2 | Unverified. Completion, parameter hints and theme interactions pending. |
-| UI-3 | Partial. Ctrl+F opened Find and found one match. Match selection, folding, navigation, replace/undo and copying unverified. |
-| UI-4 | Unverified. Panel edits, Save As/reopen and compact layout pending. |
-| UI-5 | Unverified. Copy and Copy formatted are exposed. Display modes and clipboard contents pending. |
-| UI-6 | Unverified. Controlled cancellation and host-switch/reopen interaction pending. |
-| UI-7 | Partial. Native Diagram Studio opens. Its canvas, visual round trip and legacy preview are unverified. |
-| UI-8 | Partial. Exact docked payload, native pop-out, independent launcher query, native close and remembered pop-out verified. Detached content/correction, docking back, clipboard and PNG save/cancel are unverified. |
+| UI-1 | Passed. The H2 script produced the expected results and source Undo/Redo. Pinning `answer` showed 120. Editing `unit_price` from 12.5 to 20 updated its source assignment and preserved both `count` assignments. The binding fixture produced 2, 2, 5, 2, 5. Programmer Inspector compared `r1` and `x` as 2 and 5. |
+| UI-2 | Partial. Variable completion appeared and Tab accepted it. Turned completion off in Editor options and confirmed its checkbox was cleared. The nested `range` hint identified `stop` in both dark and compact light profiles. Explicit suggestion dismissal and normal-key behavior with completion off were not verified. |
+| UI-3 | Partial. Folded a region and a loop and verified physical row numbers. Find Next revealed the hidden region match. Ctrl+G revealed the hidden loop body. Replace All was undone in one step, and the complete source was copied and pasted back with no placeholder. The diagnostic row was reached, but its source highlight was not confirmed. |
+| UI-4 | Passed. Showed input and watch panels, rejected an invalid numeric edit without changing source, saved a named Pad, opened a blank Pad, and reopened the saved document. Its selected input and named watch returned when the panels were shown. In the 640 × 460 profile, both `x` assignments were separately selectable by line label and Results remained reachable by scrolling. |
+| UI-5 | Passed. Verified Auto, fixed decimal, grouping, scientific and scalar percent display. The exact integer `9007199254740993` retained all digits, the unit remained attached and the vector stayed canonical. Pasting canonical and formatted scalar copies yielded `12345.1` and `1.23e6%` respectively. Format changes preserved the source. |
+| UI-6 | Partial. The nested-loop fixture hit the explicit work limit and a newer source revision replaced it. The newer Pad popped out and the launcher remained responsive. The earlier workload finished before it could be superseded while pending. The dirty detached close/reopen cycle was not completed. |
+| UI-7 | Passed. The H2 Mermaid fixture had four nodes and three edges. Explicit RL layout placed arrows right to left. Added a node visually, changed to BT, and verified upward arrows after Auto-layout. Undo restored the previous geometry and Redo reapplied BT. Saved, opened a blank draft, and reopened from Recent. Both comments survived and the exported Mermaid source matched the saved draft exactly. A legacy sequence diagram rendered Alice, Bob and the Hello message. |
+| UI-8 | Passed. Changed synthetic source and pasted back the exact copied bytes. Copy QR reported a successful image clipboard write. Save PNG wrote a 232 × 232 PNG, while cancel left no destination file. Changed correction to High and verified the same text, High selection and Advanced state after Pop Out → Dock. Popped out again, typed in the independent launcher query, and closed the native QR window. A fresh command opened a distinct window in the remembered presentation. Docking it showed an empty source and default Medium correction. Raster clipboard fidelity remains covered by the automated tests. |
 
-The sandboxed launch received Windows desktop access denied. An authorized current-desktop launch allowed keyboard and ROOT accessibility checks. Windows Graphics Capture repeatedly timed out, and detached utility accessibility exposed only title bars. Both successful native runs exited with verified process cleanup and output drain.
+Evidence is under the task visualization directory `calc-scripting/ui-followup`. See `root-captures-r1/framebuffer-004.png` and `framebuffer-006.png` for RL/BT, `framebuffer-012.png` for the legacy preview, `bt-roundtrip.mld` and `diagram.mmd` for matched source, `qa-native-42.png` for QR export, `qr-final-captures/framebuffer-003.png` and `framebuffer-004.png` for retained and reset QR correction, and `calc-captures` and `compact-light-captures` for Calc. The follow-up used synthetic clipboard content only. Process receipts are in the sibling `ui-followup-process*` directories.
 
 ## Requirement matrix
 
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
-| MMD-01 | M1-A, M1-B | Yes | Passed | Unverified |
-| MMD-02 | M1-A | Yes | Passed | Unverified |
-| MMD-03 | M1-A | Yes | Passed | Unverified |
-| MMD-04 | M1-A | Yes | Passed | Unverified |
-| MMD-05 | M1-B | Yes | Passed | Unverified |
-| CP-01 | M2-A/C/D | Yes | Passed | Partial, UI-1 |
-| CP-02 | M4-A/C | Yes | Passed | Unverified |
-| CP-03 | M3-B, M4-C | Yes | Passed | Unverified |
-| CP-04 | M3-B | Yes | Passed | Unverified |
-| CP-05 | M4-A/C | Yes | Passed | Unverified |
-| CP-06 | M3-A/C | Yes | Passed | Partial, UI-3 |
-| CP-07 | M3-A/C | Yes | Passed | Unverified |
-| CP-08 | M3-B | Yes | Passed | Unverified |
-| CP-09 | M4-B/C | Yes | Passed | Unverified |
+| MMD-01 | M1-A, M1-B | Yes | Passed | Passed |
+| MMD-02 | M1-A | Yes | Passed | Passed |
+| MMD-03 | M1-A | Yes | Passed | Passed |
+| MMD-04 | M1-A | Yes | Passed | Passed |
+| MMD-05 | M1-B | Yes | Passed | Passed |
+| CP-01 | M2-A/C/D | Yes | Passed | Passed |
+| CP-02 | M4-A/C | Yes | Passed | Passed |
+| CP-03 | M3-B, M4-C | Yes | Passed | Partial, UI-2 |
+| CP-04 | M3-B | Yes | Passed | Partial, UI-2 |
+| CP-05 | M4-A/C | Yes | Passed | Passed |
+| CP-06 | M3-A/C | Yes | Passed | Passed |
+| CP-07 | M3-A/C | Yes | Passed | Partial, UI-3 |
+| CP-08 | M3-B | Yes | Passed | Passed |
+| CP-09 | M4-B/C | Yes | Passed | Passed |
 | CP-10 | M3-C | Yes | Passed | Unverified |
-| CP-11 | M3-C | Yes | Passed | Unverified |
-| CP-12 | M3-A/C | Yes | Passed | Unverified |
-| CP-13 | M2-B | Yes | Passed | Partial, UI-1 |
-| CP-14 | M2-B | Yes | Passed | Partial, UI-1 |
-| CP-15 | M2-C/D | Yes | Passed | Partial, UI-1 |
-| CP-16 | M2-B/C | Yes | Passed | Partial, UI-1 |
-| QR-01 | M5-A | Yes | Passed | Partial, UI-8 |
+| CP-11 | M3-C | Yes | Passed | Passed |
+| CP-12 | M3-A/C | Yes | Passed | Partial, UI-3 |
+| CP-13 | M2-B | Yes | Passed | Passed |
+| CP-14 | M2-B | Yes | Passed | Passed |
+| CP-15 | M2-C/D | Yes | Passed | Partial, UI-1, UI-6 |
+| CP-16 | M2-B/C | Yes | Passed | Passed |
+| QR-01 | M5-A | Yes | Passed | Passed |
