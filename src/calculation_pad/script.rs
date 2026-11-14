@@ -192,22 +192,91 @@ pub(super) enum Function {
     Stdev,
 }
 
-/// The signatures are shared with editor assistance and reflect runtime arity.
+/// Runtime arity and editor presentation share one function catalog.
+#[derive(Clone, Copy)]
+pub(crate) struct FunctionSignature {
+    pub name: &'static str,
+    pub help: &'static str,
+    arities: &'static [usize],
+    insensitive: bool,
+}
+pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "if", help: "if(condition, when_true, when_false)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "range", help: "range(stop)  ·  range(start, stop[, step])", arities: &[1, 2, 3], insensitive: true },
+    FunctionSignature { name: "sum", help: "sum(values)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "average", help: "average(values)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "median", help: "median(values)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "stdev", help: "stdev(values)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "min", help: "min(values)  ·  min(left, right)", arities: &[1, 2], insensitive: true },
+    FunctionSignature { name: "max", help: "max(values)  ·  max(left, right)", arities: &[1, 2], insensitive: true },
+    FunctionSignature { name: "atan2", help: "atan2(y, x)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "mod", help: "mod(left, right)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "dot", help: "dot(left, right)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "cross", help: "cross(left, right)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rotl", help: "rotl(value, count)", arities: &[2], insensitive: false },
+    FunctionSignature { name: "rotr", help: "rotr(value, count)", arities: &[2], insensitive: false },
+    FunctionSignature { name: "mask", help: "mask(value, start, count)", arities: &[3], insensitive: false },
+    FunctionSignature { name: "extract", help: "extract(value, start, count)", arities: &[3], insensitive: false },
+    FunctionSignature { name: "abs", help: "abs(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "signum", help: "signum(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sin", help: "sin(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cos", help: "cos(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "tan", help: "tan(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "asin", help: "asin(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "acos", help: "acos(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "atan", help: "atan(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sinh", help: "sinh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cosh", help: "cosh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "tanh", help: "tanh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "asinh", help: "asinh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "acosh", help: "acosh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "atanh", help: "atanh(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "floor", help: "floor(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "round", help: "round(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "ceil", help: "ceil(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "trunc", help: "trunc(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "fract", help: "fract(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "exp", help: "exp(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sqrt", help: "sqrt(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cbrt", help: "cbrt(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "ln", help: "ln(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "log2", help: "log2(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "log10", help: "log10(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "log", help: "log(value)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "not", help: "not(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "popcount", help: "popcount(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "int", help: "int(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "i8", help: "i8(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "i16", help: "i16(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "i32", help: "i32(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "i64", help: "i64(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "i128", help: "i128(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "u8", help: "u8(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "u16", help: "u16(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "u32", help: "u32(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "u64", help: "u64(value)", arities: &[1], insensitive: false },
+    FunctionSignature { name: "u128", help: "u128(value)", arities: &[1], insensitive: false },
+];
+pub(crate) fn function_signature_help(name: &str) -> Option<&'static str> {
+    lookup_function(name).map(|function| function.help)
+}
+fn lookup_function(name: &str) -> Option<&'static FunctionSignature> {
+    FUNCTIONS.iter().find(|function| function.name == name
+        || (function.insensitive && function.name.eq_ignore_ascii_case(name)))
+}
 pub(super) fn signature(name: &str) -> Option<&'static [usize]> {
-    match name.to_ascii_lowercase().as_str() {
-        "if" => Some(&[3]),
-        "range" => Some(&[1, 2, 3]),
-        "sum" | "average" | "median" | "stdev" => Some(&[1]),
-        "min" | "max" => Some(&[1, 2]),
-        "atan2" | "mod" | "dot" | "cross" | "rotl" | "rotr" => Some(&[2]),
-        "mask" | "extract" => Some(&[3]),
-        "abs" | "signum" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh"
-        | "tanh" | "asinh" | "acosh" | "atanh" | "floor" | "round" | "ceil" | "trunc" | "fract"
-        | "exp" | "sqrt" | "cbrt" | "ln" | "log2" | "log10" | "log" | "not" | "popcount"
-        | "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128" => {
-            Some(&[1])
-        }
-        _ => None,
+    lookup_function(name).map(|function| function.arities)
+}
+
+#[cfg(test)]
+mod signature_catalog_tests {
+    use super::*;
+    #[test]
+    fn structural_arity_uses_runtime_case_policy() {
+        assert_eq!(signature("FLOOR"), Some(&[1][..]));
+        assert_eq!(signature("DOT"), Some(&[2][..]));
+        assert_eq!(signature("EXTRACT"), None);
+        assert_eq!(signature("extract"), Some(&[3][..]));
     }
 }
 

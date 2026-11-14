@@ -23,6 +23,44 @@ pub(super) mod script;
 #[path = "loops.rs"]
 mod loops;
 pub use script::CalculationSequence;
+pub(crate) use script::{FUNCTIONS, function_signature_help};
+
+/// Names visible before the caret, without evaluating the document.
+pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
+    let Some(prefix) = source.get(..caret) else { return Vec::new(); };
+    let current_indent = prefix.rsplit('\n').next().unwrap_or("").chars().take_while(|c| *c == ' ').count();
+    let mut bindings: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut scopes: Vec<(usize, usize)> = Vec::new();
+    let lines: Vec<_> = prefix.split('\n').collect();
+    for (line_number, line) in lines.iter().take(lines.len().saturating_sub(1)).enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
+        let indent = line.chars().take_while(|ch| *ch == ' ').count();
+        while scopes.last().is_some_and(|(previous, _)| indent <= *previous) { scopes.pop(); }
+        if let Some(name) = loops::editor_iterator(trimmed) {
+            scopes.push((indent, line_number));
+            bindings.push((name, scopes.iter().map(|(_, id)| *id).collect()));
+        } else if let Some(index) = find_assignment_delimiter(trimmed)
+            && let Ok(name) = parse_assignment_name(trimmed[..index].trim())
+        {
+            if !is_row_reference_name(&name.canonical)
+                && (name.braced || !is_reserved_name(&name.canonical))
+                && find_assignment_delimiter(&trimmed[index + 1..]).is_none()
+            {
+                let display = if name.braced { format!("{{{}}}", name.canonical) } else { name.canonical };
+                bindings.push((display, scopes.iter().map(|(_, id)| *id).collect()));
+            }
+        }
+    }
+    while scopes.last().is_some_and(|(indent, _)| current_indent <= *indent) { scopes.pop(); }
+    let active: Vec<_> = scopes.iter().map(|(_, id)| *id).collect();
+    bindings.reverse();
+    let mut result = Vec::new();
+    for (name, scope) in bindings {
+        if active.starts_with(&scope) && !result.contains(&name) { result.push(name); }
+    }
+    result
+}
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;

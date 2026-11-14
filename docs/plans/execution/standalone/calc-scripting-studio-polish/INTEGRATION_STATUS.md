@@ -15,8 +15,9 @@
 | M2-B | Complete and pushed at `79016f86dd2720e7ecce38d3cd0f438e6c998a07`, 60 focused tests passed plus the corrected typed composition fixture. |
 | M2-C | Complete and pushed at `2d5c6c563159004f5a4dba97d7610253b75f604e`, 72 focused tests passed. |
 | M2-D | Complete and pushed at `6066a7e88b701b4262fcbc549dfd226f1bcab528`. Final affected navigation cases passed 3/3. UI-6 pending. |
-| M3-A | Complete at the automated level. 56 unaffected cases passed and 6 final targeted cases passed. |
-| M3-B through M6-A | Pending |
+| M3-A | Complete and pushed at `ed6c91fd6e83df0fecefddc38b45170344e5d464`. 56 unaffected cases passed and 6 final targeted cases passed. |
+| M3-B | Complete at the automated level. 65 focused cases and 11 final targeted cases passed. |
+| M3-C through M6-A | Pending |
 
 ## M1-A evidence
 
@@ -74,6 +75,12 @@
 - Review corrections let source navigation work while evaluation is pending, fence queued actions during host retirement, preserve native widget focus and make Escape dismiss the focused tools. The reference catalogue keeps its existing first group and appends the new examples.
 - The first run passed 51/55 and exposed four reference-catalogue order regressions. Restoring its order passed those cases. The next run passed 56/57 and caught immediate Escape after Ctrl+H. The final six targeted cases passed, including the keyboard sequence, live-source navigation, retirement, and detached launcher query.
 
+## M3-B evidence
+
+- The editor highlights syntax using the active egui theme, offers scope-aware names and built-ins, and shows call signatures with the active parameter. Completion replaces the whole token and preserves existing parentheses. Completion and hints default on and can be disabled independently.
+- The signature catalogue supplies parser arities and assistance. Scalar/vector calls follow their established case policy. Exact programmer constructors and helpers keep their existing case sensitivity.
+- Compilation initially found four egui character-index mismatches. After correction, 65 Pad, settings and script cases passed. The final 11 targeted checks passed, including compact completion, disabled Enter, case policy, nested hints, braced loop scope and retained source boundaries. UI-2 remains pending.
+
 | Requirement | Checkpoints | Implemented | Automated verification | Native verification |
 | --- | --- | --- | --- | --- |
 | MMD-01 | M1-A, M1-B | Yes | Passed | Pending |
@@ -83,12 +90,12 @@
 | MMD-05 | M1-B | Yes | Passed | Pending |
 | CP-01 | M2-A/C/D | Yes | Passed | Pending |
 | CP-02 | M4-A/C | Pending | Pending | Pending |
-| CP-03 | M3-B, M4-C | Pending | Pending | Pending |
-| CP-04 | M3-B | Pending | Pending | Pending |
+| CP-03 | M3-B, M4-C | Assistance and toggles | Passed for M3-B | Pending |
+| CP-04 | M3-B | Yes | Passed | Pending |
 | CP-05 | M4-A/C | Pending | Pending | Pending |
 | CP-06 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
 | CP-07 | M3-A/C | Unfolded editor | Passed for M3-A | Pending |
-| CP-08 | M3-B | Pending | Pending | Pending |
+| CP-08 | M3-B | Yes | Passed | Pending |
 | CP-09 | M4-B/C | Pending | Pending | Pending |
 | CP-10 | M3-C | Pending | Pending | Pending |
 | CP-11 | M3-C | Pending | Pending | Pending |

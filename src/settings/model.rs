@@ -13,13 +13,15 @@ use std::path::PathBuf;
 pub struct CalculationPadDisplayPreferences {
     pub line_numbers: bool,
     pub word_wrap: bool,
+    pub completion: bool,
+    pub parameter_hints: bool,
     pub wide_source_ratio: f32,
     pub stacked_source_ratio: f32,
 }
 
 impl Default for CalculationPadDisplayPreferences {
     fn default() -> Self {
-        Self { line_numbers: true, word_wrap: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
+        Self { line_numbers: true, word_wrap: false, completion: true, parameter_hints: true, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
     }
 }
 
@@ -30,6 +32,8 @@ impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
         if let Some(map) = value.as_object() {
             preferences.line_numbers = map.get("line_numbers").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.word_wrap = map.get("word_wrap").and_then(|v| v.as_bool()).unwrap_or(false);
+            preferences.completion = map.get("completion").and_then(|v| v.as_bool()).unwrap_or(true);
+            preferences.parameter_hints = map.get("parameter_hints").and_then(|v| v.as_bool()).unwrap_or(true);
             let ratio = |name: &str, fallback| {
                 map.get(name).and_then(|v| v.as_f64())
                     .filter(|value| value.is_finite() && (0.05..=0.95).contains(value))

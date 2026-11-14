@@ -40,6 +40,7 @@ pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
 pub use vector::CalculationVector;
 pub use document::CalculationSequence;
+pub(crate) use document::{editor_bindings, function_signature_help, FUNCTIONS};
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,

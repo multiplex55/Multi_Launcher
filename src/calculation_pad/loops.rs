@@ -8,7 +8,14 @@ const MAX_LOOP_ITERATIONS: usize = 10_000;
 
 struct LoopHeader {
     name: String,
+    braced: bool,
     expression: String,
+}
+
+pub(super) fn editor_iterator(source: &str) -> Option<String> {
+    header(source).and_then(Result::ok).map(|header| {
+        if header.braced { format!("{{{}}}", header.name) } else { header.name }
+    })
 }
 
 enum Statement {
@@ -92,6 +99,7 @@ fn header(source: &str) -> Option<Result<LoopHeader, DiagnosticKind>> {
     }
     Some(Ok(LoopHeader {
         name: assignment.canonical,
+        braced: assignment.braced,
         expression: expression.trim().to_owned(),
     }))
 }
