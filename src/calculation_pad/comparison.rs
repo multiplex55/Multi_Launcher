@@ -51,7 +51,9 @@ impl ComparisonSide {
         match &self.value {
             Ok(CalculationValue::Integer(value)) => value.mode().type_name(),
             Ok(CalculationValue::ExactBase { .. }) => "exact base",
+            Ok(CalculationValue::Exact(_)) => "exact",
             Ok(CalculationValue::Scalar(_)) => "scalar",
+            Ok(CalculationValue::ApproximateScalar(_)) => "approximate scalar",
             Ok(CalculationValue::Boolean(_)) => "Boolean",
             Ok(CalculationValue::Sequence(_)) => "sequence",
             Ok(CalculationValue::Vector(_)) => "vector",

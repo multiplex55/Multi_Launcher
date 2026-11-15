@@ -87,6 +87,10 @@ fuzzy-matcher = "0.3"
 fst = { version = "0.4", features = ["levenshtein"] }
 open = "5.0"                   # Open files/folders/apps cross-platform
 anyhow = "1.0"
+num-bigint = "0.4.6"
+num-rational = "0.4.2"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
 walkdir = "2.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

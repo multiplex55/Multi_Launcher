@@ -13,6 +13,16 @@ pub(super) fn validate_source(source: &str) -> Result<usize, DiagnosticKind> {
     let mut chars = source.char_indices().peekable();
     while let Some((start, ch)) = chars.next() {
         match ch {
+            '"' => {
+                let mut escaped = false;
+                let mut closed = false;
+                for (_, character) in chars.by_ref() {
+                    if escaped { escaped = false; }
+                    else if character == '\\' { escaped = true; }
+                    else if character == '"' { closed = true; break; }
+                }
+                if !closed { return Err(DiagnosticKind::InvalidExpression); }
+            }
             '{' => {
                 let mut length = 0;
                 loop {
@@ -170,6 +180,8 @@ pub(super) enum ScriptExpression {
     Not(Box<Self>),
     Compare(Compare, Box<Self>, Box<Self>),
     Call(Function, Vec<Self>),
+    Decimal(String),
+    ExactInteger(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -190,6 +202,9 @@ pub(super) enum Function {
     Min,
     Max,
     Stdev,
+    Fraction,
+    DecimalDivide,
+    ToFloat,
 }
 
 /// Runtime arity and editor presentation share one function catalog.
@@ -201,6 +216,10 @@ pub(crate) struct FunctionSignature {
     insensitive: bool,
 }
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "decimal", help: "decimal(\"value\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "fraction", help: "fraction(numerator, denominator)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "decimal_div", help: "decimal_div(numerator, denominator, places)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "to_float", help: "to_float(value)", arities: &[1], insensitive: true },
     FunctionSignature { name: "if", help: "if(condition, when_true, when_false)", arities: &[3], insensitive: true },
     FunctionSignature { name: "range", help: "range(stop)  ·  range(start, stop[, step])", arities: &[1, 2, 3], insensitive: true },
     FunctionSignature { name: "sum", help: "sum(values)", arities: &[1], insensitive: true },
@@ -282,6 +301,9 @@ mod signature_catalog_tests {
 
 fn special(name: &str, arity: usize) -> Option<Function> {
     match name.to_ascii_lowercase().as_str() {
+        "fraction" => Some(Function::Fraction),
+        "decimal_div" => Some(Function::DecimalDivide),
+        "to_float" => Some(Function::ToFloat),
         "range" => Some(Function::Range),
         "sum" => Some(Function::Sum),
         "average" => Some(Function::Average),
@@ -356,7 +378,7 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
         if source[end..].trim_start().starts_with('(')
             && matches!(
                 name.to_ascii_lowercase().as_str(),
-                "if" | "range" | "sum" | "average" | "median" | "stdev"
+                "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float"
             )
         {
             return true;
@@ -386,7 +408,15 @@ pub(super) fn prepare(
 fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
     let mut braces = false;
+    let mut quoted = false;
+    let mut escaped = false;
     for (offset, ch) in source[open..].char_indices() {
+        if quoted {
+            if escaped { escaped = false; }
+            else if ch == '\\' { escaped = true; }
+            else if ch == '"' { quoted = false; }
+            continue;
+        }
         if braces {
             if ch == '}' {
                 braces = false;
@@ -397,6 +427,7 @@ fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
             braces = true;
             continue;
         }
+        if ch == '"' { quoted = true; continue; }
         match ch {
             '(' | '[' => stack.push(ch),
             ')' | ']' => {
@@ -426,6 +457,17 @@ fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
             .chars()
             .next()
             .ok_or(DiagnosticKind::InvalidExpression)?;
+        if ch == '"' {
+            let mut escaped = false;
+            let mut end = None;
+            for (offset, character) in source[index + 1..].char_indices() {
+                if escaped { escaped = false; }
+                else if character == '\\' { escaped = true; }
+                else if character == '"' { end = Some(index + offset + 2); break; }
+            }
+            index = end.ok_or(DiagnosticKind::InvalidExpression)?;
+            continue;
+        }
         if matches!(ch, '(' | '[') {
             index = matching(source, index)? + 1;
             continue;
@@ -625,10 +667,30 @@ fn parse(
                     return Err(DiagnosticKind::InvalidExpression);
                 }
                 let is_if = name.eq_ignore_ascii_case("if");
+                if name.eq_ignore_ascii_case("decimal") {
+                    let literal = args[0].trim();
+                    let Some(literal) = literal.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
+                        return Err(error("decimal requires a quoted decimal literal"));
+                    };
+                    let node = ScriptExpression::Decimal(literal.to_owned());
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 if is_if || special(name, args.len()).is_some() {
                     let children = args
                         .into_iter()
-                        .map(|arg| parse(arg, declared, depth + 1))
+                        .map(|arg| {
+                            let digits = arg.trim().trim_start_matches(['+', '-']);
+                            if name.eq_ignore_ascii_case("fraction") && !digits.is_empty()
+                                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                            {
+                                Ok(ScriptExpression::ExactInteger(arg.trim().to_owned()))
+                            } else {
+                                parse(arg, declared, depth + 1)
+                            }
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     let node = if is_if {
                         let [first, second, third]: [ScriptExpression; 3] = children
@@ -806,6 +868,7 @@ impl ScriptExpression {
         named_binding: &mut impl FnMut(&str) -> Option<usize>,
     ) {
         match self {
+            Self::Decimal(_) | Self::ExactInteger(_) => {}
             Self::Boolean { name, target } => {
                 *target = named_binding(name)
                     .filter(|target| *target < line_index || *target >= super::MAX_SOURCE_LINES);
@@ -855,6 +918,11 @@ impl ScriptExpression {
     ) -> Result<CalculationValue, DiagnosticKind> {
         work.charge(1)?;
         match self {
+            Self::Decimal(value) => Ok(CalculationValue::Exact(super::super::exact::ExactNumber::decimal(value, work)?)),
+            Self::ExactInteger(value) => {
+                let value = super::super::exact::ExactNumber::from_integer_text(value, work)?;
+                Ok(CalculationValue::Exact(super::super::exact::ExactNumber::fraction(value, 1.into(), work)?))
+            }
             Self::Boolean { name, target } => {
                 if let Some(target) = target {
                     dependencies.push(*target);
@@ -907,7 +975,7 @@ impl ScriptExpression {
                         .and_then(Option::as_ref)
                     && matches!(
                         value,
-                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_)
+                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_)
                     )
                 {
                     return Ok(value.clone());
@@ -921,7 +989,7 @@ impl ScriptExpression {
                     dependencies: Vec::new(),
                     diagnostic: None,
                 };
-                evaluate_prepared_statement(&line.statement, &surrogate, &all_values)
+                evaluate_prepared_statement(&line.statement, &surrogate, &all_values, work)
             }
             Self::If(condition, yes, no) => {
                 let condition = boolean(condition.evaluate(
@@ -975,7 +1043,7 @@ impl ScriptExpression {
             Self::Compare(operator, left, right) => {
                 let left = left.evaluate(line_index, outcomes, values, dependencies, work)?;
                 let right = right.evaluate(line_index, outcomes, values, dependencies, work)?;
-                let ordering = compare_values(&left, &right)?;
+                let ordering = compare_values(&left, &right, work)?;
                 let result = match operator {
                     Compare::Equal => ordering == Ordering::Equal,
                     Compare::NotEqual => ordering != Ordering::Equal,
@@ -1065,10 +1133,16 @@ fn boolean(value: CalculationValue) -> Result<bool, DiagnosticKind> {
 fn compare_values(
     left: &CalculationValue,
     right: &CalculationValue,
+    work: &mut WorkBudget,
 ) -> Result<Ordering, DiagnosticKind> {
     match (left, right) {
+        (CalculationValue::Exact(_), _) | (_, CalculationValue::Exact(_)) => super::super::exact::ExactNumber::compare(left, right, work),
         (CalculationValue::Boolean(a), CalculationValue::Boolean(b)) => Ok(a.cmp(b)),
         (CalculationValue::Scalar(a), CalculationValue::Scalar(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| error("values cannot be compared")),
+        (CalculationValue::Scalar(a) | CalculationValue::ApproximateScalar(a),
+         CalculationValue::Scalar(b) | CalculationValue::ApproximateScalar(b)) => a
             .partial_cmp(b)
             .ok_or_else(|| error("values cannot be compared")),
         (CalculationValue::Integer(a), CalculationValue::Integer(b)) if a.mode() == b.mode() => {
@@ -1095,6 +1169,20 @@ fn call(
     arguments: &[CalculationValue],
     work: &mut WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
+    use super::super::exact::ExactNumber;
+    match (function, arguments) {
+        (Function::Fraction, [numerator, denominator]) => {
+            return Ok(CalculationValue::Exact(ExactNumber::fraction(ExactNumber::integer(numerator)?, ExactNumber::integer(denominator)?, work)?));
+        }
+        (Function::DecimalDivide, [left, right, places]) => {
+            use num_traits::ToPrimitive;
+            let places = ExactNumber::integer(places)?.to_u32().ok_or_else(|| error("decimal precision must be a nonnegative integer"))?;
+            return Ok(CalculationValue::Exact(ExactNumber::rounded_divide(left, right, places, work)?));
+        }
+        (Function::ToFloat, [CalculationValue::Exact(value)]) => return Ok(CalculationValue::ApproximateScalar(value.approximate()?)),
+        (Function::ToFloat, _) => return Err(error("to_float requires an exact value")),
+        _ => {}
+    }
     if matches!(function, Function::Range) {
         let numbers = arguments
             .iter()
@@ -1214,7 +1302,7 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Range => unreachable!(),
+        Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat => unreachable!(),
     };
     Ok(CalculationValue::Scalar(finite(result)?))
 }

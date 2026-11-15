@@ -340,7 +340,7 @@ impl CalculationDocument {
                 let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
                 match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
             } else {
-                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values)
+                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values, &mut work)
             };
             if matches!(
                 outcome,
@@ -462,6 +462,8 @@ pub enum LineOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
     Scalar(f64),
+    ApproximateScalar(f64),
+    Exact(super::exact::ExactNumber),
     Boolean(bool),
     Sequence(CalculationSequence),
     Vector(vector::CalculationVector),
@@ -486,6 +488,8 @@ impl CalculationValue {
     pub fn formatted_result(&self) -> Option<String> {
         match self {
             Self::Scalar(value) => format_number(*value),
+            Self::ApproximateScalar(value) => Some(format!("≈ {}", format_number(*value)?)),
+            Self::Exact(value) => Some(value.display()),
             Self::Boolean(value) => Some(value.to_string()),
             Self::Sequence(value) => Some(value.display()),
             Self::Vector(value) => value.formatted_result(),
@@ -502,6 +506,8 @@ impl CalculationValue {
     pub fn canonical_result(&self) -> Option<String> {
         match self {
             Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
+            Self::Exact(value) => Some(value.canonical()),
+            Self::ApproximateScalar(value) => format_number(*value),
             _ => self.formatted_result(),
         }
     }
@@ -509,6 +515,8 @@ impl CalculationValue {
     pub fn is_approximate(&self) -> bool {
         match self {
             Self::DimensionalQuantity(value) => value.is_approximate(),
+            Self::Exact(value) => value.is_rounded(),
+            Self::ApproximateScalar(_) => true,
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
             Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
         }
@@ -1527,8 +1535,17 @@ impl PreparedLine {
 
 fn find_assignment_delimiter(expression: &str) -> Option<AssignmentDelimiter> {
     let mut in_braces = false;
+    let mut quoted = false;
+    let mut escaped = false;
     for (index, character) in expression.char_indices() {
+        if quoted {
+            if escaped { escaped = false; }
+            else if character == '\\' { escaped = true; }
+            else if character == '"' { quoted = false; }
+            continue;
+        }
         match character {
+            '"' if !in_braces => quoted = true,
             '{' => in_braces = true,
             '}' => in_braces = false,
             '=' if !in_braces => {
@@ -2595,6 +2612,7 @@ fn evaluate_line(
     cyclic: &[bool],
     outcomes: &[LineOutcome],
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> LineOutcome {
     if let Some(diagnostic) = &line.diagnostic {
         return LineOutcome::Error(diagnostic.clone());
@@ -2614,6 +2632,7 @@ fn evaluate_line(
                             value,
                             CalculationValue::Integer(_)
                                 | CalculationValue::ExactBase { .. }
+                                | CalculationValue::Exact(_)
                                 | CalculationValue::Vector(_)
                         )
                     })
@@ -2702,7 +2721,7 @@ fn evaluate_line(
         }
     }
 
-    let result = evaluate_prepared_statement(&line.statement, line, values);
+    let result = evaluate_prepared_statement(&line.statement, line, values, work);
 
     match result {
         Ok(value) => LineOutcome::Value(value),
@@ -2714,13 +2733,14 @@ fn evaluate_prepared_statement(
     statement: &PreparedStatement,
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     match statement {
         PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid | PreparedStatement::Script(_) => {
             unreachable!("non-result line states returned above")
         }
         PreparedStatement::Expression(expression) => {
-            evaluate_prepared_expression(expression, line, values)
+            evaluate_prepared_expression(expression, line, values, work)
         }
         PreparedStatement::PhysicalConversion(expression) => {
             match unit_conversion::evaluate_conversion(expression) {
@@ -2823,13 +2843,22 @@ fn evaluate_prepared_expression(
     expression: &PreparedExpression,
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     if let Some(name) = &expression.simple_reference
         && let Some(reference) = line.references.iter().find(|reference| &reference.name == name)
         && let Some(value) = reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
-        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_))
+        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_))
     {
         return Ok(value.clone());
+    }
+    let has_exact = line.references.iter().any(|reference| {
+        reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
+            .is_some_and(|value| matches!(value, CalculationValue::Exact(_)))
+    });
+    if has_exact {
+        let programmer = expression.programmer.as_ref().ok_or_else(|| DiagnosticKind::Script("unsupported exact expression".into()))?;
+        return programmer.evaluate_exact(&quantity_bindings(line, values), work);
     }
     let has_vector_reference = line.references.iter().any(|reference| {
         reference
@@ -2932,6 +2961,7 @@ fn evaluate_prepared_expression(
     };
 
     let mut variables = Vec::with_capacity(expression.var_names().len());
+    let mut approximate = false;
     for name in expression.var_names() {
         let Some(reference) = line
             .references
@@ -2945,15 +2975,67 @@ fn evaluate_prepared_expression(
         };
         match values.get(dependency_line).and_then(Option::as_ref) {
             Some(CalculationValue::Scalar(value)) => variables.push(*value),
+            Some(CalculationValue::ApproximateScalar(value)) => {
+                approximate = true;
+                variables.push(*value);
+            }
             Some(_) => return Err(DiagnosticKind::ExpectedScalar(name.clone())),
             None => return Err(DiagnosticKind::DependencyFailed { dependency_line }),
         }
     }
     match expression.eval(&variables) {
-        Ok(value) if value.is_finite() => Ok(CalculationValue::Scalar(value)),
+        Ok(value) if value.is_finite() => Ok(if approximate { CalculationValue::ApproximateScalar(value) } else { CalculationValue::Scalar(value) }),
         Ok(_) => Err(DiagnosticKind::InvalidArithmetic),
         Err(_) => Err(DiagnosticKind::InvalidExpression),
     }
+}
+
+pub(super) fn evaluate_legacy_fragment(
+    source: &str,
+    bindings: &HashMap<String, CalculationValue>,
+    work: &mut script::WorkBudget,
+) -> Result<CalculationValue, DiagnosticKind> {
+    let declared = bindings.keys().cloned().collect();
+    let mut count = 0;
+    let mut line = prepare_line_internal(0..source.len(), source, &mut count, &declared, true);
+    if let Some(diagnostic) = &line.diagnostic { return Err(diagnostic.kind.clone()); }
+    if let PreparedStatement::Script(expression) = &mut line.statement {
+        let mut names = bindings.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        let line_index = MAX_SOURCE_LINES + names.len();
+        let mut outcomes = vec![LineOutcome::Blank; line_index];
+        let mut values = vec![None; line_index];
+        for (index, name) in names.iter().enumerate() {
+            let value = bindings[name].clone();
+            let slot = MAX_SOURCE_LINES + index;
+            outcomes[slot] = LineOutcome::Value(value.clone());
+            values[slot] = Some(value.clone());
+            if let Some(row) = name.strip_prefix('r').and_then(|number| number.parse::<usize>().ok())
+                && (1..=MAX_SOURCE_LINES).contains(&row)
+            {
+                outcomes[row - 1] = LineOutcome::Value(value.clone());
+                values[row - 1] = Some(value);
+            }
+        }
+        expression.resolve(line_index, MAX_SOURCE_LINES, |name| {
+            names.iter().position(|candidate| candidate == name).map(|index| MAX_SOURCE_LINES + index)
+        });
+        let runtime_line = work.runtime_line.take();
+        let runtime_definitions = work.runtime_definitions.take();
+        let result = expression.evaluate(line_index, &outcomes, &values, &mut Vec::new(), work);
+        work.runtime_line = runtime_line;
+        work.runtime_definitions = runtime_definitions;
+        return result;
+    }
+    if matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid) {
+        return Err(DiagnosticKind::Script("unsupported operand in exact arithmetic".into()));
+    }
+    let mut values = Vec::new();
+    for reference in &mut line.references {
+        reference.target_line = Some(values.len());
+        values.push(Some(bindings.get(&reference.name).cloned().ok_or_else(|| DiagnosticKind::UnknownName(reference.name.clone()))?));
+    }
+    evaluate_prepared_statement(&line.statement, &line, &values, work)
 }
 
 fn quantity_bindings(
@@ -2983,6 +3065,96 @@ mod tests {
     use crate::calculation_pad::{ProgrammerError, TypedInteger};
     use crate::common::numeric_base::NumericBase;
     use crate::unit_conversion::{Approximation, ConversionError, Unit};
+
+    #[test]
+    fn exact_decimal_fraction_arithmetic_and_canonical_round_trip() {
+        let source = concat!(
+            "a = decimal(\"0.1\") + decimal(\"0.2\")\n",
+            "b = fraction(1,3) + fraction(1,6)\n",
+            "c = b * 3\n",
+            "d = u64(9007199254740993) + fraction(1,2)\n",
+            "a == decimal(\"0.3\")\n",
+            "if(false, fraction(1,0), b)"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(value(&result, 0).formatted_result().as_deref(), Some("0.3"));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("1/2"));
+        assert_eq!(value(&result, 2).formatted_result().as_deref(), Some("3/2"));
+        assert_eq!(value(&result, 3).canonical_result().as_deref(), Some("fraction(18014398509481987,2)"));
+        assert!(matches!(value(&result, 4), CalculationValue::Boolean(true)));
+        let canonical = value(&result, 3).canonical_result().unwrap();
+        let copy = CalculationDocument::new(canonical);
+        assert_eq!(value(&copy.evaluate(), 0), value(&result, 3));
+        assert_eq!(value(&result, 5), value(&result, 1));
+    }
+
+    #[test]
+    fn exact_division_rounding_mixing_and_bounds_are_explicit() {
+        let document = CalculationDocument::new(concat!(
+            "decimal(\"1\") / decimal(\"3\")\n",
+            "decimal_div(decimal(\"1\"), decimal(\"8\"), 2)\n",
+            "decimal_div(decimal(\"-3\"), decimal(\"8\"), 2)\n",
+            "fraction(1,0)\n",
+            "fraction(1,2) + 0.1\n",
+            "decimal(\"1e1001\")\n",
+            "sin(to_float(fraction(1,2)))"
+        ));
+        let result = document.evaluate();
+        assert!(error_message(&result, 0).contains("nonterminating"));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("≈ 0.12"));
+        assert_eq!(value(&result, 2).formatted_result().as_deref(), Some("≈ -0.38"));
+        assert!(error_message(&result, 3).contains("zero"));
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(value(&result, 6).is_approximate());
+    }
+
+    #[test]
+    fn exact_values_work_through_loop_and_compound_assignments() {
+        let document = CalculationDocument::new(concat!(
+            "total = fraction(0,1)\n",
+            "for i in range(1,4):\n",
+            "  total += fraction(1,2)\n",
+            "total"
+        ));
+        let result = document.evaluate();
+        assert_eq!(value(&result, 3).canonical_result().as_deref(), Some("fraction(3,2)"));
+    }
+
+    #[test]
+    fn exact_mixed_operands_and_approximate_comparisons_are_safe() {
+        let document = CalculationDocument::new(concat!(
+            "decimal(\"1\") + true\n",
+            "decimal(\"1\") + sum(range(4))\n",
+            "to_float(fraction(1,2)) == 0.5\n",
+            "fraction(1,2) == to_float(fraction(1,2))"
+        ));
+        let result = document.evaluate();
+        assert!(matches!(result.lines[0].outcome, LineOutcome::Error(_)));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("7"));
+        assert!(matches!(value(&result, 2), CalculationValue::Boolean(true)));
+        assert!(matches!(result.lines[3].outcome, LineOutcome::Error(_)));
+        let mut work = super::script::WorkBudget::default();
+        let bindings = std::collections::HashMap::new();
+        assert!(matches!(
+            super::evaluate_legacy_fragment("sum(range(4))", &bindings, &mut work),
+            Ok(CalculationValue::Scalar(value)) if value == 6.0
+        ));
+        assert!(matches!(
+            super::evaluate_legacy_fragment("true", &bindings, &mut work),
+            Ok(CalculationValue::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn exact_decimal_at_bit_limit_has_parseable_canonical_copy() {
+        let document = CalculationDocument::new("decimal(\"1e617\") * decimal(\"1e616\")");
+        let result = document.evaluate();
+        let canonical = value(&result, 0).canonical_result().unwrap();
+        let copy = CalculationDocument::new(canonical);
+        assert_eq!(value(&copy.evaluate(), 0), value(&result, 0));
+    }
 
     fn value<'a>(
         evaluation: &'a CalculationEvaluation<'_>,

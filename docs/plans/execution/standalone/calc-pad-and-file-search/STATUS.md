@@ -19,9 +19,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M1-A | Verified and pushed | `80d790e5af3eab84b5b2435a6f4385646c1be2cf`. Shared analysis and evaluator routes. 13 focused tests passed. |
 | M1-B | Verified and pushed | `5a724285e402db21411c5cf3454ed9a797e22c61`. Shared editor/observer mapping; focused batches passed 20/20 and 3/3. |
 | M2-A | Verified and pushed | `ffbc28d6a0fc3feecca7ed489846dd9dd177d026`. Versioned options/recovery, evaluation identity and related-reference edit seam. Focused batch passed 20/20. |
-| M2-B | Verified | Manual scheduling, immutable stale results, guarded actions and recovery. Focused batches passed 18/18 and 4/4. |
-| M3-A | In progress | Bounded exact decimal/fraction domain and evaluator integration. |
-| M3-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M2-B | Verified and pushed | `54567303d7ff18aa5ce751a044cf103093b4e30e`. Manual lifecycle, immutable stale results, guarded actions. Focused batches passed 18/18 and 4/4. |
+| M3-A | Verified | Exact arithmetic, bounded size, canonical copy, explicit approximation. Focused batches passed 12/12 and 7/7. |
+| M3-B | In progress | Exact display, observers and reference integration. |
+| M4-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -29,7 +30,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | --- | --- | --- | --- |
 | C20 | Implemented | Focused automated domain/editor checks passed. Native integrated check pending. | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
 | C24 | Implemented | Focused scheduler, persistence and host tests passed. Native integrated check pending. | Session scheduling, worker stamps, persistence/recovery and companion observers |
-| C25 | Pending | Pending | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
+| C25 | Domain implemented; display and observer integration pending | Focused exact/legacy checks passed | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Pending | Pending | Script function catalog and signatures, editor hints, executable examples |
 | C18 | Pending | Pending | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Pending | Pending | Existing loop block parser, transactional execution and editor structure |
@@ -72,3 +73,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Scoped library Nextest passed 18/18 in 2.58 seconds. The correction kept the already-finished but undelivered worker request coalesced and retained the accurate pending companion notice. Its four-test rerun passed in 2.10 seconds.
 - Both batches used a 100-second watchdog. Separate compilation ran 246.89 and 159.13 seconds under the 900-second deadline. Cleanup and output drain passed. Receipts are in `m2b-build`, `m2b-run`, `m2b-correction-build`, and `m2b-correction-run`.
 - Coverage includes six edits and read-only observers producing zero Manual attempts, explicit calculation, immutable stale source, cancel/coalesce/retry generations, Automatic restoration, result navigation, and preservation of Automatic canonical same-frame copy. Native controls and cross-feature behavior remain for integrated acceptance.
+
+### M3-A exact-number domain
+
+- Promoted already-locked numeric crates to direct dependencies. `Cargo.lock` changes only those dependency edges. Exact decimal/fraction arithmetic uses bounded rational operands, opted-in constructors, canonical copy, explicit approximate conversion and shared evaluation work.
+- Scoped library Nextest initially passed 12/12 in 2.57 seconds (separate compile 433.96 seconds). Code inspection found a script-fragment panic path, a decimal canonical length mismatch at the admitted bit limit, and missing approximate scalar comparison. The correction batch passed 6/7; the sole failing assertion used the wrong expected sum for `range(4)`, which is 0 through 3. After correcting the fixture, the focused batch passed 7/7 with exit 0 in 2.37 seconds (final compile 66.84 seconds).
+- Verified bounded process cleanup and drained output. Cached batches used the 100-second deadline and separate compiles used 900 seconds. Receipts are under `m3a-build`, `m3a-run`, `m3a-correction-build`, `m3a-correction-run`, `m3a-final-build`, and `m3a-final-run`.

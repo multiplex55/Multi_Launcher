@@ -7,6 +7,7 @@ mod bit_labels;
 mod comparison;
 mod dependencies;
 mod document;
+mod exact;
 mod examples;
 mod inspector;
 mod integer;
