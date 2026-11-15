@@ -202,6 +202,9 @@ pub fn search_with_everything(
     if request.kind != SearchKind::Filename || !matches!(request.scope, SearchScope::Roots { .. }) {
         return Err("Everything search only supports filename root requests".to_owned());
     }
+    if request.metadata.active() {
+        return Err("Metadata filters require filesystem search; Everything is not queried.".into());
+    }
     let diagnostic = everything_diagnostic(settings);
     let executable = diagnostic.detected_path.ok_or_else(|| {
         let reason = diagnostic.unavailable_reason.unwrap_or_else(|| {
@@ -595,6 +598,16 @@ mod tests {
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
             metadata_preferences: Default::default(), metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn direct_everything_adapter_rejects_metadata_before_executable_lookup() {
+        let mut request = request("needle");
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::Empty);
+        let settings = FileSearchSettings { everything_enabled: true, everything_executable_path: PathBuf::from("missing-es-executable"), ..Default::default() };
+        let (tx, _rx) = mpsc::channel();
+        let error = search_with_everything(request, &settings, &CancellationToken::new(), &tx.into(), SearchId(1)).unwrap_err();
+        assert!(error.contains("filesystem search"), "{error}");
     }
 
     #[test]

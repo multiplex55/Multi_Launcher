@@ -101,6 +101,7 @@ impl FileSearchExecutor {
     pub fn plan_for_request(request: &SearchRequest, settings: &FileSearchSettings) -> BackendPlan {
         let candidates = match (&request.kind, &request.scope) {
             (SearchKind::Content, _) => vec![SearchBackend::Ripgrep, SearchBackend::Native],
+            (SearchKind::Filename, _) if request.metadata.active() => vec![SearchBackend::WalkDir],
             (SearchKind::Filename, SearchScope::Roots { roots })
                 if is_custom_root(roots, settings) =>
             {
@@ -161,6 +162,16 @@ impl SearchExecutor for FileSearchExecutor {
         events: SearchEventSender,
     ) {
         let plan = Self::plan_for_request(&request, &self.settings);
+        if request.kind == SearchKind::Filename && request.metadata.active() && self.settings.everything_enabled
+            && request.filename_match_mode == FilenameMatchMode::RankedSubstring
+            && (request.included_extensions.is_empty() || request.file_type_filter == FileTypeFilter::FilesOnly)
+            && matches!(&request.scope, SearchScope::Roots { roots } if !is_custom_root(roots, &self.settings))
+        {
+            let _ = events.send(SearchEvent::Diagnostic { id, diagnostic: crate::file_search::model::SearchDiagnostic::Warning("Metadata filters use filesystem search instead of the Everything index.".into()) });
+        }
+        if let Some(warning) = &request.metadata.warning {
+            let _ = events.send(SearchEvent::Diagnostic { id, diagnostic: crate::file_search::model::SearchDiagnostic::Warning(warning.clone()) });
+        }
         let mut skipped: Option<(SearchBackend, String)> = None;
         for backend in plan.candidates {
             match self.availability(backend) {
@@ -495,6 +506,24 @@ mod tests {
             SearchCoordinator::select_backend(&req),
             SearchBackend::WalkDir
         );
+    }
+
+    #[test]
+    fn metadata_filtered_global_search_routes_to_filesystem_and_explains_policy() {
+        let settings = FileSearchSettings { everything_enabled: true, ..Default::default() };
+        let mut req = request(SearchKind::Filename, SearchScope::Roots { roots: Vec::new() });
+        req.metadata.size = Some(crate::file_search::predicate::SizePredicate::Empty);
+        assert_eq!(FileSearchExecutor::plan_for_request(&req, &settings).candidates, vec![SearchBackend::WalkDir]);
+        assert_eq!(SearchCoordinator::select_backend(&req), SearchBackend::WalkDir);
+        let walkdir = Arc::new(RecordingExecutor::default());
+        let everything = Arc::new(RecordingExecutor::default());
+        let executor = dispatcher_with_availability(settings, Arc::new(MockAvailability::default()), Arc::new(RecordingExecutor::default()), Arc::new(RecordingExecutor::default()), walkdir.clone(), everything.clone());
+        let (tx, rx) = mpsc::channel();
+        executor.execute(SearchId(99), req, CancellationToken::new(), tx.into());
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(walkdir.calls(), vec![SearchId(99)]);
+        assert!(everything.calls().is_empty());
+        assert!(events.iter().any(|event| matches!(event, SearchEvent::Diagnostic { diagnostic: crate::file_search::model::SearchDiagnostic::Warning(message), .. } if message.contains("filesystem"))));
     }
 
     #[test]

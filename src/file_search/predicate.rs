@@ -146,6 +146,27 @@ impl ResolvedMetadata {
     }
 }
 
+/// Evaluate a filesystem entry with the same frozen predicate on every backend.
+pub(crate) fn metadata_matches(filters: &ResolvedMetadata, metadata: Option<&std::fs::Metadata>) -> Result<bool, MissingMetadata> {
+    if !filters.active() { return Ok(true); }
+    let metadata = metadata.ok_or(if filters.date.is_some() { MissingMetadata::Modified } else { MissingMetadata::Size })?;
+    let kind = if metadata.is_file() { FileKind::File } else if metadata.is_dir() { FileKind::Directory } else { FileKind::Other };
+    filters.matches(kind, metadata.modified().ok(), metadata.is_file().then(|| metadata.len()))
+}
+
+#[cfg(test)]
+mod backend_metadata_tests {
+    use super::*;
+    #[test]
+    fn missing_metadata_is_reported_only_when_required() {
+        assert_eq!(metadata_matches(&ResolvedMetadata::default(), None), Ok(true));
+        let size = ResolvedMetadata { size: Some(SizePredicate::Empty), ..Default::default() };
+        assert_eq!(metadata_matches(&size, None), Err(MissingMetadata::Size));
+        let date = ResolvedMetadata { date: Some(DateWindow { start: SystemTime::UNIX_EPOCH, end: SystemTime::UNIX_EPOCH, end_inclusive: true }), ..Default::default() };
+        assert_eq!(metadata_matches(&date, None), Err(MissingMetadata::Modified));
+    }
+}
+
 /// Convert a decimal amount to whole bytes without floating-point rounding.
 pub fn parse_bytes(text: &str, unit: SizeUnit) -> Result<u64, String> {
     let text = text.trim();

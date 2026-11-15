@@ -66,6 +66,7 @@ pub struct RipgrepSearchSummary {
     pub stderr: String,
     pub global_truncated: bool,
     pub execution_details: Option<BackendExecutionDetails>,
+    pub metadata_unavailable: u64,
 }
 
 fn execute_content_search(
@@ -83,6 +84,7 @@ fn execute_content_search(
         });
     }
     send_bounded_stderr_diagnostic(id, &summary.stderr, events);
+    send_metadata_warning(id, summary.metadata_unavailable, events);
     for result in summary.results {
         if events
             .send(SearchEvent::Result {
@@ -132,6 +134,7 @@ fn execute_filename_search(
         });
     }
     send_bounded_stderr_diagnostic(id, &summary.stderr, events);
+    send_metadata_warning(id, summary.metadata_unavailable, events);
     for result in summary.results {
         if events
             .send(SearchEvent::Result {
@@ -177,6 +180,10 @@ fn send_bounded_stderr_diagnostic(id: SearchId, stderr: &str, events: &SearchEve
     });
 }
 
+fn send_metadata_warning(id: SearchId, count: u64, events: &SearchEventSender) {
+    if count > 0 { let _ = events.send(SearchEvent::Diagnostic { id, diagnostic: SearchDiagnostic::Warning(format!("Metadata unavailable for {count} entries; they were excluded by the active filters.")) }); }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RipgrepFilenameSearchSummary {
     pub results: Vec<FilenameResult>,
@@ -186,6 +193,7 @@ pub struct RipgrepFilenameSearchSummary {
     pub stderr: String,
     pub global_truncated: bool,
     pub execution_details: Option<BackendExecutionDetails>,
+    pub metadata_unavailable: u64,
 }
 
 pub fn search_content_with_ripgrep(
@@ -221,11 +229,13 @@ pub fn search_content_with_ripgrep(
     let stderr = child.stderr.take().expect("stderr piped");
     let stderr_handle = thread::spawn(move || read_bounded_to_string(stderr, STDERR_CAPTURE_LIMIT));
     let per_file_match_limit = per_file_match_limit(&request, settings);
+    let metadata_filter = request.metadata.clone();
     let stdout_handle = thread::spawn(move || {
-        parse_ripgrep_json_reader(
+        parse_ripgrep_json_reader_filtered(
             BufReader::new(stdout),
             per_file_match_limit,
             request.max_results,
+            &metadata_filter,
         )
     });
     let process = wait_for_child(&mut child, cancellation, None);
@@ -429,17 +439,17 @@ pub fn search_filenames_with_ripgrep(
             Ok(line) => {
                 summary.files_scanned = summary.files_scanned.saturating_add(1);
                 if let Some(result) =
-                    filename_result_from_path(&line, &needle, &request, results.len())
+                    filename_result_from_path(&line, &needle, &request, results.len(), &mut summary.metadata_unavailable)
                 {
                     let identity = crate::file_search::model::PathIdentity::from_path(&result.path);
                     if seen.insert(identity) {
-                        results.push(result);
-                        summary.results_found += 1;
                         if results.len() >= request.max_results {
                             summary.global_truncated = true;
                             let _ = stop_tx.send(());
                             break;
                         }
+                        results.push(result);
+                        summary.results_found += 1;
                     }
                 }
             }
@@ -475,19 +485,17 @@ pub fn search_filenames_with_ripgrep(
         fallback_reason: None,
         cancelled: summary.cancelled,
     });
-    if !summary.cancelled
+    if !summary.cancelled && !summary.global_truncated
         && let Some(status) = process.status
     {
         handle_exit_status(status, &executable, &stderr)?;
     }
     while let Ok(line) = line_rx.try_recv() {
-        if results.len() >= request.max_results {
-            break;
-        }
         summary.files_scanned = summary.files_scanned.saturating_add(1);
-        if let Some(result) = filename_result_from_path(&line, &needle, &request, results.len()) {
+        if let Some(result) = filename_result_from_path(&line, &needle, &request, results.len(), &mut summary.metadata_unavailable) {
             let identity = crate::file_search::model::PathIdentity::from_path(&result.path);
             if seen.insert(identity) {
+                if results.len() >= request.max_results { summary.global_truncated = true; break; }
                 results.push(result);
                 summary.results_found += 1;
             }
@@ -625,12 +633,10 @@ fn filename_result_from_path(
     needle: &str,
     request: &SearchRequest,
     arrival_index: usize,
+    metadata_unavailable: &mut u64,
 ) -> Option<FilenameResult> {
     let path = PathBuf::from(line);
     let metadata = path.metadata().ok();
-    if !matches_file_type_filter(metadata.as_ref(), request.file_type_filter) {
-        return None;
-    }
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -642,6 +648,12 @@ fn filename_result_from_path(
         request.case_sensitive,
         request.filename_match_mode,
     )?;
+    match crate::file_search::predicate::metadata_matches(&request.metadata, metadata.as_ref()) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(_) => { *metadata_unavailable = metadata_unavailable.saturating_add(1); return None; }
+    }
+    if !matches_file_type_filter(metadata.as_ref(), request.file_type_filter) { return None; }
     let rank = highlight.rank;
     Some(FilenameResult {
         path: path.clone(),
@@ -741,10 +753,20 @@ fn parse_ripgrep_json_reader<R: Read>(
     max_matches_per_file: usize,
     max_result_files: usize,
 ) -> Result<RipgrepSearchSummary, FileSearchError> {
-    let mut current: Option<(PathBuf, ContentFileResultBuilder)> = None;
+    parse_ripgrep_json_reader_filtered(reader, max_matches_per_file, max_result_files, &Default::default())
+}
+
+fn parse_ripgrep_json_reader_filtered<R: Read>(
+    reader: R,
+    max_matches_per_file: usize,
+    max_result_files: usize,
+    metadata_filter: &crate::file_search::predicate::ResolvedMetadata,
+) -> Result<RipgrepSearchSummary, FileSearchError> {
+    let mut current: Option<(PathBuf, Option<ContentFileResultBuilder>, bool)> = None;
     let mut results = Vec::new();
     let mut files_scanned = 0_u64;
     let mut global_truncated = false;
+    let mut metadata_unavailable = 0_u64;
     for line in BufReader::new(reader).lines() {
         let line = line.map_err(|error| FileSearchError::ProcessOutputParseFailure {
             backend: "ripgrep".to_owned(),
@@ -762,18 +784,8 @@ fn parse_ripgrep_json_reader<R: Read>(
         match value.get("type").and_then(Value::as_str) {
             Some("begin") => {
                 if let Some(path) = event_path(&value) {
-                    if let Some((_path, builder)) = current.take() {
-                        push_content_result(
-                            builder,
-                            &mut results,
-                            max_result_files,
-                            &mut global_truncated,
-                        );
-                    }
-                    current = Some((
-                        path.clone(),
-                        ContentFileResultBuilder::new(path, max_matches_per_file),
-                    ));
+                    flush_content_group(current.take(), &mut results, max_result_files, &mut global_truncated);
+                    current = Some((path, None, false));
                 }
             }
             Some("match") => {
@@ -783,33 +795,25 @@ fn parse_ripgrep_json_reader<R: Read>(
                         message: "match event missing path text".to_owned(),
                     }
                 })?;
-                if current.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
-                    if let Some((_path, builder)) = current.take() {
-                        push_content_result(
-                            builder,
-                            &mut results,
-                            max_result_files,
-                            &mut global_truncated,
-                        );
-                    }
-                    current = Some((
-                        path.clone(),
-                        ContentFileResultBuilder::new(path.clone(), max_matches_per_file),
-                    ));
+                if current.as_ref().map(|(p, _, _)| p != &path).unwrap_or(true) {
+                    flush_content_group(current.take(), &mut results, max_result_files, &mut global_truncated);
+                    current = Some((path.clone(), None, false));
                 }
-                if let Some((_path, builder)) = current.as_mut() {
-                    parse_match_event_into_builder(&value, builder)?;
+                if let Some((path, builder, accepted)) = current.as_mut() {
+                    if builder.is_none() {
+                        let metadata = path.metadata().ok();
+                        *accepted = match crate::file_search::predicate::metadata_matches(metadata_filter, metadata.as_ref()) {
+                            Ok(value) => value,
+                            Err(_) => { metadata_unavailable = metadata_unavailable.saturating_add(1); false }
+                        };
+                        let modified = metadata.as_ref().and_then(|metadata| metadata.modified().ok());
+                        *builder = Some(ContentFileResultBuilder::with_modified(path.clone(), if *accepted { max_matches_per_file } else { 0 }, modified));
+                    }
+                    if let Some(builder) = builder.as_mut() { parse_match_event_into_builder(&value, builder)?; }
                 }
             }
             Some("end") => {
-                if let Some((_path, builder)) = current.take() {
-                    push_content_result(
-                        builder,
-                        &mut results,
-                        max_result_files,
-                        &mut global_truncated,
-                    );
-                }
+                flush_content_group(current.take(), &mut results, max_result_files, &mut global_truncated);
             }
             Some("summary") => {
                 if let Some(searched) = value
@@ -823,14 +827,7 @@ fn parse_ripgrep_json_reader<R: Read>(
             _ => {}
         }
     }
-    if let Some((_path, builder)) = current.take() {
-        push_content_result(
-            builder,
-            &mut results,
-            max_result_files,
-            &mut global_truncated,
-        );
-    }
+    flush_content_group(current.take(), &mut results, max_result_files, &mut global_truncated);
     Ok(RipgrepSearchSummary {
         results_found: results.len(),
         files_scanned,
@@ -839,15 +836,17 @@ fn parse_ripgrep_json_reader<R: Read>(
         stderr: String::new(),
         global_truncated,
         execution_details: None,
+        metadata_unavailable,
     })
 }
 
-fn push_content_result(
-    builder: ContentFileResultBuilder,
+fn flush_content_group(
+    group: Option<(PathBuf, Option<ContentFileResultBuilder>, bool)>,
     results: &mut Vec<ContentFileResult>,
     max_result_files: usize,
     global_truncated: &mut bool,
 ) {
+    let Some((_, Some(builder), true)) = group else { return; };
     let result = builder.finish();
     if result.total_matches == 0 {
         return;
@@ -1063,6 +1062,29 @@ mod tests {
         let summary = parse_ripgrep_json(json, 25).unwrap();
         assert_eq!(summary.results.len(), 1);
         assert_eq!(summary.results[0].matches.len(), 1);
+    }
+
+    #[test]
+    fn metadata_filtered_stream_counts_only_accepted_matching_files() {
+        use crate::file_search::predicate::{ResolvedMetadata, SizePredicate};
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.txt"); let large = dir.path().join("large.txt");
+        std::fs::write(&small, "hit").unwrap(); std::fs::write(&large, "hit more").unwrap();
+        let mut events = Vec::new();
+        for path in [&small, &large] {
+            let text = path.to_string_lossy();
+            events.push(serde_json::json!({"type":"begin","data":{"path":{"text":text}}}).to_string());
+            events.push(serde_json::json!({"type":"match","data":{"path":{"text":text},"lines":{"text":"hit\n"},"line_number":1,"submatches":[{"start":0,"end":3}]}}).to_string());
+            events.push(serde_json::json!({"type":"end","data":{"path":{"text":text}}}).to_string());
+        }
+        let filter = ResolvedMetadata { size: Some(SizePredicate::LargerThan(3)), ..Default::default() };
+        let summary = parse_ripgrep_json_reader_filtered(events.join("\n").as_bytes(), 25, 1, &filter).unwrap();
+        assert_eq!(summary.results.len(), 1);
+        assert_eq!(summary.results[0].path, large);
+        assert!(!summary.global_truncated);
+        std::fs::remove_file(&small).unwrap();
+        let summary = parse_ripgrep_json_reader_filtered(events.join("\n").as_bytes(), 25, 1, &filter).unwrap();
+        assert_eq!(summary.metadata_unavailable, 1);
     }
 
     #[test]

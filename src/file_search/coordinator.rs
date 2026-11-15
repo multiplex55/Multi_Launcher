@@ -346,6 +346,7 @@ impl SearchCoordinator {
                 .unwrap_or(SearchBackend::WalkDir)
         } else {
             match (&request.kind, &request.scope) {
+                (SearchKind::Filename, _) if request.metadata.active() => SearchBackend::WalkDir,
                 (SearchKind::Filename, SearchScope::Roots { .. })
                     if request.filename_match_mode
                         != crate::file_search::model::FilenameMatchMode::RankedSubstring =>

@@ -60,6 +60,30 @@ fn filenames(request: SearchRequest, settings: &FileSearchSettings) -> (Vec<Stri
 }
 
 #[test]
+fn metadata_filtered_explicit_files_preserve_the_eligible_cap_slot() {
+    use multi_launcher::file_search::predicate::SizePredicate;
+    let directory = tempfile::tempdir().unwrap();
+    let rejected = directory.path().join("needle-small.txt");
+    let accepted = directory.path().join("needle-large.txt");
+    write(&rejected, "hit"); write(&accepted, "hit more");
+    let mut filename = req(SearchKind::Filename, vec![], "needle");
+    filename.scope = SearchScope::Files { files: vec![rejected.clone(), accepted.clone()] };
+    filename.max_results = 1;
+    filename.metadata.size = Some(SizePredicate::LargerThan(3));
+    let (names, errors) = filenames(filename, &FileSearchSettings::default());
+    assert!(errors.is_empty());
+    assert_eq!(names, vec!["needle-large.txt"]);
+    let mut content = req(SearchKind::Content, vec![], "hit");
+    content.scope = SearchScope::Files { files: vec![rejected, accepted.clone()] };
+    content.max_results = 1;
+    content.metadata.size = Some(SizePredicate::LargerThan(3));
+    let summary = search_content_native_summary(content, &FileSearchSettings::default(), &CancellationToken::new()).unwrap();
+    assert_eq!(summary.results.len(), 1);
+    assert_eq!(summary.results[0].path, accepted);
+    assert!(!summary.global_truncated);
+}
+
+#[test]
 fn global_roots_resolve_and_search_only_configured_roots() {
     let d = tempfile::tempdir().unwrap();
     let configured = d.path().join("configured");

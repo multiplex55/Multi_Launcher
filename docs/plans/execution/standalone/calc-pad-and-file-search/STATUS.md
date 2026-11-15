@@ -38,9 +38,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M10-B | Verified and pushed | `64cf01ae222c1fd2e03d0ae9952f2aa58c1eaa93`. Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
 | M11-A | Verified and pushed | `349088413ef4d38d45099273a4e521b72645fcbc`. Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5, and the PNG was inspected. |
 | M11-B | Verified and pushed | `eb7c6fdb1f3a2251ac9b84f52d9d8e31dae68025`. Dockable Charts companion, persisted definition and guarded image copy. Final batch passed 12/12. |
-| M12-A | Verified | Typed date/size predicates, frozen request and semantic dirty state. Focused batches passed 35/35 and 6/6; domain target checked. |
-| M12-B | In progress | Pre-cap backend filtering, fallback policy and metadata diagnostics. |
-| M12-C through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M12-A | Verified and pushed | `4b8b52bedd0711ca904071190fa057d74d17ec69`. Typed predicates and frozen criteria. Focused batches passed 35/35 and 6/6, and the domain target compiled. |
+| M12-B | Verified | Pre-cap backend filtering, filesystem policy and metadata diagnostics. Focused and domain checks passed. |
+| M12-C | In progress | Date/size filter controls, persistence and help. |
+| M13-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -58,7 +59,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
 | C4 | Implemented | Focused XP, sample, worker, panel, exact exports, stale actions, persistence and rename history passed. Native integrated check pending. | Session-owned bounded worker and retained Config Menu actions |
 | C5 | Implemented | Focused chart model, raster, clipboard, ownership and persistence tests passed. Chart-only PNG inspected. Native integrated check pending. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
-| F3 | Typed criteria implemented; backend and filter UI in progress | Focused date, size, preferences and paging tests passed. Domain target compiled. Native integrated check pending. | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and domain cases |
+| F3 | Predicates and backends implemented; filter UI in progress | Focused date/size, backend-before-cap, diagnostics and nine domain cases passed. Native integrated check pending. | Semantic preferences, frozen request, backend routing, dialog filters |
 
 ## Verification evidence
 
@@ -204,3 +205,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Decimal byte boundaries use checked integer arithmetic through `u64::MAX`. Equivalent authored units compare by their effective bytes, while stored text and preferences remain available for editing. Size filtering effectively searches files, and the independent content-reading cap yields explicit impossible or partial-intersection feedback.
 - Same-result content drill-down preserves the frozen metadata window while retaining the ordinary form criterion baseline. Dirty-state checks use semantic settings without a clock.
 - Initial library Nextest passed 35/35. The final narrower semantic/window selection passed 6/6 in 2.25 seconds owned elapsed after a 178.06-second separate compile. `cargo check -p multi_launcher --test domain --profile fast-dev --locked` passed in 148.76 seconds. All cached runs met 100 seconds, compiles met 900 seconds, and cleanup/output drain passed. Receipts: `m12a-*`, `m12a-final-*`, and `m12a-domain-check`.
+
+### M12-B File Search result admission
+
+- Apply one frozen metadata predicate before accepted filename/content result accounting in WalkDir, native content and both ripgrep paths. The streaming content parser decides eligibility on a group's first match and retains bounded parse/error behavior. Explicit-file scopes keep their stable cap slots. Date-rejected directories still allow eligible descendants.
+- Required metadata missing from otherwise eligible candidates produces bounded aggregate diagnostics. Metadata requests that would use the Everything index run through WalkDir and surface the filesystem policy. The direct Everything adapter rejects filtered requests before executable discovery. Unfiltered indexed plans retain their established route.
+- Initial scoped library Nextest passed 94/95. The failing Windows fixture compared a canonical result path with the uncanonicalized fixture path. The final affected selection passed 5/5 in 2.27 seconds owned elapsed after a 191.47-second separate compile. The real `domain` target filtered to `file_search_e2e` passed 9/9 in 2.31 seconds owned elapsed after its 302.26-second compile. Cached checks met 100 seconds, compiles met 900 seconds; cleanup and output drain passed. Receipts: `m12b-lib-*`, `m12b-final-lib-*`, and `m12b-domain-*`.
