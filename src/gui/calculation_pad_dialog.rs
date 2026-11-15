@@ -136,6 +136,8 @@ struct PadView {
     watches: Vec<String>,
     watch_entry: String,
     config_editor: Option<InputConfigDraft>,
+    sensitivity: Option<crate::calculation_pad::SensitivitySettings>,
+    sensitivity_output: String,
 }
 #[derive(Clone, PartialEq)]
 struct InputConfigDraft {
@@ -405,6 +407,7 @@ struct HostEffects {
     pad_view: Option<PadView>,
     input_commit: Option<InputCommit>,
     input_config_commit: Option<InputConfigDraft>,
+    sensitivity_action: Option<SensitivityAction>,
     watch_copy: Option<(String, bool)>,
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
     evaluation_basis: Option<crate::calculation_pad::EvaluationBasis>,
@@ -451,6 +454,12 @@ struct HostEffects {
     focus_viewport: bool,
     embedded_root_layer: Option<egui::LayerId>,
     embedded_root_focused_id: Option<egui::Id>,
+}
+
+enum SensitivityAction {
+    Generate(crate::calculation_pad::SensitivitySettings),
+    Cancel(crate::calculation_pad::SensitivityBasis),
+    Copy(crate::calculation_pad::SensitivityBasis, crate::calculation_pad::TableExport),
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -541,6 +550,7 @@ impl CalculationPadDialog {
             pad_view: None,
             input_commit: None,
             input_config_commit: None,
+            sensitivity_action: None,
             watch_copy: None,
             document_basis: self
                 .session
@@ -1746,6 +1756,7 @@ impl CalculationPadDialog {
                 id: input.id, name: input.name.clone(), unavailable: input.unavailable, config: input.config.clone(),
             }).collect(),
             watches: self.pad_view.watches.clone(),
+            sensitivity: self.pad_view.sensitivity.clone(),
         };
         if let Err(message) = self.session.set_view_metadata(view) { self.error = Some(message.into()); }
     }
@@ -1789,12 +1800,13 @@ impl CalculationPadDialog {
     fn refresh_related_view(&mut self) {
         let metadata = self.session.view_metadata().cloned().unwrap_or_default();
         let same = self.pad_view.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable, &input.config)).eq(metadata.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable, &input.config)))
-            && self.pad_view.watches == metadata.watches;
+            && self.pad_view.watches == metadata.watches && self.pad_view.sensitivity == metadata.sensitivity;
         if same { return; }
         self.pad_view.inputs = metadata.inputs.into_iter().map(|input| InputSelection {
             id: input.id, name: input.name, unavailable: input.unavailable, config: input.config, draft: None,
         }).collect();
         self.pad_view.watches = metadata.watches;
+        self.pad_view.sensitivity = metadata.sensitivity;
     }
 
     fn restore_view_from_session(&mut self) {
@@ -1804,6 +1816,7 @@ impl CalculationPadDialog {
                 id: input.id, name: input.name, unavailable: input.unavailable, config: input.config, draft: None,
             }).collect(),
             watches: metadata.watches,
+            sensitivity: metadata.sensitivity,
             ..PadView::default()
         };
     }
@@ -1917,6 +1930,7 @@ impl CalculationPadDialog {
                 });
                 #[cfg(test)]
                 self.test_config_groups.push(("Tools", _tools.response.rect));
+                self.sensitivity_ui(ui, source, view, effects);
 
                 ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
                     ui.menu_button("View", |ui| {
@@ -2270,6 +2284,87 @@ impl CalculationPadDialog {
         }
     }
 
+    fn sensitivity_ui(&self, ui: &mut egui::Ui, source: &str, view: &mut PadView, effects: &mut HostEffects) {
+        let ids = self.session.line_ids().unwrap_or_default();
+        egui::CollapsingHeader::new("Sensitivity Tables").id_salt("pad-sensitivity").default_open(false).show(ui, |ui| {
+                let inputs = crate::calculation_pad::literal_inputs(source);
+                if view.sensitivity.is_some() && ui.button("Remove table definition").clicked() { view.sensitivity = None; }
+                if view.sensitivity.is_none() && ui.button("Create table definition").clicked()
+                    && let Some(input) = inputs.first() && let Some(&id) = ids.get(input.line)
+                {
+                    view.sensitivity = Some(crate::calculation_pad::SensitivitySettings {
+                        input_name: input.name.clone(), definition: crate::calculation_pad::SensitivityDefinition { input: id, start: input.value.clone(), end: input.value.clone(), sampling: crate::calculation_pad::Sampling::Count(5), outputs: view.watches.iter().take(8).cloned().collect() },
+                    });
+                }
+                let Some(settings) = view.sensitivity.as_mut() else { ui.label("Choose an eligible literal input to begin."); return; };
+                let selected = inputs.iter().find(|input| ids.get(input.line) == Some(&settings.definition.input) && input.name == settings.input_name);
+                egui::ComboBox::from_id_salt("sensitivity-input").selected_text(selected.map_or("Input unavailable".to_owned(), |input| format!("{} · line {}", input.name, input.line + 1))).show_ui(ui, |ui| {
+                    for input in &inputs { if let Some(&id) = ids.get(input.line)
+                        && ui.selectable_label(settings.definition.input == id && settings.input_name == input.name, format!("{} · line {}", input.name, input.line + 1)).clicked() {
+                        settings.definition.input = id; settings.input_name = input.name.clone();
+                    } }
+                });
+                if selected.is_none() { ui.colored_label(ui.visuals().warn_fg_color, "The selected input changed or is unavailable; choose it again."); }
+                ui.horizontal(|ui| {
+                    ui.label("Start"); ui.add(egui::TextEdit::singleline(&mut settings.definition.start).desired_width(90.0).char_limit(257));
+                    ui.label("End"); ui.add(egui::TextEdit::singleline(&mut settings.definition.end).desired_width(90.0).char_limit(257));
+                });
+                ui.horizontal(|ui| {
+                    let count_mode = matches!(&settings.definition.sampling, crate::calculation_pad::Sampling::Count(_));
+                    if ui.selectable_label(!count_mode, "Step").clicked() && count_mode { settings.definition.sampling = crate::calculation_pad::Sampling::Step("1".into()); }
+                    if ui.selectable_label(count_mode, "Sample count").clicked() && !count_mode { settings.definition.sampling = crate::calculation_pad::Sampling::Count(5); }
+                    match &mut settings.definition.sampling {
+                        crate::calculation_pad::Sampling::Step(step) => { ui.add(egui::TextEdit::singleline(step).desired_width(90.0).char_limit(257)); }
+                        crate::calculation_pad::Sampling::Count(count) => { ui.add(egui::DragValue::new(count).range(1..=1000)); }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Outputs:");
+                    let mut remove = None;
+                    for (index, name) in settings.definition.outputs.iter().enumerate() { if ui.small_button(format!("{name} ×")).clicked() { remove = Some(index); } }
+                    if let Some(index) = remove { settings.definition.outputs.remove(index); }
+                    ui.add(egui::TextEdit::singleline(&mut view.sensitivity_output).desired_width(90.0).hint_text("name"));
+                    if ui.button("Add").clicked() && settings.definition.outputs.len() < 8
+                        && let Some(name) = crate::calculation_pad::watch_name(&view.sensitivity_output)
+                        && !settings.definition.outputs.contains(&name) { settings.definition.outputs.push(name); view.sensitivity_output.clear(); }
+                });
+                ui.menu_button("Choose watched outputs", |ui| {
+                    for name in &view.watches {
+                        let mut checked = settings.definition.outputs.contains(name);
+                        if ui.checkbox(&mut checked, name).changed() {
+                            if checked && settings.definition.outputs.len() < 8 { settings.definition.outputs.push(name.clone()); }
+                            else if !checked { settings.definition.outputs.retain(|output| output != name); }
+                        }
+                    }
+                });
+                let current = self.session.sensitivity_table().filter(|table| table.basis.definition == settings.definition && table.basis.input_name == settings.input_name);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(selected.is_some(), egui::Button::new("Generate")).clicked() { effects.sensitivity_action = Some(SensitivityAction::Generate(settings.clone())); }
+                    if let Some(basis) = self.session.active_sensitivity_basis() && matches!(self.session.sensitivity_status(), crate::calculation_pad::SensitivityStatus::Pending { .. })
+                        && ui.button("Cancel").clicked() { effects.sensitivity_action = Some(SensitivityAction::Cancel(basis)); }
+                    for (label, format) in [("Copy Table", crate::calculation_pad::TableExport::Table), ("Copy CSV", crate::calculation_pad::TableExport::Csv), ("Copy Markdown", crate::calculation_pad::TableExport::Markdown)] {
+                        if ui.add_enabled(current.is_some(), egui::Button::new(label)).clicked() && let Some(table) = &current { effects.sensitivity_action = Some(SensitivityAction::Copy(table.basis.clone(), format)); }
+                    }
+                });
+                match self.session.sensitivity_status() {
+                    crate::calculation_pad::SensitivityStatus::Pending { completed, total } => { ui.label(format!("Calculating {completed} / {total}")); }
+                    crate::calculation_pad::SensitivityStatus::Failed(error) => { ui.colored_label(ui.visuals().error_fg_color, error); }
+                    crate::calculation_pad::SensitivityStatus::Canceled => { ui.label("Canceled; no complete table was published."); }
+                    crate::calculation_pad::SensitivityStatus::Outdated => { ui.label("Table is outdated; generate again to copy."); }
+                    _ => {}
+                }
+                if let Some(table) = current {
+                    ui.strong(crate::calculation_pad::table_header(&table).join("  |  "));
+                    egui::ScrollArea::vertical().max_height(180.0).id_salt("sensitivity-results").show_rows(ui, 22.0, table.rows.len(), |ui, rows| {
+                        for row in &table.rows[rows] {
+                            let text = crate::calculation_pad::table_row(row).join("  |  ");
+                            ui.add(egui::Label::new(&text).truncate()).on_hover_text(text);
+                        }
+                    });
+                } else { ui.weak("Copy is available for a current completed table."); }
+            });
+    }
+
     fn draw_host_contents(
         &mut self,
         ui: &mut egui::Ui,
@@ -2285,6 +2380,7 @@ impl CalculationPadDialog {
             repaint.request_repaint_of(egui::ViewportId::ROOT);
             repaint.request_repaint_of(pad_viewport_id());
         });
+        self.session.poll_sensitivity();
         if self.dependency_navigation.is_some_and(|pending| {
             let nav = pending.navigation;
             pending.host != self.host_identity()
@@ -2738,6 +2834,7 @@ impl CalculationPadDialog {
             host.editor_primary_caret = None;
             host.rename_action = None;
             host.rename_context_caret = None;
+            host.sensitivity_action = None;
             host.result_scroll = None;
         }
 
@@ -2818,6 +2915,7 @@ impl CalculationPadDialog {
             || host.editor_primary_caret.is_some()
             || host.rename_action.is_some()
             || host.rename_context_caret.is_some()
+            || host.sensitivity_action.is_some()
             || host.input_config_commit.is_some()
             || host.result_scroll.is_some()
             || host.close_requested
@@ -2930,8 +3028,39 @@ impl CalculationPadDialog {
         if accepted_source_or_history {
             self.reconcile_input_selections(old_source.as_deref(), old_ids.as_deref(), accepted_input_commit);
         }
+        if self.session.view_metadata().is_some_and(|view| view.sensitivity != self.pad_view.sensitivity) {
+            self.session.invalidate_sensitivity();
+        }
         if current_basis.is_some() && host.document_basis == current_basis && self.session.pending_transition().is_none() {
             self.persist_view_state_in_session();
+        }
+        if !accepted_source_or_history && !host.close_requested && !host.native_close_requested
+            && host.intent.is_none() && host.host_request.is_none()
+            && host.calculation_policy.is_none() && host.document_profile.is_none()
+            && host.document_basis == current_basis && host.evaluation_basis == self.session.evaluation_basis()
+            && self.session.pending_transition().is_none()
+            && let Some(action) = host.sensitivity_action.take()
+        {
+            let saved = self.session.view_metadata().and_then(|view| view.sensitivity.clone());
+            match action {
+                SensitivityAction::Generate(settings) if saved.as_ref() == Some(&settings) => {
+                    let source = self.session.source().unwrap_or_default();
+                    let ids = self.session.line_ids().unwrap_or_default();
+                    let valid = crate::calculation_pad::literal_inputs(source).iter().any(|input| ids.get(input.line) == Some(&settings.definition.input) && input.name == settings.input_name);
+                    if valid {
+                        if let Err(error) = self.session.request_sensitivity(settings.definition) { self.error = Some(error); }
+                    } else { self.error = Some("The selected sensitivity input changed; choose it again.".into()); }
+                }
+                SensitivityAction::Cancel(basis) => { self.session.cancel_sensitivity(&basis); }
+                SensitivityAction::Copy(basis, format) => {
+                    if saved.as_ref().is_some_and(|settings| settings.definition == basis.definition && settings.input_name == basis.input_name)
+                        && let Some(table) = self.session.sensitivity_table().filter(|table| table.basis == basis) {
+                        delivered.push(CalculationPadDialogEffect::CopyText(crate::calculation_pad::export_table(&table, format)));
+                    }
+                }
+                _ => {}
+            }
+            ctx.request_repaint_of(host.viewport_id);
         }
         if accepted_source_or_history {
             self.source_highlight = None;
@@ -5849,6 +5978,42 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().to_path_buf());
         let dialog = CalculationPadDialog::new(&root);
         (directory, root, dialog)
+    }
+
+    #[test]
+    fn sensitivity_retained_generate_copy_and_stale_guards_in_manual_mode() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        dialog.session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        dialog.open();
+        dialog.session.set_document_options(crate::calculation_pad::DocumentOptions { calculation: crate::calculation_pad::CalculationPolicy::Manual, profile: crate::calculation_pad::DocumentProfile::Standard }).unwrap();
+        dialog.test_replace_source("x = 1\ny = x + 1");
+        let source = dialog.test_source().unwrap().to_owned();
+        let settings = crate::calculation_pad::SensitivitySettings { input_name: "x".into(), definition: crate::calculation_pad::SensitivityDefinition { input: dialog.session.line_id(0).unwrap(), start: "1".into(), end: "3".into(), sampling: crate::calculation_pad::Sampling::Count(3), outputs: vec!["y".into()] } };
+        let mut view = dialog.pad_view.clone();
+        view.sensitivity = Some(settings.clone());
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true; host.pad_view = Some(view); host.sensitivity_action = Some(super::SensitivityAction::Generate(settings));
+        complete_host_effects(&mut dialog, &ctx, host);
+        for _ in 0..20 {
+            let _ = wake_rx.recv_timeout(std::time::Duration::from_secs(5));
+            dialog.session.poll_sensitivity();
+            if dialog.session.sensitivity_table().is_some() { break; }
+        }
+        let table = dialog.session.sensitivity_table().unwrap();
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(dialog.test_source(), Some(source.as_str()));
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::NotCalculated);
+        let mut copy = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        copy.pass_accepted = true;
+        copy.sensitivity_action = Some(super::SensitivityAction::Copy(table.basis.clone(), crate::calculation_pad::TableExport::Csv));
+        assert!(complete_host_effects(&mut dialog, &ctx, copy).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(text) if text.contains("x,y"))));
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true;
+        stale.sensitivity_action = Some(super::SensitivityAction::Copy(table.basis.clone(), crate::calculation_pad::TableExport::Csv));
+        dialog.test_replace_source("x = 2\ny = x + 1");
+        assert!(!complete_host_effects(&mut dialog, &ctx, stale).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(_))));
     }
 
     #[test]

@@ -60,9 +60,10 @@ pub use document::CalculationSequence;
 pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, editor_control_keyword, editor_function_scope, function_signature_help, FUNCTIONS};
 pub(crate) use document::rename::{RenamePlan, RenameScope};
 
-pub(crate) use persistence::{PadViewMetadata, PadInputReference};
+pub(crate) use persistence::{PadViewMetadata, PadInputReference, SensitivitySettings};
 pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
 pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
+pub(crate) use sensitivity::{TableExport, export_table, table_header, table_row};
 pub(crate) use input::{step_value, slider_values, exact_grid, exact_grid_value, project as project_input};
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, CalculationPolicy, DocumentOptions, DocumentProfile, DocumentId, LineId,

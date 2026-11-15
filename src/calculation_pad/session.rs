@@ -213,6 +213,8 @@ struct HistoryEntry {
     after: EditableState,
     related: RelatedReferenceEdits,
     watches: Vec<WatchReplay>,
+    sensitivity_input_live: bool,
+    sensitivity_outputs: Vec<WatchReplay>,
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +224,8 @@ struct WatchReplay { id: Option<u64> }
 pub(crate) struct RelatedReferenceEdits {
     pub inputs: Vec<RelatedInputRename>,
     pub watches: Vec<RelatedWatchRename>,
+    pub sensitivity_input: Option<RelatedInputRename>,
+    pub sensitivity_outputs: Vec<RelatedWatchRename>,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +245,8 @@ impl RelatedReferenceEdits {
     fn byte_size(&self) -> usize {
         self.inputs.iter().map(|item| std::mem::size_of::<LineId>() + item.before.len() + item.after.len())
             .chain(self.watches.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.sensitivity_input.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .fold(0usize, usize::saturating_add)
     }
 
@@ -271,44 +277,61 @@ impl RelatedReferenceEdits {
                 watch.clone_from(if reverse { &item.before } else { &item.after });
             }
         }
+        if let Some(settings) = result.sensitivity.as_mut() {
+            if let Some(item) = &self.sensitivity_input {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if settings.definition.input == item.id && settings.input_name == *from { settings.input_name.clone_from(to); }
+            }
+            for item in &self.sensitivity_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if !settings.definition.outputs.contains(to)
+                    && let Some(output) = settings.definition.outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
+            }
+        }
         super::persistence::validate_view_metadata(&result)?;
         Ok(result)
     }
 }
 
 impl HistoryEntry {
-    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>), &'static str> {
-        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new() };
+    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new() };
         let mut result = inputs.apply(view, reverse, false)?;
+        let mut sensitivity_ids = sensitivity_ids.to_vec();
+        let mut sensitivity_hidden = sensitivity_hidden.clone();
+        if let Some(settings) = result.sensitivity.as_mut() {
+            replay_names(&mut settings.definition.outputs, &mut sensitivity_ids, &mut sensitivity_hidden, &self.related.sensitivity_outputs, &mut self.sensitivity_outputs, 8, reverse);
+        } else { self.sensitivity_input_live = false; for state in &mut self.sensitivity_outputs { state.id = None; } }
         let mut ids = ids.to_vec();
         let mut hidden = hidden.clone();
-        for (edit, state) in self.related.watches.iter().zip(&mut self.watches) {
+        replay_names(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse);
+        super::persistence::validate_view_metadata(&result)?;
+        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden))
+    }
+
+    fn byte_size(&self) -> usize {
+        self.before.byte_size().saturating_add(self.after.byte_size()).saturating_add(self.related.byte_size())
+            .saturating_add((self.watches.len() + self.sensitivity_outputs.len()).saturating_mul(std::mem::size_of::<WatchReplay>()))
+    }
+}
+
+fn replay_names(names: &mut Vec<String>, ids: &mut Vec<u64>, hidden: &mut HashSet<u64>, edits: &[RelatedWatchRename], states: &mut [WatchReplay], cap: usize, reverse: bool) {
+        for (edit, state) in edits.iter().zip(states) {
             let Some(id) = state.id else { continue; };
             let to = if reverse { &edit.before } else { &edit.after };
             if !hidden.contains(&id) {
                 let Some(index) = ids.iter().position(|candidate| *candidate == id) else { state.id = None; continue; };
-                if result.watches.contains(to) {
-                    result.watches.remove(index);
+                if names.contains(to) {
+                    names.remove(index);
                     ids.remove(index);
                     hidden.insert(id);
-                } else { result.watches[index].clone_from(to); }
-            } else if !result.watches.contains(to) && result.watches.len() < super::persistence::MAX_WATCHES {
-                result.watches.push(to.clone());
+                } else { names[index].clone_from(to); }
+            } else if !names.contains(to) && names.len() < cap {
+                names.push(to.clone());
                 ids.push(id);
                 hidden.remove(&id);
             }
         }
-        super::persistence::validate_view_metadata(&result)?;
-        Ok((result, ids, hidden))
-    }
-
-    fn byte_size(&self) -> usize {
-        self.before
-            .byte_size()
-            .saturating_add(self.after.byte_size())
-            .saturating_add(self.related.byte_size())
-            .saturating_add(self.watches.len().saturating_mul(std::mem::size_of::<WatchReplay>()))
-    }
 }
 
 #[derive(Default)]
@@ -318,13 +341,15 @@ struct EditHistory {
 }
 
 impl EditHistory {
-    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>) {
+    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>, sensitivity_ids: Vec<Option<u64>>) {
         if before == after {
             return;
         }
         self.redo.clear();
         let watches = watch_ids.into_iter().map(|id| WatchReplay { id }).collect();
-        self.undo.push_back(HistoryEntry { before, after, related, watches });
+        let sensitivity_input_live = related.sensitivity_input.is_some();
+        let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id }).collect();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs });
         self.trim();
     }
 
@@ -377,6 +402,9 @@ struct ActiveDocument {
     watch_ids: Vec<u64>,
     hidden_watch_ids: HashSet<u64>,
     next_watch_id: u64,
+    sensitivity_output_ids: Vec<u64>,
+    hidden_sensitivity_output_ids: HashSet<u64>,
+    next_sensitivity_output_id: u64,
     options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
@@ -403,6 +431,9 @@ impl ActiveDocument {
             watch_ids: Vec::new(),
             hidden_watch_ids: HashSet::new(),
             next_watch_id: 1,
+            sensitivity_output_ids: Vec::new(),
+            hidden_sensitivity_output_ids: HashSet::new(),
+            next_sensitivity_output_id: 1,
             options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
@@ -445,6 +476,9 @@ impl ActiveDocument {
             watch_ids: (1..=stored.view.watches.len() as u64).collect(),
             hidden_watch_ids: HashSet::new(),
             next_watch_id: stored.view.watches.len() as u64 + 1,
+            sensitivity_output_ids: (1..=stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64).collect(),
+            hidden_sensitivity_output_ids: HashSet::new(),
+            next_sensitivity_output_id: stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64 + 1,
             view: stored.view.clone(),
             options: stored.options,
             baseline: DocumentBaseline {
@@ -577,6 +611,10 @@ impl CalculationPadSession {
             && current.view.watches.contains(&plan.old_name) && current.view.watches.contains(&plan.new_name) {
             return Err("The new name is already pinned as a watch.".into());
         }
+        if matches!(plan.scope, super::RenameScope::Document)
+            && current.view.sensitivity.as_ref().is_some_and(|settings| settings.definition.outputs.contains(&plan.old_name) && settings.definition.outputs.contains(&plan.new_name)) {
+            return Err("The new name is already a sensitivity output.".into());
+        }
         Ok(RenamePreview { basis, plan, caret, replacement: replacement.to_owned(), view: current.view.clone() })
     }
 
@@ -597,6 +635,14 @@ impl CalculationPadSession {
             }
             if current.view.watches.contains(&preview.plan.old_name) {
                 related.watches.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if let Some(settings) = &current.view.sensitivity {
+                if settings.input_name == preview.plan.old_name {
+                    related.sensitivity_input = Some(RelatedInputRename { id: settings.definition.input, before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
+                if settings.definition.outputs.contains(&preview.plan.old_name) {
+                    related.sensitivity_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
             }
         }
         let line_ids = current.line_ids.clone();
@@ -653,6 +699,7 @@ impl CalculationPadSession {
         self.sensitivity_failure = None;
         self.sensitivity_canceled = false;
     }
+    pub(crate) fn invalidate_sensitivity(&mut self) { self.retire_sensitivity(); }
 
     fn invalidate_stale_sensitivity(&mut self) {
         if self.sensitivity_active.as_ref().is_some_and(|basis| !self.sensitivity_matches(basis)) { self.retire_sensitivity(); }
@@ -723,9 +770,14 @@ impl CalculationPadSession {
         if self.sensitivity_table.is_some() { super::SensitivityStatus::Outdated } else { super::SensitivityStatus::Idle }
     }
 
+    pub(crate) fn active_sensitivity_basis(&self) -> Option<super::SensitivityBasis> {
+        self.sensitivity_active.clone()
+    }
+
     pub(crate) fn sensitivity_table(&self) -> Option<Arc<super::SensitivityTable>> {
         let basis = self.sensitivity_active.as_ref()?;
         if !self.sensitivity_matches(basis) || self.sensitivity_progress.is_some() || self.sensitivity_failure.is_some() { return None; }
+        if self.current.as_ref().and_then(|current| current.view.sensitivity.as_ref()).is_some_and(|settings| settings.definition != basis.definition || settings.input_name != basis.input_name) { return None; }
         self.sensitivity_table.as_ref().filter(|table| table.basis == *basis).cloned()
     }
 
@@ -815,9 +867,40 @@ impl CalculationPadSession {
         if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
         if self.current.as_ref().is_some_and(|document| document.view == view) { return Ok(()); }
         super::persistence::validate_view_metadata(&view)?;
+        let (sensitivity_ids, sensitivity_next) = if let Some(current) = self.current.as_ref() {
+            let old = current.view.sensitivity.as_ref();
+            let new = view.sensitivity.as_ref();
+            let old_names = old.map(|settings| settings.definition.outputs.as_slice()).unwrap_or_default();
+            let new_names = new.map(|settings| settings.definition.outputs.as_slice()).unwrap_or_default();
+            let mut next = current.next_sensitivity_output_id;
+            let mut ids = Vec::with_capacity(new_names.len());
+            for name in new_names {
+                let id = if let Some(index) = old_names.iter().position(|old| old == name) { current.sensitivity_output_ids[index] }
+                    else { let id = next; next = next.checked_add(1).ok_or("Sensitivity output identity space exhausted.")?; id };
+                ids.push(id);
+            }
+            let removed: HashSet<_> = current.sensitivity_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+                for state in &mut entry.sensitivity_outputs {
+                    if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; }
+                }
+                if let Some(item) = &entry.related.sensitivity_input
+                    && old.is_some_and(|settings| settings.definition.input == item.id)
+                    && old.map(|settings| (settings.definition.input, &settings.input_name)) != new.map(|settings| (settings.definition.input, &settings.input_name))
+                { entry.sensitivity_input_live = false; }
+            }
+            (ids, next)
+        } else { return Err("No document is open."); };
+        if self.current.as_ref().is_some_and(|current| current.view.sensitivity != view.sensitivity)
+            && self.sensitivity_active.as_ref().is_some_and(|basis| view.sensitivity.as_ref().is_none_or(|settings| settings.definition != basis.definition || settings.input_name != basis.input_name)) {
+            self.retire_sensitivity();
+        }
         let document = self.current.as_mut().ok_or("No document is open.")?;
+        document.sensitivity_output_ids = sensitivity_ids;
+        document.next_sensitivity_output_id = sensitivity_next;
         if document.view.watches == view.watches {
             document.view = view;
+            self.prune_hidden_watch_ids();
             return Ok(());
         }
         let mut next_id = document.next_watch_id;
@@ -851,6 +934,8 @@ impl CalculationPadSession {
             .collect::<HashSet<_>>();
         if let Some(current) = self.current.as_mut() {
             current.hidden_watch_ids.retain(|id| retained.contains(id));
+            let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.sensitivity_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
+            current.hidden_sensitivity_output_ids.retain(|id| retained.contains(id));
         }
     }
 
@@ -1219,6 +1304,7 @@ impl CalculationPadSession {
         }
         let before = current.editable_state();
         let watch_ids = related.watches.iter().map(|edit| current.view.watches.iter().position(|name| name == &edit.before).map(|index| current.watch_ids[index])).collect();
+        let sensitivity_ids = related.sensitivity_outputs.iter().map(|edit| current.view.sensitivity.as_ref().and_then(|settings| settings.definition.outputs.iter().position(|name| name == &edit.before)).map(|index| current.sensitivity_output_ids[index])).collect();
         let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
@@ -1230,7 +1316,7 @@ impl CalculationPadSession {
 
         self.retire_sensitivity();
         self.retire_background_evaluation();
-        self.history.record(before, after, related, watch_ids);
+        self.history.record(before, after, related, watch_ids, sensitivity_ids);
         let current = self
             .current
             .as_mut()
@@ -1282,7 +1368,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.undo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, true) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, true) else {
             return false;
         };
         if self.history.undo.pop_back().is_none() {
@@ -1296,6 +1382,8 @@ impl CalculationPadSession {
             current.view = view;
             current.watch_ids = watch_ids;
             current.hidden_watch_ids = hidden_watch_ids;
+            current.sensitivity_output_ids = sensitivity_ids;
+            current.hidden_sensitivity_output_ids = sensitivity_hidden;
         }
         self.history.redo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -1313,7 +1401,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.redo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, false) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, false) else {
             return false;
         };
         if self.history.redo.pop_back().is_none() {
@@ -1327,6 +1415,8 @@ impl CalculationPadSession {
             current.view = view;
             current.watch_ids = watch_ids;
             current.hidden_watch_ids = hidden_watch_ids;
+            current.sensitivity_output_ids = sensitivity_ids;
+            current.hidden_sensitivity_output_ids = sensitivity_hidden;
         }
         self.history.undo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -1884,6 +1974,109 @@ mod tests {
     }
 
     #[test]
+    fn sensitivity_definition_persists_and_rename_undo_preserves_later_settings() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\ny = x + 1").unwrap();
+        let settings = super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "10".into(), sampling: super::super::Sampling::Count(3), outputs: vec!["x".into(), "y".into()] } };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(settings.clone());
+        session.set_view_metadata(view).unwrap();
+        session.save_as("sensitivity").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.view_metadata().unwrap().sensitivity, Some(settings));
+        let preview = reopened.preview_rename(0, "z").unwrap();
+        assert!(reopened.apply_rename(&preview).unwrap());
+        let mut later = reopened.view_metadata().unwrap().clone();
+        let sensitivity = later.sensitivity.as_mut().unwrap();
+        assert_eq!(sensitivity.input_name, "z");
+        assert_eq!(sensitivity.definition.outputs, vec!["z", "y"]);
+        sensitivity.definition.end = "20".into();
+        reopened.set_view_metadata(later).unwrap();
+        assert!(reopened.undo());
+        let sensitivity = reopened.view_metadata().unwrap().sensitivity.as_ref().unwrap();
+        assert_eq!(sensitivity.input_name, "x");
+        assert_eq!(sensitivity.definition.outputs, vec!["x", "y"]);
+        assert_eq!(sensitivity.definition.end, "20");
+    }
+
+    #[test]
+    fn sensitivity_rename_does_not_rewrite_removed_and_readded_output() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.clear();
+        session.set_view_metadata(view.clone()).unwrap();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x"]);
+    }
+
+    #[test]
+    fn chained_sensitivity_renames_preserve_independent_reselection() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let first = session.preview_rename(0, "y").unwrap(); session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap(); session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.clear();
+        session.set_view_metadata(view.clone()).unwrap();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("y".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo()); assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["y"]);
+        assert!(session.redo()); assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["y"]);
+    }
+
+    #[test]
+    fn sensitivity_rename_collision_restores_hidden_selection() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap(); session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn chained_sensitivity_input_retarget_survives_undo() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nother = 3\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let first = session.preview_rename(0, "y").unwrap(); session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap(); session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        let settings = view.sensitivity.as_mut().unwrap();
+        settings.definition.input = session.line_id(1).unwrap(); settings.input_name = "other".into();
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo()); assert!(session.undo());
+        let settings = session.view_metadata().unwrap().sensitivity.as_ref().unwrap();
+        assert_eq!(settings.input_name, "other");
+        assert_eq!(settings.definition.input, session.line_id(1).unwrap());
+    }
+
+    #[test]
     fn related_reference_transaction_undo_preserves_later_view_changes() {
         let (_dir, _root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
@@ -1891,11 +2084,13 @@ mod tests {
         let view = super::PadViewMetadata {
             inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
             watches: vec!["x".into(), "other".into()],
+            ..Default::default()
         };
         session.set_view_metadata(view).unwrap();
         let edits = super::RelatedReferenceEdits {
             inputs: vec![super::RelatedInputRename { id: line, before: "x".into(), after: "y".into() }],
             watches: vec![super::RelatedWatchRename { before: "x".into(), after: "y".into() }],
+            ..Default::default()
         };
         let basis = session.evaluation_basis().unwrap();
         assert!(session.commit_related_edit(basis, "y = 2\ny + 1".into(), edits.clone()).unwrap());
@@ -1924,7 +2119,7 @@ mod tests {
         let (_dir, root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
         let ids = session.line_ids().unwrap().to_vec();
-        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false, config: Default::default() }], watches: vec!["x".into()] };
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false, config: Default::default() }], watches: vec!["x".into()], ..Default::default() };
         session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "y").unwrap();
         assert!(session.apply_rename(&preview).unwrap());
@@ -3230,6 +3425,7 @@ mod tests {
         let view = super::super::persistence::PadViewMetadata {
             inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
             watches: vec!["x".into(), "missing".into()],
+            ..Default::default()
         };
         session.set_view_metadata(view.clone()).unwrap();
         assert!(session.is_dirty());

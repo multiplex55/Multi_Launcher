@@ -761,6 +761,14 @@ impl std::error::Error for PadStoreError {
 pub(crate) struct PadViewMetadata {
     pub inputs: Vec<PadInputReference>,
     pub watches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<SensitivitySettings>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SensitivitySettings {
+    pub input_name: String,
+    pub definition: super::SensitivityDefinition,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -782,7 +790,7 @@ struct LegacyViewMetadata { inputs: Vec<LegacyInputReference>, watches: Vec<Stri
 
 impl From<LegacyViewMetadata> for PadViewMetadata {
     fn from(old: LegacyViewMetadata) -> Self {
-        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches }
+        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches, sensitivity: None }
     }
 }
 #[derive(Deserialize)]
@@ -1212,6 +1220,16 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
     let mut names = HashSet::new();
     if view.watches.iter().any(|name| !valid_name(name) || !names.insert(name)) {
         return Err("invalid or duplicate watch name");
+    }
+    if let Some(settings) = &view.sensitivity {
+        if !valid_name(&settings.input_name) { return Err("invalid sensitivity input name"); }
+        let definition = &settings.definition;
+        let mut outputs = HashSet::new();
+        if definition.input.0 == 0 || definition.start.len() > 256 || definition.end.len() > 256
+            || definition.start.chars().any(char::is_control) || definition.end.chars().any(char::is_control)
+            || definition.outputs.len() > 8 || definition.outputs.iter().any(|name| !valid_name(name) || !outputs.insert(name))
+            || match &definition.sampling { super::Sampling::Step(step) => step.len() > 256 || step.chars().any(char::is_control), super::Sampling::Count(count) => *count > 1000 }
+        { return Err("invalid sensitivity definition"); }
     }
     Ok(())
 }

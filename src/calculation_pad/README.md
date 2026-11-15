@@ -412,6 +412,16 @@ the scope and affected physical lines before applying. The preview expires if
 the document changes. Applying updates related input and watch references in
 the same transaction; one Undo restores them and the source.
 
+## Sensitivity Tables
+
+Expand **Config Menu → Sensitivity Tables** to select a source-backed literal,
+enter start/end and either step or sample count, and choose up to eight named
+outputs. **Generate** runs a separate bounded analysis, including in Manual
+mode; it does not edit the source or calculate the main Pad. A named document
+retains the definition, while computed rows remain transient. Cancel retires
+the active run. Copy Table, CSV, and Markdown require a current completed
+table; source, option, or definition changes make previous results outdated.
+
 ## Resource limits
 
 The evaluator checks these bounds before invoking expression or unit parsers:

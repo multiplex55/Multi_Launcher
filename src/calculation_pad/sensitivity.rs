@@ -15,12 +15,14 @@ pub(crate) const MAX_CASES: usize = 1000;
 pub(crate) const MAX_OUTPUTS: usize = 8;
 pub(crate) const MAX_AGGREGATE_WORK: usize = 1_000_000;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", content = "value", rename_all = "snake_case")]
 pub(crate) enum Sampling {
     Step(String),
     Count(usize),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SensitivityDefinition {
     pub input: LineId,
     pub start: String,
@@ -59,6 +61,64 @@ pub(crate) enum SensitivityStatus {
     Outdated,
     Canceled,
     Failed(String),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TableExport { Table, Csv, Markdown }
+
+fn output_text(value: &CalculationValue) -> String {
+    match value {
+        CalculationValue::Scalar(value) | CalculationValue::ApproximateScalar(value) => value.to_string(),
+        CalculationValue::PhysicalQuantity { value, unit, .. } => format!("{value} {}", unit.symbol()),
+        CalculationValue::DimensionalQuantity(value) => value.display_parts().map(|(number, unit)| format!("{number} {unit}")).unwrap_or_else(|| "unavailable".into()),
+        CalculationValue::Integer(value) => value.formatted_decimal(),
+        CalculationValue::ExactBase { value, .. } => value.to_string(),
+        _ => value.canonical_result().unwrap_or_else(|| "unavailable".into()),
+    }
+}
+
+fn intended_text(sample: &SampleNumber) -> String {
+    let SampleNumber::Exact(number) = sample;
+    if number.is_integer() { return number.to_integer().to_string(); }
+    if let Ok(exact) = super::exact::ExactNumber::fraction(number.numer().clone(), number.denom().clone(), &mut super::document::script::WorkBudget::default()) {
+        let text = exact.decimal_display(None);
+        if !text.starts_with('≈') { return text; }
+    }
+    format!("{}/{}", number.numer(), number.denom())
+}
+
+pub(crate) fn export_table(table: &SensitivityTable, format: TableExport) -> String {
+    let mut rows = Vec::with_capacity(table.rows.len() + 1);
+    rows.push(table_header(table));
+    rows.extend(table.rows.iter().map(table_row));
+    match format {
+        TableExport::Table | TableExport::Csv => {
+            let separator = if matches!(format, TableExport::Csv) { ',' } else { '\t' };
+            rows.iter().map(|row| row.iter().map(|cell| {
+                if cell.contains([separator, '"', '\n', '\r']) { format!("\"{}\"", cell.replace('"', "\"\"")) } else { cell.clone() }
+            }).collect::<Vec<_>>().join(&separator.to_string())).collect::<Vec<_>>().join("\n")
+        }
+        TableExport::Markdown => {
+            let escape = |text: &str| text.replace('\\', "\\\\").replace('|', "\\|").replace("\r\n", "<br>").replace(['\r', '\n'], "<br>");
+            let mut result = Vec::with_capacity(rows.len() + 1);
+            for (index, row) in rows.iter().enumerate() {
+                result.push(format!("| {} |", row.iter().map(|cell| escape(cell)).collect::<Vec<_>>().join(" | ")));
+                if index == 0 { result.push(format!("| {} |", vec!["---"; row.len()].join(" | "))); }
+            }
+            result.join("\n")
+        }
+    }
+}
+
+pub(crate) fn table_header(table: &SensitivityTable) -> Vec<String> {
+    let input = match &table.input_kind {
+        super::input::InputKind::Quantity { unit } => format!("{} ({unit})", table.basis.input_name),
+        _ => table.basis.input_name.clone(),
+    };
+    std::iter::once(input).chain(table.basis.definition.outputs.iter().cloned()).collect()
+}
+pub(crate) fn table_row(row: &SensitivityRow) -> Vec<String> {
+    std::iter::once(intended_text(&row.intended)).chain(row.cells.iter().map(|cell| match cell { Ok(value) => output_text(value), Err(error) => format!("Error: {error}") })).collect()
 }
 
 #[derive(Clone)]
@@ -349,6 +409,19 @@ impl SensitivityWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_preserve_intended_samples_and_escape_cells() {
+        let request = make_request("x = 1\ny = x", "0", "1", Sampling::Count(2), &["y"]);
+        let mut table = run_cases(&request, Arc::new(AtomicBool::new(false)), &|| {}).unwrap();
+        table.rows[0].intended = SampleNumber::Exact(BigRational::new(1.into(), 3.into()));
+        table.rows[0].cells[0] = Err("bad, \"quoted\" | line\nnext".into());
+        let csv = export_table(&table, TableExport::Csv);
+        assert!(csv.contains("1/3,\"Error: bad, \"\"quoted\"\" | line\nnext\""), "{csv}");
+        let markdown = export_table(&table, TableExport::Markdown);
+        assert!(markdown.contains("1/3") && markdown.contains("\\|") && markdown.contains("<br>"), "{markdown}");
+        assert!(export_table(&table, TableExport::Table).contains('\t'));
+    }
 
     fn make_request(
         source: &str,
