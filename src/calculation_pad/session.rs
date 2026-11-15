@@ -14,7 +14,7 @@ use super::persistence::{
 use super::{IntegerMode, IntegerWidth, TypedInteger};
 use super::worker::{EvaluationStamp, EvaluationWorker, Request as EvaluationRequest};
 use crate::platform::app_data::AppDataRoot;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -212,7 +212,11 @@ struct HistoryEntry {
     before: EditableState,
     after: EditableState,
     related: RelatedReferenceEdits,
+    watches: Vec<WatchReplay>,
 }
+
+#[derive(Clone, Debug)]
+struct WatchReplay { id: Option<u64> }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RelatedReferenceEdits {
@@ -273,11 +277,37 @@ impl RelatedReferenceEdits {
 }
 
 impl HistoryEntry {
+    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>), &'static str> {
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new() };
+        let mut result = inputs.apply(view, reverse, false)?;
+        let mut ids = ids.to_vec();
+        let mut hidden = hidden.clone();
+        for (edit, state) in self.related.watches.iter().zip(&mut self.watches) {
+            let Some(id) = state.id else { continue; };
+            let to = if reverse { &edit.before } else { &edit.after };
+            if !hidden.contains(&id) {
+                let Some(index) = ids.iter().position(|candidate| *candidate == id) else { state.id = None; continue; };
+                if result.watches.contains(to) {
+                    result.watches.remove(index);
+                    ids.remove(index);
+                    hidden.insert(id);
+                } else { result.watches[index].clone_from(to); }
+            } else if !result.watches.contains(to) && result.watches.len() < super::persistence::MAX_WATCHES {
+                result.watches.push(to.clone());
+                ids.push(id);
+                hidden.remove(&id);
+            }
+        }
+        super::persistence::validate_view_metadata(&result)?;
+        Ok((result, ids, hidden))
+    }
+
     fn byte_size(&self) -> usize {
         self.before
             .byte_size()
             .saturating_add(self.after.byte_size())
             .saturating_add(self.related.byte_size())
+            .saturating_add(self.watches.len().saturating_mul(std::mem::size_of::<WatchReplay>()))
     }
 }
 
@@ -288,12 +318,13 @@ struct EditHistory {
 }
 
 impl EditHistory {
-    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits) {
+    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>) {
         if before == after {
             return;
         }
         self.redo.clear();
-        self.undo.push_back(HistoryEntry { before, after, related });
+        let watches = watch_ids.into_iter().map(|id| WatchReplay { id }).collect();
+        self.undo.push_back(HistoryEntry { before, after, related, watches });
         self.trim();
     }
 
@@ -343,6 +374,9 @@ struct ActiveDocument {
     revision: u64,
     generation: u64,
     view: PadViewMetadata,
+    watch_ids: Vec<u64>,
+    hidden_watch_ids: HashSet<u64>,
+    next_watch_id: u64,
     options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
@@ -366,6 +400,9 @@ impl ActiveDocument {
             revision: 0,
             generation: 0,
             view: PadViewMetadata::default(),
+            watch_ids: Vec::new(),
+            hidden_watch_ids: HashSet::new(),
+            next_watch_id: 1,
             options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
@@ -405,6 +442,9 @@ impl ActiveDocument {
             next_line_id: stored.next_line_id,
             revision: 0,
             generation: 0,
+            watch_ids: (1..=stored.view.watches.len() as u64).collect(),
+            hidden_watch_ids: HashSet::new(),
+            next_watch_id: stored.view.watches.len() as u64 + 1,
             view: stored.view.clone(),
             options: stored.options,
             baseline: DocumentBaseline {
@@ -501,7 +541,52 @@ pub enum EvaluationStatus {
     Inactive,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RenamePreview {
+    pub basis: super::EvaluationBasis,
+    pub plan: super::RenamePlan,
+    caret: usize,
+    replacement: String,
+    view: PadViewMetadata,
+}
+
 impl CalculationPadSession {
+    pub(crate) fn preview_rename(&self, caret: usize, replacement: &str) -> Result<RenamePreview, String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if self.pending.is_some() { return Err("Resolve the pending document transition first.".into()); }
+        let basis = self.evaluation_basis().ok_or("No document is open.")?;
+        let plan = super::document::rename::plan(&current.source, caret, replacement)?;
+        validate_source_size(&plan.source).map_err(|error| error.to_string())?;
+        if matches!(plan.scope, super::RenameScope::Document)
+            && current.view.watches.contains(&plan.old_name) && current.view.watches.contains(&plan.new_name) {
+            return Err("The new name is already pinned as a watch.".into());
+        }
+        Ok(RenamePreview { basis, plan, caret, replacement: replacement.to_owned(), view: current.view.clone() })
+    }
+
+    pub(crate) fn apply_rename(&mut self, preview: &RenamePreview) -> Result<bool, String> {
+        self.ensure_editable().map_err(|error| error.to_string())?;
+        if self.evaluation_basis() != Some(preview.basis) { return Err("The document changed; preview the rename again.".into()); }
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if current.view != preview.view || super::document::rename::plan(&current.source, preview.caret, &preview.replacement)? != preview.plan {
+            return Err("The document or related references changed; preview the rename again.".into());
+        }
+        validate_source_size(&preview.plan.source).map_err(|error| error.to_string())?;
+        let mut related = RelatedReferenceEdits::default();
+        if matches!(preview.plan.scope, super::RenameScope::Document) {
+            for input in &current.view.inputs {
+                if input.name == preview.plan.old_name {
+                    related.inputs.push(RelatedInputRename { id: input.id, before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
+            }
+            if current.view.watches.contains(&preview.plan.old_name) {
+                related.watches.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+        }
+        let line_ids = current.line_ids.clone();
+        let next_id = current.next_line_id;
+        self.commit_source_edit(preview.plan.source.clone(), line_ids, next_id, related).map_err(|error| error.to_string())
+    }
     /// Creates an immediately usable blank session without touching the filesystem.
     pub fn new(root: &AppDataRoot) -> Self {
         Self::with_store(PadDocumentStore::new(root))
@@ -615,8 +700,42 @@ impl CalculationPadSession {
         if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
         super::persistence::validate_view_metadata(&view)?;
         let document = self.current.as_mut().ok_or("No document is open.")?;
+        if document.view.watches == view.watches {
+            document.view = view;
+            return Ok(());
+        }
+        let mut next_id = document.next_watch_id;
+        let mut ids = Vec::with_capacity(view.watches.len());
+        for name in &view.watches {
+            let id = if let Some(index) = document.view.watches.iter().position(|old| old == name) {
+                document.watch_ids[index]
+            } else {
+                let id = next_id;
+                next_id = next_id.checked_add(1).ok_or("Watch identity space exhausted.")?;
+                id
+            };
+            ids.push(id);
+        }
+        let removed: HashSet<_> = document.watch_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+        for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+            for state in &mut entry.watches {
+                if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; }
+            }
+        }
         document.view = view;
+        document.watch_ids = ids;
+        document.next_watch_id = next_id;
+        self.prune_hidden_watch_ids();
         Ok(())
+    }
+
+    fn prune_hidden_watch_ids(&mut self) {
+        let retained = self.history.undo.iter().chain(&self.history.redo)
+            .flat_map(|entry| entry.watches.iter().filter_map(|watch| watch.id))
+            .collect::<HashSet<_>>();
+        if let Some(current) = self.current.as_mut() {
+            current.hidden_watch_ids.retain(|id| retained.contains(id));
+        }
     }
 
     pub fn current_id(&self) -> Option<DocumentId> {
@@ -953,6 +1072,7 @@ impl CalculationPadSession {
             return Ok(false);
         }
         let before = current.editable_state();
+        let watch_ids = related.watches.iter().map(|edit| current.view.watches.iter().position(|name| name == &edit.before).map(|index| current.watch_ids[index])).collect();
         let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
@@ -963,7 +1083,7 @@ impl CalculationPadSession {
             .ok_or(SessionError::RevisionExhausted)?;
 
         self.retire_background_evaluation();
-        self.history.record(before, after, related);
+        self.history.record(before, after, related, watch_ids);
         let current = self
             .current
             .as_mut()
@@ -973,6 +1093,7 @@ impl CalculationPadSession {
         current.next_line_id = next_line_id;
         current.revision = next_revision;
         current.view = view;
+        self.prune_hidden_watch_ids();
         Ok(true)
     }
 
@@ -1013,19 +1134,23 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
-        let Some(view) = self.history.undo.back().and_then(|entry| entry.related.apply(&current.view, true, false).ok()) else {
+        let Some(mut entry) = self.history.undo.back().cloned() else { return false; };
+        let Ok((view, watch_ids, hidden_watch_ids)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, true) else {
             return false;
         };
-        let Some(entry) = self.history.undo.pop_back() else {
+        if self.history.undo.pop_back().is_none() {
             return false;
-        };
+        }
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.before);
             current.revision = next_revision;
             current.view = view;
+            current.watch_ids = watch_ids;
+            current.hidden_watch_ids = hidden_watch_ids;
         }
         self.history.redo.push_back(entry);
+        self.prune_hidden_watch_ids();
         true
     }
 
@@ -1039,19 +1164,23 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
-        let Some(view) = self.history.redo.back().and_then(|entry| entry.related.apply(&current.view, false, false).ok()) else {
+        let Some(mut entry) = self.history.redo.back().cloned() else { return false; };
+        let Ok((view, watch_ids, hidden_watch_ids)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, false) else {
             return false;
         };
-        let Some(entry) = self.history.redo.pop_back() else {
+        if self.history.redo.pop_back().is_none() {
             return false;
-        };
+        }
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.after);
             current.revision = next_revision;
             current.view = view;
+            current.watch_ids = watch_ids;
+            current.hidden_watch_ids = hidden_watch_ids;
         }
         self.history.undo.push_back(entry);
+        self.prune_hidden_watch_ids();
         true
     }
 
@@ -1633,6 +1762,111 @@ mod tests {
         let before = session.source().unwrap().to_owned();
         assert!(matches!(session.commit_related_edit(basis, "z = 1".into(), edits), Err(super::SessionError::StaleRelatedEdit)));
         assert_eq!(session.source(), Some(before.as_str()));
+    }
+
+    #[test]
+    fn rename_transaction_preserves_ids_related_settings_and_independent_watches() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false }], watches: vec!["x".into()] };
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.line_ids().unwrap(), ids);
+        let mut view = session.view_metadata().unwrap().clone();
+        view.inputs[0].unavailable = true;
+        view.watches.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["x"]);
+        assert!(session.view_metadata().unwrap().inputs[0].unavailable);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["x", "y"]);
+        session.save_as("renamed").unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(session.current_id().unwrap()).unwrap();
+        assert_eq!(reopened.source(), Some("y = 2\ny + 1"));
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        assert!(session.apply_rename(&preview).is_err());
+    }
+
+    #[test]
+    fn rename_undo_does_not_resurrect_removed_and_repinned_watch() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        session.set_view_metadata(super::PadViewMetadata::default()).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["y".into()], ..Default::default() }).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+    }
+
+    #[test]
+    fn chained_renames_preserve_independently_repinned_watch_identity() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let first = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap();
+        session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.push("y".into());
+        session.set_view_metadata(view).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.retain(|name| name != "z");
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+        assert!(session.redo());
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+    }
+
+    #[test]
+    fn full_watch_list_never_blocks_rename_history() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.extend((0..63).map(|index| format!("watch_{index}")));
+        session.set_view_metadata(view).unwrap();
+        assert!(session.redo());
+        assert_eq!(session.source(), Some("y = 2\ny"));
+        assert_eq!(session.view_metadata().unwrap().watches.len(), 64);
+        assert!(session.undo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.pop();
+        session.set_view_metadata(view).unwrap();
+        assert!(session.redo());
+        assert!(session.view_metadata().unwrap().watches.iter().any(|name| name == "y"));
+    }
+
+    #[test]
+    fn rename_preview_rejects_stale_and_oversized_result() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\nx").unwrap();
+        let preview = session.preview_rename(0, "longer").unwrap();
+        session.replace_source("x = 2\nx").unwrap();
+        assert!(session.apply_rename(&preview).is_err());
+        assert_eq!(session.source(), Some("x = 2\nx"));
+        let max = crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES;
+        let source = format!("x = 1\n#{}", "a".repeat(max - 7));
+        session.replace_source(source.clone()).unwrap();
+        assert!(session.preview_rename(0, "longer").is_err());
+        assert_eq!(session.source(), Some(source.as_str()));
     }
 
     #[test]

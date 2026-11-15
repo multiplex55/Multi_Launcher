@@ -24,6 +24,8 @@ pub(super) mod script;
 mod loops;
 #[path = "syntax.rs"]
 pub(super) mod syntax;
+#[path = "rename.rs"]
+pub(super) mod rename;
 pub use script::CalculationSequence;
 
 pub(crate) fn editor_loop_header(source: &str) -> bool {

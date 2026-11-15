@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
+pub(crate) const MAX_WATCHES: usize = 64;
 pub const MAX_STORED_DOCUMENT_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
 pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 3;
 
@@ -1185,7 +1186,7 @@ fn validate_stored_document(stored: &StoredDocument, path: &Path) -> Result<(), 
 }
 
 pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'static str> {
-    if view.inputs.len() > 64 || view.watches.len() > 64 { return Err("too many input or watch references"); }
+    if view.inputs.len() > 64 || view.watches.len() > MAX_WATCHES { return Err("too many input or watch references"); }
     let valid_name = |name: &str| super::document::watch_name(&format!("{{{name}}}")).as_deref() == Some(name);
     let mut lines = HashSet::new();
     if view.inputs.iter().any(|input| input.id.0 == 0 || !valid_name(&input.name) || !lines.insert(input.id)) {

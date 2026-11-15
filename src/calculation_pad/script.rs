@@ -614,7 +614,7 @@ pub(super) fn prepare_with_functions(
     parse(source.trim(), declared, functions, 0)
 }
 
-fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
+pub(super) fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
     let mut braces = false;
     let mut quoted = false;
@@ -654,7 +654,7 @@ fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
     Err(DiagnosticKind::InvalidExpression)
 }
 
-fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
+pub(super) fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
     if source.trim().is_empty() {
         return Ok(Vec::new());
     }

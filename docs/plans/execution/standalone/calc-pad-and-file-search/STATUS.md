@@ -29,9 +29,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M6-A | Verified and pushed | `da6d58cca7453770c95079c3a031dee10941f608`. Calendar domain. Batches passed 11/11 and 5/5. |
 | M6-B | Verified and pushed | `ae72a9246fdd000ba41fc7750e6f49e43c5cfcb0`. Calendar presentation and examples. Focused batch passed 14/14. |
 | M7-A | Verified and pushed | `07857478c05296eda7b3554b3399d27ee09887a5`. Extended source lifecycle, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
-| M7-B | Verified | Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
-| M8-A | In progress | Binding-aware rename planning and one source-plus-metadata transaction. |
-| M8-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M7-B | Verified and pushed | `9039f3296226184de3aaa37cf45fd12f0b919fd5`. Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
+| M8-A | Verified | Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
+| M8-B | In progress | Focus-scoped editor/context entry and retained preview Apply. |
+| M9-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -45,7 +46,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
 | C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check pending. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
-| C14 | Pending | Pending | Binding identity, session history/metadata, guarded editor preview and apply |
+| C14 | Domain implemented; editor integration in progress | Focused scope, contextual syntax, transaction and persistence tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
 | C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
 | C5 | Pending | Pending | Committed snapshots, utility window host and render lifecycle, size/presentation settings and clipboard |
@@ -136,6 +137,12 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Added per-document profile controls, source/evaluation usage and independent 90% warnings. Large Results snapshots draw visible rows, including stale Extended results still displayed after switching to Standard. Navigation can jump to a physical row outside the painted range.
 - The initial measurement at 255,647 bytes and 2,000 rows showed about 482 ms for the first result frame, reduced to about 221 ms with visible-row rendering. A subsequent expanded-editor pass still took about 264 ms warmed and 636 ms across three offscreen-navigation frames. Based on those measurements, the Extended evaluation ceiling is 128 KiB and 1,024 physical rows. Text above it can still be edited, saved and reopened within the independent 256 KiB/2,048-row absolute admission limits. The 4 MiB serialized envelope and existing work/history limits remain in force.
-- Final deterministic headless observations in the same fast-dev profile: Standard, 62,751 bytes/248 rows, 10.38 ms folded typing, 18.52 ms calculation, 88.64 ms first populated frame. Extended, 130,638 bytes/1,000 rows, 22.81 ms folded typing, 70.13 ms worker calculation, 113.69 ms first populated frame, 112.83 ms warmed expanded frame, 304.79 ms across the three-frame offscreen jump. Extended process working set went from 29.07 MB to 35.14 MB. This is within the selected scope on this machine, with perceptible lag in the fully expanded near-ceiling editor. These are single headless fixture observations, not Windows interaction or latency guarantees.
+- Final deterministic headless observations in the same fast-dev profile: Standard, 62,751 bytes/248 rows, 10.38 ms folded typing, 18.52 ms calculation, 88.64 ms first populated frame. Extended, 130,638 bytes/1,000 rows, 22.81 ms folded typing, 70.13 ms worker calculation, 113.69 ms first populated frame, 112.83 ms warmed expanded frame, 304.79 ms across the three-frame offscreen jump. Extended process working set went from 29.07 MB to 35.14 MB. The fully expanded near-ceiling editor shows perceptible lag in this headless fixture. Windows interaction checks are pending.
 - Channel-controlled Extended worker cancellation and replacement passed at 130,999 bytes/1,000 rows in 144.06 ms end to end. The retired generation never published. Tests also cover byte/row admission boundaries, over-profile source saving/reopening, folding, Find, full-source Copy, navigation and result-basis isolation.
 - Focused library Nextest final batch passed 9/9 with exit 0, 2.05 seconds reported by Nextest and 4.21 seconds owned elapsed under the 100-second deadline. Separate final compile took 348.45 seconds under a 900-second deadline. Cleanup and output drain passed. Receipts: `m7b-build`, `m7b-correction-*`, `m7b-final-*`, `m7b-stale-*`, `m7b-editor-cache-*`, `m7b-validated-ceiling-*`.
+
+### M8-A rename planning and transaction
+
+- Static preview distinguishes document reassignment families from function-local parameters. It preserves active/inactive lexical spans, protected source, CRLF, physical references, actual conditional/loop/quantity/operator grammar and programmer radix notation. Conflicts, capture, malformed source, and oversized projections are checked before application.
+- Apply checks document identity, revision/run basis, current metadata and the plan. The one source edit preserves physical line IDs and the allocator. Source-aware input names and watches follow the rename with one Undo/Redo. Ephemeral watch identities preserve chains, independently pinned/removed watches and source history at full watch capacity. Saved metadata keeps its established persisted shape.
+- Initial focused library run passed 10/10. The first expanded contextual-alias run passed 10/11; its fixture used bare terminal `to` in a position where the legacy evaluator attempts a conversion. The corrected fixture uses valid punctuation-adjacent references, adds radix coverage, and passed 12/12. A separate destination safeguard braces `to` so a renamed reference cannot become an attempted conversion; exact before/after value checks and directly related regressions passed 6/6. Each cached run met the 100-second deadline, final elapsed 2.32 seconds; separate compiles met 900-second deadlines, final 181.52 seconds. Cleanup and output drain passed. Receipts: `m8a-*`, `m8a-correction-*`, `m8a-final-*`, `m8a-destination-*`.

@@ -370,6 +370,7 @@ pub(crate) struct ParseAttempt {
     pub error: Option<QuantityError>,
     pub references: Vec<String>,
     pub unit_evidence: UnitParseEvidence,
+    pub unit_ranges: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,6 +482,7 @@ pub(crate) fn parse_expression(source: &str) -> ParseAttempt {
         error,
         references: parser.references,
         unit_evidence: parser.unit_evidence,
+        unit_ranges: parser.unit_ranges,
     }
 }
 
@@ -543,6 +545,7 @@ struct Parser<'a> {
     recursion: usize,
     references: Vec<String>,
     unit_evidence: UnitParseEvidence,
+    unit_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl<'a> Parser<'a> {
@@ -554,6 +557,7 @@ impl<'a> Parser<'a> {
             recursion: 0,
             references: Vec::new(),
             unit_evidence: UnitParseEvidence::None,
+            unit_ranges: Vec::new(),
         }
     }
 
@@ -697,6 +701,7 @@ impl<'a> Parser<'a> {
         };
         self.bump_token()?;
         self.cursor += consumed;
+        self.unit_ranges.push(alias_start..self.cursor);
         let alias = self.source[alias_start..self.cursor].trim();
         let plain_minute_alias = unit == Unit::Minute && alias == "min";
         self.unit_evidence.include(if plain_minute_alias {
@@ -729,6 +734,7 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
             self.bump_token()?;
             self.cursor += consumed;
+            self.unit_ranges.push(unit_start..self.cursor);
             let power = self.parse_attached_unit_power()?.unwrap_or(1);
             product.add(
                 denominator,
