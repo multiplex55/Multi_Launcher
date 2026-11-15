@@ -186,7 +186,7 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
     let mut result = Vec::new();
     let analysis = syntax::SourceAnalysis::new(source);
     let has_loops = loops::contains_loop_in(&analysis);
-    for (line, row) in analysis.rows.iter().enumerate().take(MAX_SOURCE_LINES) {
+    for (line, row) in analysis.rows.iter().enumerate().take(super::limits::ABSOLUTE_LINES) {
         if row.owner.is_some() { continue; }
         let text = row.text.as_str();
         let trimmed = text.trim();
@@ -258,8 +258,9 @@ impl CalculationDocument {
     }
 }
 
-pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
-pub const MAX_SOURCE_LINES: usize = 256;
+pub const MAX_DOCUMENT_BYTES: usize = super::limits::STANDARD_BYTES;
+pub const MAX_SOURCE_LINES: usize = super::limits::STANDARD_LINES;
+const SLOT_BASE: usize = super::limits::SLOT_BASE;
 pub const MAX_EXPRESSION_BYTES: usize = 2048;
 pub const MAX_EXPRESSION_NESTING: usize = 32;
 pub const MAX_DEPENDENCIES: usize = 512;
@@ -276,13 +277,19 @@ const MAX_EXACT_SCALAR_INTEGER: u64 = 1_u64 << 53;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalculationDocument {
     source: String,
+    profile: super::persistence::DocumentProfile,
 }
 
 impl CalculationDocument {
     pub fn new(source: impl Into<String>) -> Self {
         Self {
             source: source.into(),
+            profile: super::persistence::DocumentProfile::Standard,
         }
+    }
+
+    pub(crate) fn with_profile(source: impl Into<String>, profile: super::persistence::DocumentProfile) -> Self {
+        Self { source: source.into(), profile }
     }
 
     pub fn source(&self) -> &str {
@@ -347,25 +354,26 @@ impl CalculationDocument {
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> CalculationEvaluation<'_> {
         let source = self.source.as_str();
-        if source.len() > MAX_DOCUMENT_BYTES {
+        let limits = super::limits::profile_limits(self.profile);
+        if source.len() > limits.bytes {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
                 final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::DocumentTooLarge {
-                    max_bytes: MAX_DOCUMENT_BYTES,
+                    max_bytes: limits.bytes,
                 }),
             };
         }
 
-        let source_line_count = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        if source_line_count > MAX_SOURCE_LINES {
+        let source_line_count = super::limits::physical_rows(source);
+        if source_line_count > limits.lines {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
                 final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::TooManyLines {
-                    max_lines: MAX_SOURCE_LINES,
+                    max_lines: limits.lines,
                 }),
             };
         }
@@ -2639,10 +2647,10 @@ pub(super) fn evaluate_comparison_expression(
     let mut names = final_bindings.keys().cloned().collect::<Vec<_>>();
     names.sort();
     let slots = names.iter().enumerate().map(|(index, name)| {
-        (name.clone(), MAX_SOURCE_LINES + index)
+        (name.clone(), SLOT_BASE + index)
     }).collect::<HashMap<_, _>>();
-    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); MAX_SOURCE_LINES];
-    let mut values = vec![None; MAX_SOURCE_LINES];
+    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); SLOT_BASE];
+    let mut values = vec![None; SLOT_BASE];
     for (index, row) in rows.iter().enumerate() {
         outcomes[index] = row.outcome.clone();
         if let LineOutcome::Value(value) = &row.outcome { values[index] = Some(value.clone()); }
@@ -2660,8 +2668,8 @@ pub(super) fn evaluate_comparison_expression(
     work.runtime_line = Some(rows.len());
     match expression_tree.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut work) {
         Ok(value) => LineOutcome::Value(value),
-        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= MAX_SOURCE_LINES => {
-            let name = &names[dependency_line - MAX_SOURCE_LINES];
+        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= SLOT_BASE => {
+            let name = &names[dependency_line - SLOT_BASE];
             LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed {
                 dependency_line: final_bindings[name].line_index,
             }))
@@ -3130,23 +3138,23 @@ pub(super) fn evaluate_legacy_fragment(
     if let PreparedStatement::Script(expression) = &mut line.statement {
         let mut names = bindings.keys().cloned().collect::<Vec<_>>();
         names.sort();
-        let line_index = MAX_SOURCE_LINES + names.len();
+        let line_index = SLOT_BASE + names.len();
         let mut outcomes = vec![LineOutcome::Blank; line_index];
         let mut values = vec![None; line_index];
         for (index, name) in names.iter().enumerate() {
             let value = bindings[name].clone();
-            let slot = MAX_SOURCE_LINES + index;
+            let slot = SLOT_BASE + index;
             outcomes[slot] = LineOutcome::Value(value.clone());
             values[slot] = Some(value.clone());
             if let Some(row) = name.strip_prefix('r').and_then(|number| number.parse::<usize>().ok())
-                && (1..=MAX_SOURCE_LINES).contains(&row)
+                && (1..=SLOT_BASE).contains(&row)
             {
                 outcomes[row - 1] = LineOutcome::Value(value.clone());
                 values[row - 1] = Some(value);
             }
         }
-        expression.resolve(line_index, MAX_SOURCE_LINES, |name| {
-            names.iter().position(|candidate| candidate == name).map(|index| MAX_SOURCE_LINES + index)
+        expression.resolve(line_index, SLOT_BASE, |name| {
+            names.iter().position(|candidate| candidate == name).map(|index| SLOT_BASE + index)
         });
         let runtime_line = work.runtime_line.take();
         let runtime_definitions = work.runtime_definitions.take();
@@ -4860,6 +4868,27 @@ mod tests {
             error(&evaluation, 0),
             DiagnosticKind::NameTooLong { .. }
         ));
+    }
+
+    #[test]
+    fn extended_rows_keep_physical_references_distinct_from_runtime_slots() {
+        let prefix = "# α\r\n".repeat(256);
+        let plain = format!("{prefix}a = u8(4)\ncopy = r257\nfn same(x) = x\nsame(r257)\nfraction(1,2) + r257\nr257 == u8(4)");
+        let ordinary = CalculationDocument::with_profile(plain, super::super::persistence::DocumentProfile::Extended);
+        let result = ordinary.evaluate();
+        assert!(result.diagnostic.is_none());
+        for line in [256, 257, 259, 260, 261] {
+            assert!(matches!(result.lines[line].outcome, LineOutcome::Value(_)), "line {line}: {:?}", result.lines[line].outcome);
+        }
+        let source = format!("{prefix}a = u8(4)\ncopy = r257\nfn same(x) = x\nsame(r257)\nif r257 == u8(4):\n  loopcopy = r257\nloopcopy");
+        let standard = CalculationDocument::new(source.clone());
+        assert!(matches!(standard.evaluate().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { max_lines: 256 })));
+        let extended = CalculationDocument::with_profile(source, super::super::persistence::DocumentProfile::Extended);
+        let result = extended.evaluate();
+        assert!(result.diagnostic.is_none());
+        for line in [256, 257, 259, 260, 261, 262] {
+            assert!(matches!(result.lines[line].outcome, LineOutcome::Value(_)), "line {line}: {:?}", result.lines[line].outcome);
+        }
     }
 
     #[test]

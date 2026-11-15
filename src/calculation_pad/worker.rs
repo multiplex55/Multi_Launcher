@@ -21,6 +21,7 @@ pub(super) struct Request {
     pub stamp: EvaluationStamp,
     pub source: String,
     pub line_ids: Vec<LineId>,
+    pub profile: super::persistence::DocumentProfile,
 }
 
 pub(super) struct Completion {
@@ -176,7 +177,7 @@ fn run(shared: Arc<Shared>) {
 }
 
 fn evaluate(request: Request, cancellation: Arc<AtomicBool>) -> Result<SessionEvaluation, String> {
-    let document = CalculationDocument::new(request.source);
+    let document = CalculationDocument::with_profile(request.source, request.profile);
     let evaluation = document.evaluate_with_cancellation(cancellation);
     project_evaluation(evaluation, &request.line_ids, request.stamp)
 }
@@ -186,6 +187,21 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn extended_request_uses_profile_for_large_source() {
+        let source = format!("{}2\nr257", "# note\n".repeat(256));
+        let document = DocumentId::fresh();
+        let request = Request {
+            stamp: EvaluationStamp { document, incarnation: DocumentIncarnation(DocumentId::fresh()), revision: 0, generation: 0 },
+            line_ids: (1..=258).map(LineId).collect(),
+            source,
+            profile: super::super::persistence::DocumentProfile::Extended,
+        };
+        let result = super::evaluate(request, Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(result.diagnostic.is_none());
+        assert!(matches!(result.lines[257].outcome, super::super::document::LineOutcome::Value(_)));
+    }
 
     #[test]
     fn worker_cancels_old_work_and_coalesces_latest_pending_revision() {
@@ -217,6 +233,7 @@ mod tests {
             },
             source: format!("{revision}"),
             line_ids: vec![LineId(1)],
+            profile: Default::default(),
         };
         worker.submit(request(1));
         assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
@@ -256,6 +273,7 @@ mod tests {
             },
             source: "1".into(),
             line_ids: vec![LineId(1)],
+            profile: Default::default(),
         };
         worker.submit(request(1));
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -284,6 +302,7 @@ mod tests {
             stamp: EvaluationStamp { document, incarnation, revision: 7, generation },
             source: "1".into(),
             line_ids: vec![LineId(1)],
+            profile: Default::default(),
         };
         worker.submit(request(1));
         assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);

@@ -27,9 +27,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M5-B | Verified and pushed | `c5a7fbfed5fe53dbd31ee0944ff6232c088d647b`. Formula editor and examples. Focused batch passed 13/13. |
 | M5-C | Verified and pushed | `3aa2402776a075c74673cc4e792535923871902d`. Conditional blocks, loop flow and recovery. Final batch passed 16/16. |
 | M6-A | Verified and pushed | `da6d58cca7453770c95079c3a031dee10941f608`. Calendar domain. Batches passed 11/11 and 5/5. |
-| M6-B | Verified | Calendar presentation, comparison, copy and examples. Focused batch passed 14/14. |
-| M7-A | In progress | Extended source admission, evaluation, worker and persistence. |
-| M7-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M6-B | Verified and pushed | `ae72a9246fdd000ba41fc7750e6f49e43c5cfcb0`. Calendar presentation and examples. Focused batch passed 14/14. |
+| M7-A | Verified | Extended source admission, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
+| M7-B | In progress | Profile/usage UI and deterministic capacity observations. |
+| M8-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -42,7 +43,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C18 | Implemented | Focused runtime, editor, navigation and examples passed. Native integrated check pending. | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
 | C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
-| C26 | Pending | Pending | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
+| C26 | Lifecycle implemented; UI and capacity observation pending | Focused edit, worker, recovery and storage checks passed | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
 | C14 | Pending | Pending | Binding identity, session history/metadata, guarded editor preview and apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
 | C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
@@ -123,3 +124,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Show distinct zone/fold offsets and named weekdays, typed temporal comparison, and canonical versus formatted copy with current evaluation guards. Added eight calendar examples for 103 total; retained the original Variables group first for existing reference-window interactions.
 - After fixing the inferred index in a new comparison test (initial compile exit 101), scoped Nextest passed 14/14 with exit 0 in 3.31 seconds. The successful separate compile took 219.13 seconds. Tested canonical/Manual copy, hints, same-instant comparisons, all executable examples, and legacy reference-window search/copy. Cleanup and output drain passed. Receipts are in `m6b-build`, `m6b-correction-build`, and `m6b-correction-run`.
+
+### M7-A source capacity lifecycle
+
+- Standard evaluation remains 64 KiB/256 rows; Extended and absolute source admission use 256 KiB/2,048. Both records use a shared 4 MiB envelope. Physical rows remain distinct from runtime binding slots. GUI Extended uses the coalescing worker even without control flow. Undo keeps its existing entry and byte budget.
+- Initial compile exited 101 on a fixture calling private recovery store methods. The fixture now uses the production writer boundary. The correction also rejects oversized Find/Replace content atomically, including when the widget would otherwise truncate a paste. Preflight avoids analyzing over-profile Standard source before returning its diagnostic.
+- Scoped Nextest passed 19/19 with exit 0 in 2.90 seconds after a 317.37-second separate compile. It covers high rows, UTF-8 and trailing rows, profile retirement, save/reopen/recovery, exact source and stable IDs, atomic oversized edits, older versions and envelope checks. Cleanup and output drain passed. Receipts in `m7a-build`, `m7a-correction-build`, and `m7a-correction-run`.

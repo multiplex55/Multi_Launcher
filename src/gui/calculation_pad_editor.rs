@@ -630,6 +630,9 @@ impl EditorTools {
     }
 
     pub fn replacement(&self, source: &str, all: bool) -> Option<String> {
+        if self.replacement.len() > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
+            return None;
+        }
         let ranges = if all {
             self.matches.as_ref()
         } else {
@@ -643,7 +646,7 @@ impl EditorTools {
             .try_fold(0usize, |sum, range| sum.checked_add(range.len()))?;
         let added = self.replacement.len().checked_mul(ranges.len())?;
         let size = source.len().checked_sub(removed)?.checked_add(added)?;
-        if size > crate::calculation_pad::MAX_DOCUMENT_BYTES {
+        if size > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
             return None;
         }
         let mut result = String::with_capacity(size);
@@ -654,9 +657,7 @@ impl EditorTools {
             cursor = range.end;
         }
         result.push_str(source.get(cursor..)?);
-        if result.bytes().filter(|byte| *byte == b'\n').count() + 1
-            > crate::calculation_pad::MAX_SOURCE_LINES
-        {
+        if !crate::calculation_pad::source_admitted(&result) {
             return None;
         }
         Some(result)
@@ -701,7 +702,7 @@ pub(super) fn smart_edit(
         '[' => ']',
         _ => return None,
     };
-    if source.len().checked_add(2)? > crate::calculation_pad::MAX_DOCUMENT_BYTES {
+    if source.len().checked_add(2)? > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
         return None;
     }
     let mut result = String::with_capacity(source.len().checked_add(2)?);
@@ -1028,5 +1029,19 @@ mod tests {
         assert_eq!(positions.character(6), Some(4));
         assert_eq!(positions.line_range(3), Some(12..12));
         assert_eq!(positions.line_range(4), None);
+    }
+
+    #[test]
+    fn oversized_replacement_is_rejected_without_applying_a_prefix() {
+        let source = "needle";
+        let mut tools = EditorTools {
+            query: source.into(),
+            replacement: "x".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1),
+            ..Default::default()
+        };
+        tools.refresh(source, 1);
+        assert!(tools.replacement(source, true).is_none());
+        tools.replacement = "雪".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES / 3 + 1);
+        assert!(tools.replacement(source, true).is_none());
     }
 }

@@ -12,6 +12,7 @@ mod exact;
 mod examples;
 mod inspector;
 mod integer;
+mod limits;
 mod operators;
 mod persistence;
 mod programmer;
@@ -20,6 +21,8 @@ mod session;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;
+pub use limits::{ABSOLUTE_BYTES as MAX_ADMITTED_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_ADMITTED_SOURCE_LINES};
+pub(crate) use limits::source_admitted;
 pub use calendar::CalendarValue;
 
 pub(crate) use document::syntax::{ProtectedKind, SourceAnalysis};

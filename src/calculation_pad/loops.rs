@@ -421,11 +421,11 @@ impl Execution {
         let result = result.map_err(|kind| {
             let kind = match kind {
                 DiagnosticKind::DependencyFailed { dependency_line }
-                    if dependency_line >= MAX_SOURCE_LINES =>
+                    if dependency_line >= SLOT_BASE =>
                 {
                     DiagnosticKind::DependencyFailed {
                         dependency_line: self.bindings
-                            [&self.slot_names[dependency_line - MAX_SOURCE_LINES]]
+                            [&self.slot_names[dependency_line - SLOT_BASE]]
                             .line,
                     }
                 }
@@ -440,9 +440,9 @@ impl Execution {
         dependencies = dependencies
             .into_iter()
             .filter_map(|dependency| {
-                if dependency >= MAX_SOURCE_LINES {
+                if dependency >= SLOT_BASE {
                     self.bindings
-                        .get(&self.slot_names[dependency - MAX_SOURCE_LINES])
+                        .get(&self.slot_names[dependency - SLOT_BASE])
                         .map(|binding| binding.line)
                 } else {
                     Some(dependency)
@@ -1057,7 +1057,7 @@ fn evaluate_analyzed<'a>(
     let slots = slot_names
         .iter()
         .enumerate()
-        .map(|(index, name)| (name.clone(), MAX_SOURCE_LINES + index))
+        .map(|(index, name)| (name.clone(), SLOT_BASE + index))
         .collect::<HashMap<_, _>>();
     for (line, expression) in expressions.iter_mut().enumerate() {
         if let Some(expression) = expression {
@@ -1066,7 +1066,7 @@ fn evaluate_analyzed<'a>(
     }
     let mut outcomes = vec![
         LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted));
-        MAX_SOURCE_LINES + slots.len()
+        SLOT_BASE + slots.len()
     ];
     for row in &rows {
         outcomes[row.line_index] = row.outcome.clone();

@@ -1657,7 +1657,7 @@ impl CalculationPadDialog {
             } else {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Find");
-                    let changed = ui.add(egui::TextEdit::singleline(&mut tools.query).id(find_id).char_limit(crate::calculation_pad::MAX_DOCUMENT_BYTES).desired_width(150.0)).changed();
+                    let changed = ui.add(egui::TextEdit::singleline(&mut tools.query).id(find_id).char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES).desired_width(150.0)).changed();
                     let case_changed = ui.checkbox(&mut tools.case_sensitive, "Match case").changed();
                     if changed || case_changed { tools.refresh(source, revision); }
                     if ui.small_button("Previous").clicked() { effects.editor_navigation = tools.navigate(false); }
@@ -1669,7 +1669,7 @@ impl CalculationPadDialog {
                 if tools.replace {
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Replace");
-                        ui.add(egui::TextEdit::singleline(&mut tools.replacement).id(replace_id).char_limit(crate::calculation_pad::MAX_DOCUMENT_BYTES).desired_width(150.0));
+                        ui.add(egui::TextEdit::singleline(&mut tools.replacement).id(replace_id).char_limit(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1).desired_width(150.0));
                         if ui.button("Replace").clicked() {
                             if tools.current.is_none() { let _ = tools.navigate(true); }
                             effects.editor_replacement = tools.replacement(source, false);
@@ -3919,7 +3919,7 @@ impl CalculationPadDialog {
                         ui.label("Quantities preserve dimensions and support compatible arithmetic and conversions. Names and rN references use earlier physical source lines.");
                         ui.label("Compatible units can be added, scaled, multiplied, divided and converted using 'to'. Temperature and fuel-economy units remain conversion-only; month/year conversions may be approximate.");
                         ui.label("Braced names may contain spaces and Unicode. rN counts physical source lines, including comments and blanks; forward or failed references are diagnosed.");
-                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, documents to 64 KiB and 256 lines, and identifiers to 64 per line and 512 per document.");
+                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, and identifiers to 64 per line and 512 per document. Standard documents evaluate up to 64 KiB and 256 lines; Extended documents allow 256 KiB and 2,048 lines.");
                         ui.label("Quantity expressions are limited to 256 tokens and unit powers from -8 through 8. Finite operands and intermediate values are required.");
                     });
                     ui.collapsing("Dates and times", |ui| {
@@ -4299,9 +4299,7 @@ impl CalculationPadDialog {
                 let mut updated = source.clone();
                 updated.replace_range(range.clone(), &insertion);
                 let cursor = range.start + insertion.len();
-                if updated.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES
-                    || updated.bytes().filter(|byte| *byte == b'\n').count() + 1 > crate::calculation_pad::MAX_SOURCE_LINES
-                {
+                if !crate::calculation_pad::source_admitted(&updated) {
                     *edited_source = Some(updated);
                 } else {
                     *source = updated;
@@ -4437,12 +4435,10 @@ impl CalculationPadDialog {
             }).inner
         }).inner;
         if scroll.inner.response.changed() {
-            if visible_source.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES {
+            if visible_source.len() > crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES {
                 *edited_source = Some(visible_source.clone());
             } else if let Some(updated) = projection.apply_edit(source, &visible_source) {
-                if updated.len() > crate::calculation_pad::MAX_DOCUMENT_BYTES
-                    || updated.bytes().filter(|byte| *byte == b'\n').count() + 1 > crate::calculation_pad::MAX_SOURCE_LINES
-                {
+                if !crate::calculation_pad::source_admitted(&updated) {
                     *edited_source = Some(updated);
                 } else {
                     *source = updated;
@@ -5456,7 +5452,7 @@ fn copy_all_results(
 mod tests {
     use super::{CalculationPadDialog, CalculationPadDialogEffect, DialogIntent, copy_all_results};
     use crate::calculation_pad::{
-        CalculationPadSession, CalculationValue, LineOutcome, MAX_DOCUMENT_BYTES, PadDocumentStore,
+        CalculationPadSession, CalculationValue, LineOutcome, PadDocumentStore,
         PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
         PendingTransition, TransitionDecision,
     };
@@ -8420,7 +8416,7 @@ mod tests {
         let mut host_effects = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host_effects.pass = Some(pass);
         host_effects.pass_accepted = true;
-        host_effects.edited_source = Some("x".repeat(MAX_DOCUMENT_BYTES + 1));
+        host_effects.edited_source = Some("x".repeat(crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES + 1));
         host_effects.intent = Some(DialogIntent::Save);
         host_effects.close_requested = true;
         dialog.pending_root_effects = Some(super::RootEffects {

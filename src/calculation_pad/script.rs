@@ -332,7 +332,7 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
             let declared: HashSet<_> = parameters.iter().cloned().collect();
             let mut expression = prepare_with_functions(body, &declared, &functions)?;
             expression.validate_parameters(&declared)?;
-            expression.resolve(MAX_SOURCE_LINES, 0, |name| parameters.iter().position(|parameter| parameter == name));
+            expression.resolve(SLOT_BASE, 0, |name| parameters.iter().position(|parameter| parameter == name));
             functions.push(Arc::new(UserFunction { name, line, parameters, body: expression }));
             Ok(())
         });
@@ -1147,7 +1147,7 @@ impl ScriptExpression {
             Self::Decimal(_) | Self::ExactInteger(_) | Self::CalendarLiteral(_, _) => {}
             Self::Boolean { name, target } => {
                 *target = named_binding(name)
-                    .filter(|target| *target < line_index || *target >= super::MAX_SOURCE_LINES);
+                    .filter(|target| *target < line_index || *target >= SLOT_BASE);
             }
             Self::Legacy { line, slots, .. } => {
                 for (_, child) in slots.iter_mut() {
@@ -1352,7 +1352,7 @@ impl ScriptExpression {
                 let local_values = arguments.into_iter().map(Some).collect::<Vec<_>>();
                 let runtime_line = work.runtime_line.take();
                 let runtime_definitions = work.runtime_definitions.take();
-                let result = function.body.evaluate(MAX_SOURCE_LINES, &local_outcomes, &local_values, &mut Vec::new(), work);
+                let result = function.body.evaluate(SLOT_BASE, &local_outcomes, &local_values, &mut Vec::new(), work);
                 work.runtime_line = runtime_line;
                 work.runtime_definitions = runtime_definitions;
                 work.call_depth -= 1;
@@ -1372,7 +1372,7 @@ fn value_at(
     boolean_literal: bool,
 ) -> Result<CalculationValue, DiagnosticKind> {
     let physical_line = work.runtime_line.unwrap_or(line_index);
-    let runtime_binding = work.runtime_line.is_some() && target >= super::MAX_SOURCE_LINES;
+    let runtime_binding = work.runtime_line.is_some() && target >= SLOT_BASE;
     if runtime_binding && matches!(
         outcomes.get(target),
         Some(LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted }))

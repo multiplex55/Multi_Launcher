@@ -2,8 +2,8 @@
 
 use super::document::{
     CalculationDocument, CalculationEvaluation, CalculationValue, DocumentDiagnostic, EditError, FinalBinding, LineOutcome,
-    MAX_DOCUMENT_BYTES, MAX_SOURCE_LINES,
 };
+use super::limits::{ABSOLUTE_BYTES as MAX_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_SOURCE_LINES, physical_rows};
 use super::inspector::{
     DocumentIncarnation, InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot,
 };
@@ -834,7 +834,7 @@ impl CalculationPadSession {
         let new_len = source.len().checked_sub(descriptor.value_range.len())
             .and_then(|size| size.checked_add(value.len()))
             .ok_or("Input is too large.")?;
-        if new_len > super::document::MAX_DOCUMENT_BYTES { return Err("Input is too large.".into()); }
+        if new_len > MAX_DOCUMENT_BYTES { return Err("Input is too large.".into()); }
         let mut replacement = source.to_owned();
         replacement.replace_range(descriptor.value_range.clone(), value);
         let valid = super::document::literal_inputs(&replacement).into_iter()
@@ -1084,7 +1084,9 @@ impl CalculationPadSession {
         let Some(current) = self.current.as_ref() else { return; };
         #[cfg(test)]
         { self.evaluation_attempts += 1; }
-        if self.evaluation_wake.is_some() && CalculationDocument::source_requires_repeated_execution(&current.source) {
+        let limits = super::limits::profile_limits(current.options.profile);
+        let within_profile = current.source.len() <= limits.bytes && physical_rows(&current.source) <= limits.lines;
+        if self.evaluation_wake.is_some() && (current.options.profile == super::persistence::DocumentProfile::Extended || (within_profile && CalculationDocument::source_requires_repeated_execution(&current.source))) {
             if self.evaluation_worker.is_none() {
                 let Some(wake) = self.evaluation_wake.as_ref().cloned() else { return; };
                 match EvaluationWorker::start(wake) {
@@ -1093,11 +1095,11 @@ impl CalculationPadSession {
                 }
             }
             let Some(worker) = self.evaluation_worker.as_ref() else { return; };
-            worker.submit(EvaluationRequest { stamp, source: current.source.clone(), line_ids: current.line_ids.clone() });
+            worker.submit(EvaluationRequest { stamp, source: current.source.clone(), line_ids: current.line_ids.clone(), profile: current.options.profile });
             self.scheduled_evaluation = Some(stamp);
             return;
         }
-        let document = CalculationDocument::new(current.source.clone());
+        let document = CalculationDocument::with_profile(current.source.clone(), current.options.profile);
         let evaluation = document.evaluate();
         match project_evaluation(evaluation, &current.line_ids, stamp) {
             Ok(result) => {
@@ -1379,7 +1381,7 @@ fn validate_source_size(source: &str) -> Result<(), SessionError> {
             max_bytes: MAX_DOCUMENT_BYTES,
         });
     }
-    let line_count = source.split('\n').count();
+    let line_count = physical_rows(source);
     if line_count > MAX_SOURCE_LINES {
         return Err(SessionError::TooManyLines {
             max_lines: MAX_SOURCE_LINES,
@@ -1428,7 +1430,7 @@ fn remap_line_ids(
         }
     }
     let width = new_count + 1;
-    let mut lcs = vec![0usize; (old_count + 1) * width];
+    let mut lcs = vec![0u16; (old_count + 1) * width];
     for old_index in (0..old_count).rev() {
         for new_index in (0..new_count).rev() {
             let value = if old_lines[old_index] == new_lines[new_index] {
@@ -1518,7 +1520,7 @@ mod tests {
     };
     use crate::calculation_pad::{
         CalculationValue, DiagnosticKind, DocumentId, LineId, LineOutcome, MAX_DOCUMENT_BYTES,
-        MAX_SOURCE_LINES, PadStoreError,
+        PadStoreError,
     };
     use crate::platform::app_data::AppDataRoot;
     use std::path::PathBuf;
@@ -1689,7 +1691,7 @@ mod tests {
         let evaluator = std::sync::Arc::new(move |request: super::EvaluationRequest, cancellation| {
             started_tx.send(request.stamp.generation).unwrap();
             continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
-            let document = super::CalculationDocument::new(request.source);
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
             super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
         });
         session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
@@ -1727,6 +1729,39 @@ mod tests {
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         session.advance_automatic();
         assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
+    fn changing_profile_retires_pending_extended_worker() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
+        let evaluator = std::sync::Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(()).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.replace_source("1").unwrap();
+        session.set_document_options(super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() }).unwrap();
+        session.advance_automatic();
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let old = session.evaluation_basis().unwrap();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Pending);
+        session.set_document_options(super::DocumentOptions::default()).unwrap();
+        assert_ne!(session.evaluation_basis(), Some(old));
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        continue_tx.send(()).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        assert_ne!(session.shared_evaluation().unwrap().basis, old);
     }
 
     #[test]
@@ -2160,30 +2195,81 @@ mod tests {
 
     #[test]
     fn rejects_oversized_and_overlong_edits_before_line_diffing() {
+        use crate::calculation_pad::{MAX_ADMITTED_DOCUMENT_BYTES as LIMIT_BYTES, MAX_ADMITTED_SOURCE_LINES as LIMIT_LINES};
         let (_directory, _root, mut session) = fixture();
         session.replace_source("existing = 1").unwrap();
         let original = session.source().unwrap().to_owned();
 
         assert!(matches!(
-            session.replace_source("x".repeat(MAX_DOCUMENT_BYTES + 1)),
+            session.replace_source("x".repeat(LIMIT_BYTES + 1)),
             Err(SessionError::DocumentTooLarge { .. })
         ));
-        let too_many_lines = vec![""; MAX_SOURCE_LINES + 1].join("\n");
+        let too_many_lines = vec![""; LIMIT_LINES + 1].join("\n");
         assert!(matches!(
             session.replace_source(too_many_lines),
             Err(SessionError::TooManyLines { .. })
         ));
         assert!(matches!(
-            super::remap_line_ids("", &[LineId(1)], &"x".repeat(MAX_DOCUMENT_BYTES + 1), 2),
+            super::remap_line_ids("", &[LineId(1)], &"x".repeat(LIMIT_BYTES + 1), 2),
             Err(SessionError::DocumentTooLarge { .. })
         ));
-        let too_many_lines = vec![""; MAX_SOURCE_LINES + 1].join("\n");
+        let too_many_lines = vec![""; LIMIT_LINES + 1].join("\n");
         assert!(matches!(
             super::remap_line_ids("", &[LineId(1)], &too_many_lines, 2),
             Err(SessionError::TooManyLines { .. })
         ));
         assert_eq!(session.source(), Some(original.as_str()));
         assert_eq!(session.line_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn extended_source_survives_profile_save_reopen_and_recovery() {
+        let (_directory, root, mut session) = fixture();
+        let source = format!("{}value = 2\r\nr257", "# α\r\n".repeat(256));
+        session.replace_source(source.clone()).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert!(matches!(session.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { .. })));
+        session.save_as("extended source").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.source(), Some(source.as_str()));
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        let options = super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() };
+        reopened.set_document_options(options).unwrap();
+        let result = reopened.evaluation().unwrap();
+        assert!(result.diagnostic.is_none());
+        assert!(matches!(result.lines[257].outcome, LineOutcome::Value(CalculationValue::Scalar(2.0))));
+        let comparison = reopened.comparison_context().unwrap().compare(super::super::ComparisonRequest {
+            left: super::super::ComparisonSlot::Expression("r257".into()),
+            right: super::super::ComparisonSlot::Expression("value".into()),
+        });
+        assert!(matches!(comparison.relation, super::super::ComparisonRelation::Scalar { ordering: std::cmp::Ordering::Equal, .. }));
+        let mut recovery = super::super::PadRecoveryWriter::new(super::super::PadRecoveryStore::new(&root));
+        let snapshot = super::super::PadRecoverySnapshot { document_id: id, revision: 1, source: source.clone(), options };
+        recovery.save_now(snapshot).unwrap();
+        let loaded = recovery.load().unwrap().unwrap();
+        assert_eq!(loaded.source, source);
+        let mut restored = CalculationPadSession::new(&root);
+        assert!(restored.restore_recovered_document(loaded.source, loaded.options).unwrap());
+        assert_eq!(restored.source(), Some(source.as_str()));
+    }
+
+    #[test]
+    fn absolute_admission_counts_utf8_bytes_and_trailing_physical_rows() {
+        use crate::calculation_pad::{MAX_ADMITTED_DOCUMENT_BYTES as BYTES, MAX_ADMITTED_SOURCE_LINES as LINES};
+        let (_directory, _root, mut session) = fixture();
+        let exact_bytes = "é".repeat(BYTES / 2);
+        session.replace_source(exact_bytes.clone()).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert!(session.replace_source(format!("{exact_bytes}a")).is_err());
+        assert_eq!(session.source(), Some(exact_bytes.as_str()));
+        assert_eq!(session.line_ids().unwrap(), ids);
+        let exact_rows = "\r\n".repeat(LINES - 1);
+        session.replace_source(exact_rows.clone()).unwrap();
+        assert_eq!(session.line_ids().unwrap().len(), LINES);
+        assert!(session.replace_source(format!("{exact_rows}\n")).is_err());
+        assert_eq!(session.source(), Some(exact_rows.as_str()));
     }
 
     #[test]

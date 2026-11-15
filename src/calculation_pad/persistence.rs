@@ -1,6 +1,7 @@
 //! Bounded persistence for explicitly opened Calculation Pad documents.
 
-use crate::calculation_pad::document::{MAX_DOCUMENT_BYTES, MAX_NAME_BYTES, MAX_SOURCE_LINES};
+use crate::calculation_pad::document::MAX_NAME_BYTES;
+use crate::calculation_pad::limits::{ABSOLUTE_BYTES as MAX_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_SOURCE_LINES, physical_rows};
 use crate::common::atomic_file::save_atomic;
 use crate::platform::app_data::AppDataRoot;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
-pub const MAX_STORED_DOCUMENT_BYTES: usize = 512 * 1024;
+pub const MAX_STORED_DOCUMENT_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
 pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 3;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
@@ -22,7 +23,7 @@ const DOCUMENTS_DIRECTORY: &str = "documents";
 const RECOVERY_FILE: &str = "last_source.json";
 const MAX_DIRECTORY_ENTRIES: usize = MAX_SAVED_DOCUMENTS * 4;
 pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 2;
-pub const MAX_STORED_RECOVERY_BYTES: usize = 512 * 1024;
+pub const MAX_STORED_RECOVERY_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
 const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,7 +261,7 @@ fn validate_recovery_source(source: &str) -> anyhow::Result<()> {
     if source.len() > MAX_DOCUMENT_BYTES {
         anyhow::bail!("recovered source exceeds the {MAX_DOCUMENT_BYTES}-byte limit");
     }
-    let lines = source.split('\n').count();
+    let lines = physical_rows(source);
     if lines > MAX_SOURCE_LINES {
         anyhow::bail!("recovered source exceeds the {MAX_SOURCE_LINES}-line limit");
     }
@@ -1206,7 +1207,7 @@ fn validate_source_and_line_ids(
     if source.len() > MAX_DOCUMENT_BYTES {
         return Err(invalid_document(path, "source exceeds its byte limit"));
     }
-    let line_count = source.split('\n').count();
+    let line_count = physical_rows(source);
     if line_count > MAX_SOURCE_LINES {
         return Err(invalid_document(path, "source exceeds its line limit"));
     }
