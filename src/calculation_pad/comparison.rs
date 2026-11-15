@@ -49,6 +49,7 @@ impl ComparisonSide {
     }
     pub fn type_label(&self) -> &'static str {
         match &self.value {
+            Ok(CalculationValue::Calendar(_)) => "calendar",
             Ok(CalculationValue::Integer(value)) => value.mode().type_name(),
             Ok(CalculationValue::ExactBase { .. }) => "exact base",
             Ok(CalculationValue::Exact(_)) => "exact",

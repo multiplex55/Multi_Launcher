@@ -2037,6 +2037,7 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::Vector(_) => "vector",
                                             crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. } => "integer",
                                             crate::calculation_pad::CalculationValue::Exact(_) => "exact",
+                                            crate::calculation_pad::CalculationValue::Calendar(_) => "calendar",
                                             crate::calculation_pad::CalculationValue::ApproximateScalar(_) => "approximate scalar",
                                             _ => "quantity",
                                         });

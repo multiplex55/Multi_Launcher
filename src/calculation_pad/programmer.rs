@@ -927,6 +927,7 @@ fn evaluate_as(
                 }
             }
             Some(CalculationValue::Exact(_))
+            | Some(CalculationValue::Calendar(_))
             | Some(CalculationValue::ApproximateScalar(_))
             | Some(CalculationValue::Scalar(_))
             | Some(CalculationValue::Boolean(_))
@@ -1053,6 +1054,7 @@ fn evaluate_constructor(
             }
             Some(CalculationValue::Scalar(value)) => return scalar_to_integer(*value, target_mode),
             Some(CalculationValue::Exact(_))
+            | Some(CalculationValue::Calendar(_))
             | Some(CalculationValue::ApproximateScalar(_))
             | Some(CalculationValue::PhysicalQuantity { .. })
             | Some(CalculationValue::Boolean(_))

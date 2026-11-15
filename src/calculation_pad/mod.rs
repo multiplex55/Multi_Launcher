@@ -4,6 +4,7 @@
 //! `README.md`.
 
 mod bit_labels;
+mod calendar;
 mod comparison;
 mod dependencies;
 mod document;
@@ -19,6 +20,7 @@ mod session;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;
+pub use calendar::CalendarValue;
 
 pub(crate) use document::syntax::{ProtectedKind, SourceAnalysis};
 

@@ -565,6 +565,7 @@ pub enum LineOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
+    Calendar(super::calendar::CalendarValue),
     Scalar(f64),
     ApproximateScalar(f64),
     Exact(super::exact::ExactNumber),
@@ -591,6 +592,7 @@ impl CalculationValue {
     /// Formats a result using the shared number formatter where it applies.
     pub fn formatted_result(&self) -> Option<String> {
         match self {
+            Self::Calendar(value) => Some(value.display()),
             Self::Scalar(value) => format_number(*value),
             Self::ApproximateScalar(value) => Some(format!("≈ {}", format_number(*value)?)),
             Self::Exact(value) => Some(value.display()),
@@ -609,6 +611,7 @@ impl CalculationValue {
     /// Complete parseable value for clipboard operations.
     pub fn canonical_result(&self) -> Option<String> {
         match self {
+            Self::Calendar(value) => value.canonical(),
             Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
             Self::Exact(value) => Some(value.canonical()),
             Self::ApproximateScalar(value) => format_number(*value),
@@ -622,7 +625,7 @@ impl CalculationValue {
             Self::Exact(value) => value.is_rounded(),
             Self::ApproximateScalar(_) => true,
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
-            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
+            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } | Self::Calendar(_) => false,
         }
     }
 }
@@ -2973,7 +2976,7 @@ fn evaluate_prepared_expression(
     if let Some(name) = &expression.simple_reference
         && let Some(reference) = line.references.iter().find(|reference| &reference.name == name)
         && let Some(value) = reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
-        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_))
+        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_) | CalculationValue::Calendar(_))
     {
         return Ok(value.clone());
     }

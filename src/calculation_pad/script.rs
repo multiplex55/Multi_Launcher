@@ -185,6 +185,8 @@ pub(super) enum ScriptExpression {
     Compare(Compare, Box<Self>, Box<Self>),
     Call(Function, Vec<Self>),
     Decimal(String),
+    CalendarLiteral(String, Vec<String>),
+    CalendarCall(String, Vec<Self>, Option<String>),
     ExactInteger(String),
     UserCall(Arc<UserFunction>, Vec<Self>),
 }
@@ -381,6 +383,17 @@ pub(crate) struct FunctionSignature {
     insensitive: bool,
 }
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "date", help: "date(\"YYYY-MM-DD\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "time", help: "time(\"HH:MM[:SS]\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "datetime", help: "datetime(\"RFC3339 timestamp\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "zoned_datetime", help: "zoned_datetime(\"local\", \"zone\"[, \"earlier\" or \"later\"])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_days", help: "add_days(value, days[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_months", help: "add_months(value, months[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_years", help: "add_years(value, years[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "days_between", help: "days_between(start, end)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "weekday", help: "weekday(date)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "elapsed_between", help: "elapsed_between(start, end)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "add_duration", help: "add_duration(time, duration)", arities: &[2], insensitive: true },
     FunctionSignature { name: "round_to", help: "round_to(value, step)", arities: &[2], insensitive: true },
     FunctionSignature { name: "floor_to", help: "floor_to(value, step)", arities: &[2], insensitive: true },
     FunctionSignature { name: "ceil_to", help: "ceil_to(value, step)", arities: &[2], insensitive: true },
@@ -565,6 +578,7 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
                 name.to_ascii_lowercase().as_str(),
                 "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
                 "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
+                | "date" | "time" | "datetime" | "zoned_datetime" | "add_days" | "add_months" | "add_years" | "days_between" | "weekday" | "elapsed_between" | "add_duration"
             )
         {
             return true;
@@ -875,6 +889,29 @@ fn parse(
                     return Err(DiagnosticKind::InvalidExpression);
                 }
                 let is_if = name.eq_ignore_ascii_case("if");
+                let lower = name.to_ascii_lowercase();
+                let constructor = matches!(lower.as_str(), "date" | "time" | "datetime" | "zoned_datetime");
+                let calendar_call = matches!(lower.as_str(), "add_days" | "add_months" | "add_years" | "days_between" | "weekday" | "elapsed_between" | "add_duration");
+                if constructor || calendar_call {
+                    let literal = |arg: &str| -> Result<String, DiagnosticKind> {
+                        let value = arg.trim().strip_prefix('"').and_then(|s| s.strip_suffix('"')).ok_or_else(|| error("calendar literal must be quoted"))?;
+                        if value.len() > 128 || value.contains(['"', '\\']) { return Err(error("invalid calendar literal")); }
+                        Ok(value.to_owned())
+                    };
+                    let node = if constructor {
+                        ScriptExpression::CalendarLiteral(lower, args.iter().map(|arg| literal(arg)).collect::<Result<Vec<_>, _>>()?)
+                    } else {
+                        let has_fold = matches!(lower.as_str(), "add_days" | "add_months" | "add_years") && args.len() == 3;
+                        let fold = if has_fold { Some(literal(args[2])?) } else { None };
+                        let count = args.len() - usize::from(has_fold);
+                        let children = args[..count].iter().map(|arg| parse(arg, declared, functions, depth + 1)).collect::<Result<Vec<_>, _>>()?;
+                        ScriptExpression::CalendarCall(lower, children, fold)
+                    };
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 if name.eq_ignore_ascii_case("decimal") {
                     let literal = args[0].trim();
                     let Some(literal) = literal.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
@@ -1063,7 +1100,7 @@ fn validate_calls(source: &str) -> Result<(), DiagnosticKind> {
 impl ScriptExpression {
     fn validate_parameters(&self, parameters: &HashSet<String>) -> Result<(), DiagnosticKind> {
         match self {
-            Self::Decimal(_) | Self::ExactInteger(_) | Self::Boolean { .. } => Ok(()),
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::Boolean { .. } | Self::CalendarLiteral(_, _) => Ok(()),
             Self::Legacy { line, slots, .. } => {
                 for reference in &line.references {
                     if slots.iter().any(|(name, _)| *name == reference.name) { continue; }
@@ -1084,7 +1121,7 @@ impl ScriptExpression {
                 b.validate_parameters(parameters)
             }
             Self::Not(child) => child.validate_parameters(parameters),
-            Self::Call(_, args) | Self::UserCall(_, args) => {
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
                 for child in args { child.validate_parameters(parameters)?; }
                 Ok(())
             }
@@ -1107,7 +1144,7 @@ impl ScriptExpression {
         named_binding: &mut impl FnMut(&str) -> Option<usize>,
     ) {
         match self {
-            Self::Decimal(_) | Self::ExactInteger(_) => {}
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::CalendarLiteral(_, _) => {}
             Self::Boolean { name, target } => {
                 *target = named_binding(name)
                     .filter(|target| *target < line_index || *target >= super::MAX_SOURCE_LINES);
@@ -1139,7 +1176,7 @@ impl ScriptExpression {
                 b.resolve_inner(line_index, row_count, named_binding);
             }
             Self::Not(child) => child.resolve_inner(line_index, row_count, named_binding),
-            Self::Call(_, args) | Self::UserCall(_, args) => {
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
                 for arg in args {
                     arg.resolve_inner(line_index, row_count, named_binding);
                 }
@@ -1157,6 +1194,11 @@ impl ScriptExpression {
     ) -> Result<CalculationValue, DiagnosticKind> {
         work.charge(1)?;
         match self {
+            Self::CalendarLiteral(name, args) => super::super::calendar::construct(name, args),
+            Self::CalendarCall(name, args, fold) => {
+                let values = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
+                super::super::calendar::call(name, &values, fold.as_deref())
+            }
             Self::Decimal(value) => Ok(CalculationValue::Exact(super::super::exact::ExactNumber::decimal(value, work)?)),
             Self::ExactInteger(value) => {
                 let value = super::super::exact::ExactNumber::from_integer_text(value, work)?;
@@ -1214,7 +1256,7 @@ impl ScriptExpression {
                         .and_then(Option::as_ref)
                     && matches!(
                         value,
-                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_)
+                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_) | CalculationValue::Calendar(_)
                     )
                 {
                     return Ok(value.clone());
@@ -1393,6 +1435,7 @@ fn compare_values(
     work: &mut WorkBudget,
 ) -> Result<Ordering, DiagnosticKind> {
     match (left, right) {
+        (CalculationValue::Calendar(a), CalculationValue::Calendar(b)) => a.compare(b),
         (CalculationValue::Exact(_), _) | (_, CalculationValue::Exact(_)) => super::super::exact::ExactNumber::compare(left, right, work),
         (CalculationValue::Boolean(a), CalculationValue::Boolean(b)) => Ok(a.cmp(b)),
         (CalculationValue::Scalar(a), CalculationValue::Scalar(b)) => a
@@ -1659,6 +1702,80 @@ mod tests {
             LineOutcome::Value(CalculationValue::Boolean(value)) => *value,
             other => panic!("expected Boolean: {other:?}"),
         }
+    }
+
+    #[test]
+    fn calendar_dates_aliases_functions_and_clamping() {
+        let rows = evaluated(concat!(
+            "start = date(\"2026-11-15\")\n",
+            "finish = add_days(start, 45)\n",
+            "days_between(start, finish)\n",
+            "weekday(start)\n",
+            "add_months(date(\"2024-01-31\"), 1)\n",
+            "add_years(date(\"2024-02-29\"), 1)\n",
+            "alias = finish\n",
+            "fn move_date(d) = add_days(d, 1)\n",
+            "move_date(alias)\n",
+            "date(\"2026-11-15\") < finish"
+        ));
+        for (index, expected) in [(1, "2026-12-30"), (3, "Sun"), (4, "2024-02-29"), (5, "2025-02-28"), (6, "2026-12-30"), (8, "2026-12-31")] {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{index}: {:?}", rows[index]); };
+            assert_eq!(value.formatted_result().as_deref(), Some(expected));
+        }
+        assert_eq!(scalar(&rows[2]), 45.0);
+        assert!(boolean_value(&rows[9]));
+    }
+
+    #[test]
+    fn calendar_dst_duration_fold_gap_and_canonical_replay() {
+        let rows = evaluated(concat!(
+            "start = zoned_datetime(\"2026-03-07T12:00:00\", \"America/New_York\")\n",
+            "calendar = add_days(start, 1)\n",
+            "elapsed = add_duration(start, 24 h)\n",
+            "elapsed_between(start, calendar)\n",
+            "elapsed_between(start, elapsed)\n",
+            "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\")\n",
+            "zoned_datetime(\"2026-03-08T02:30:00\", \"America/New_York\")\n",
+            "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\", \"later\")\n",
+            "add_duration(time(\"23:30\"), 1 h)\n",
+            "add_duration(start, 1 m)\n",
+            "days_between(start, date(\"2026-03-07\"))\n",
+            "datetime(\"2026-11-15T12:34:56.125-05:00\")\n",
+            "add_duration(datetime(\"2000-01-01T00:00:00Z\"), 9460800000 s)\n",
+            "add_days(date(\"9999-12-31\"), 1)\n",
+            "add_days(date(\"2026-01-01\"), 1, \"later\")"
+        ));
+        for (index, expected) in [(3, 82800.0), (4, 86400.0)] {
+            assert!(matches!(&rows[index], LineOutcome::Value(CalculationValue::PhysicalQuantity { value, .. }) if *value == expected), "{:?}", rows[index]);
+        }
+        for index in [5, 6, 8, 9, 10, 13, 14] { assert!(matches!(rows[index], LineOutcome::Error(_)), "{:?}", rows[index]); }
+        for index in [1, 2, 7, 11, 12] {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{:?}", rows[index]); };
+            let replay = evaluated(&value.canonical_result().unwrap());
+            assert_eq!(replay[0], rows[index]);
+        }
+    }
+
+    #[test]
+    fn calendar_duration_float_tolerance_and_clock_precision() {
+        let rows = evaluated(concat!(
+            "add_duration(time(\"00:00\"), 1000.123 s)\n",
+            "time(\"12:00:00.123456789\")\n",
+            "datetime(\"2026-11-15T12:00:00.123456789Z\")\n",
+            "zoned_datetime(\"2026-11-15T12:00:00.123456789\", \"America/New_York\")\n",
+            "time(\"12:00:00.1234567891\")\n",
+            "datetime(\"2026-11-15T12:00:00.1234567891Z\")\n",
+            "zoned_datetime(\"2026-11-15T12:00:00.1234567891\", \"America/New_York\")\n",
+            "add_duration(time(\"00:00\"), 0.0000000001 s)"
+        ));
+        let LineOutcome::Value(value) = &rows[0] else { panic!("{:?}", rows[0]); };
+        assert_eq!(value.formatted_result().as_deref(), Some("00:16:40.123"));
+        for index in 1..=3 {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{:?}", rows[index]); };
+            let replay = evaluated(&value.canonical_result().unwrap());
+            assert_eq!(replay[0], rows[index]);
+        }
+        for index in 4..=7 { assert!(matches!(rows[index], LineOutcome::Error(_)), "{:?}", rows[index]); }
     }
 
     #[test]

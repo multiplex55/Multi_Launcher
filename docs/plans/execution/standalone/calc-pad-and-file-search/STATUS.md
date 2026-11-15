@@ -25,9 +25,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M4-A | Verified and pushed | `7fa01717e6fa7fd8e298255aaf67b18b24937e42`. All ten helpers. Focused batch passed 10/10. |
 | M5-A | Verified and pushed | `0cdba26a511b5c3abb3c0e14b9b433bbb2608a9a`. Formula runtime. Batches passed 11/11 and 7/7. |
 | M5-B | Verified and pushed | `c5a7fbfed5fe53dbd31ee0944ff6232c088d647b`. Formula editor and examples. Focused batch passed 13/13. |
-| M5-C | Verified | Conditional chains, break/continue, preserved rollback and source recovery. Final batch passed 16/16. |
-| M6-A | In progress | Typed deterministic dates and durations. |
-| M6-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M5-C | Verified and pushed | `3aa2402776a075c74673cc4e792535923871902d`. Conditional blocks, loop flow and recovery. Final batch passed 16/16. |
+| M6-A | Verified | Typed deterministic dates/durations, named-zone semantics and canonical replay. Batches passed 11/11 and 5/5. |
+| M6-B | In progress | Calendar presentation, comparison and reference. |
+| M7-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -39,7 +40,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C21 | Implemented | Focused numeric, compatibility, hint and executable example checks passed. | Script function catalog and signatures, editor hints, executable examples |
 | C18 | Implemented | Focused runtime, editor, navigation and examples passed. Native integrated check pending. | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
-| C22 | Pending | Pending | Existing calendar and named-zone domain, typed Pad operations and formatting |
+| C22 | Domain implemented; presentation pending | Focused date, DST, precision and legacy unit checks passed | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Pending | Pending | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
 | C14 | Pending | Pending | Binding identity, session history/metadata, guarded editor preview and apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
@@ -111,3 +112,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Added contextual blocks, Boolean condition evaluation, nearest-loop control outcomes, and physical/non-value control rows. Successful early exit preserves completed work. Existing error rollback and iteration accounting remain active, including structural errors in skipped branches.
 - Initial focused run passed 13/14; a legacy loop-validation case exposed an earlier source-mapping regression where an unclosed delimiter absorbed subsequent clear dedented assignments. Recovery now reports the opening physical location and resumes at the new assignment without affecting valid dedented continuations. The first correction compile identified a missing explicit owner type, corrected to `Option<usize>`.
 - Final Nextest passed 16/16 in 2.66 seconds with verified cleanup and output drain. Final separate compile ran 189.57 seconds. Cached tests used 100 seconds, compiles 900 seconds. Receipts are in `m5c-build`, `m5c-run`, `m5c-correction-build`, `m5c-final-build`, and `m5c-final-run`.
+
+### M6-A typed calendar domain
+
+- Added deterministic calendar constructors and operations, with compatibility for existing physical-time quantities. Named-zone resolution uses explicit fold/gap semantics and distinguishes local calendar shifts from elapsed time. Output constructors retain kind, zone/fold, offset and supported fractional precision.
+- Initial scoped library Nextest passed 11/11 in 2.53 seconds. Corrected false duration precision rejection caused by f64 representation and blocked excess fractional clock digits before parsing. The focused correction run passed 5/5 in 2.26 seconds. Separate compilation ran 282.86 and 193.37 seconds under 900-second deadlines. Cached tests used 100-second deadlines; cleanup and output drain passed. Receipts are in `m6a-build`, `m6a-run`, `m6a-correction-build`, and `m6a-correction-run`.
