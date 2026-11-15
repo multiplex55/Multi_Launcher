@@ -3804,7 +3804,7 @@ impl CalculationPadDialog {
             .vertical_scroll_offset(self.examples_scroll).max_height(ui.available_height())
             .show(ui, |ui| {
                 if !active {
-                    ui.label("One expression or name = expression per physical line; # or // starts a full-line comment.");
+                    ui.label("Use one expression, assignment, or for header per line. Start full-line comments with # or //.");
                     ui.label("Results include scalars, vectors, exact integers, quantities, and exact base conversions.");
                     ui.collapsing("Operator and function reference", |ui| {
                         ui.label("Functions are case-insensitive in call position. Unbound pi and pie mean PI. Infix mod matches signed %, while mod(a, b) is Euclidean.");
