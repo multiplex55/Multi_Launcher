@@ -53,7 +53,7 @@ impl EvaluationWorker {
         Self::start_with(wake, Arc::new(evaluate))
     }
 
-    fn start_with(
+    pub(super) fn start_with(
         wake: Arc<dyn Fn() + Send + Sync>,
         evaluate: Arc<
             dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync,

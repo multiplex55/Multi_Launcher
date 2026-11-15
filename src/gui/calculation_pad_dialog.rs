@@ -369,6 +369,9 @@ struct HostEffects {
     watch_copy: Option<(String, bool)>,
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
     evaluation_basis: Option<crate::calculation_pad::EvaluationBasis>,
+    calculation_policy: Option<crate::calculation_pad::CalculationPolicy>,
+    calculate: Option<crate::calculation_pad::EvaluationBasis>,
+    cancel_calculation: Option<crate::calculation_pad::EvaluationBasis>,
     inspector_selection: Option<LineId>,
     inspector_caret: Option<std::ops::Range<usize>>,
     open_inspector: bool,
@@ -503,6 +506,9 @@ impl CalculationPadDialog {
                 .zip(self.session.revision())
                 .map(|((incarnation, document), revision)| (incarnation, document, revision)),
             evaluation_basis: self.session.evaluation_basis(),
+            calculation_policy: None,
+            calculate: None,
+            cancel_calculation: None,
             inspector_selection: None,
             inspector_caret: None,
             open_inspector: false,
@@ -1772,6 +1778,15 @@ impl CalculationPadDialog {
                 #[cfg(test)]
                 self.test_config_groups.push(("Document", _document.response.rect));
 
+                ui.menu_button("Calculation", |ui| {
+                    if let Some(options) = self.session.document_options() {
+                        let mut policy = options.calculation;
+                        ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Automatic, "Automatic");
+                        ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Manual, "Manual");
+                        if policy != options.calculation { effects.calculation_policy = Some(policy); }
+                    }
+                });
+
                 let _tools = ui.menu_button("Tools", |ui| {
                     let examples = ui.button("Examples & reference");
                     #[cfg(test)]
@@ -1866,7 +1881,8 @@ impl CalculationPadDialog {
                 if ui.checkbox(&mut remember_source, "Remember last source").changed() {
                     effects.intent = Some(DialogIntent::SetRememberSource(remember_source));
                 }
-                let copy = ui.button("Copy all");
+                let current = evaluation.is_some_and(|result| Some(result.basis) == self.session.evaluation_basis());
+                let copy = ui.add_enabled(current, egui::Button::new("Copy all"));
                 #[cfg(test)]
                 { self.test_copy_all_rect = Some(copy.rect); }
                 if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
@@ -1899,6 +1915,16 @@ impl CalculationPadDialog {
             }
             let title = self.session.current_name().unwrap_or("Untitled");
             ui.label(title);
+            if self.session.document_options().is_some_and(|options| options.calculation == crate::calculation_pad::CalculationPolicy::Manual)
+                && ui.button("Calculate").clicked()
+            {
+                effects.calculate = self.session.evaluation_basis();
+            }
+            if self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Pending
+                && ui.button("Cancel").clicked()
+            {
+                effects.cancel_calculation = self.session.evaluation_basis();
+            }
             if self.session.is_dirty() {
                 ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
             }
@@ -1980,6 +2006,8 @@ impl CalculationPadDialog {
         if view.show_watches {
             ui.group(|ui| {
                 ui.label("Output watches");
+                let current = evaluation.is_some_and(|result| Some(result.basis) == self.session.evaluation_basis());
+                if evaluation.is_some() && !current { ui.colored_label(ui.visuals().warn_fg_color, "Outdated results"); }
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut view.watch_entry).desired_width(100.0).hint_text("Name"));
                     if ui.button("Pin").clicked()
@@ -2005,8 +2033,8 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. } => "integer",
                                             _ => "quantity",
                                         });
-                                        if ui.small_button("Copy").clicked() { effects.watch_copy = Some((name.clone(), false)); }
-                                        if ui.small_button("Copy formatted").clicked() { effects.watch_copy = Some((name.clone(), true)); }
+                                        if ui.add_enabled(current, egui::Button::new("Copy").small()).clicked() { effects.watch_copy = Some((name.clone(), false)); }
+                                        if ui.add_enabled(current, egui::Button::new("Copy formatted").small()).clicked() { effects.watch_copy = Some((name.clone(), true)); }
                                     }
                                     LineOutcome::Error(error) => { ui.colored_label(ui.visuals().error_fg_color, error.to_string()); }
                                     _ => { ui.weak("Not executed"); }
@@ -2016,6 +2044,9 @@ impl CalculationPadDialog {
                                 None => { ui.weak(match self.session.evaluation_status() {
                                     crate::calculation_pad::EvaluationStatus::Failed(_) => "Evaluation failed",
                                     crate::calculation_pad::EvaluationStatus::Inactive => "Unavailable",
+                                    crate::calculation_pad::EvaluationStatus::NotCalculated => "Not calculated",
+                                    crate::calculation_pad::EvaluationStatus::Outdated => "Outdated",
+                                    crate::calculation_pad::EvaluationStatus::Canceled => "Canceled",
                                     _ => "Pending",
                                 }); }
                             }
@@ -2052,6 +2083,7 @@ impl CalculationPadDialog {
                 || self.session.current_id() != Some(nav.document)
                 || self.session.document_incarnation() != Some(nav.incarnation)
                 || self.session.revision() != Some(pending.revision)
+                || (pending.selection.is_none() && nav.basis != self.session.evaluation_basis())
                 || !self.open
                 || !self
                     .session
@@ -2088,7 +2120,7 @@ impl CalculationPadDialog {
                             self.take_editor_history_shortcut(ui, editor_id);
                     }
                     let source = self.session.source().unwrap_or_default().to_owned();
-                    let evaluation = self.session.shared_evaluation();
+                    let evaluation = self.session.displayed_evaluation();
                     let mut view = self.pad_view.clone();
                     let mut folds = self.folds.clone();
                     let mut fold_request = None;
@@ -2458,6 +2490,9 @@ impl CalculationPadDialog {
             host.pad_view = None;
             host.input_commit = None;
             host.watch_copy = None;
+            host.calculation_policy = None;
+            host.calculate = None;
+            host.cancel_calculation = None;
             host.editor_history_action = None;
             host.inspector_selection = None;
             host.inspector_caret = None;
@@ -2516,6 +2551,9 @@ impl CalculationPadDialog {
             host.editor_primary_caret = None;
         }
         let needs_repaint = host.edited_source.is_some()
+            || host.calculation_policy.is_some()
+            || host.calculate.is_some()
+            || host.cancel_calculation.is_some()
             || host.save_as_name.is_some()
             || host.source_focus_requested
             || host.editor_history_action.is_some()
@@ -2744,6 +2782,38 @@ impl CalculationPadDialog {
             self.selected_result = None;
             self.active_source_line = None;
             self.pending_result_scroll = None;
+            ctx.request_repaint_of(host.viewport_id);
+        }
+        if self.open && !host.close_requested && !host.native_close_requested
+            && !host_request_requested && self.session.pending_transition().is_none()
+            && before_document == after_document
+        {
+            if host.evaluation_basis == self.session.evaluation_basis() {
+                if let Some(policy) = host.calculation_policy.take()
+                    && let Some(mut options) = self.session.document_options()
+                {
+                    options.calculation = policy;
+                    match self.session.set_document_options(options) {
+                        Ok(true) => { self.schedule_recovery_snapshot(ctx); ctx.request_repaint_of(host.viewport_id); }
+                        Ok(false) => {}
+                        Err(error) => self.set_error(error),
+                    }
+                } else if let Some(basis) = host.cancel_calculation.take() {
+                    if self.session.cancel_calculation(basis) { ctx.request_repaint_of(host.viewport_id); }
+                } else if host.calculate.is_some() {
+                    self.session.request_calculate();
+                    ctx.request_repaint_of(host.viewport_id);
+                }
+            } else if accepted_source_or_history
+                && host.calculate.is_some()
+                && host.calculate == host.evaluation_basis
+            {
+                self.session.request_calculate();
+                ctx.request_repaint_of(host.viewport_id);
+            }
+            let status = self.session.evaluation_status();
+            self.session.advance_automatic();
+            if self.session.evaluation_status() != status { ctx.request_repaint_of(host.viewport_id); }
         }
         if before_document == after_document
             && let Some((incarnation, document)) = after_document
@@ -3001,6 +3071,7 @@ impl CalculationPadDialog {
         if self.source_highlight.is_some_and(|highlight| {
             highlight.host != self.host_identity()
                 || self.session.revision() != Some(highlight.revision)
+                || highlight.navigation.basis != self.session.evaluation_basis()
                 || self.session.resolve_dependency_line(highlight.navigation.document, highlight.navigation.incarnation, highlight.navigation.line).is_none()
                 || ctx.input_for(host.viewport_id, |input| input.time) >= highlight.expires_at
         }) {
@@ -3252,7 +3323,6 @@ impl CalculationPadDialog {
             self.inspector_caret = None;
             self.inspector_caret_generation = self.inspector_caret_generation.wrapping_add(1);
         }
-        self.session.evaluation();
         let evaluation_ready = self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Ready;
         let key =
             self.session.evaluation_basis()
@@ -3472,6 +3542,8 @@ impl CalculationPadDialog {
                     self.inspector_caret = None;
                     self.schedule_recovery_snapshot(ctx);
                     self.request_source_focus();
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    ctx.request_repaint_of(pad_viewport_id());
                 }
                 self.sync_inspector_context();
                 changed
@@ -3522,7 +3594,7 @@ impl CalculationPadDialog {
             }
             ResultCopyTarget::Line(line_id) | ResultCopyTarget::FormattedLine(line_id) => self
                 .session
-                .evaluation()?
+                .shared_evaluation()?
                 .lines
                 .iter()
                 .find(|line| line.id == line_id)
@@ -4372,6 +4444,7 @@ impl CalculationPadDialog {
         if let Some(highlight) = self.source_highlight
             && highlight.host == self.host_identity()
             && self.session.revision() == Some(highlight.revision)
+            && highlight.navigation.basis == self.session.evaluation_basis()
             && !scroll.inner.response.changed()
             && ui.input(|input| input.time) < highlight.expires_at
             && let Some(location) = self.session.resolve_dependency_line(
@@ -4680,11 +4753,24 @@ impl CalculationPadDialog {
                 let Some(evaluation) = evaluation else {
                     match self.session.evaluation_status() {
                         crate::calculation_pad::EvaluationStatus::Pending => { ui.label("Calculating…"); }
+                        crate::calculation_pad::EvaluationStatus::NotCalculated => { ui.label("Not calculated."); }
+                        crate::calculation_pad::EvaluationStatus::Outdated => { ui.label("Results are outdated."); }
+                        crate::calculation_pad::EvaluationStatus::Canceled => { ui.label("Calculation canceled."); }
                         crate::calculation_pad::EvaluationStatus::Failed(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
                         _ => { ui.label("Open the pad to start a calculation."); }
                     }
                     return;
                 };
+                let current = Some(evaluation.basis) == self.session.evaluation_basis();
+                if !current {
+                    let status = match self.session.evaluation_status() {
+                        crate::calculation_pad::EvaluationStatus::Pending => "Calculating… showing outdated results",
+                        crate::calculation_pad::EvaluationStatus::Canceled => "Calculation canceled · showing outdated results",
+                        crate::calculation_pad::EvaluationStatus::Failed(_) => "Calculation failed · showing outdated results",
+                        _ => "Outdated results",
+                    };
+                    ui.colored_label(ui.visuals().warn_fg_color, status);
+                }
                 if let Some(diagnostic) = evaluation.diagnostic.as_ref() {
                     ui.colored_label(ui.visuals().error_fg_color, diagnostic.to_string());
                 }
@@ -4781,21 +4867,21 @@ impl CalculationPadDialog {
                     #[cfg(test)]
                     self.test_result_bodies.push((line.line_index, scope.response.rect, text_rect));
                     let row_response = scope.response.union(scope.inner.inner);
-                    if selected == Some(line.id) {
+                    if current && selected == Some(line.id) {
                         ui.painter().set(highlight, egui::Shape::rect_filled(
                             row_response.rect, 2.0, ui.visuals().selection.bg_fill.gamma_multiply(0.35),
                         ));
                     }
-                    if self.pending_result_scroll.is_some_and(|(_, _, revision, target)| {
+                    if current && self.pending_result_scroll.is_some_and(|(_, _, revision, target)| {
                         revision == evaluation.basis.revision && target == line.id
                     }) {
                         scroll_target = Some(row_response.rect);
                     }
-                    if row_response.clicked() {
+                    if current && row_response.clicked() {
                         *selected_result = Some(line.id);
                     }
                     row_response.context_menu(|ui| {
-                        let go_to_source = ui.button("Go to source");
+                        let go_to_source = ui.add_enabled(current, egui::Button::new("Go to source"));
                         #[cfg(test)] { self.test_go_to_source = Some(go_to_source.rect); }
                         if go_to_source.clicked()
                             && let (Some(document), Some(incarnation), Some(revision)) = (
@@ -4807,7 +4893,7 @@ impl CalculationPadDialog {
                             }, revision));
                             ui.close();
                         }
-                        let has_value = matches!(line.outcome, LineOutcome::Value(_));
+                        let has_value = current && matches!(line.outcome, LineOutcome::Value(_));
                         let select = ui.add_enabled(has_value, egui::Button::new("Select for comparison"));
                         #[cfg(test)] { self.test_select_comparison = Some(select.rect); }
                         if select.clicked() {
@@ -4847,7 +4933,7 @@ impl CalculationPadDialog {
                             crate::calculation_pad::CalculationValue::Integer(_)
                                 | crate::calculation_pad::CalculationValue::ExactBase { .. }
                         )) {
-                            let inspect = ui.button("Inspect bits…");
+                            let inspect = ui.add_enabled(current, egui::Button::new("Inspect bits…"));
                             #[cfg(test)]
                             {
                                 self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
@@ -5394,6 +5480,7 @@ mod tests {
     }
 
     fn copy_all_session(session: &mut CalculationPadSession) -> String {
+        session.evaluation();
         let (source, evaluation) = session.evaluation_with_source().unwrap();
         copy_all_results(source, evaluation)
     }
@@ -5407,6 +5494,50 @@ mod tests {
         let copied = copy_all_session(&mut dialog.session);
         assert!(copied.contains("r1 = α = (1 +\r\n  2) # end = 3\r\n"), "{copied}");
         assert!(copied.contains("Results only\nr1 = 3\nr3 = 3"), "{copied}");
+    }
+
+    #[test]
+    fn retained_manual_actions_keep_stale_results_read_only_and_resume_automatic() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.session.set_document_options(crate::calculation_pad::DocumentOptions {
+            calculation: crate::calculation_pad::CalculationPolicy::Manual,
+            profile: crate::calculation_pad::DocumentProfile::Standard,
+        }).unwrap();
+        dialog.test_replace_source("x = 2\nx * 3");
+        dialog.sync_inspector_context();
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::NotCalculated);
+        let mut calculate = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        calculate.pass_accepted = true;
+        calculate.calculate = dialog.session.evaluation_basis();
+        complete_host_effects(&mut dialog, &ctx, calculate);
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::Ready);
+        let old = dialog.session.displayed_evaluation().unwrap();
+        let mut edit = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        edit.pass_accepted = true;
+        edit.edited_source = Some("x = 5\nx * 3".into());
+        edit.result_copy = Some(super::ResultCopyIntent {
+            host: edit.identity, viewport_id: egui::ViewportId::ROOT,
+            document_id: old.basis.document, basis: old.basis,
+            target: super::ResultCopyTarget::All,
+        });
+        assert!(!complete_host_effects(&mut dialog, &ctx, edit).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(_))));
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::Outdated);
+        assert_eq!(&*old.source, "x = 2\nx * 3");
+        let mut calculate_edit = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        calculate_edit.pass_accepted = true;
+        calculate_edit.edited_source = Some("x = 7\nx * 3".into());
+        calculate_edit.calculate = dialog.session.evaluation_basis();
+        complete_host_effects(&mut dialog, &ctx, calculate_edit);
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::Ready);
+        assert_eq!(value(&mut dialog.session, 1), 21.0);
+        let mut automatic = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        automatic.pass_accepted = true;
+        automatic.calculation_policy = Some(crate::calculation_pad::CalculationPolicy::Automatic);
+        complete_host_effects(&mut dialog, &ctx, automatic);
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::Ready);
+        assert_eq!(value(&mut dialog.session, 1), 21.0);
     }
 
     fn input(screen_size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {

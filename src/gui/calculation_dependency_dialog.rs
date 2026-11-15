@@ -95,7 +95,7 @@ impl CalculationDependencyDialog {
                     && s.incarnation == inc
                     && s.rows.iter().any(|row| row.id == id)
             }) && !(identity == Some((doc, inc))
-                && matches!(status, EvaluationStatus::Pending | EvaluationStatus::Failed(_)))
+                && !matches!(status, EvaluationStatus::Ready | EvaluationStatus::Inactive))
         }) {
             self.selected = None;
         }
@@ -151,6 +151,7 @@ impl CalculationDependencyDialog {
                 let Some(snapshot) = runtime.snapshot.as_deref() else {
                     match &runtime.status {
                         EvaluationStatus::Pending if runtime.identity.is_some() => { ui.label("Calculation is pending. Dependencies will appear when results are ready."); }
+                        EvaluationStatus::NotCalculated | EvaluationStatus::Outdated | EvaluationStatus::Canceled if runtime.identity.is_some() => { ui.label("Calculate the current document to browse dependencies."); }
                         EvaluationStatus::Failed(message) if runtime.identity.is_some() => { ui.colored_label(ui.visuals().error_fg_color, message); }
                         _ => { ui.label("Calculation Pad is unavailable. Open a Pad document to browse dependencies."); }
                     }

@@ -35,6 +35,7 @@ pub struct SessionLineResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionEvaluation {
     pub basis: super::EvaluationBasis,
+    pub source: Arc<str>,
     pub lines: Vec<SessionLineResult>,
     /// Physical rows holding the final bindings in this evaluation.
     pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
@@ -46,6 +47,7 @@ pub(super) fn project_evaluation(
     line_ids: &[LineId],
     basis: super::EvaluationBasis,
 ) -> Result<SessionEvaluation, String> {
+    let source: Arc<str> = Arc::from(evaluation.source);
     if evaluation.diagnostic.is_none() && evaluation.lines.len() != line_ids.len() {
         return Err("Calculation results do not match the current source lines.".into());
     }
@@ -70,6 +72,7 @@ pub(super) fn project_evaluation(
         .collect::<Result<Vec<_>, String>>()?;
     Ok(SessionEvaluation {
         basis,
+        source,
         lines,
         final_bindings: Arc::new(evaluation.final_bindings),
         diagnostic: evaluation.diagnostic,
@@ -480,12 +483,18 @@ pub struct CalculationPadSession {
     evaluation_worker: Option<EvaluationWorker>,
     scheduled_evaluation: Option<EvaluationStamp>,
     evaluation_failure: Option<(EvaluationStamp, String)>,
+    canceled_evaluation: Option<EvaluationStamp>,
+    #[cfg(test)]
+    evaluation_attempts: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvaluationStatus {
     Ready,
     Pending,
+    NotCalculated,
+    Outdated,
+    Canceled,
     Failed(String),
     Inactive,
 }
@@ -506,6 +515,9 @@ impl CalculationPadSession {
             evaluation_worker: None,
             scheduled_evaluation: None,
             evaluation_failure: None,
+            canceled_evaluation: None,
+            #[cfg(test)]
+            evaluation_attempts: 0,
         }
     }
 
@@ -531,6 +543,7 @@ impl CalculationPadSession {
         }
         self.scheduled_evaluation = None;
         self.evaluation_failure = None;
+        self.canceled_evaluation = None;
         if let Some(current) = self.current.as_mut() {
             if let Some(next) = current.generation.checked_add(1) {
                 current.generation = next;
@@ -550,6 +563,12 @@ impl CalculationPadSession {
         {
             return EvaluationStatus::Failed(message.clone());
         }
+        if self.canceled_evaluation == Some(stamp) {
+            return EvaluationStatus::Canceled;
+        }
+        if self.scheduled_evaluation == Some(stamp) {
+            return EvaluationStatus::Pending;
+        }
         if self
             .current
             .as_ref()
@@ -557,8 +576,10 @@ impl CalculationPadSession {
             .is_some_and(|evaluation| evaluation.basis == stamp)
         {
             EvaluationStatus::Ready
+        } else if self.current.as_ref().is_some_and(|current| current.cached_evaluation.is_some()) {
+            EvaluationStatus::Outdated
         } else {
-            EvaluationStatus::Pending
+            EvaluationStatus::NotCalculated
         }
     }
 
@@ -1032,9 +1053,8 @@ impl CalculationPadSession {
         true
     }
 
-    /// Returns owned line outcomes, recomputing only after a source revision changes.
-    pub fn evaluation(&mut self) -> Option<&SessionEvaluation> {
-        let stamp = self.evaluation_stamp()?;
+    fn poll_evaluation(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
         if let Some(completion) = self
             .evaluation_worker
             .as_ref()
@@ -1057,79 +1077,92 @@ impl CalculationPadSession {
                 Err(message) => self.evaluation_failure = Some((stamp, message)),
             }
         }
-        let needs_evaluation = self
-            .current
-            .as_ref()?
-            .cached_evaluation
-            .as_ref()
-            .is_none_or(|evaluation| evaluation.basis != stamp);
-        if needs_evaluation && self.evaluation_wake.is_some() {
-            if self.scheduled_evaluation == Some(stamp)
-                || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
-            {
-                return None;
-            }
-            let current = self.current.as_ref()?;
-            if CalculationDocument::source_requires_repeated_execution(&current.source) {
-                if self.scheduled_evaluation != Some(stamp)
-                    && self
-                        .evaluation_failure
-                        .as_ref()
-                        .is_none_or(|(failed, _)| *failed != stamp)
-                {
-                    if self.evaluation_worker.is_none() {
-                        let wake = Arc::clone(self.evaluation_wake.as_ref()?);
-                        match EvaluationWorker::start(wake) {
-                            Ok(worker) => self.evaluation_worker = Some(worker),
-                            Err(error) => {
-                                self.evaluation_failure = Some((stamp, error));
-                                return None;
-                            }
-                        }
-                    }
-                    let current = self.current.as_ref()?;
-                    self.evaluation_worker.as_ref()?.submit(EvaluationRequest {
-                        stamp,
-                        source: current.source.clone(),
-                        line_ids: current.line_ids.clone(),
-                    });
-                    self.scheduled_evaluation = Some(stamp);
-                }
-                return None;
-            }
-        }
-        let current = self.current.as_mut()?;
-        if current
-            .cached_evaluation
-            .as_ref()
-            .is_none_or(|evaluation| evaluation.basis != stamp)
-        {
-            let document = CalculationDocument::new(current.source.clone());
-            let evaluation = document.evaluate();
-            match project_evaluation(evaluation, &current.line_ids, stamp) {
-                Ok(result) => current.cached_evaluation = Some(Arc::new(result)),
-                Err(message) => {
-                    self.evaluation_failure = Some((stamp, message));
-                    return None;
+    }
+
+    fn start_evaluation(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        let Some(current) = self.current.as_ref() else { return; };
+        #[cfg(test)]
+        { self.evaluation_attempts += 1; }
+        if self.evaluation_wake.is_some() && CalculationDocument::source_requires_repeated_execution(&current.source) {
+            if self.evaluation_worker.is_none() {
+                let Some(wake) = self.evaluation_wake.as_ref().cloned() else { return; };
+                match EvaluationWorker::start(wake) {
+                    Ok(worker) => self.evaluation_worker = Some(worker),
+                    Err(error) => { self.evaluation_failure = Some((stamp, error)); return; }
                 }
             }
-            #[cfg(test)]
-            {
-                current.evaluation_count += 1;
-            }
+            let Some(worker) = self.evaluation_worker.as_ref() else { return; };
+            worker.submit(EvaluationRequest { stamp, source: current.source.clone(), line_ids: current.line_ids.clone() });
+            self.scheduled_evaluation = Some(stamp);
+            return;
         }
-        current.cached_evaluation.as_deref()
+        let document = CalculationDocument::new(current.source.clone());
+        let evaluation = document.evaluate();
+        match project_evaluation(evaluation, &current.line_ids, stamp) {
+            Ok(result) => {
+                if let Some(current) = self.current.as_mut() {
+                    current.cached_evaluation = Some(Arc::new(result));
+                    current.dependency_snapshot = None;
+                    #[cfg(test)]
+                    { current.evaluation_count += 1; }
+                }
+            }
+            Err(message) => self.evaluation_failure = Some((stamp, message)),
+        }
+    }
+
+    /// Poll a finished worker and advance automatic calculation once when needed.
+    pub(crate) fn advance_automatic(&mut self) {
+        self.poll_evaluation();
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        if self.pending.is_some()
+            || self.document_options().is_none_or(|options| options.calculation != super::CalculationPolicy::Automatic)
+            || self.scheduled_evaluation == Some(stamp)
+            || self.canceled_evaluation == Some(stamp)
+            || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
+            || self.current.as_ref().and_then(|current| current.cached_evaluation.as_ref()).is_some_and(|result| result.basis == stamp)
+        { return; }
+        self.start_evaluation();
+    }
+
+    /// Explicitly calculate the current document, coalescing an active request.
+    pub fn request_calculate(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        if self.pending.is_some() || self.scheduled_evaluation == Some(stamp) { return; }
+        self.poll_evaluation();
+        self.retire_background_evaluation();
+        self.start_evaluation();
+    }
+
+    pub fn cancel_calculation(&mut self, basis: super::EvaluationBasis) -> bool {
+        if self.scheduled_evaluation != Some(basis) || self.evaluation_stamp() != Some(basis) { return false; }
+        self.retire_background_evaluation();
+        self.canceled_evaluation = self.evaluation_stamp();
+        true
+    }
+
+    /// Drive automatic evaluation explicitly and return current results only.
+    pub fn evaluation(&mut self) -> Option<&SessionEvaluation> {
+        self.advance_automatic();
+        let stamp = self.evaluation_stamp()?;
+        self.current.as_ref()?.cached_evaluation.as_deref().filter(|result| result.basis == stamp)
     }
 
     /// Returns the source and its evaluation from the same current revision.
     pub(crate) fn evaluation_with_source(&mut self) -> Option<(&str, &SessionEvaluation)> {
-        self.evaluation()?;
+        let stamp = self.evaluation_stamp()?;
         let current = self.current.as_ref()?;
-        Some((&current.source, current.cached_evaluation.as_deref()?))
+        let evaluation = current.cached_evaluation.as_deref().filter(|result| result.basis == stamp)?;
+        Some((&evaluation.source, evaluation))
     }
 
     pub(crate) fn shared_evaluation(&mut self) -> Option<Arc<SessionEvaluation>> {
-        self.evaluation()?;
+        let stamp = self.evaluation_stamp()?;
+        self.current.as_ref()?.cached_evaluation.as_ref().filter(|result| result.basis == stamp).cloned()
+    }
+
+    pub(crate) fn displayed_evaluation(&self) -> Option<Arc<SessionEvaluation>> {
         self.current.as_ref()?.cached_evaluation.clone()
     }
 
@@ -1533,6 +1566,7 @@ mod tests {
         assert_ne!(session.evaluation_basis(), Some(basis));
         assert!(session.is_dirty());
         assert!(session.inspector_source(line).is_none());
+        session.request_calculate();
         session.evaluation().unwrap();
         assert_ne!(session.inspector_source(line).unwrap().basis, original.basis);
         session.save_as("options").unwrap();
@@ -1593,9 +1627,95 @@ mod tests {
     }
 
     #[test]
+    fn manual_mode_never_calculates_from_edits_or_observers() {
+        let (_dir, _root, mut session) = fixture();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard };
+        session.set_document_options(options).unwrap();
+        for value in 1..=6 {
+            session.replace_source(format!("x = {value}\nx * 2")).unwrap();
+            assert!(session.evaluation().is_none());
+            assert!(session.shared_evaluation().is_none());
+            assert!(session.dependency_snapshot().is_none());
+            assert!(session.comparison_context().is_none());
+        }
+        assert!(session.undo());
+        assert!(session.redo());
+        assert_eq!(session.evaluation_attempts, 0);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::NotCalculated);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 1);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        let old = session.displayed_evaluation().unwrap();
+        session.replace_source("x = 10\nx * 2").unwrap();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Outdated);
+        assert_eq!(&*old.source, "x = 6\nx * 2");
+        assert!(session.evaluation_with_source().is_none());
+        assert!(session.inspector_source(session.line_id(0).unwrap()).is_none());
+        assert_eq!(session.evaluation_attempts, 1);
+        session.set_document_options(super::DocumentOptions::default()).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_attempts, 2);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
+    fn cancel_retires_same_revision_and_explicit_retry_uses_new_generation() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluator = std::sync::Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(request.stamp.generation).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            let document = super::CalculationDocument::new(request.source);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        session.replace_source("sum(range(1000))").unwrap();
+        session.request_calculate();
+        let first = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), first.generation);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Pending);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 1);
+        assert!(session.cancel_calculation(first));
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Canceled);
+        session.advance_automatic();
+        assert_eq!(session.evaluation_attempts, 1);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 2);
+        assert_ne!(session.evaluation_basis(), Some(first));
+        assert!(!session.cancel_calculation(first));
+        continue_tx.send(()).unwrap();
+        let second = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), second.generation);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 2);
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 3);
+        let third = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), third.generation);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
     fn watches_use_final_current_binding_including_failed_reassignment() {
         let (_dir, _root, mut session) = fixture();
         session.replace_source("x = 2\nx = x + 3\nbroken = 7\nbroken = 1 / 0").unwrap();
+        session.evaluation().unwrap();
         let evaluation = session.shared_evaluation().unwrap();
         assert!(matches!(&evaluation.final_bindings["x"].outcome, LineOutcome::Value(CalculationValue::Scalar(value)) if *value == 5.0));
         assert!(matches!(&evaluation.final_bindings["broken"].outcome, LineOutcome::Error(_)));

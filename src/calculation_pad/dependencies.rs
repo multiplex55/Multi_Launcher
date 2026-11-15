@@ -153,6 +153,7 @@ mod tests {
         });
         let evaluation = SessionEvaluation {
             basis: super::super::EvaluationBasis { document: DocumentId(1), incarnation: DocumentIncarnation(DocumentId(2)), revision: 7, generation: 3 },
+            source: std::sync::Arc::from("a\nb\nc\nd"),
             final_bindings: Default::default(),
             lines: vec![
                 SessionLineResult {
