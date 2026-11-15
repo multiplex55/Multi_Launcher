@@ -5,23 +5,40 @@ use std::ops::Range;
 use super::{DiagnosticKind, MAX_EXPRESSION_NESTING};
 
 #[derive(Debug)]
-pub(super) struct SourceRow {
-    pub(super) range: Range<usize>,
-    pub(super) owner: Option<usize>,
-    pub(super) text: String,
+pub(crate) struct SourceRow {
+    pub(crate) range: Range<usize>,
+    pub(crate) owner: Option<usize>,
+    pub(crate) text: String,
     /// Original byte offset for each byte of text, or `None` for a separator.
-    pub(super) offsets: Vec<Option<usize>>,
+    pub(crate) offsets: Vec<Option<usize>>,
     pub(super) diagnostic: Option<DiagnosticKind>,
 }
 
 #[derive(Debug)]
-pub(super) struct SourceAnalysis {
-    pub(super) rows: Vec<SourceRow>,
+pub(crate) struct SourceAnalysis {
+    pub(crate) rows: Vec<SourceRow>,
+    pub(crate) protected: Vec<ProtectedSpan>,
+    pub(crate) pairs: Vec<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProtectedKind {
+    Comment,
+    Quoted,
+    Braced,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProtectedSpan {
+    pub(crate) range: Range<usize>,
+    pub(crate) kind: ProtectedKind,
 }
 
 impl SourceAnalysis {
-    pub(super) fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str) -> Self {
         let mut rows: Vec<SourceRow> = Vec::new();
+        let mut protected = Vec::new();
+        let mut pairs = Vec::new();
         let mut offset = 0;
         let mut owner = None;
         let mut delimiters: Vec<(u8, usize, usize)> = Vec::new();
@@ -41,7 +58,7 @@ impl SourceAnalysis {
             let bytes = line.as_bytes();
             let mut cursor = 0;
             let mut end = bytes.len();
-            let mut braced = false;
+            let mut braced = None;
             let mut quote = None;
             let mut escaped = false;
             let mut error = None;
@@ -53,22 +70,26 @@ impl SourceAnalysis {
                     } else if byte == b'\\' {
                         escaped = true;
                     } else if byte == b'"' {
+                        protected.push(ProtectedSpan { range: offset + quote.unwrap()..offset + cursor + 1, kind: ProtectedKind::Quoted });
                         quote = None;
                     }
-                } else if braced {
+                } else if let Some(start) = braced {
                     if byte == b'}' {
-                        braced = false;
+                        protected.push(ProtectedSpan { range: offset + start..offset + cursor + 1, kind: ProtectedKind::Braced });
+                        braced = None;
                     }
                 } else {
                     match byte {
-                        b'{' => braced = true,
+                        b'{' => braced = Some(cursor),
                         b'"' => quote = Some(cursor),
                         b'#' => {
                             end = cursor;
+                            protected.push(ProtectedSpan { range: offset + cursor..range.end, kind: ProtectedKind::Comment });
                             break;
                         }
                         b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
                             end = cursor;
+                            protected.push(ProtectedSpan { range: offset + cursor..range.end, kind: ProtectedKind::Comment });
                             break;
                         }
                         b'(' | b'[' => {
@@ -82,7 +103,10 @@ impl SourceAnalysis {
                         }
                         b')' | b']' => {
                             let expected = if byte == b')' { b'(' } else { b'[' };
-                            if delimiters.pop().map(|entry| entry.0) != Some(expected) {
+                            if let Some((open, open_line, open_column)) = delimiters.pop().filter(|entry| entry.0 == expected) {
+                                let _ = open;
+                                pairs.push((rows[open_line].range.start + open_column, offset + cursor));
+                            } else {
                                 error = Some(location_error(
                                     "mismatched closing delimiter",
                                     line_index,
@@ -97,11 +121,15 @@ impl SourceAnalysis {
                 cursor += 1;
             }
             if let Some(start) = quote {
+                protected.push(ProtectedSpan { range: offset + start..range.end, kind: ProtectedKind::Quoted });
                 error = Some(location_error(
                     "unterminated quoted literal",
                     line_index,
                     start,
                 ));
+            }
+            if let Some(start) = braced {
+                protected.push(ProtectedSpan { range: offset + start..range.end, kind: ProtectedKind::Braced });
             }
 
             let target = &mut rows[statement];
@@ -124,7 +152,7 @@ impl SourceAnalysis {
         if let (Some(owner), Some((_, line, column))) = (owner, delimiters.last()) {
             rows[owner].diagnostic = Some(location_error("unclosed delimiter", *line, *column));
         }
-        Self { rows }
+        Self { rows, protected, pairs }
     }
 }
 

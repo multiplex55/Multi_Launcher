@@ -18,6 +18,8 @@ mod session;
 mod vector;
 mod worker;
 
+pub(crate) use document::syntax::{ProtectedKind, SourceAnalysis};
+
 pub(crate) use bit_labels::{read_bit_labels, write_bit_labels};
 pub use comparison::{
     ComparisonContext, ComparisonRelation, ComparisonRequest, ComparisonResult,

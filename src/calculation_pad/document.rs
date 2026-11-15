@@ -34,11 +34,22 @@ pub(crate) use script::{FUNCTIONS, function_signature_help};
 /// Names visible before the caret, without evaluating the document.
 pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
     let Some(prefix) = source.get(..caret) else { return Vec::new(); };
-    let current_indent = prefix.rsplit('\n').next().unwrap_or("").chars().take_while(|c| *c == ' ').count();
     let mut bindings: Vec<(String, Vec<usize>)> = Vec::new();
     let mut scopes: Vec<(usize, usize)> = Vec::new();
-    let lines: Vec<_> = prefix.split('\n').collect();
-    for (line_number, line) in lines.iter().take(lines.len().saturating_sub(1)).enumerate() {
+    let analysis = syntax::SourceAnalysis::new(source);
+    let caret_line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let current = analysis.rows.get(caret_line);
+    let current_start = current.and_then(|row| row.owner).unwrap_or(caret_line);
+    let indentation_source = if current.is_some_and(|row| row.owner.is_some()) {
+        &source[analysis.rows[current_start].range.clone()]
+    } else {
+        prefix.rsplit('\n').next().unwrap_or("")
+    };
+    let current_indent = indentation_source.chars().take_while(|c| *c == ' ').count();
+    for (line_number, row) in analysis.rows.iter().enumerate().take(current_start) {
+        if row.owner.is_some() { continue; }
+        if row.offsets.iter().flatten().any(|offset| *offset >= caret) { continue; }
+        let line = row.text.as_str();
         let trimmed = line.trim();
         if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
         let indent = line.chars().take_while(|ch| *ch == ' ').count();
@@ -93,13 +104,14 @@ pub(crate) struct LiteralInput {
 
 pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
     let mut result = Vec::new();
-    let mut offset = 0;
-    let has_loops = loops::contains_loop(source);
-    for (line, raw) in source.split_inclusive('\n').enumerate().take(MAX_SOURCE_LINES) {
-        let text = raw.trim_end_matches(['\r', '\n']);
+    let analysis = syntax::SourceAnalysis::new(source);
+    let has_loops = loops::contains_loop_in(&analysis);
+    for (line, row) in analysis.rows.iter().enumerate().take(MAX_SOURCE_LINES) {
+        if row.owner.is_some() { continue; }
+        let text = row.text.as_str();
         let trimmed = text.trim();
-        if trimmed.is_empty() || is_full_line_comment(trimmed) { offset += raw.len(); continue; }
-        if has_loops && text.len() != text.trim_start().len() { offset += raw.len(); continue; }
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
+        if has_loops && text.len() != text.trim_start().len() { continue; }
         if let Some(delimiter) = find_assignment_delimiter(text)
             && delimiter.operator == AssignmentOperator::Assign
             && let Ok(name) = parse_assignment_name(text[..delimiter.left_end].trim())
@@ -132,13 +144,18 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
                 let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
                 let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
                 if evaluation {
-                    let value_start = offset + delimiter.right_start + leading + start;
-                    result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
-                        value_range: value_start..value_start + value.len(), source_line: text.to_owned() });
+                    let logical_start = delimiter.right_start + leading + start;
+                    let logical_end = logical_start + value.len();
+                    if let Some(offsets) = row.offsets.get(logical_start..logical_end)
+                        && let Some(Some(value_start)) = offsets.first()
+                        && offsets.iter().enumerate().all(|(index, offset)| *offset == Some(*value_start + index))
+                    {
+                        result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
+                            value_range: *value_start..*value_start + value.len(), source_line: source[row.range.clone()].to_owned() });
+                    }
                 }
             }
         }
-        offset += raw.len();
     }
     result
 }

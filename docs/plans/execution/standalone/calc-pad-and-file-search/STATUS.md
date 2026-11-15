@@ -15,16 +15,17 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | Checkpoint | State | Evidence |
 | --- | --- | --- |
 | M0-A | Verified | Exact parent and baseline, fresh task branch, successful push |
-| M0-B | Verified | Live owners below. Five Calc Pad and three File Search baseline cases passed. |
-| M1-A | Verified | Shared source analysis, both evaluator routes, physical continuation outcomes and diagnostics. 13 focused tests passed. |
-| M1-B | In progress | Editor and observer integration. |
-| M2-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M0-B | Verified and pushed | `8d76bb28e0f7dd82229d6d3bd53e1d473d569079`. Five Calc Pad and three File Search baseline cases passed. |
+| M1-A | Verified and pushed | `80d790e5af3eab84b5b2435a6f4385646c1be2cf`. Shared analysis and evaluator routes. 13 focused tests passed. |
+| M1-B | Verified | Shared editor/observer mapping, folded highlighting, input edits and result presentation. Focused batches passed 20/20 and 3/3. |
+| M2-A | In progress | Document options, migration and evaluation identity. |
+| M2-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
 | ID | Implementation | Verification | Owners and boundaries |
 | --- | --- | --- | --- |
-| C20 | Domain implemented, editor pending | Domain verified | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
+| C20 | Implemented | Focused automated domain/editor checks passed. Native integrated check pending. | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
 | C24 | Pending | Pending | Session scheduling, worker stamps, persistence/recovery and companion observers |
 | C25 | Pending | Pending | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Pending | Pending | Script function catalog and signatures, editor hints, executable examples |
@@ -52,3 +53,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Scoped library `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <M1-A selectors> --test-threads 1` passed 13/13 with exit 0 in 2.28 seconds under the 100-second watchdog. The separate fixture-assisted compilation exited 0 in 283.84 seconds under a 900-second deadline. Both receipts confirmed cleanup and output drain. Selectors and results are in `m1a-build` and `m1a-run`.
 - Coverage includes six physical/logical source cases, typed values, loop/header grouping, continuation errors, legacy row references, laziness, loop rollback, and existing examples. Editor integration remains M1-B.
+
+### M1-B editor and observers
+
+- Scoped library Nextest passed 20/20 in 2.58 seconds, including folding and projected highlighting, multiline hints and references, original-byte literal edit/undo, and physical result copying and navigation. Diff inspection exposed a dedented-continuation completion issue. The correction uses the logical owner's indentation and excludes the current assignment as a prior binding. Its three-test focused rerun passed in 1.95 seconds.
+- Both batches used a 100-second watchdog. Separate compile stages finished in 330.53 and 210.43 seconds under the 900-second deadline. Receipts are in `m1b-build`, `m1b-run`, `m1b-correction-build`, and `m1b-correction-run`; cleanup and output drain passed.

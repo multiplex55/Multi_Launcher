@@ -11,6 +11,7 @@ pub(super) struct FoldRegion {
 
 /// Find physical loop and explicit comment-region bodies without changing the source.
 pub(super) fn fold_regions(source: &str) -> Vec<FoldRegion> {
+    let analysis = crate::calculation_pad::SourceAnalysis::new(source);
     let mut lines = Vec::new();
     let mut offset = 0;
     for raw in source.split_inclusive('\n') {
@@ -40,11 +41,21 @@ pub(super) fn fold_regions(source: &str) -> Vec<FoldRegion> {
                 hidden: hidden_start..end,
             });
         }
-        if crate::calculation_pad::editor_loop_header(trimmed) {
+        let Some(row) = analysis.rows.get(index) else { continue; };
+        if row.owner.is_some() { continue; }
+        let statement_end = analysis.rows.iter().enumerate().skip(index + 1)
+            .take_while(|(_, next)| next.owner == Some(index))
+            .map(|(index, _)| index)
+            .last().unwrap_or(index);
+        if crate::calculation_pad::editor_loop_header(&row.text) {
             let indent = text.len() - text.trim_start().len();
-            let mut body_end = end;
+            let mut body_end = lines[statement_end].1;
             let mut has_body = false;
-            for &(line_start, line_end, line) in lines.iter().skip(index + 1) {
+            for (body_index, &(line_start, line_end, line)) in lines.iter().enumerate().skip(statement_end + 1) {
+                if analysis.rows.get(body_index).is_some_and(|row| row.owner.is_some()) {
+                    body_end = line_end;
+                    continue;
+                }
                 let content = line.trim();
                 if content.is_empty() || content.starts_with('#') || content.starts_with("//") {
                     body_end = line_end;
@@ -64,6 +75,8 @@ pub(super) fn fold_regions(source: &str) -> Vec<FoldRegion> {
                     hidden: end..body_end,
                 });
             }
+        } else if statement_end > index && end < lines[statement_end].1 {
+            regions.push(FoldRegion { header: index, hidden: end..lines[statement_end].1 });
         }
         let _ = start;
     }
@@ -81,6 +94,22 @@ pub(super) struct Projection {
 }
 
 impl Projection {
+    pub fn project_spans(&self, spans: &[SyntaxSpan]) -> Vec<SyntaxSpan> {
+        let mut projected = Vec::new();
+        for (view, source) in &self.pieces {
+            for span in spans {
+                let start = span.range.start.max(source.start);
+                let end = span.range.end.min(source.end);
+                if start < end {
+                    projected.push(SyntaxSpan {
+                        range: view.start + start - source.start..view.start + end - source.start,
+                        kind: span.kind,
+                    });
+                }
+            }
+        }
+        projected
+    }
     pub fn byte_at_character(&self, character: usize) -> Option<usize> {
         self.visible
             .char_indices()
@@ -250,20 +279,24 @@ pub(super) struct SyntaxSpan {
 
 pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
     let mut spans = Vec::new();
+    let analysis = crate::calculation_pad::SourceAnalysis::new(source);
+    let mut protected_spans = analysis.protected.iter().peekable();
     let mut offset = 0;
     for line in source.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') || trimmed.starts_with("//") {
-            spans.push(SyntaxSpan {
-                range: offset..offset + line.len(),
-                kind: SyntaxKind::Comment,
-            });
-            offset += line.len();
-            continue;
-        }
         let mut pos = 0;
         while pos < line.len() {
             let start = pos;
+            if protected_spans.peek().is_some_and(|span| span.range.start == offset + pos) {
+                let protected = protected_spans.next().unwrap();
+                pos = protected.range.end - offset;
+                let kind = match protected.kind {
+                    crate::calculation_pad::ProtectedKind::Comment => SyntaxKind::Comment,
+                    crate::calculation_pad::ProtectedKind::Braced => SyntaxKind::Name,
+                    crate::calculation_pad::ProtectedKind::Quoted => SyntaxKind::Text,
+                };
+                spans.push(SyntaxSpan { range: offset + start..offset + pos, kind });
+                continue;
+            }
             let ch = line[pos..].chars().next().unwrap();
             pos += ch.len_utf8();
             let kind = if ch == '{' {
@@ -331,14 +364,25 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
     let Some(prefix) = source.get(..caret) else {
         return Vec::new();
     };
+    let analysis = crate::calculation_pad::SourceAnalysis::new(source);
+    let protected = analysis.protected.iter().find(|span| {
+        span.range.start <= caret && (caret < span.range.end
+            || caret == span.range.end && match span.kind {
+                crate::calculation_pad::ProtectedKind::Comment => true,
+                crate::calculation_pad::ProtectedKind::Braced => !source[span.range.clone()].ends_with('}'),
+                crate::calculation_pad::ProtectedKind::Quoted => !source[span.range.clone()].ends_with('"'),
+            })
+    });
+    if protected.is_some_and(|span| span.kind != crate::calculation_pad::ProtectedKind::Braced) {
+        return Vec::new();
+    }
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
     let line = &prefix[line_start..];
     if line.trim_start().starts_with('#') || line.trim_start().starts_with("//") {
         return Vec::new();
     }
-    let braced = line
-        .rfind('{')
-        .filter(|start| !line[*start..].contains('}'));
+    let braced = protected.filter(|span| span.kind == crate::calculation_pad::ProtectedKind::Braced)
+        .map(|span| span.range.start - line_start);
     let start = braced.unwrap_or_else(|| {
             line.char_indices()
                 .rev()
@@ -409,21 +453,23 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
 
 pub(super) fn call_hint(source: &str, caret: usize) -> Option<(String, usize)> {
     let prefix = source.get(..caret)?;
-    let line = prefix.rsplit('\n').next()?;
-    if line.trim_start().starts_with('#') || line.trim_start().starts_with("//") {
+    let analysis = crate::calculation_pad::SourceAnalysis::new(prefix);
+    if analysis.protected.iter().any(|span| span.kind == crate::calculation_pad::ProtectedKind::Comment && span.range.end == caret) {
         return None;
     }
+    let last = analysis.rows.len().checked_sub(1)?;
+    let row = &analysis.rows[analysis.rows[last].owner.unwrap_or(last)];
+    let line = row.text.as_str();
     let mut stack: Vec<(Option<String>, usize)> = Vec::new();
-    let mut braces = false;
+    let mut protected_spans = analysis.protected.iter().peekable();
     for (index, ch) in line.char_indices() {
-        if braces {
-            if ch == '}' {
-                braces = false;
+        let protected = row.offsets.get(index).and_then(|offset| *offset).is_some_and(|offset| {
+            while protected_spans.peek().is_some_and(|span| span.range.end <= offset) {
+                protected_spans.next();
             }
-            continue;
-        }
-        if ch == '{' {
-            braces = true;
+            protected_spans.peek().is_some_and(|span| span.range.contains(&offset))
+        });
+        if protected {
             continue;
         }
         match ch {
@@ -470,6 +516,7 @@ pub(super) struct CompletionState {
 #[derive(Clone, Default)]
 pub(super) struct SyntaxCache {
     pub source: String,
+    pub visible: String,
     pub spans: Vec<SyntaxSpan>,
 }
 
@@ -595,44 +642,7 @@ pub(super) fn matching_delimiters(source: &str, caret: usize) -> Option<(usize, 
                 .filter(|(_, character)| matches!(character, '(' | ')' | '[' | ']'))
                 .map(|(byte, _)| byte)
         })?;
-    let mut stack = Vec::new();
-    let mut pairs = Vec::new();
-    let mut braces = false;
-    let mut comment = false;
-    let mut line_start = true;
-    for (byte, character) in source.char_indices() {
-        if character == '\n' {
-            comment = false;
-            braces = false;
-            line_start = true;
-            continue;
-        }
-        if comment {
-            continue;
-        }
-        if line_start && character.is_whitespace() {
-            continue;
-        }
-        if line_start && (source[byte..].starts_with('#') || source[byte..].starts_with("//")) {
-            comment = true;
-            continue;
-        }
-        line_start = false;
-        match character {
-            '{' if !braces => braces = true,
-            '}' if braces => braces = false,
-            '(' | '[' if !braces => stack.push((character, byte)),
-            ')' | ']' if !braces => {
-                if let Some((open, start)) = stack.pop()
-                    && matches!((open, character), ('(', ')') | ('[', ']'))
-                {
-                    pairs.push((start, byte));
-                }
-            }
-            _ => {}
-        }
-    }
-    pairs
+    crate::calculation_pad::SourceAnalysis::new(source).pairs
         .into_iter()
         .find(|(left, right)| *left == candidate || *right == candidate)
 }
@@ -747,6 +757,45 @@ mod tests {
         assert_eq!(matching_delimiters(&source, 0), Some((0, 4)));
         assert_eq!(matching_delimiters("# (ignore)\n{a[b]}\n[2]", 2), None);
         assert_eq!(matching_delimiters("# (ignore)\n{a[b]}\n[2]", 13), None);
+    }
+
+    #[test]
+    fn multiline_lexing_hints_folds_and_projected_highlighting_use_original_source() {
+        let source = "α = max(\r\n  1, // ignore ], (\r\n  2)\r\nβ = 3 # comment (\r\n";
+        let open = source.find('(').unwrap();
+        let close = source.find("2)").unwrap() + 1;
+        assert_eq!(matching_delimiters(source, open), Some((open, close)));
+        let ignored = source.find("],").unwrap();
+        assert_eq!(matching_delimiters(source, ignored), None);
+        let caret = source.find("2)").unwrap() + 1;
+        assert_eq!(call_hint(source, caret).map(|(_, argument)| argument), Some(1));
+        assert!(suggestions(source, source.find("ignore").unwrap() + 3).is_empty());
+        let regions = fold_regions(source);
+        assert!(regions.iter().any(|region| region.header == 0));
+        let projection = Projection::new(source, &[regions.iter().find(|region| region.header == 0).unwrap().hidden.clone()]);
+        let spans = projection.project_spans(&syntax_spans(source));
+        assert_eq!(spans.iter().map(|span| &projection.visible[span.range.clone()]).collect::<String>(), projection.visible);
+        let comment = projection.visible.find("# comment").unwrap();
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment && span.range.contains(&comment)));
+        let edited = projection.visible.replace("β = 3", "β = 4");
+        let result = projection.apply_edit(source, &edited).unwrap();
+        assert_eq!(result, source.replace("β = 3", "β = 4"));
+    }
+
+    #[test]
+    fn multiline_header_fold_keeps_grouped_header_and_body_together() {
+        let source = "for item in range(\r\n  1, 4):\r\n    n = (item +\r\n      1)\r\nafter = 3";
+        let region = fold_regions(source).into_iter().find(|region| region.header == 0).unwrap();
+        let projection = Projection::new(source, &[region.hidden]);
+        assert_eq!(projection.visible, "for item in range(\r\nafter = 3");
+    }
+
+    #[test]
+    fn completion_uses_owning_statement_scope_inside_dedented_continuation() {
+        let source = "for item in range(3):\n    total = max(\n  it";
+        assert!(suggestions(source, source.len()).iter().any(|item| item.label == "item"));
+        let source = "for item in range(3):\n    total = max(\n  1, 2) + to";
+        assert!(suggestions(source, source.len()).iter().all(|item| item.label != "total"));
     }
     #[test]
     fn completion_respects_loop_scope_and_braced_names() {

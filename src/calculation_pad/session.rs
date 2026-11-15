@@ -1365,6 +1365,22 @@ mod tests {
     }
 
     #[test]
+    fn multiline_literal_input_apply_preserves_comments_crlf_and_undo() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "{α#} = u64( // explanation\r\n  42) # retained\r\nfor i in range(2):\r\n  hidden = 3\r\nresult = {α#}";
+        session.replace_source(source).unwrap();
+        let input = super::super::document::literal_inputs(source).into_iter().next().unwrap();
+        assert_eq!(input.line, 0);
+        assert_eq!(&source[input.value_range.clone()], "42");
+        let line = session.line_ids().unwrap()[0];
+        let replacement = session.input_replacement(session.revision().unwrap(), line, &input.source_line, "99").unwrap();
+        assert_eq!(replacement, source.replace("42)", "99)"));
+        session.replace_source(replacement).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
     fn watches_use_final_current_binding_including_failed_reassignment() {
         let (_dir, _root, mut session) = fixture();
         session.replace_source("x = 2\nx = x + 3\nbroken = 7\nbroken = 1 / 0").unwrap();

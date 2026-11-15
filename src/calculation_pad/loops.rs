@@ -109,10 +109,6 @@ fn header(source: &str) -> Option<Result<LoopHeader, DiagnosticKind>> {
     }))
 }
 
-pub(super) fn contains_loop(source: &str) -> bool {
-    contains_loop_in(&syntax::SourceAnalysis::new(source))
-}
-
 pub(super) fn contains_loop_in(analysis: &syntax::SourceAnalysis) -> bool {
     analysis.rows.iter().any(|row| row.owner.is_none() && header(&row.text).is_some())
 }

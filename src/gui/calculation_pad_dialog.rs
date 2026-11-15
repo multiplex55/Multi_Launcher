@@ -4259,9 +4259,14 @@ impl CalculationPadDialog {
                         let spans = ui.ctx().data_mut(|data| {
                             let id = editor_id.with("syntax-cache");
                             let mut cache = data.get_temp::<SyntaxCache>(id).unwrap_or_default();
-                            if cache.source != text {
-                                cache.source = text.to_owned();
-                                cache.spans = editor::syntax_spans(text);
+                            if cache.source.as_str() != source.as_str() || cache.visible != text {
+                                cache.source = source.clone();
+                                cache.visible = text.to_owned();
+                                cache.spans = if text == projection.visible {
+                                    projection.project_spans(&editor::syntax_spans(source))
+                                } else {
+                                    editor::syntax_spans(text)
+                                };
                                 data.insert_temp(id, cache.clone());
                             }
                             cache.spans
@@ -4676,7 +4681,8 @@ impl CalculationPadDialog {
                     .or_else(|| self.dependency_seed());
                 for line in &evaluation.lines {
                     let formatted = match &line.outcome {
-                        LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => continue,
+                        LineOutcome::Blank | LineOutcome::Comment => continue,
+                        LineOutcome::Continuation { .. } => None,
                         LineOutcome::Value(value) => {
                             let formatted = result_format::display(value, self.display_preferences);
                             if formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
@@ -4725,7 +4731,10 @@ impl CalculationPadDialog {
                                 row_response = row_response.union(ui.weak(format!("uses {refs}")));
                             }
                             match &line.outcome {
-                                LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => {}
+                                LineOutcome::Blank | LineOutcome::Comment => {}
+                                LineOutcome::Continuation { owner_line } => {
+                                    row_response = row_response.union(ui.weak(format!("Continuation of r{}", owner_line + 1)));
+                                }
                                 LineOutcome::Value(value) => {
                                     let value_label = ui.label(formatted.as_deref().unwrap_or("unavailable"));
                                     #[cfg(test)] { text_rect = value_label.rect; }
@@ -5269,6 +5278,7 @@ fn copy_all_results(
     let mut labeled = String::new();
     let mut unlabeled = String::new();
     let mut results = Vec::new();
+    let analysis = crate::calculation_pad::SourceAnalysis::new(source);
     if evaluation.lines.is_empty() {
         // Preserve source even if a document-level diagnostic prevented evaluation.
         labeled.push_str(source);
@@ -5278,7 +5288,9 @@ fn copy_all_results(
         let Some(expression) = source.get(line.source_range.clone()) else {
             continue;
         };
-        let outcome = match &line.outcome {
+        let owner = analysis.rows.get(index).and_then(|row| row.owner).unwrap_or(index);
+        let Some(owner_line) = evaluation.lines.get(owner) else { continue; };
+        let outcome = match &owner_line.outcome {
             LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => None,
             LineOutcome::Value(value) => Some(
                 value
@@ -5287,14 +5299,16 @@ fn copy_all_results(
             ),
             LineOutcome::Error(error) => Some(format!("error: {error}")),
         };
-        if let Some(outcome) = outcome {
-            let number = line.line_index + 1;
-            labeled.push_str(&format!("r{number} = {expression} = {outcome}"));
-            unlabeled.push_str(&format!("{expression} = {outcome}"));
-            results.push(format!("r{number} = {outcome}"));
-        } else {
-            labeled.push_str(expression);
-            unlabeled.push_str(expression);
+        if index == owner && outcome.is_some() {
+            labeled.push_str(&format!("r{} = ", owner_line.line_index + 1));
+        }
+        labeled.push_str(expression);
+        unlabeled.push_str(expression);
+        let last = analysis.rows.get(index + 1).is_none_or(|row| row.owner != Some(owner));
+        if last && let Some(outcome) = outcome {
+            labeled.push_str(&format!(" = {outcome}"));
+            unlabeled.push_str(&format!(" = {outcome}"));
+            results.push(format!("r{} = {outcome}", owner_line.line_index + 1));
         }
         let end = evaluation
             .lines
@@ -5358,6 +5372,17 @@ mod tests {
     fn copy_all_session(session: &mut CalculationPadSession) -> String {
         let (source, evaluation) = session.evaluation_with_source().unwrap();
         copy_all_results(source, evaluation)
+    }
+
+    #[test]
+    fn copy_all_keeps_multiline_source_together_before_result() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        let source = "α = (1 +\r\n  2) # end\r\nα";
+        dialog.test_replace_source(source);
+        let copied = copy_all_session(&mut dialog.session);
+        assert!(copied.contains("r1 = α = (1 +\r\n  2) # end = 3\r\n"), "{copied}");
+        assert!(copied.contains("Results only\nr1 = 3\nr3 = 3"), "{copied}");
     }
 
     fn input(screen_size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
