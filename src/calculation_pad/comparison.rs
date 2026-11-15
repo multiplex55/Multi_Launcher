@@ -94,6 +94,12 @@ pub enum ComparisonRelation {
     Scalar {
         ordering: Ordering,
         difference: f64,
+        approximate: bool,
+    },
+    Exact {
+        ordering: Ordering,
+        difference: String,
+        approximate: bool,
     },
     Quantity {
         ordering: Ordering,
@@ -142,7 +148,13 @@ impl ComparisonRelation {
             Self::Scalar {
                 ordering: order,
                 difference,
-            } => format!("{}; left − right = {difference}.", ordering(*order)),
+                approximate,
+            } => format!("{}; left − right = {}{difference}.", ordering(*order), if *approximate { "≈ " } else { "" }),
+            Self::Exact {
+                ordering: order,
+                difference,
+                approximate,
+            } => format!("{}; left − right = {}{difference}.", ordering(*order), if *approximate { "≈ " } else { "" }),
             Self::Quantity {
                 ordering: order,
                 difference,
@@ -257,11 +269,29 @@ impl ComparisonContext {
                     differing_bits: xor.count_ones(),
                 }
             }
-            (Ok(CalculationValue::Scalar(a)), Ok(CalculationValue::Scalar(b))) => {
+            (Ok(a @ CalculationValue::Exact(_)), Ok(b))
+            | (Ok(a), Ok(b @ CalculationValue::Exact(_))) => {
+                let mut work = super::document::script::WorkBudget::default();
+                match super::exact::ExactNumber::compare(a, b, &mut work) {
+                    Ok(ordering) => match super::exact::ExactNumber::arithmetic(a, b, '-', &mut work) {
+                        Ok(difference) => ComparisonRelation::Exact {
+                            ordering,
+                            difference: difference.formatted_result().unwrap_or_else(|| "unavailable".into()).trim_start_matches("≈ ").to_owned(),
+                            approximate: difference.is_approximate(),
+                        },
+                        Err(_) => ComparisonRelation::DifferenceOverflow,
+                    },
+                    Err(_) => ComparisonRelation::TypeMismatch { left: left.type_label(), right: right.type_label() },
+                }
+            }
+            (Ok(CalculationValue::Scalar(a) | CalculationValue::ApproximateScalar(a)),
+             Ok(CalculationValue::Scalar(b) | CalculationValue::ApproximateScalar(b))) => {
                 match a.partial_cmp(b) {
                     Some(ordering) if (a - b).is_finite() => ComparisonRelation::Scalar {
                         ordering,
                         difference: a - b,
+                        approximate: matches!(&left.value, Ok(CalculationValue::ApproximateScalar(_)))
+                            || matches!(&right.value, Ok(CalculationValue::ApproximateScalar(_))),
                     },
                     _ => ComparisonRelation::DifferenceOverflow,
                 }
@@ -308,6 +338,26 @@ mod tests {
     use super::*;
     use crate::calculation_pad::{CalculationPadSession, IntegerMode, IntegerWidth};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn exact_comparison_preserves_rational_difference_and_provenance() {
+        let (_directory, mut session, context) = frozen("a = fraction(7,4)\nb = fraction(1,2)");
+        let relation = compare(&context, "a", "b").relation;
+        assert!(matches!(relation, ComparisonRelation::Exact {
+            ordering: Ordering::Greater, ref difference, approximate: false,
+        } if difference == "5/4"));
+        let relation = compare(&context, "decimal_div(decimal(\"1\"), decimal(\"8\"), 2)", "decimal(\"0.1\")").relation;
+        assert!(matches!(relation, ComparisonRelation::Exact { approximate: true, .. }));
+        session.replace_source("a = to_float(fraction(1,2))\nb = 0.25").unwrap();
+        session.evaluation();
+        let context = session.comparison_context().unwrap();
+        assert!(matches!(compare(&context, "a", "b").relation,
+            ComparisonRelation::Scalar { approximate: true, .. }));
+        assert!(matches!(
+            compare(&context, "decimal(\"1e1000\")", "decimal(\"-1e1000\")").relation,
+            ComparisonRelation::DifferenceOverflow
+        ));
+    }
     fn frozen(source: &str) -> (tempfile::TempDir, CalculationPadSession, ComparisonContext) {
         let temp = tempfile::tempdir().unwrap();
         let mut session =

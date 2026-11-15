@@ -123,12 +123,19 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
             let expr = rhs.trim();
             let (value, start, valid_shape) = if let Some(open) = expr.find('(') {
                 let constructor = &expr[..open];
-                let valid = matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
-                    && expr.ends_with(')');
+                let valid = (matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
+                    || constructor.eq_ignore_ascii_case("decimal")) && expr.ends_with(')');
                 let argument = if valid { &expr[open + 1..expr.len() - 1] } else { "" };
-                let value = argument.trim();
-                let start = open + 1 + argument.len() - argument.trim_start().len();
-                (value, start, valid && integer_literal_token(value))
+                let argument_start = open + 1 + argument.len() - argument.trim_start().len();
+                let argument = argument.trim();
+                if constructor.eq_ignore_ascii_case("decimal") {
+                    let value = argument.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or("");
+                    let valid_decimal = !value.is_empty()
+                        && super::exact::ExactNumber::decimal(value, &mut script::WorkBudget::default()).is_ok();
+                    (value, argument_start + 1, valid && valid_decimal)
+                } else {
+                    (argument, argument_start, valid && integer_literal_token(argument))
+                }
             } else {
                 let sign = usize::from(expr.starts_with('+') || expr.starts_with('-'));
                 let rest = &expr[sign..];
@@ -142,7 +149,8 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
             };
             if valid_shape {
                 let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
-                let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
+                let is_decimal_literal = expr.find('(').is_some_and(|open| expr[..open].eq_ignore_ascii_case("decimal"));
+                let evaluation = is_decimal_literal || CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
                 if evaluation {
                     let logical_start = delimiter.right_start + leading + start;
                     let logical_end = logical_start + value.len();
@@ -164,7 +172,7 @@ impl CalculationDocument {
     fn evaluate_owned_literal(&self, needs_quantity: bool) -> bool {
         self.evaluate().lines.first().is_some_and(|line| match &line.outcome {
             LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) => true,
-            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }) => !needs_quantity,
+            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. } | CalculationValue::Exact(_)) => !needs_quantity,
             _ => false,
         })
     }

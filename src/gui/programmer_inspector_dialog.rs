@@ -1322,7 +1322,7 @@ impl ProgrammerInspectorDialog {
                                 ui.label(format!("{name} ({})", side.type_label()));
                                 let formatted = side.formatted();
                                 ui.monospace(&formatted);
-                                if side
+                                if !formatted.starts_with("≈ ") && side
                                     .value
                                     .as_ref()
                                     .is_ok_and(crate::calculation_pad::CalculationValue::is_approximate)

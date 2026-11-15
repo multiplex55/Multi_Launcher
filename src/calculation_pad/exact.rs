@@ -21,6 +21,7 @@ pub struct ExactNumber {
     value: BigRational,
     decimal: bool,
     rounded: bool,
+    canonical: String,
 }
 
 impl ExactNumber {
@@ -41,8 +42,9 @@ impl ExactNumber {
                 return Err(error("decimal coefficient or scale exceeds the exact limit"));
             }
         }
-        let result = Self { value, decimal, rounded };
-        if result.canonical().len() > MAX_EXPRESSION_BYTES {
+        let mut result = Self { value, decimal, rounded, canonical: String::new() };
+        result.canonical = result.build_canonical();
+        if result.canonical.len() > MAX_EXPRESSION_BYTES {
             return Err(error("exact number exceeds the canonical expression length limit"));
         }
         Ok(result)
@@ -205,7 +207,58 @@ impl ExactNumber {
         if self.rounded { format!("≈ {value}") } else { value }
     }
 
+    /// Formats a reduced value without converting through floating point.
+    pub(crate) fn mixed_display(&self) -> String {
+        let (whole, remainder) = self.value.numer().abs().div_rem(self.value.denom());
+        let sign = if self.value.is_negative() { "-" } else { "" };
+        let text = if remainder.is_zero() {
+            format!("{sign}{whole}")
+        } else if whole.is_zero() {
+            format!("{sign}{remainder}/{}", self.value.denom())
+        } else {
+            format!("{sign}{whole} {remainder}/{}", self.value.denom())
+        };
+        if self.rounded { format!("≈ {text}") } else { text }
+    }
+
+    /// Decimal presentation uses at most 15 requested places when rounding is needed.
+    pub(crate) fn decimal_display(&self, places: Option<u8>) -> String {
+        if places.is_none() {
+            if self.decimal { return self.display(); }
+            let mut work = WorkBudget::default();
+            if let Ok(decimal) = Self::checked(self.value.clone(), true, self.rounded, &mut work) {
+                return decimal.display();
+            }
+        }
+        let places = places.unwrap_or(12).min(15) as usize;
+        let factor = BigInt::from(10u8).pow(places as u32);
+        let scaled = self.value.numer() * &factor;
+        let (mut coefficient, remainder) = scaled.div_rem(self.value.denom());
+        let twice = remainder.abs() * 2u8;
+        let ordering = twice.cmp(self.value.denom());
+        if ordering == Ordering::Greater || (ordering == Ordering::Equal && coefficient.is_odd()) {
+            coefficient += if scaled.sign() == Sign::Minus { -1 } else { 1 };
+        }
+        let negative = coefficient.is_negative();
+        let mut digits = coefficient.abs().to_string();
+        if places > 0 {
+            if digits.len() <= places {
+                digits = format!("{}{}", "0".repeat(places + 1 - digits.len()), digits);
+            }
+            digits.insert(digits.len() - places, '.');
+            while digits.ends_with('0') { digits.pop(); }
+            if digits.ends_with('.') { digits.pop(); }
+        }
+        let sign = if negative { "-" } else { "" };
+        let marker = if self.rounded || !remainder.is_zero() { "≈ " } else { "" };
+        format!("{marker}{sign}{digits}")
+    }
+
     pub(crate) fn canonical(&self) -> String {
+        self.canonical.clone()
+    }
+
+    fn build_canonical(&self) -> String {
         if self.decimal {
             let mut denominator = self.value.denom().clone();
             let mut twos = 0u32;

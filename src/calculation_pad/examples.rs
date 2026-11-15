@@ -17,6 +17,7 @@ pub(crate) struct CalculationExampleGroup {
 #[derive(Clone, Copy, Debug)]
 enum ExampleExpectation {
     Scalar(f64),
+    ApproximateScalar(f64),
     ScalarWithSkipped(f64),
     Vector(&'static [f64]),
     Physical {
@@ -24,6 +25,7 @@ enum ExampleExpectation {
         unit: Unit,
     },
     ExactBase(&'static str),
+    Exact(&'static str),
     ExactInteger {
         mode: &'static str,
         value: &'static str,
@@ -50,6 +52,7 @@ impl CalculationExample {
             ExampleExpectation::Scalar(value) | ExampleExpectation::ScalarWithSkipped(value) => {
                 format_number(value).unwrap_or_default()
             }
+            ExampleExpectation::ApproximateScalar(value) => format!("≈ {}", format_number(value).unwrap_or_default()),
             ExampleExpectation::Vector(values) => format!(
                 "[{}]",
                 values
@@ -64,6 +67,7 @@ impl CalculationExample {
                 unit.symbol()
             ),
             ExampleExpectation::ExactBase(digits) => digits.into(),
+            ExampleExpectation::Exact(value) => value.into(),
             ExampleExpectation::ExactInteger { value, .. } => value.into(),
             ExampleExpectation::Dimensional {
                 formatted_result, ..
@@ -74,6 +78,53 @@ impl CalculationExample {
 }
 
 const EXAMPLES: &[CalculationExampleGroup] = &[
+    CalculationExampleGroup {
+        title: "Exact decimals and fractions",
+        examples: &[
+            CalculationExample {
+                title: "Add exact decimals",
+                source: "decimal(\"0.1\") + decimal(\"0.2\")",
+                explanation: "Quoted decimal literals preserve their base-10 values.",
+                expected: ExampleExpectation::Exact("0.3"),
+            },
+            CalculationExample {
+                title: "Add fractions",
+                source: "fraction(1,3) + fraction(1,6)",
+                explanation: "Fractions reduce to lowest terms.",
+                expected: ExampleExpectation::Exact("1/2"),
+            },
+            CalculationExample {
+                title: "Combine a large integer and fraction",
+                source: "u64(9007199254740993) + fraction(1,2)",
+                explanation: "Fixed-width integers promote losslessly when combined with an exact number.",
+                expected: ExampleExpectation::Exact("18014398509481987/2"),
+            },
+            CalculationExample {
+                title: "Round a decimal division",
+                source: "decimal_div(decimal(\"1\"), decimal(\"8\"), 2)",
+                explanation: "Decimal division rounds ties to even and identifies a rounded result.",
+                expected: ExampleExpectation::Exact("≈ 0.12"),
+            },
+            CalculationExample {
+                title: "Convert explicitly to floating point",
+                source: "to_float(fraction(1,2))",
+                explanation: "Explicit conversion permits floating-point operations and marks the result approximate.",
+                expected: ExampleExpectation::ApproximateScalar(0.5),
+            },
+            CalculationExample {
+                title: "Reject a zero denominator",
+                source: "fraction(1,0)",
+                explanation: "A fraction must have a nonzero denominator.",
+                expected: ExampleExpectation::ErrorContains("denominator"),
+            },
+            CalculationExample {
+                title: "Reject unrounded repeating division",
+                source: "decimal(\"1\") / decimal(\"3\")",
+                explanation: "Use decimal_div with an explicit precision for repeating decimal results.",
+                expected: ExampleExpectation::ErrorContains("nonterminating"),
+            },
+        ],
+    },
     CalculationExampleGroup {
         title: "Variables and physical lines",
         examples: &[
@@ -690,6 +741,12 @@ mod tests {
                         let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
                         assert!((actual - expected).abs() <= tolerance, "{}", example.title);
                     }
+                    (ExampleExpectation::ApproximateScalar(expected), LineOutcome::Value(CalculationValue::ApproximateScalar(actual))) => {
+                        assert_eq!(*actual, expected, "{}", example.title);
+                    }
+                    (ExampleExpectation::Exact(expected), LineOutcome::Value(actual @ CalculationValue::Exact(_))) => {
+                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
+                    }
                     (
                         ExampleExpectation::Vector(expected),
                         LineOutcome::Value(CalculationValue::Vector(actual)),
@@ -772,7 +829,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 74);
+        assert_eq!(checked, 81);
     }
 
     #[test]

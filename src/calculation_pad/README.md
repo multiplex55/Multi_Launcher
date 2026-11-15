@@ -132,6 +132,28 @@ PI * radius ^ 2
 x = min(100, min(50, 75))
 ```
 
+## Exact decimals and fractions
+
+Use `decimal("0.1")` for a base-10 exact value and `fraction(1, 3)`
+for a reduced rational. For example, `decimal("0.1") + decimal("0.2")`
+is exactly 0.3 and `fraction(1, 3) + fraction(1, 6)` is exactly 1/2.
+The four arithmetic operations and comparisons retain exact values. Decimal
+division requires a finite decimal result. Use
+`decimal_div(decimal("1"), decimal("8"), 2)` to round to two places with
+ties to even. Rounded values display an approximation marker.
+
+Exact decimals and fractions combine with fixed-width integers and finite,
+integral scalars within the exact scalar integer range. A nonintegral scalar
+requires an explicit exact constructor. Use `to_float(fraction(1, 2))`
+to opt into floating-point operations. The resulting value is marked
+approximate. Exact numbers have 4,096-bit numerator and denominator or
+coefficient limits, a decimal scale and precision limit of 1,000, and the
+normal expression and work limits.
+
+The Number format menu offers Exact, Decimal, and Mixed number views.
+Repeating decimals use a bounded approximation. Canonical copy retains a
+parseable exact constructor independently of the selected display view.
+
 Non-finite operands and intermediate results remain invalid even when a later
 operation could otherwise hide them, as in `min(sqrt(-1), 1)`.
 

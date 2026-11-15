@@ -1830,6 +1830,11 @@ impl CalculationPadDialog {
                         });
                         let has_precision = values().any(result_format::supports_precision);
                         let has_percent = values().any(result_format::supports_percent);
+                        ui.label("Exact values");
+                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::Exact, "Exact");
+                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::Decimal, "Decimal");
+                        ui.selectable_value(&mut preferences.exact_mode, crate::settings::CalculationPadExactMode::MixedNumber, "Mixed number");
+                        ui.separator();
                         ui.selectable_value(&mut preferences.number_mode, Mode::Auto, "Auto");
                         ui.add_enabled_ui(has_precision, |ui| {
                             ui.selectable_value(&mut preferences.number_mode, Mode::Fixed, "Fixed decimal");
@@ -2031,6 +2036,8 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::Sequence(_) => "sequence",
                                             crate::calculation_pad::CalculationValue::Vector(_) => "vector",
                                             crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. } => "integer",
+                                            crate::calculation_pad::CalculationValue::Exact(_) => "exact",
+                                            crate::calculation_pad::CalculationValue::ApproximateScalar(_) => "approximate scalar",
                                             _ => "quantity",
                                         });
                                         if ui.add_enabled(current, egui::Button::new("Copy").small()).clicked() { effects.watch_copy = Some((name.clone(), false)); }
@@ -4847,7 +4854,9 @@ impl CalculationPadDialog {
                                     let value_label = ui.label(formatted.as_deref().unwrap_or("unavailable"));
                                     #[cfg(test)] { text_rect = value_label.rect; }
                                     row_response = row_response.union(value_label);
-                                    if value.is_approximate() {
+                                    if value.is_approximate()
+                                        && !formatted.as_deref().is_some_and(|text| text.starts_with("≈ "))
+                                    {
                                         row_response = row_response.union(ui.weak("approx."));
                                     }
                                 }
@@ -7322,6 +7331,27 @@ mod tests {
         let select = dialog.test_select_comparison.unwrap();
         click(&mut dialog, &ctx, size, select.center());
         assert_eq!(dialog.inspector_context().selected_line, dialog.session.line_id(0));
+    }
+
+    #[test]
+    fn exact_result_copy_uses_current_basis_and_selected_display_mode() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("fraction(7,4)");
+        dialog.session.evaluation().unwrap();
+        let document_id = dialog.test_current_document_id().unwrap();
+        let line = dialog.session.line_id(0).unwrap();
+        dialog.display_preferences.exact_mode = crate::settings::CalculationPadExactMode::Decimal;
+        let basis = dialog.session.evaluation_basis().unwrap();
+        let intent = |target| super::ResultCopyIntent {
+            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT, document_id, basis, target,
+        };
+        let canonical = intent(super::ResultCopyTarget::Line(line));
+        let formatted = intent(super::ResultCopyTarget::FormattedLine(line));
+        assert_eq!(dialog.resolve_result_copy(canonical), Some(CalculationPadDialogEffect::CopyText("fraction(7,4)".into())));
+        assert_eq!(dialog.resolve_result_copy(formatted), Some(CalculationPadDialogEffect::CopyText("1.75".into())));
+        dialog.session.retire_background_evaluation();
+        assert!(dialog.resolve_result_copy(canonical).is_none());
     }
 
     #[test]

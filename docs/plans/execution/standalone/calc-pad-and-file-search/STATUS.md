@@ -20,9 +20,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M1-B | Verified and pushed | `5a724285e402db21411c5cf3454ed9a797e22c61`. Shared editor/observer mapping; focused batches passed 20/20 and 3/3. |
 | M2-A | Verified and pushed | `ffbc28d6a0fc3feecca7ed489846dd9dd177d026`. Versioned options/recovery, evaluation identity and related-reference edit seam. Focused batch passed 20/20. |
 | M2-B | Verified and pushed | `54567303d7ff18aa5ce751a044cf103093b4e30e`. Manual lifecycle, immutable stale results, guarded actions. Focused batches passed 18/18 and 4/4. |
-| M3-A | Verified | Exact arithmetic, bounded size, canonical copy, explicit approximation. Focused batches passed 12/12 and 7/7. |
-| M3-B | In progress | Exact display, observers and reference integration. |
-| M4-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M3-A | Verified and pushed | `fad44d1cf51e88a2093eb9c1d74de86a1e2fa13c`. Exact arithmetic, bounds, canonical copy and approximation. Batches passed 12/12 and 7/7. |
+| M3-B | Verified | Exact display and comparison, current canonical copy and executable examples. Batches passed 13/13 and 5/5. |
+| M4-A | In progress | All ten numeric helpers and their shared signature/example entries. |
+| M5-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -30,7 +31,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | --- | --- | --- | --- |
 | C20 | Implemented | Focused automated domain/editor checks passed. Native integrated check pending. | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
 | C24 | Implemented | Focused scheduler, persistence and host tests passed. Native integrated check pending. | Session scheduling, worker stamps, persistence/recovery and companion observers |
-| C25 | Domain implemented; display and observer integration pending | Focused exact/legacy checks passed | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
+| C25 | Implemented | Focused exact/legacy, formatting, settings, copy and example checks passed. Native integrated check pending. | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Pending | Pending | Script function catalog and signatures, editor hints, executable examples |
 | C18 | Pending | Pending | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Pending | Pending | Existing loop block parser, transactional execution and editor structure |
@@ -79,3 +80,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Promoted already-locked numeric crates to direct dependencies. `Cargo.lock` changes only those dependency edges. Exact decimal/fraction arithmetic uses bounded rational operands, opted-in constructors, canonical copy, explicit approximate conversion and shared evaluation work.
 - Scoped library Nextest initially passed 12/12 in 2.57 seconds (separate compile 433.96 seconds). Code inspection found a script-fragment panic path, a decimal canonical length mismatch at the admitted bit limit, and missing approximate scalar comparison. The correction batch passed 6/7; the sole failing assertion used the wrong expected sum for `range(4)`, which is 0 through 3. After correcting the fixture, the focused batch passed 7/7 with exit 0 in 2.37 seconds (final compile 66.84 seconds).
 - Verified bounded process cleanup and drained output. Cached batches used the 100-second deadline and separate compiles used 900 seconds. Receipts are under `m3a-build`, `m3a-run`, `m3a-correction-build`, `m3a-correction-run`, `m3a-final-build`, and `m3a-final-run`.
+
+### M3-B exact presentation and reference
+
+- Exact, Decimal and Mixed Number are persisted independent display choices. Formatting never converts fractions to binary float, marks actual approximation and leaves canonical copy parseable. Current-only copy and observer guards remain in effect. The linked catalogue now contains 81 executable examples.
+- Scoped library Nextest passed 13/13 in 2.61 seconds. A focused refinement for decimal-origin mixed text, bounded differences and pure literal validation passed 5/5 in 2.30 seconds. Separate compiles ran 367.61 and 196.34 seconds. Tests used 100-second deadlines and compiles 900-second deadlines. Cleanup and output drain passed. Receipts are in `m3b-build`, `m3b-run`, `m3b-correction-build`, and `m3b-correction-run`.

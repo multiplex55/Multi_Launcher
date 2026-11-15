@@ -1537,6 +1537,24 @@ mod tests {
     }
 
     #[test]
+    fn decimal_literal_input_preserves_constructor_and_exact_source() {
+        let (_directory, _root, mut session) = fixture();
+        let source = "price = decimal(\"0.10\") # retained\r\nprice * 2";
+        session.replace_source(source).unwrap();
+        let input = super::super::document::literal_inputs(source).into_iter().next().unwrap();
+        assert_eq!(input.value, "0.10");
+        assert_eq!(&source[input.value_range.clone()], "0.10");
+        let line = session.line_id(0).unwrap();
+        let revision = session.revision().unwrap();
+        assert!(session.input_replacement(revision, line, &input.source_line, "1/3").is_err());
+        let replacement = session.input_replacement(revision, line, &input.source_line, "0.25").unwrap();
+        assert_eq!(replacement, "price = decimal(\"0.25\") # retained\r\nprice * 2");
+        session.replace_source(replacement).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
     fn multiline_literal_input_apply_preserves_comments_crlf_and_undo() {
         let (_dir, _root, mut session) = fixture();
         let source = "{α#} = u64( // explanation\r\n  42) # retained\r\nfor i in range(2):\r\n  hidden = 3\r\nresult = {α#}";
