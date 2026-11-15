@@ -4676,7 +4676,7 @@ impl CalculationPadDialog {
                     .or_else(|| self.dependency_seed());
                 for line in &evaluation.lines {
                     let formatted = match &line.outcome {
-                        LineOutcome::Blank | LineOutcome::Comment => continue,
+                        LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => continue,
                         LineOutcome::Value(value) => {
                             let formatted = result_format::display(value, self.display_preferences);
                             if formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
@@ -4725,7 +4725,7 @@ impl CalculationPadDialog {
                                 row_response = row_response.union(ui.weak(format!("uses {refs}")));
                             }
                             match &line.outcome {
-                                LineOutcome::Blank | LineOutcome::Comment => {}
+                                LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => {}
                                 LineOutcome::Value(value) => {
                                     let value_label = ui.label(formatted.as_deref().unwrap_or("unavailable"));
                                     #[cfg(test)] { text_rect = value_label.rect; }
@@ -5279,7 +5279,7 @@ fn copy_all_results(
             continue;
         };
         let outcome = match &line.outcome {
-            LineOutcome::Blank | LineOutcome::Comment => None,
+            LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Continuation { .. } => None,
             LineOutcome::Value(value) => Some(
                 value
                     .canonical_result()

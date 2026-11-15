@@ -188,6 +188,7 @@ impl CalculationDependencyDialog {
                         LineOutcome::Error(error) => { ui.colored_label(ui.visuals().error_fg_color, error.to_string()); }
                         LineOutcome::Blank => { ui.weak("Blank line"); }
                         LineOutcome::Comment => { ui.weak("Comment"); }
+                        LineOutcome::Continuation { owner_line } => { ui.weak(format!("Continuation of line {}", owner_line + 1)); }
                     }
                     let go = ui.button("Go to source");
                     #[cfg(test)]

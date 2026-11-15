@@ -16,14 +16,15 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | --- | --- | --- |
 | M0-A | Verified | Exact parent and baseline, fresh task branch, successful push |
 | M0-B | Verified | Live owners below. Five Calc Pad and three File Search baseline cases passed. |
-| M1-A | In progress | Logical statement and physical source mapping domain. |
-| M1-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M1-A | Verified | Shared source analysis, both evaluator routes, physical continuation outcomes and diagnostics. 13 focused tests passed. |
+| M1-B | In progress | Editor and observer integration. |
+| M2-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
 | ID | Implementation | Verification | Owners and boundaries |
 | --- | --- | --- | --- |
-| C20 | Pending | Pending | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
+| C20 | Domain implemented, editor pending | Domain verified | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
 | C24 | Pending | Pending | Session scheduling, worker stamps, persistence/recovery and companion observers |
 | C25 | Pending | Pending | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Pending | Pending | Script function catalog and signatures, editor hints, executable examples |
@@ -46,3 +47,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - `cargo nextest run -p multi_launcher --lib --test domain --cargo-profile fast-dev -E <eight intended cases> --test-threads 1 --no-run` completed with compiler exit 0 in 678.6 seconds under the 900-second compile deadline. It produced fresh library and domain binaries. The wrapper drained output and found 31 observed processes absent. It could not classify one process identity, PID 16032, at cleanup; a subsequent lookup found that PID absent. The temporary fixture was removed and its absence checked.
 - Listed the cases in the fresh binaries and used their exact names to run the scoped baseline directly, avoiding a rebuild after fixture cleanup. The library batch passed 5/5 in 0.21 seconds under a 100-second deadline, covering example validation, v1 loading and upgrading, stable source line IDs, full-line comments and physical references, and typed loop rollback. The domain batch passed 3/3 in 0.05 seconds under the same deadline, covering filename extension filters, native content fallback, and criteria dirty state. Both runs exited 0 with verified cleanup and output drain. See `m0b-build`, `m0b-lib`, and `m0b-domain` receipts under the evidence root.
 - Pre-existing compiler warnings were observed in vendored and first-party code. The baseline produced no feature-related test failures. Native interaction and final Clippy are later checkpoints.
+
+### M1-A domain
+
+- Scoped library `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <M1-A selectors> --test-threads 1` passed 13/13 with exit 0 in 2.28 seconds under the 100-second watchdog. The separate fixture-assisted compilation exited 0 in 283.84 seconds under a 900-second deadline. Both receipts confirmed cleanup and output drain. Selectors and results are in `m1a-build` and `m1a-run`.
+- Coverage includes six physical/logical source cases, typed values, loop/header grouping, continuation errors, legacy row references, laziness, loop rollback, and existing examples. Editor integration remains M1-B.

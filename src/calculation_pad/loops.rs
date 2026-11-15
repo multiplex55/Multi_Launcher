@@ -110,7 +110,11 @@ fn header(source: &str) -> Option<Result<LoopHeader, DiagnosticKind>> {
 }
 
 pub(super) fn contains_loop(source: &str) -> bool {
-    source.lines().any(|line| header(line).is_some())
+    contains_loop_in(&syntax::SourceAnalysis::new(source))
+}
+
+pub(super) fn contains_loop_in(analysis: &syntax::SourceAnalysis) -> bool {
+    analysis.rows.iter().any(|row| row.owner.is_none() && header(&row.text).is_some())
 }
 
 fn indentation(line: &str) -> Result<usize, DiagnosticKind> {
@@ -624,40 +628,52 @@ impl Execution {
     }
 }
 
-pub(super) fn evaluate(
-    source: &str,
+pub(super) fn evaluate<'a>(
+    source: &'a str,
+    analysis: &syntax::SourceAnalysis,
     cancellation: Option<Arc<AtomicBool>>,
-) -> CalculationEvaluation<'_> {
-    evaluate_limited(source, cancellation, MAX_LOOP_ITERATIONS)
+) -> CalculationEvaluation<'a> {
+    evaluate_analyzed(source, analysis, cancellation, MAX_LOOP_ITERATIONS)
 }
 
+#[cfg(test)]
 fn evaluate_limited(
     source: &str,
     cancellation: Option<Arc<AtomicBool>>,
     iteration_limit: usize,
 ) -> CalculationEvaluation<'_> {
-    let lines = source
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .collect::<Vec<_>>();
+    evaluate_analyzed(source, &syntax::SourceAnalysis::new(source), cancellation, iteration_limit)
+}
+
+fn evaluate_analyzed<'a>(
+    source: &'a str,
+    analysis: &syntax::SourceAnalysis,
+    cancellation: Option<Arc<AtomicBool>>,
+    iteration_limit: usize,
+) -> CalculationEvaluation<'a> {
+    let lines = analysis.rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
     let headers = lines.iter().map(|line| header(line)).collect::<Vec<_>>();
-    let mut declared = declared_names(source);
+    let mut declared = declared_names_in(analysis);
     for header in headers.iter().flatten().flatten() {
         declared.insert(header.name.clone());
     }
     let mut errors = vec![None; lines.len()];
-    let mut offset = 0;
     let mut count = 0;
     let mut canceled = false;
     let mut prepared = Vec::with_capacity(lines.len());
     let mut expressions = Vec::with_capacity(lines.len());
     let mut compound_targets = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
-        let range = offset..offset + line.len();
-        let original = &source[range.clone()];
-        offset += line.len()
-            + usize::from(source.as_bytes().get(offset + line.len()) == Some(&b'\r'))
-            + 1;
+        let row = &analysis.rows[index];
+        let end = row.offsets.iter().rev().find_map(|offset| *offset)
+            .map_or(row.range.end, |offset| offset + 1);
+        let range = row.range.start..end;
+        if row.owner.is_some() {
+            prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+            expressions.push(None);
+            compound_targets.push(None);
+            continue;
+        }
         if canceled
             || cancellation
                 .as_ref()
@@ -673,12 +689,15 @@ fn evaluate_limited(
             compound_targets.push(None);
             continue;
         }
-        let text = original.trim();
+        let text = line.trim();
         let expression = match &headers[index] {
             Some(Ok(header)) => header.expression.as_str(),
             _ => text,
         };
         let mut item = prepare_line(range, expression, &mut count, &declared);
+        if let Some(diagnostic) = &row.diagnostic {
+            item.diagnostic = Some(Diagnostic::new(diagnostic.clone()));
+        }
         if let Some(Ok(header)) = &headers[index] {
             item.assignment_name = Some(header.name.clone());
             count = count.saturating_add(1);
@@ -744,12 +763,19 @@ fn evaluate_limited(
         .iter()
         .enumerate()
         .map(|(line, item)| {
-            let outcome = if let Some(error) = errors[line]
+            let original = &source[analysis.rows[line].range.clone()];
+            let outcome = if let Some(owner) = analysis.rows[line].owner {
+                if original.trim().is_empty() { LineOutcome::Blank }
+                else if is_full_line_comment(original.trim()) { LineOutcome::Comment }
+                else { LineOutcome::Continuation { owner_line: owner } }
+            } else if let Some(error) = errors[line]
                 .as_ref()
                 .map(|kind| Diagnostic::new(kind.clone()))
                 .or_else(|| item.diagnostic.clone())
             {
                 LineOutcome::Error(error)
+            } else if is_full_line_comment(original.trim()) {
+                LineOutcome::Comment
             } else if lines[line].trim().is_empty() {
                 LineOutcome::Blank
             } else if is_full_line_comment(lines[line].trim()) {
@@ -759,7 +785,7 @@ fn evaluate_limited(
             };
             CalculationLineResult {
                 line_index: line,
-                source_range: item.source_range.clone(),
+                source_range: analysis.rows[line].range.clone(),
                 assignment_name: item.assignment_name.clone(),
                 dependency_indices: Vec::new(),
                 loop_iteration: None,
@@ -869,6 +895,28 @@ mod tests {
             LineOutcome::Value(CalculationValue::Scalar(value)) => *value,
             other => panic!("expected scalar at line {line}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multiline_headers_and_loop_bodies_keep_physical_rows() {
+        let source = concat!(
+            "total = 0 # start\r\n",
+            "for i in range(\r\n",
+            "  1, 4): // header\r\n",
+            "    total = (total +\r\n",
+            "        i) # body\r\n",
+            "total\r\n",
+            "r5\r\n",
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(result.source, source);
+        assert_eq!(scalar(&result, 5), 6.0);
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Continuation { owner_line: 1 }));
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Continuation { owner_line: 3 }));
+        assert!(matches!(&result.lines[6].outcome, LineOutcome::Error(Diagnostic {
+            kind: DiagnosticKind::ContinuationReference { owner_line: 3, .. },
+        })));
     }
 
     #[test]

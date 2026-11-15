@@ -22,6 +22,8 @@ use super::vector::{self, VectorExpression};
 pub(super) mod script;
 #[path = "loops.rs"]
 mod loops;
+#[path = "syntax.rs"]
+pub(super) mod syntax;
 pub use script::CalculationSequence;
 
 pub(crate) fn editor_loop_header(source: &str) -> bool {
@@ -216,8 +218,10 @@ impl CalculationDocument {
     }
 
     pub(crate) fn source_requires_repeated_execution(source: &str) -> bool {
-        loops::contains_loop(source)
-            || source.lines().any(|line| {
+        let analysis = syntax::SourceAnalysis::new(source);
+        loops::contains_loop_in(&analysis)
+            || analysis.rows.iter().filter(|row| row.owner.is_none()).any(|row| {
+                let line = row.text.as_str();
                 let line = line.trim();
                 if line.is_empty() || is_full_line_comment(line) {
                     return false;
@@ -259,31 +263,28 @@ impl CalculationDocument {
                 }),
             };
         }
-        if loops::contains_loop(source) {
-            return loops::evaluate(source, cancellation);
+        let analysis = syntax::SourceAnalysis::new(source);
+        if loops::contains_loop_in(&analysis) {
+            return loops::evaluate(source, &analysis, cancellation);
         }
 
         // Alias fallback must see forward declarations too, so
         // references keep the same diagnostics as ordinary named variables.
-        let declared_names = declared_names(source);
+        let declared_names = declared_names_in(&analysis);
         let mut total_identifiers = 0;
         let mut prepared = Vec::with_capacity(source_line_count);
-        let mut source_offset = 0;
-        for raw_line in source.split('\n') {
-            let raw_end = source_offset + raw_line.len();
-            let content_end = if raw_line.ends_with('\r') {
-                raw_end - 1
-            } else {
-                raw_end
-            };
-            let content = &source[source_offset..content_end];
-            prepared.push(prepare_line(
-                source_offset..content_end,
-                content,
-                &mut total_identifiers,
-                &declared_names,
-            ));
-            source_offset = raw_end.saturating_add(1);
+        for row in &analysis.rows {
+            if row.owner.is_some() {
+                prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+                continue;
+            }
+            let span_end = row.offsets.iter().rev().find_map(|offset| *offset)
+                .map_or(row.range.end, |offset| offset + 1);
+            let mut item = prepare_line(row.range.start..span_end, &row.text, &mut total_identifiers, &declared_names);
+            if let Some(diagnostic) = &row.diagnostic {
+                item.diagnostic = Some(Diagnostic::new(diagnostic.clone()));
+            }
+            prepared.push(item);
         }
 
         let definitions = assignment_definitions(&prepared);
@@ -301,7 +302,14 @@ impl CalculationDocument {
         let mut terminal = false;
         for (line_index, line) in prepared.iter().enumerate() {
             let mut dependencies = line.dependencies.clone();
-            let outcome = if terminal
+            let original = &source[analysis.rows[line_index].range.clone()];
+            let outcome = if let Some(owner) = analysis.rows[line_index].owner {
+                if original.trim().is_empty() { LineOutcome::Blank }
+                else if is_full_line_comment(original.trim()) { LineOutcome::Comment }
+                else { LineOutcome::Continuation { owner_line: owner } }
+            } else if is_full_line_comment(original.trim()) {
+                LineOutcome::Comment
+            } else if terminal
                 && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
             {
                 LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted))
@@ -334,7 +342,7 @@ impl CalculationDocument {
             outcomes.push(outcome.clone());
             results.push(CalculationLineResult {
                 line_index,
-                source_range: line.source_range.clone(),
+                source_range: analysis.rows[line_index].range.clone(),
                 assignment_name: line.assignment_name.clone(),
                 dependency_indices: dependencies,
                 loop_iteration: None,
@@ -429,6 +437,7 @@ pub struct CalculationLineResult {
 pub enum LineOutcome {
     Blank,
     Comment,
+    Continuation { owner_line: usize },
     Value(CalculationValue),
     Error(Diagnostic),
 }
@@ -528,6 +537,7 @@ pub enum DiagnosticKind {
     ReservedName(String),
     UnknownName(String),
     UnknownRowReference(String),
+    ContinuationReference { reference: String, owner_line: usize },
     ForwardReference {
         reference: String,
         dependency_line: usize,
@@ -594,6 +604,9 @@ impl fmt::Display for Diagnostic {
             Kind::UnknownRowReference(reference) => {
                 write!(formatter, "no result is available for {reference}")
             }
+            Kind::ContinuationReference { reference, owner_line } => write!(
+                formatter, "{reference} is a continuation of line {} and has no result", owner_line + 1
+            ),
             Kind::ForwardReference {
                 reference,
                 dependency_line,
@@ -1639,10 +1652,15 @@ fn is_row_reference_name(name: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn declared_names(source: &str) -> HashSet<String> {
-    source
-        .split('\n')
-        .filter_map(|line| {
+    declared_names_in(&syntax::SourceAnalysis::new(source))
+}
+
+fn declared_names_in(analysis: &syntax::SourceAnalysis) -> HashSet<String> {
+    analysis.rows.iter().filter(|row| row.owner.is_none())
+        .filter_map(|row| {
+            let line = row.text.as_str();
             let line = line.trim();
             if is_full_line_comment(line) {
                 return None;
@@ -2649,6 +2667,11 @@ fn evaluate_line(
         }
         match outcomes.get(dependency_line) {
             Some(LineOutcome::Value(_)) => {}
+            Some(LineOutcome::Continuation { owner_line }) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ContinuationReference {
+                    reference: reference.name.clone(), owner_line: *owner_line,
+                }));
+            }
             Some(LineOutcome::Blank | LineOutcome::Comment) => {
                 return LineOutcome::Error(Diagnostic::new(DiagnosticKind::UnknownRowReference(
                     reference.name.clone(),
@@ -3003,6 +3026,46 @@ mod tests {
         value(evaluation, line_index)
             .formatted_result()
             .expect("numeric result should have a display form")
+    }
+
+    #[test]
+    fn logical_statements_preserve_physical_rows_comments_and_references() {
+        let source = "{α#//} = 2 # comment\r\nsum = ({α#//} +\r\n  3) // comment\r\nr2 + 1\r\nr3\r\nif(false, r3, 7)";
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(result.source, source);
+        assert_eq!(result.lines.len(), 6);
+        assert_eq!(scalar(&result, 1), 5.0);
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Continuation { owner_line: 1 }));
+        assert_eq!(&source[result.lines[2].source_range.clone()], "  3) // comment");
+        assert_eq!(scalar(&result, 3), 6.0);
+        assert!(matches!(error(&result, 4), DiagnosticKind::ContinuationReference { owner_line: 1, .. }));
+        assert_eq!(scalar(&result, 5), 7.0);
+    }
+
+    #[test]
+    fn multiline_source_limits_and_diagnostics_remain_bounded() {
+        let source = format!("x = ({}\n + 1)", "1 + ".repeat(600));
+        let document = CalculationDocument::new(source);
+        assert!(matches!(error(&document.evaluate(), 0), DiagnosticKind::ExpressionTooLong { .. }));
+        let document = CalculationDocument::new("x = (1\n + 2]");
+        assert!(error_message(&document.evaluate(), 0).contains("line 2, byte 5"));
+        let document = CalculationDocument::new("x = (1\n + 2");
+        assert!(error_message(&document.evaluate(), 0).contains("unclosed delimiter"));
+    }
+
+    #[test]
+    fn multiline_statements_keep_existing_typed_values() {
+        let document = CalculationDocument::new(concat!(
+            "integer = u64(\n  42)\n",
+            "vector = [1,\n  2, 3]\n",
+            "distance = (2 m\n  + 3 m)\n",
+            "integer\nvector\ndistance",
+        ));
+        let result = document.evaluate();
+        assert!(matches!(value(&result, 6), CalculationValue::Integer(_)));
+        assert!(matches!(value(&result, 7), CalculationValue::Vector(_)));
+        assert!(matches!(value(&result, 8), CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }));
     }
 
     #[test]

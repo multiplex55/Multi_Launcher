@@ -1047,6 +1047,9 @@ fn value_at(
         Some(LineOutcome::Blank | LineOutcome::Comment) => {
             Err(DiagnosticKind::UnknownRowReference(name.to_owned()))
         }
+        Some(LineOutcome::Continuation { owner_line }) => Err(DiagnosticKind::ContinuationReference {
+            reference: name.to_owned(), owner_line: *owner_line,
+        }),
         _ => Err(DiagnosticKind::DependencyFailed {
             dependency_line: target,
         }),
