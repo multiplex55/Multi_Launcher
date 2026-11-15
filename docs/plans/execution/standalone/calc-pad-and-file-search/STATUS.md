@@ -35,9 +35,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M9-A | Verified and pushed | `c48bed1d9c7df339e6939ace09a70728401180be`. Typed input definitions, retained v3 configuration and source projection. Focused batch passed 12/12. |
 | M9-B | Verified and pushed | `3f7a47d17e6e2d8571a90f177f6818d0993aca33`. Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
 | M10-A | Verified and pushed | `b5bd5b163e95b201faf506f8331cd163245f4862`. Bounded immutable sensitivity analysis and current-only publication. Focused batch passed 15/15. |
-| M10-B | Verified | Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
-| M11-A | In progress | Typed graph data, shared chart layout and bounded offscreen image. |
-| M11-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M10-B | Verified and pushed | `64cf01ae222c1fd2e03d0ae9952f2aa58c1eaa93`. Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
+| M11-A | Verified | Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5; PNG inspected. |
+| M11-B | In progress | Dockable Charts companion, persisted definition and guarded image copy. |
+| M12-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -54,7 +55,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
 | C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
 | C4 | Implemented | Focused XP, sample, worker, panel, exact exports, stale actions, persistence and rename history passed. Native integrated check pending. | Session-owned bounded worker and retained Config Menu actions |
-| C5 | Pending | Pending | Committed snapshots, utility window host and render lifecycle, size/presentation settings and clipboard |
+| C5 | Chart model implemented; companion integration in progress | Focused dataset/scene/raster checks passed and chart-only PNG inspected. Native integrated check pending. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
 | F3 | Pending | Pending | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and `domain` cases |
 
 ## Verification evidence
@@ -182,3 +183,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Accepted Generate, Cancel and Copy respect source, definition, semantic options and owner freshness. TSV, CSV and Markdown preserve intended input values, exact output values, real units and per-cell diagnostics. Export runs on the accepted Copy action.
 - Sensitivity references follow a source rename. Granular replay preserves later range/selection edits, uses stable ephemeral identities for chained sensitivity outputs and watches, and releases a hidden selection when a collision clears.
 - Initial scoped library Nextest passed 14/14. The final expanded history/host/persistence selection passed 19/19 with exit 0, 0.77 seconds reported by Nextest and 23.37 seconds owned elapsed. Its separate compile took 248.65 seconds. Cached and compile deadlines remained 100 and 900 seconds. Cleanup and output drain passed. Receipts: `m10b-*` and `m10b-final-*`. Native desktop evidence remains pending.
+
+### M11-A chart models and raster
+
+- Added bounded typed vector/sensitivity adapters, shared line/bar/scatter scene, stable view transforms, unit normalization, explicit gaps, exact and round-trip tooltip text, and approximation/collision disclosure. Axis coordinates and chart-only raster work are checked before drawing.
+- Initial scoped library Nextest passed 6/6. Inspection of the first PNG showed that the 1-pixel annotation stroke skipped integer-coordinate axes. The corrected shared scene uses visible axis/tick strokes. Final focused selection passed 5/5, including actual axis pixels, aligned labels, and absence of a line across a missing row. The corrected sample image `target/calc-pad-and-file-search-evidence/m11a-final-chart.png` was opened and inspected.
+- The final compile completed with exit 0 in 208.26 seconds and drained output. Its wrapper initially could not verify one observed process after exit. A read-only Windows PID/creation-time comparison confirmed the ID had been reused by a different system process, and no Cargo/compiler process remained. The completed build was reused for the final cached run, which passed with exit 0 in 2.64 seconds and verified cleanup/output drain. Receipts: `m11a-*` and `m11a-final-*`. Native viewport and clipboard checks remain pending.

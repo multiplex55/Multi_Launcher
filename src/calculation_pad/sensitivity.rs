@@ -66,7 +66,7 @@ pub(crate) enum SensitivityStatus {
 #[derive(Clone, Copy)]
 pub(crate) enum TableExport { Table, Csv, Markdown }
 
-fn output_text(value: &CalculationValue) -> String {
+pub(super) fn output_text(value: &CalculationValue) -> String {
     match value {
         CalculationValue::Scalar(value) | CalculationValue::ApproximateScalar(value) => value.to_string(),
         CalculationValue::PhysicalQuantity { value, unit, .. } => format!("{value} {}", unit.symbol()),
@@ -77,7 +77,7 @@ fn output_text(value: &CalculationValue) -> String {
     }
 }
 
-fn intended_text(sample: &SampleNumber) -> String {
+pub(super) fn intended_text(sample: &SampleNumber) -> String {
     let SampleNumber::Exact(number) = sample;
     if number.is_integer() { return number.to_integer().to_string(); }
     if let Ok(exact) = super::exact::ExactNumber::fraction(number.numer().clone(), number.denom().clone(), &mut super::document::script::WorkBudget::default()) {

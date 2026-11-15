@@ -1358,6 +1358,22 @@ fn comparable_quantities(
     Ok(ComparableQuantities::Linear(left, right))
 }
 
+/// Convert a chart coordinate into the reference quantity's display unit (or
+/// a canonical unit for nonlinear quantities), preserving dimensional checks.
+pub(super) fn chart_coordinate(reference: &CalculationValue, value: &CalculationValue) -> Result<(f64, String, bool), QuantityError> {
+    match comparable_quantities(reference, value)? {
+        ComparableQuantities::Linear(left, right) => {
+            let converted_units = left.display_units != right.display_units;
+            let converted = convert_to_target(&right, &left.display_units)?;
+            let (number, unit) = converted.display_parts().ok_or(QuantityError::OutOfRange)?;
+            Ok((number, unit, converted_units || converted.is_approximate()))
+        }
+        ComparableQuantities::Nonlinear { right, unit, approximate, .. } => {
+            Ok((right, unit.symbol().to_owned(), approximate || reference != value))
+        }
+    }
+}
+
 /// Compare quantities without computing an otherwise unnecessary difference.
 pub(super) fn compare_ordering(
     left: &CalculationValue,
