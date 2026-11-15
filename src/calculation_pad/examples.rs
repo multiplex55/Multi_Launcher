@@ -761,6 +761,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 explanation: "Function bodies cannot capture document variables. Pass them as parameters.",
                 expected: ExampleExpectation::ErrorContains("parameters and constants"),
             },
+            CalculationExample {
+                title: "Multiline formula in a conditional loop",
+                source: "fn double(value) = (\n    value * 2\n)\ntotal = 0\nfor i in range(6):\n    if i mod 2 == 0:\n        total += double(i)\ntotal",
+                explanation: "A multiline pure formula is called only for even loop values; the final total is 12.",
+                expected: ExampleExpectation::Scalar(12.0),
+            },
         ],
     },
     CalculationExampleGroup {
@@ -931,7 +937,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 103);
+        assert_eq!(checked, 104);
     }
 
     #[test]

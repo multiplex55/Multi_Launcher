@@ -251,9 +251,11 @@ correction level; a fresh QR command starts a new draft.
 - `= history` (or `calc list`) to open the calculator history panel.
 
 Search for `calc pad` to open **Calculation Pad** for reusable documents with assignments,
-conditions, bounded loops, input controls, and named output watches. The
+conditions, bounded loops, input controls, and named output watches. The Pad
+also supports local formula functions, exact decimals and fractions, calendar
+values, Manual calculation, sensitivity tables, and a Charts companion. The
 [Calculation Pad guide](src/calculation_pad/README.md) covers the language,
-editor, formatting, Programmer Inspector, and persistence.
+editor, limits, formatting, Programmer Inspector, and persistence.
 
 ### 3) Convert things quickly
 - Unit conversion:

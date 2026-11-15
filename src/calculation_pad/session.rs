@@ -2714,6 +2714,12 @@ mod tests {
         let id = session.line_id(0).unwrap();
         session.set_view_metadata(super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id, name: "x".into(), unavailable: false, config: Default::default() }], ..Default::default() }).unwrap();
         session.configure_input(id, super::super::InputConfig { minimum: Some("1".into()), maximum: Some("1".into()), ..Default::default() }).unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() }).unwrap();
+        session.request_calculate();
+        let main = session.shared_evaluation().unwrap();
+        let source = session.source().unwrap().to_owned();
+        let history = session.history.undo.len();
+        let dirty = session.is_dirty();
         let (wake_tx, wake_rx) = mpsc::channel();
         session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
         let definition = super::super::SensitivityDefinition { input: id, start: "0".into(), end: "2".into(), sampling: super::super::Sampling::Count(3), outputs: vec!["y".into()] };
@@ -2722,6 +2728,32 @@ mod tests {
         let table = session.sensitivity_table().unwrap();
         assert_eq!(table.rows.len(), 3);
         assert!(table.rows.iter().all(|row| row.cells[0].is_ok()));
+        let dataset = super::super::ChartDataset::from_sensitivity(&table, &[0]).unwrap();
+        assert_eq!(dataset.series[0].points.len(), 3);
+        assert_eq!(dataset.series[0].points[0].as_ref().unwrap().x, 0.0);
+        assert_eq!(dataset.series[0].points[2].as_ref().unwrap().y, 2.0);
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.history.undo.len(), history);
+        assert_eq!(session.is_dirty(), dirty);
+        assert!(std::sync::Arc::ptr_eq(&session.shared_evaluation().unwrap(), &main));
+        session.replace_line(id, "x = 2").unwrap();
+        assert!(session.sensitivity_table().is_none());
+        assert!(session.shared_evaluation().is_none());
+    }
+
+    #[test]
+    fn parameter_rename_and_undo_leave_document_binding_unchanged() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "x = 10\nfn add_one(x) = (\n  x + 1\n)\nadd_one(2) + x";
+        session.replace_source(source).unwrap();
+        let parameter = source.find("add_one(x)").unwrap() + "add_one(".len();
+        let preview = session.preview_rename(parameter, "value").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.source(), Some("x = 10\nfn add_one(value) = (\n  value + 1\n)\nadd_one(2) + x"));
+        assert_eq!(scalar(&mut session, 4), 13.0);
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+        assert_eq!(scalar(&mut session, 4), 13.0);
     }
 
     #[test]
@@ -2844,9 +2876,15 @@ mod tests {
         assert_eq!(original.revision, 0);
         assert_eq!(original.revision, reopened.revision);
         assert_ne!(original.incarnation, reopened.incarnation);
-        let mut colliding_saved_binding = reopened.clone();
-        colliding_saved_binding.incarnation = original.incarnation;
-        assert_eq!(original, colliding_saved_binding);
+        assert_eq!(original.basis.document, reopened.basis.document);
+        assert_eq!(original.basis.document, id);
+        assert_eq!(original.basis.revision, reopened.basis.revision);
+        assert_ne!(original.basis.incarnation, reopened.basis.incarnation);
+        assert_eq!(original.line_id, reopened.line_id);
+        assert_eq!(original.source_range, reopened.source_range);
+        assert_eq!(original.source_text, reopened.source_text);
+        assert_eq!(original.value, reopened.value);
+        assert_eq!(original.origin, reopened.origin);
         assert!(matches!(
             session.apply_inspector_insert(request),
             Err(InspectorInsertError::StaleSource)

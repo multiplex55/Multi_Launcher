@@ -130,6 +130,23 @@ capture document variables. Function definitions have no numeric row result.
 Definitions and calls are bounded to 64 functions, 16 parameters per function,
 and a call depth of 16. Recursive and forward calls are rejected.
 
+Functions also work in structured blocks, including grouped multiline bodies:
+
+```text
+fn double(value) = (
+    value * 2
+)
+total = 0
+for i in range(6):
+    if i mod 2 == 0:
+        total += double(i)
+total
+```
+
+The final result is 12. Rename a parameter with F2 in the source editor to
+preview its local references without renaming a document variable with the same
+name. A single Undo restores the rename.
+
 ## Everyday numeric helpers
 
 `round_to(value, step)`, `floor_to(value, step)`, and `ceil_to(value, step)`
@@ -207,6 +224,8 @@ a named-zone timestamp with
 Ambiguous named-zone wall times require an explicit `"earlier"` or
 `"later"` fold choice. A nonexistent wall time reports an error. Named-zone
 results show the UTC offset so the two sides of a fold are distinguishable.
+Calendar constructors are explicit; live `today()`/`now()`, recurrence,
+business-day calculations, and date-picker inputs are not included.
 
 `add_days`, `add_months`, and `add_years` shift dates or timestamps.
 Month and year shifts clamp to the last valid day in the target month.
@@ -421,6 +440,7 @@ mode; it does not edit the source or calculate the main Pad. A named document
 retains the definition, while computed rows remain transient. Cancel retires
 the active run. Copy Table, CSV, and Markdown require a current completed
 table; source, option, or definition changes make previous results outdated.
+Each table varies one input; two-input grids are not included.
 
 ## Charts
 
@@ -464,7 +484,7 @@ Manual calculation. Each counter warns independently at 90% and over its limit.
 
 Lines that exceed a line-level bound receive a diagnostic; documents beyond
 the byte or line bound receive a document diagnostic without partial
-evaluation.
+evaluation. For example, `range(1025)` reports the 1,024-element limit.
 
 ## Dependency Explorer
 

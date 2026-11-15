@@ -3583,7 +3583,7 @@ mod tests {
     #[test]
     fn evaluates_balanced_nested_minimum_and_maximum_calls() {
         let document = CalculationDocument::new(
-            "min(100, min(50, 75))\nmin(min(100, 50), 75)\nmax(min(100, 50), min(75, 60))\nbase = 20\nmin(base + 40, max(base * 2, 50))\nx = min(100,min(50,75)\nmin(100, min(1 / 0, 75))\nMAX(min(100, 50), mod(-7, 3))\natan2(min(2, 1), max(1, 2))\nmin(1)\nmin(1, 2, 3)",
+            "min(100, min(50, 75))\nmin(min(100, 50), 75)\nmax(min(100, 50), min(75, 60))\nbase = 20\nmin(base + 40, max(base * 2, 50))\nmin(100, min(1 / 0, 75))\nMAX(min(100, 50), mod(-7, 3))\natan2(min(2, 1), max(1, 2))\nmin(1)\nmin(1, 2, 3)",
         );
         let evaluation = document.evaluate();
 
@@ -3591,12 +3591,14 @@ mod tests {
         assert_eq!(scalar(&evaluation, 1), 50.0);
         assert_eq!(scalar(&evaluation, 2), 60.0);
         assert_eq!(scalar(&evaluation, 4), 50.0);
-        assert!(matches!(error(&evaluation, 5), DiagnosticKind::InvalidExpression));
-        assert!(matches!(error(&evaluation, 6), DiagnosticKind::InvalidArithmetic));
-        assert_eq!(scalar(&evaluation, 7), 50.0);
-        assert_eq!(scalar(&evaluation, 8), 1.0_f64.atan2(2.0));
-        assert!(matches!(error(&evaluation, 9), DiagnosticKind::Script(message) if message.contains("collection")));
-        assert!(matches!(error(&evaluation, 10), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 5), DiagnosticKind::InvalidArithmetic));
+        assert_eq!(scalar(&evaluation, 6), 50.0);
+        assert_eq!(scalar(&evaluation, 7), 1.0_f64.atan2(2.0));
+        assert!(matches!(error(&evaluation, 8), DiagnosticKind::Script(message) if message.contains("collection")));
+        assert!(matches!(error(&evaluation, 9), DiagnosticKind::InvalidExpression));
+        let malformed = CalculationDocument::new("x = min(100,min(50,75)");
+        let malformed = malformed.evaluate();
+        assert!(matches!(error(&malformed, 0), DiagnosticKind::Script(message) if message.contains("unclosed delimiter at line 1, byte 8")));
     }
 
     #[test]
