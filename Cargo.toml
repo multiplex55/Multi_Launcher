@@ -195,6 +195,7 @@ trash = { version = "5.2", default-features = false, features = ["coinit_apartme
 sysinfo = "0.35"
 chrono = "0.4"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
+iana-time-zone = "=0.1.63"
 screenshots = "0.8.10"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "ico", "gif", "tiff"] }
 gif = "=0.13.3"

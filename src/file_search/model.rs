@@ -56,6 +56,21 @@ pub struct SearchRequest {
     pub content_match_mode: ContentMatchMode,
     pub whole_word: bool,
     pub file_type_filter: FileTypeFilter,
+    pub metadata_preferences: super::predicate::MetadataPreferences,
+    pub metadata: super::predicate::ResolvedMetadata,
+}
+
+impl SearchRequest {
+    /// Compare authored criteria without comparing the captured submission clock.
+    pub fn same_criteria(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.metadata = Default::default();
+        right.metadata = Default::default();
+        left.metadata_preferences = left.metadata_preferences.semantic();
+        right.metadata_preferences = right.metadata_preferences.semantic();
+        left == right
+    }
 }
 
 /// User-adjustable options that can be applied to a search request.

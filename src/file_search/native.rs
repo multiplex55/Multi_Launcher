@@ -495,6 +495,7 @@ mod tests {
             content_match_mode: ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: FileTypeFilter::FilesOnly,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         }
     }
     fn run(request: SearchRequest) -> NativeSearchSummary {

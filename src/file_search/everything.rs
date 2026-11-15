@@ -593,6 +593,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         }
     }
 

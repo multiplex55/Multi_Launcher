@@ -29,13 +29,14 @@ macro_rules! register_filter_target {
 }
 
 impl FileSearchRequestError {
-    pub fn user_message(&self) -> &'static str {
+    pub fn user_message(&self) -> &str {
         match self {
             Self::EmptySearchText => "Enter search text before searching.",
             Self::EmptyGlobalRoots => {
                 "Configure at least one valid global search root in File Search settings."
             }
             Self::EmptyDirectoryRoots => "Choose at least one valid root directory first.",
+            Self::InvalidMetadata(message) => message,
         }
     }
 }
@@ -66,6 +67,12 @@ impl FileSearchDialogState {
     }
 
     pub fn build_search_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
+        let mut request = self.build_semantic_request()?;
+        request.metadata = request.metadata_preferences.capture(request.kind, request.max_file_size_bytes).map_err(FileSearchRequestError::InvalidMetadata)?;
+        Ok(request)
+    }
+
+    pub(super) fn build_semantic_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
         let text = self.search_text.trim();
         if text.is_empty() {
             return Err(FileSearchRequestError::EmptySearchText);
@@ -102,9 +109,12 @@ impl FileSearchDialogState {
             content_match_mode: self.ui_preferences.content_match_mode,
             whole_word: self.ui_preferences.whole_word,
             file_type_filter: match self.selected_mode {
+                _ if self.ui_preferences.metadata.size.mode != crate::file_search::predicate::SizeMode::Any => FileTypeFilter::FilesOnly,
                 FileSearchMode::Filename => self.ui_preferences.file_type_filter,
                 FileSearchMode::Content => FileTypeFilter::FilesOnly,
             },
+            metadata_preferences: self.ui_preferences.metadata.clone(),
+            metadata: Default::default(),
         })
     }
 
@@ -113,9 +123,9 @@ impl FileSearchDialogState {
             self.current_status,
             crate::file_search::model::SearchStatus::Completed
         ) && self
-            .last_submitted_request
+            .last_submitted_form
             .as_ref()
-            .is_some_and(|last| self.build_search_request().ok().as_ref() != Some(last))
+            .is_some_and(|last| self.build_semantic_request().ok().is_none_or(|current| !last.same_criteria(&current)))
     }
 
     pub fn filters_ui(&mut self, ui: &mut egui::Ui) {

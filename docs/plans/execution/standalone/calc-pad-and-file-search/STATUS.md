@@ -37,9 +37,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M10-A | Verified and pushed | `b5bd5b163e95b201faf506f8331cd163245f4862`. Bounded immutable sensitivity analysis and current-only publication. Focused batch passed 15/15. |
 | M10-B | Verified and pushed | `64cf01ae222c1fd2e03d0ae9952f2aa58c1eaa93`. Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
 | M11-A | Verified and pushed | `349088413ef4d38d45099273a4e521b72645fcbc`. Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5, and the PNG was inspected. |
-| M11-B | Verified | Dockable Charts companion, persisted definition and guarded image copy. Final batch passed 12/12. |
-| M12-A | In progress | Typed semantic/resolved date and size criteria. |
-| M12-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M11-B | Verified and pushed | `eb7c6fdb1f3a2251ac9b84f52d9d8e31dae68025`. Dockable Charts companion, persisted definition and guarded image copy. Final batch passed 12/12. |
+| M12-A | Verified | Typed date/size predicates, frozen request and semantic dirty state. Focused batches passed 35/35 and 6/6; domain target checked. |
+| M12-B | In progress | Pre-cap backend filtering, fallback policy and metadata diagnostics. |
+| M12-C through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -57,7 +58,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
 | C4 | Implemented | Focused XP, sample, worker, panel, exact exports, stale actions, persistence and rename history passed. Native integrated check pending. | Session-owned bounded worker and retained Config Menu actions |
 | C5 | Implemented | Focused chart model, raster, clipboard, ownership and persistence tests passed. Chart-only PNG inspected. Native integrated check pending. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
-| F3 | Pending | Pending | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and `domain` cases |
+| F3 | Typed criteria implemented; backend and filter UI in progress | Focused date, size, preferences and paging tests passed. Domain target compiled. Native integrated check pending. | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and domain cases |
 
 ## Verification evidence
 
@@ -196,3 +197,10 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Config Menu offers a parent-owned Charts companion with existing dock/pop-out and size/presentation persistence. It observes current Pad and sensitivity snapshots, reports stale or unavailable data, and resets transient view on document changes. Cached typed data and the shared chart scene serve both screen and copy. The same chart supports line/bar/scatter, source and visible series selection, axis labels and real units, bar labels, pan/zoom/reset and raw tooltips.
 - One bounded chart definition persists per named Pad. Observable image copy uses the retained owner, current source/definition stamps and the chart-only raster path. Chart selections follow source rename transactions and retain independent later output selections. Closing the Pad retires its Charts host.
 - Initial library compile exited 101 because the tracked Panel array count needed updating. The correction compile passed in 381.33 seconds. Scoped Nextest passed 12/12 with exit 0, 0.44 seconds reported by Nextest and 2.65 seconds owned elapsed. Verification covers chart source and owner guards, injected clipboard success/failure, type/quantity and raster models, definition round-trip, name history, and neighboring retained actions. Cleanup and output drain passed. Receipts: `m11b-build`, `m11b-correction-build`, and `m11b-correction-run`. Windows desktop interaction remains pending.
+
+### M12-A typed File Search filters
+
+- Added semantic date and size preferences with disabled defaults and a separate frozen request predicate. Calendar windows use local day boundaries from one captured zone, and rolling windows use an elapsed duration from one submission instant. The IANA zone lookup uses the already locked version as a direct dependency.
+- Decimal byte boundaries use checked integer arithmetic through `u64::MAX`. Equivalent authored units compare by their effective bytes, while stored text and preferences remain available for editing. Size filtering effectively searches files, and the independent content-reading cap yields explicit impossible or partial-intersection feedback.
+- Same-result content drill-down preserves the frozen metadata window while retaining the ordinary form criterion baseline. Dirty-state checks use semantic settings without a clock.
+- Initial library Nextest passed 35/35. The final narrower semantic/window selection passed 6/6 in 2.25 seconds owned elapsed after a 178.06-second separate compile. `cargo check -p multi_launcher --test domain --profile fast-dev --locked` passed in 148.76 seconds. All cached runs met 100 seconds, compiles met 900 seconds, and cleanup/output drain passed. Receipts: `m12a-*`, `m12a-final-*`, and `m12a-domain-check`.
