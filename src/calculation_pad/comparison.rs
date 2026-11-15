@@ -372,6 +372,16 @@ mod tests {
     }
 
     #[test]
+    fn comparison_uses_compound_loop_final_binding_and_rejects_statements() {
+        let (_temp, _session, context) = frozen("total = 0\nfor n in range(1, 4):\n    total += n\ntotal");
+        assert_eq!(compare(&context, "total", "r1").left.formatted(), "6");
+        assert_eq!(compare(&context, "total", "r1").right.formatted(), "0");
+        for operator in ["+=", "-=", "*=", "/=", "%=", "^="] {
+            assert!(compare(&context, &format!("total {operator} 1"), "total").left.value.is_err());
+        }
+    }
+
+    #[test]
     fn failed_loop_binding_is_distinct_from_an_unexecuted_physical_row() {
         let (_temp, _session, context) =
             frozen("for x in [0]:\n    failed = 1 / x\n    later = 7\nlater");

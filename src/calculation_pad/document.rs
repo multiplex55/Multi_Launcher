@@ -2361,6 +2361,9 @@ fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, 
                 line.dependencies.push(prior);
             } else if let Some(name) = compound_name {
                 set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
+                // The implicit target is evaluated first, so RHS edges cannot
+                // participate in a cycle until a prior binding exists.
+                continue;
             }
         }
         let named_binding = |name: &str| {
@@ -3180,6 +3183,15 @@ mod tests {
         assert!(matches!(evaluation.lines[11].outcome, LineOutcome::Error(_)));
         assert!(matches!(error(&evaluation, 12), DiagnosticKind::DependencyFailed { dependency_line: 11 }));
         assert!(matches!(error(&evaluation, 13), DiagnosticKind::InvalidAssignment));
+    }
+
+    #[test]
+    fn unbound_compound_does_not_create_a_cycle_through_its_rhs() {
+        let document = CalculationDocument::new("x += y\ny = x + 1");
+        let result = document.evaluate();
+        assert!(matches!(error(&result, 0), DiagnosticKind::UnknownName(name) if name == "x"));
+        assert!(matches!(error(&result, 1), DiagnosticKind::DependencyFailed { dependency_line: 0 }));
+        assert!(result.lines[0].dependency_indices.is_empty());
     }
 
     #[test]

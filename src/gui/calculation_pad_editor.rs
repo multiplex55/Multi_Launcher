@@ -772,6 +772,20 @@ mod tests {
     }
 
     #[test]
+    fn compound_operators_keep_source_spans_and_completion_names() {
+        let source = "{顧客 名} = 1\r\n{顧客 額} = 3\r\n{顧客 名} += 2\r\n{顧";
+        let result = suggestions(source, source.len());
+        let names = result.iter().filter(|item| item.insertion.starts_with("{顧客"))
+            .map(|item| item.insertion.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["{顧客 名}", "{顧客 額}"]);
+        let operators = syntax_spans(source).into_iter()
+            .filter(|span| span.kind == SyntaxKind::Operator)
+            .map(|span| &source[span.range])
+            .collect::<Vec<_>>();
+        assert_eq!(operators, ["=", "=", "+", "="]);
+    }
+
+    #[test]
     fn completion_replaces_suffix_and_preserves_existing_parentheses() {
         let source = "squareroot(9)";
         let result = suggestions(source, 2);

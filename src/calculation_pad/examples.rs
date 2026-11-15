@@ -17,6 +17,7 @@ pub(crate) struct CalculationExampleGroup {
 #[derive(Clone, Copy, Debug)]
 enum ExampleExpectation {
     Scalar(f64),
+    ScalarWithSkipped(f64),
     Vector(&'static [f64]),
     Physical {
         value: f64,
@@ -46,7 +47,9 @@ impl CalculationExample {
     pub(crate) fn result_text(&self) -> String {
         use crate::common::number_format::format_number;
         match self.expected {
-            ExampleExpectation::Scalar(value) => format_number(value).unwrap_or_default(),
+            ExampleExpectation::Scalar(value) | ExampleExpectation::ScalarWithSkipped(value) => {
+                format_number(value).unwrap_or_default()
+            }
             ExampleExpectation::Vector(values) => format!(
                 "[{}]",
                 values
@@ -394,8 +397,162 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         ],
     },
     CalculationExampleGroup {
+        title: "Loops and Iteration",
+        examples: &[
+            CalculationExample {
+                title: "Count from zero with range",
+                source: "total = 0\nfor i in range(5):\n    total += i\ntotal",
+                explanation: "range(5) visits 0 through 4. Calculation Pad supports for loops. while loops are unsupported.",
+                expected: ExampleExpectation::Scalar(10.0),
+            },
+            CalculationExample {
+                title: "Sum a start and stop range",
+                source: "total = 0\nfor i in range(1, 6):\n    total += i\ntotal",
+                explanation: "The running total adds 1 through 5. The stop value 6 is excluded.",
+                expected: ExampleExpectation::Scalar(15.0),
+            },
+            CalculationExample {
+                title: "Iterate with a positive step",
+                source: "total = 0\nfor i in range(0, 10, 2):\n    total += i\ntotal",
+                explanation: "A step of 2 visits 0, 2, 4, 6, and 8.",
+                expected: ExampleExpectation::Scalar(20.0),
+            },
+            CalculationExample {
+                title: "Reverse iteration with a negative step",
+                source: "digits = 0\nfor i in range(5, 0, -1):\n    digits = digits * 10 + i\ndigits",
+                explanation: "The negative step counts down from 5 to 1, excluding 0.",
+                expected: ExampleExpectation::Scalar(54321.0),
+            },
+            CalculationExample {
+                title: "Iterate over a vector literal",
+                source: "total = 0\nfor price in [4, 7, 9]:\n    total += price\ntotal",
+                explanation: "Each vector component is visited in order.",
+                expected: ExampleExpectation::Scalar(20.0),
+            },
+            CalculationExample {
+                title: "Iterate over a named vector",
+                source: "measurements = [2, 4, 6]\ntotal = 0\nfor value in measurements:\n    total += value\ntotal",
+                explanation: "A vector stored in a name can be used as the iteration source.",
+                expected: ExampleExpectation::Scalar(12.0),
+            },
+            CalculationExample {
+                title: "Nested loops",
+                source: "total = 0\nfor x in [1, 2]:\n    for y in [3, 4]:\n        total += x * y\ntotal",
+                explanation: "The inner loop runs once for each outer value, adding four products.",
+                expected: ExampleExpectation::Scalar(21.0),
+            },
+            CalculationExample {
+                title: "Multiple statements in a loop",
+                source: "total = 0\nfor price in [3, 5]:\n    doubled = price * 2\n    total += doubled\ntotal",
+                explanation: "Both equally indented statements run for each price.",
+                expected: ExampleExpectation::Scalar(16.0),
+            },
+            CalculationExample {
+                title: "Calculate a factorial",
+                source: "number = 5\nfactorial = 1\nfor i in range(1, number + 1):\n    factorial *= i\nfactorial",
+                explanation: "Multiply by each integer from 1 through number to calculate 5 factorial.",
+                expected: ExampleExpectation::Scalar(120.0),
+            },
+            CalculationExample {
+                title: "Loop with zero iterations",
+                source: "total = 3\nfor i in range(0):\n    total += 1\ntotal",
+                explanation: "An empty range skips the body, leaving the previous total unchanged. The skipped row shows not executed.",
+                expected: ExampleExpectation::ScalarWithSkipped(3.0),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Variables and compound assignments",
+        examples: &[
+            CalculationExample {
+                title: "Reassignment and earlier values",
+                source: "x = 10\nearlier = x * 2\nx = 7\nearlier + x",
+                explanation: "A new assignment becomes the latest binding. earlier keeps its calculated value of 20.",
+                expected: ExampleExpectation::Scalar(27.0),
+            },
+            CalculationExample {
+                title: "Compound assignment updates",
+                source: "x = 10\nx += 5\nx *= 2\nx",
+                explanation: "A compound assignment combines the latest x with the right side and stores the result.",
+                expected: ExampleExpectation::Scalar(30.0),
+            },
+            CalculationExample {
+                title: "Subtract, divide, remainder, and power assignments",
+                source: "x = 20\nx -= 2\nx /= 3\nx %= 4\nx ^= 3\nx",
+                explanation: "These compound operators subtract, divide, take signed remainder, and raise to a power in order.",
+                expected: ExampleExpectation::Scalar(8.0),
+            },
+            CalculationExample {
+                title: "Compound vector addition",
+                source: "v = [1, 2]\nv += [3, 4]\nv",
+                explanation: "Vector compound addition adds corresponding elements.",
+                expected: ExampleExpectation::Vector(&[4.0, 6.0]),
+            },
+            CalculationExample {
+                title: "Compound exact integer addition",
+                source: "n = u128(9007199254740993)\nn += 9007199254740993\nn",
+                explanation: "Exact integer compound arithmetic retains the integer mode and precision.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u128",
+                    value: "18014398509481986",
+                },
+            },
+            CalculationExample {
+                title: "Compound dimensional addition",
+                source: "distance = 1 m\ndistance += 2 m\ndistance",
+                explanation: "Compatible physical dimensions can be added with a compound assignment.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "3 m",
+                    approximate: false,
+                },
+            },
+        ],
+    },
+    CalculationExampleGroup {
         title: "Conditions and collections",
         examples: &[
+            CalculationExample {
+                title: "Comparison operators",
+                source: "if(3 > 2 && 2 < 3 && 3 >= 3 && 2 <= 2 && 3 == 3 && 2 != 3, 1, 0)",
+                explanation: "All six comparisons are true, so the conditional expression returns 1.",
+                expected: ExampleExpectation::Scalar(1.0),
+            },
+            CalculationExample {
+                title: "Logical OR and NOT",
+                source: "if(!(2 > 3) || 1 == 2, 10, 0)",
+                explanation: "! reverses a Boolean result. || is true when either side is true.",
+                expected: ExampleExpectation::Scalar(10.0),
+            },
+            CalculationExample {
+                title: "Conditional expression in a calculation",
+                source: "price = 100\ndiscount = if(price >= 100, 10, 0)\nprice - discount",
+                explanation: "if(condition, true value, false value) selects a value inside an expression. Multiline if statements are unsupported.",
+                expected: ExampleExpectation::Scalar(90.0),
+            },
+            CalculationExample {
+                title: "Short-circuit logical OR",
+                source: "if(1 == 1 || 1 / 0 > 0, 42, 0)",
+                explanation: "The first condition is true, so OR skips the division on its right.",
+                expected: ExampleExpectation::Scalar(42.0),
+            },
+            CalculationExample {
+                title: "Average and median of measurements",
+                source: "values = [2, 4, 9]\naverage(values) + median(values)",
+                explanation: "average is 5 and median is 4. The final sum is 9.",
+                expected: ExampleExpectation::Scalar(9.0),
+            },
+            CalculationExample {
+                title: "Minimum and maximum from a range",
+                source: "min(range(1, 6)) + max(range(1, 6))",
+                explanation: "min and max find the smallest and largest sequence values, 1 and 5.",
+                expected: ExampleExpectation::Scalar(6.0),
+            },
+            CalculationExample {
+                title: "Population standard deviation of a range",
+                source: "stdev(range(1, 4)) * stdev(range(1, 4))",
+                explanation: "stdev uses population standard deviation. Its square is the population variance, 2/3.",
+                expected: ExampleExpectation::Scalar(2.0 / 3.0),
+            },
             CalculationExample {
                 title: "Choose a value",
                 source: "if(2 > 1, 7, 1 / 0)",
@@ -422,6 +579,55 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
         ],
     },
+    CalculationExampleGroup {
+        title: "Script errors and boundaries",
+        examples: &[
+            CalculationExample {
+                title: "Missing loop body",
+                source: "for i in range(3):",
+                explanation: "A for header must be followed by a more-indented body.",
+                expected: ExampleExpectation::ErrorContains("for block requires an indented body"),
+            },
+            CalculationExample {
+                title: "Inconsistent loop indentation",
+                source: "for i in range(2):\n    x = i\n      x = i + 1",
+                explanation: "Statements at the same loop level need the same indentation using spaces.",
+                expected: ExampleExpectation::ErrorContains("unexpected indentation"),
+            },
+            CalculationExample {
+                title: "Range step cannot be zero",
+                source: "range(1, 5, 0)",
+                explanation: "A zero step cannot advance toward the stop.",
+                expected: ExampleExpectation::ErrorContains("range step cannot be zero"),
+            },
+            CalculationExample {
+                title: "Range size limit",
+                source: "range(1025)",
+                explanation: "A range can contain at most 1,024 values.",
+                expected: ExampleExpectation::ErrorContains("range exceeds the 1024-element limit"),
+            },
+            CalculationExample {
+                title: "Division by zero in a loop",
+                source: "for divisor in [2, 0]:\n    value = 10 / divisor",
+                explanation: "The second iteration divides by zero and reports its failing iteration.",
+                expected: ExampleExpectation::ErrorContains(
+                    "iteration 2: division or remainder by zero",
+                ),
+            },
+            CalculationExample {
+                title: "Compound assignment requires a binding",
+                source: "missing += 1",
+                explanation: "Compound assignment needs an earlier binding for its target.",
+                expected: ExampleExpectation::ErrorContains("unknown name: missing"),
+            },
+            CalculationExample {
+                title: "Compound exact integer overflow",
+                source: "n = u8(255)\nn += 1",
+                explanation: "Checked u8 addition reports overflow when the result exceeds 255.",
+                expected: ExampleExpectation::ErrorContains("integer arithmetic overflowed"),
+            },
+        ],
+    },
 ];
 
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
@@ -429,7 +635,9 @@ pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
 #[cfg(test)]
 mod tests {
     use super::{EXAMPLE_GROUPS, ExampleExpectation};
-    use crate::calculation_pad::{CalculationDocument, CalculationValue, LineOutcome};
+    use crate::calculation_pad::{
+        CalculationDocument, CalculationValue, DiagnosticKind, LineOutcome,
+    };
 
     #[test]
     fn shared_examples_evaluate_to_their_documented_results() {
@@ -439,11 +647,28 @@ mod tests {
                 let document = CalculationDocument::new(example.source);
                 let evaluation = document.evaluate();
                 if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
+                    if matches!(example.expected, ExampleExpectation::ScalarWithSkipped(_)) {
+                        assert!(
+                            evaluation.lines.iter().any(|line| matches!(
+                                &line.outcome,
+                                LineOutcome::Error(diagnostic)
+                                    if matches!(diagnostic.kind, DiagnosticKind::NotExecuted)
+                            )),
+                            "{} must contain a skipped row",
+                            example.title
+                        );
+                    }
                     assert!(
-                        evaluation
-                            .lines
-                            .iter()
-                            .all(|line| !matches!(line.outcome, LineOutcome::Error(_))),
+                        evaluation.lines.iter().all(|line| match &line.outcome {
+                            LineOutcome::Error(diagnostic) => matches!(
+                                (example.expected, &diagnostic.kind),
+                                (
+                                    ExampleExpectation::ScalarWithSkipped(_),
+                                    DiagnosticKind::NotExecuted
+                                )
+                            ),
+                            _ => true,
+                        }),
                         "{} has an invalid source line",
                         example.title
                     );
@@ -458,7 +683,8 @@ mod tests {
 
                 match (example.expected, outcome) {
                     (
-                        ExampleExpectation::Scalar(expected),
+                        ExampleExpectation::Scalar(expected)
+                        | ExampleExpectation::ScalarWithSkipped(expected),
                         LineOutcome::Value(CalculationValue::Scalar(actual)),
                     ) => {
                         let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
@@ -546,13 +772,48 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 44);
+        assert_eq!(checked, 74);
     }
 
     #[test]
     fn catalogue_search_finds_function_keywords_and_vector_examples() {
+        for title in [
+            "Loops and Iteration",
+            "Variables and compound assignments",
+            "Conditions and collections",
+            "Script errors and boundaries",
+        ] {
+            let group = EXAMPLE_GROUPS
+                .iter()
+                .find(|group| group.title == title)
+                .expect("expected catalogue group");
+            let query = title.to_uppercase();
+            assert!(
+                group
+                    .examples
+                    .iter()
+                    .all(|example| example.matches(group.title, &query))
+            );
+        }
         for keyword in [
-            "ceil", "floor", "sqrt", "binary", "dot", "cross", "atanh", "rotl", "mask", "u128",
+            "ceil",
+            "floor",
+            "sqrt",
+            "binary",
+            "dot",
+            "cross",
+            "atanh",
+            "rotl",
+            "mask",
+            "u128",
+            "for",
+            "range",
+            "nested",
+            "factorial",
+            "compound",
+            "+=",
+            "median",
+            "iteration",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group

@@ -8,30 +8,20 @@ recomputes after an edit, undo, or redo changes that revision. Ordinary small
 calculations use the cached synchronous path; repeated script work runs in a
 bounded background evaluation, with pending results identified in the UI.
 
-The Pad's **Examples & reference** window has a pinned search and executable
+The Pad's **Config Menu → Tools → Examples & reference** window has a pinned search and executable
 examples with expected results. Use **Pop Out** to keep it in a separate native
 window, or **Dock** to return it to the launcher; its search and scroll position
 are retained when moving between presentations. Search matches group names,
 titles, source, and keywords without regard to case; matching examples are
-shown even if their group was collapsed. Copy an example's source to try it
-in the Pad. Clearing search restores the ordinary groups.
+shown even if their group was collapsed. Select **Copy example**, then paste the
+source into the Pad to run it. The arrow beneath each example shows its expected
+result or diagnostic. Clearing search restores the ordinary groups.
 
 ## Lines and names
 
 * An empty or whitespace-only line is blank.
 * A line whose first non-whitespace characters are `#` or `//` is a comment.
 * A result line may be an expression or an assignment: `total = 2 + 3`.
-* Conditions use `if(condition, when_true, when_false)` and the Boolean operators
-  `&&`, `||`, and `!`. Comparisons use `<`, `<=`, `>`, `>=`, `==`,
-  and `!=`. Conditions require Boolean values. Conditional branches and
-  Boolean operators evaluate only the values they need. Programmer operators
-  such as `and`, `or`, `not`, `&`, and `|` keep their integer meanings.
-* `range(stop)`, `range(start, stop)`, and `range(start, stop, step)`
-  produce half-open sequences of at most 1,024 finite integral scalar values.
-  A zero step or an unrepresentable generated integer is an error. `sum`,
-  `average`, `median`, `min`, `max`, and `stdev` accept a scalar vector
-  or sequence. `stdev` uses population standard deviation. Empty `sum`
-  returns zero and the other statistics reject an empty sequence.
 * Bare names use ASCII letters, Greek letters, digits after the first
   character, and underscores. Names are case-sensitive.
 * Braced names such as `{顧客名}` may contain other Unicode characters and
@@ -40,12 +30,22 @@ in the Pad. Clearing search restores the ordinary groups.
 * Existing scalar function and constant names such as `sin` and `PI`, and
   `rN` row-reference names, are reserved for assignments. Braces allow names
   such as `{sin}`. New words such as `if`, `range`, `sum`, and `for` are
-  contextual; for example, `range(` starts a call, while bare `range` may be
+  contextual. For example, `range(` starts a call, while bare `range` may be
   a binding. Likewise, `mod(` starts the modulo function while bare `mod`
   remains an assignable name.
 * Assigning a name again creates a new binding. The right-hand side reads the
   latest preceding binding, and later lines use the new one. A failed
   assignment becomes the latest binding and causes dependent lines to fail.
+  Earlier calculated lines retain their values after reassignment. For example,
+  `x = 10`, followed by `earlier = x * 2` and `x = 7`, leaves `earlier` as 20
+  while later references to `x` use 7.
+* Compound assignments `+=`, `-=`, `*=`, `/=`, `%=`, and `^=`
+  update an already bound name using its latest preceding value. The entire
+  right-hand expression is the second operand, so `x *= 2 + 3` multiplies
+  `x` by five. They use the same type, unit, precision and error rules as
+  the corresponding arithmetic operators. `%=` uses signed remainder and
+  `^=` raises to a power. Typed integer division with `/=` is unsupported,
+  as with ordinary typed integer `/`.
 * Unknown names, forward references, and references to a failed result are
   errors on the affected line. A later valid line still evaluates independently.
 
@@ -54,20 +54,62 @@ and blank lines count. For example, `r2 * 4` uses the result from physical line
 2. A reference must point to an earlier line. Self, forward, missing, and
 cyclic references are diagnosed.
 
-Loops visit a vector or `range` sequence in order. Indent each body consistently
-with spaces. Assignments and the iterator retain their final values after a
-successful nonempty loop.
+## Loops and Iteration
+
+`for` loops visit each value of a vector or range in order. Use a colon after
+the header and indent its body with spaces. Statements in the same body must
+have the same indentation. Indent a nested loop's body further. Blank and
+comment lines do not supply the required body. Tabs in indentation and
+unexpected indentation produce diagnostics. `while` loops are unsupported.
+
+`range(stop)` starts at zero, `range(start, stop)` starts at `start`, and
+`range(start, stop, step)` advances by `step`. The stop is excluded, and a
+negative step counts down. For example, `range(5)` visits 0 through 4,
+`range(1, 6)` visits 1 through 5, `range(0, 10, 2)` visits even values through
+8, and `range(5, 0, -1)` visits 5 through 1. Range arguments must be finite
+integral scalar values. A zero step or an unrepresentable generated integer is
+an error. A range contains at most 1,024 values.
+
+A loop can use a vector literal or a named vector. Assignments and the iterator
+retain their final values after a successful nonempty loop.
 
 ```text
 total = 0
 for amount in [10, 20, 30]:
-    total = total + amount
+    total += amount
 total
 ```
+
+Nested loops repeat the inner body for each outer value:
+
+```text
+total = 0
+for x in [1, 2]:
+    for y in [3, 4]:
+        total += x * y
+total
+```
+
+The result is 21. A loop over an empty range executes no body statements.
+Previously bound values retain their values and skipped body rows show
+`not executed`.
 
 Loops allow up to eight nesting levels and 10,000 iterations per evaluation.
 The shared evaluation budget is 50,000 work units. If a loop fails, its
 assignments do not publish partial results and later references report an error.
+
+## Conditions and collections
+
+Comparisons `<`, `<=`, `>`, `>=`, `==`, and `!=` produce Boolean values for
+`if(condition, when_true, when_false)` and the logical operators `&&`, `||`,
+and `!`. Conditions require Boolean values. `if()` is an expression and can
+be used within a larger calculation. Only the selected branch is evaluated.
+Logical operators also evaluate only the operands they need. Programmer
+operators such as `and`, `or`, `not`, `&`, and `|` keep their integer meanings.
+Python-style multiline `if` statements are unsupported. Collection functions
+`sum`, `average`, `median`, `min`, `max`, and `stdev` accept vectors or ranges.
+For example, `median(range(1, 6))` is 3. `stdev` computes population standard
+deviation. Empty `sum` is zero and the other statistics reject an empty input.
 
 ## Scalar expressions
 
@@ -235,20 +277,20 @@ hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
 
 ## Source editor and Results
 
-**Line numbers** starts on and counts physical lines, including blanks and
-comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
+In **Config Menu → Source display**, **Line numbers** starts on and counts
+physical lines, including blanks and comments. **Word wrap** starts off. Use the horizontal scrollbar to reach the
 end of long lines, or enable wrapping to fit the Source pane. Drag the divider
 to resize Source and Results. The launcher remembers both display toggles and
 the separate divider positions for side-by-side and stacked layouts.
 
-Use **Editor options** to turn completions and parameter hints on or off, enable
+Use **Config Menu → Editor options** to turn completions and parameter hints on or off, enable
 optional delimiter auto-closing, and fold loop bodies or `# region` / `# endregion`
 comment sections. Completions are accepted with Tab or Enter; Escape dismisses
 the list. Folding changes only the editor view: source, physical row references,
 and saved text remain intact. Ctrl+F opens Find, Ctrl+H opens Replace, and
 Ctrl+G goes to a physical line. Replace All is one undoable source edit.
 
-The **View** menu independently shows **Editable inputs** and **Output watches**.
+**Config Menu → View** independently shows **Editable inputs** and **Output watches**.
 Both start hidden. Choose a top-level literal assignment as an input, edit its
 value and select **Apply**; invalid or unfinished values stay in the field until
 corrected or reset. Assignments with the same name are listed by source line.
@@ -258,15 +300,17 @@ script evaluation, the panels show pending or failed status instead of an old
 value. Save a named Pad to retain its input and watch selections; Save As copies
 them. The optional remembered-source recovery remains source-only.
 
-**Number format** starts at Auto. Fixed decimal and scientific modes offer 0–15
+**Config Menu → Number format** starts at Auto. Fixed decimal and scientific modes offer 0–15
 decimal places; digit grouping and percent presentation are also available where
 applicable. These controls change presentation rather than source or evaluated
-values. Ordinary **Copy** and **Copy all** retain canonical results; use the
-explicit **Copy formatted** action for displayed grouping, percent, or precision.
+values. **Config Menu → Copy all** retains canonical results.
 
 Results show values and diagnostics. Blank and comment lines still count toward
-`rN`, so visible result labels can have gaps. Right-click a value or error row
-and choose **Go to source** to focus the editor and briefly highlight its line.
+`rN`, so visible result labels can have gaps. Right-click a result row for
+**Go to source**, **Select for comparison**, **Copy**, and **Copy formatted**.
+Copy uses the canonical result and Copy formatted uses the displayed grouping,
+percent, or precision. Error rows offer Go to source. Exact integer rows also
+offer **Inspect bits…**.
 
 ## Remembered source
 
@@ -300,7 +344,7 @@ evaluation.
 
 ## Dependency Explorer
 
-Choose **Dependencies…** to browse the current cached evaluation. Select a
+Choose **Config Menu → Tools → Dependencies…** to browse the current cached evaluation. Select a
 physical `rN` row or named assignment in the chooser to see its source and exact
 result or diagnostic. **Upstream inputs** and **Downstream dependents** show
 **Direct** relationships and expandable **Transitive** relationships. Select a
