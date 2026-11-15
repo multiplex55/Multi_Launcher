@@ -4639,15 +4639,11 @@ impl CalculationPadDialog {
         }
 
         if preferences.parameter_hints && focused
-            && let Some((signature, argument)) = caret.and_then(|caret| editor::call_hint(source, caret))
+            && let Some(hint) = caret.and_then(|caret| editor::call_hint(source, caret))
         {
-            let overload = if argument > 0 { signature.rsplit("  ·  ").next().unwrap_or(&signature) } else { signature.as_str() };
-            let parameter = overload.split_once('(').and_then(|(_, rest)| rest.split_once(')'))
-                .and_then(|(parameters, _)| parameters.split(',').nth(argument))
-                .map(|parameter| parameter.trim().trim_matches(['[', ']']).trim());
-            ui.small(match parameter {
-                Some(parameter) => format!("{signature}  ·  {parameter}"),
-                None => format!("{signature}  ·  argument {}", argument + 1),
+            ui.small(match hint.parameter {
+                Some(parameter) => format!("{}  ·  {parameter}", hint.signature),
+                None => format!("{}  ·  argument {}", hint.signature, hint.argument + 1),
             });
         }
         if completion.visible {

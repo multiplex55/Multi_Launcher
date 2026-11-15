@@ -237,12 +237,29 @@ pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) 
     false
 }
 
-/// Recognize only the full callable prefix so existing uses of `fn` remain valid.
-pub(super) fn declaration(source: &str) -> Option<Result<(String, Vec<String>, &str), DiagnosticKind>> {
-    let source = source.trim_start();
-    let rest = source.strip_prefix("fn")?;
+#[derive(Debug)]
+pub(super) struct DeclarationParameter {
+    pub(super) canonical: String,
+    pub(super) range: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+pub(super) struct DeclarationHeader {
+    pub(super) name: String,
+    pub(super) keyword_range: std::ops::Range<usize>,
+    pub(super) name_range: std::ops::Range<usize>,
+    pub(super) parameters: Vec<DeclarationParameter>,
+    pub(super) body_start: Option<usize>,
+}
+
+/// Parse the callable header even while its expression body is incomplete.
+pub(super) fn declaration_header(source: &str) -> Option<Result<DeclarationHeader, DiagnosticKind>> {
+    let leading = source.len() - source.trim_start().len();
+    let trimmed = &source[leading..];
+    let rest = trimmed.strip_prefix("fn")?;
     if !rest.starts_with(char::is_whitespace) { return None; }
     let rest = rest.trim_start();
+    let name_start = source.len() - rest.len();
     let end = rest.char_indices().find_map(|(index, ch)| (!is_identifier_continue(ch)).then_some(index)).unwrap_or(rest.len());
     let name = &rest[..end];
     if !is_bare_identifier(name) { return None; }
@@ -252,24 +269,39 @@ pub(super) fn declaration(source: &str) -> Option<Result<(String, Vec<String>, &
         let close = matching(after_name, 0)?;
         let parameters = split_arguments(&after_name[1..close])?;
         if parameters.len() > 16 { return Err(error("function exceeds the 16-parameter limit")); }
-        let mut result = Vec::with_capacity(parameters.len());
+        let mut result: Vec<DeclarationParameter> = Vec::with_capacity(parameters.len());
+        let args_start = source.len() - after_name.len() + 1;
+        let mut search_start = args_start;
         for parameter in parameters {
             let parsed = parse_assignment_name(parameter)?;
             if is_row_reference_name(&parsed.canonical)
                 || (!parsed.braced && is_reserved_name(&parsed.canonical))
-                || result.contains(&parsed.canonical)
+                || result.iter().any(|item| item.canonical == parsed.canonical)
             { return Err(error("function parameters must be unique valid names")); }
-            result.push(parsed.canonical);
+            let start = search_start + source[search_start..].find(parameter).ok_or(DiagnosticKind::InvalidExpression)?;
+            let end = start + parameter.len();
+            search_start = end;
+            result.push(DeclarationParameter { canonical: parsed.canonical, range: start..end });
         }
-        let body = after_name[close + 1..].trim_start().strip_prefix('=')
-            .ok_or_else(|| error("function declaration requires an expression body"))?.trim();
+        let after_close = after_name[close + 1..].trim_start();
+        let body_start = after_close.strip_prefix('=').map(|body| source.len() - body.len());
+        Ok(DeclarationHeader { name: name.to_owned(), keyword_range: leading..leading + 2,
+            name_range: name_start..name_start + end, parameters: result, body_start })
+    })())
+}
+
+/// Recognize only the full callable prefix so existing uses of `fn` remain valid.
+pub(super) fn declaration(source: &str) -> Option<Result<(DeclarationHeader, &str), DiagnosticKind>> {
+    declaration_header(source).map(|header| header.and_then(|header| {
+        let body_start = header.body_start.ok_or_else(|| error("function declaration requires an expression body"))?;
+        let body = source[body_start..].trim();
         if body.is_empty() { return Err(error("function declaration requires an expression body")); }
         if find_assignment_delimiter(body).is_some() {
             return Err(error("function body must be an expression without assignments"));
         }
         if body.len() > MAX_EXPRESSION_BYTES { return Err(DiagnosticKind::ExpressionTooLong { max_bytes: MAX_EXPRESSION_BYTES }); }
-        Ok((name.to_owned(), result, body))
-    })())
+        Ok((header, body))
+    }))
 }
 
 pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctions, Vec<Option<Result<(), DiagnosticKind>>>, usize) {
@@ -279,7 +311,9 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
     for (line, row) in analysis.rows.iter().enumerate() {
         if row.owner.is_some() { continue; }
         let Some(declaration) = declaration(&row.text) else { continue; };
-        let result = declaration.and_then(|(name, parameters, body)| {
+        let result = declaration.and_then(|(header, body)| {
+            let name = header.name;
+            let parameters = header.parameters.into_iter().map(|parameter| parameter.canonical).collect::<Vec<_>>();
             if let Some(diagnostic) = &row.diagnostic { return Err(diagnostic.clone()); }
             if row.text.len() != row.text.trim_start().len() {
                 return Err(error("function declarations must be top-level"));

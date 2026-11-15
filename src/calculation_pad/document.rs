@@ -31,9 +31,85 @@ pub(crate) fn editor_loop_header(source: &str) -> bool {
 }
 pub(crate) use script::{FUNCTIONS, function_signature_help};
 
+#[derive(Clone, Debug)]
+pub(crate) struct EditorFunction {
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub line: usize,
+    pub keyword_range: Range<usize>,
+    pub name_range: Range<usize>,
+    pub parameter_ranges: Vec<Range<usize>>,
+    pub body_ranges: Vec<Range<usize>>,
+    pub valid: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct EditorFunctionScope {
+    pub declarations: Vec<EditorFunction>,
+    pub owner_line: usize,
+    pub local_parameters: Option<Vec<String>>,
+    pub in_declaration_header: bool,
+}
+
+fn mapped_ranges(row: &syntax::SourceRow, range: Range<usize>) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for offset in row.offsets.get(range).unwrap_or_default().iter().flatten().copied() {
+        if let Some(last) = ranges.last_mut() && last.end == offset { last.end += 1; }
+        else { ranges.push(offset..offset + 1); }
+    }
+    ranges
+}
+
+/// Describe declarations and the current lexical scope without evaluating the Pad.
+pub(crate) fn editor_function_scope(source: &str, caret: usize) -> EditorFunctionScope {
+    let Some(prefix) = source.get(..caret) else { return EditorFunctionScope::default(); };
+    let analysis = syntax::SourceAnalysis::new(source);
+    let caret_line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let Some(current) = analysis.rows.get(caret_line) else { return EditorFunctionScope::default(); };
+    let owner_line = current.owner.unwrap_or(caret_line);
+    let mut scope = EditorFunctionScope { owner_line, ..Default::default() };
+    if !analysis.rows.iter().any(|row| row.owner.is_none() && row.text.trim_start().strip_prefix("fn").is_some_and(|rest| rest.starts_with(char::is_whitespace))) {
+        return scope;
+    }
+    let (valid_functions, _, _) = script::build_functions(&analysis);
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() { continue; }
+        let Some(header) = script::declaration_header(&row.text) else { continue; };
+        let Ok(header) = header else {
+            let logical_caret = row.offsets.iter().position(|offset| offset.is_some_and(|offset| offset >= caret)).unwrap_or(row.text.len());
+            if line == owner_line {
+                if find_assignment_delimiter(&row.text).is_some_and(|delimiter| logical_caret >= delimiter.right_start) {
+                    scope.local_parameters = Some(Vec::new());
+                } else {
+                    scope.in_declaration_header = true;
+                }
+            }
+            continue;
+        };
+        let authored = header.parameters.iter().map(|parameter| row.text[parameter.range.clone()].to_owned()).collect::<Vec<_>>();
+        if line == owner_line {
+            let logical_caret = row.offsets.iter().position(|offset| offset.is_some_and(|offset| offset >= caret)).unwrap_or(row.text.len());
+            if header.body_start.is_some_and(|body_start| logical_caret >= body_start) {
+                scope.local_parameters = Some(authored.clone());
+            } else {
+                scope.in_declaration_header = true;
+            }
+        }
+        let Some(keyword_range) = mapped_ranges(row, header.keyword_range).into_iter().next() else { continue; };
+        let Some(name_range) = mapped_ranges(row, header.name_range).into_iter().next() else { continue; };
+        let parameter_ranges = header.parameters.iter().flat_map(|parameter| mapped_ranges(row, parameter.range.clone())).collect();
+        let body_ranges = header.body_start.map_or_else(Vec::new, |start| mapped_ranges(row, start..row.text.len()));
+        let valid = valid_functions.iter().any(|function| function.line == line && function.name == header.name);
+        scope.declarations.push(EditorFunction { name: header.name, parameters: authored, line,
+            keyword_range, name_range, parameter_ranges, body_ranges, valid });
+    }
+    scope
+}
+
 /// Names visible before the caret, without evaluating the document.
-pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
+pub(crate) fn editor_bindings(source: &str, caret: usize, function_scope: &EditorFunctionScope) -> Vec<String> {
     let Some(prefix) = source.get(..caret) else { return Vec::new(); };
+    if let Some(parameters) = &function_scope.local_parameters { return parameters.clone(); }
     let mut bindings: Vec<(String, Vec<usize>)> = Vec::new();
     let mut scopes: Vec<(usize, usize)> = Vec::new();
     let analysis = syntax::SourceAnalysis::new(source);
@@ -3598,7 +3674,8 @@ mod tests {
         assert!(matches!(error(&evaluation, 14), DiagnosticKind::ReservedName(_)));
         assert!(!super::literal_inputs("x = 1\nx += 2").iter().any(|input| input.line == 1));
         let source = "x = 1\nx += 2\n";
-        assert!(super::editor_bindings(source, source.len()).contains(&"x".to_owned()));
+        let scope = super::editor_function_scope(source, source.len());
+        assert!(super::editor_bindings(source, source.len(), &scope).contains(&"x".to_owned()));
     }
 
     #[test]

@@ -280,9 +280,10 @@ pub(super) struct SyntaxSpan {
 pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
     let mut spans = Vec::new();
     let analysis = crate::calculation_pad::SourceAnalysis::new(source);
+    let functions = crate::calculation_pad::editor_function_scope(source, source.len());
     let mut protected_spans = analysis.protected.iter().peekable();
     let mut offset = 0;
-    for line in source.split_inclusive('\n') {
+    for (line_index, line) in source.split_inclusive('\n').enumerate() {
         let mut pos = 0;
         while pos < line.len() {
             let start = pos;
@@ -322,16 +323,25 @@ pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
                     pos += next.len_utf8();
                 }
                 let token = &line[start..pos];
-                if matches!(token, "for" | "in") {
+                let token_range = offset + start..offset + pos;
+                let physical_owner = analysis.rows.get(line_index).map_or(line_index, |row| row.owner.unwrap_or(line_index));
+                let owner_line = functions.declarations.iter()
+                    .find(|function| function.body_ranges.iter().any(|range| range.contains(&token_range.start)))
+                    .map_or(physical_owner, |function| function.line);
+                if matches!(token, "for" | "in") || functions.declarations.iter().any(|function| function.keyword_range == token_range) {
                     SyntaxKind::Keyword
+                } else if functions.declarations.iter().any(|function| function.parameter_ranges.contains(&token_range)) {
+                    SyntaxKind::Name
                 } else if matches!(token, "true" | "false" | "PI" | "E") {
                     SyntaxKind::Constant
                 } else if matches!(token, "and" | "or" | "xor" | "shl" | "shr" | "mod")
                     && !line[pos..].trim_start().starts_with('(')
                 {
                     SyntaxKind::Operator
-                } else if line[pos..].trim_start().starts_with('(')
-                    && crate::calculation_pad::function_signature_help(token).is_some()
+                } else if functions.declarations.iter().any(|function| function.name_range == token_range)
+                    || line[pos..].trim_start().starts_with('(')
+                        && (crate::calculation_pad::function_signature_help(token).is_some()
+                            || functions.declarations.iter().any(|function| function.valid && function.line < owner_line && function.name == token))
                 {
                     SyntaxKind::Call
                 } else {
@@ -410,7 +420,8 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
     };
     let replacement = line_start + start..end;
     let mut output = Vec::new();
-    for name in crate::calculation_pad::editor_bindings(source, caret) {
+    let scope = crate::calculation_pad::editor_function_scope(source, caret);
+    for name in crate::calculation_pad::editor_bindings(source, caret, &scope) {
         if name.starts_with(fragment) && name != fragment {
             let cursor = replacement.start + name.len();
             output.push(Suggestion {
@@ -422,6 +433,14 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
         }
     }
     if braced.is_none() {
+        for function in scope.declarations.iter().filter(|function| function.valid && function.line < scope.owner_line) {
+            if function.name.starts_with(fragment) && function.name != fragment {
+                let has_call = source[end..].trim_start().starts_with('(');
+                let insertion = if has_call { function.name.clone() } else { format!("{}()", function.name) };
+                let cursor = replacement.start + function.name.len() + usize::from(!has_call);
+                output.push(Suggestion { label: format!("{}()", function.name), insertion, replacement: replacement.clone(), cursor });
+            }
+        }
         for function in crate::calculation_pad::FUNCTIONS {
             let name = function.name;
             if name.starts_with(fragment) && name != fragment {
@@ -451,7 +470,14 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
     output
 }
 
-pub(super) fn call_hint(source: &str, caret: usize) -> Option<(String, usize)> {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CallHint {
+    pub signature: String,
+    pub argument: usize,
+    pub parameter: Option<String>,
+}
+
+pub(super) fn call_hint(source: &str, caret: usize) -> Option<CallHint> {
     let prefix = source.get(..caret)?;
     let analysis = crate::calculation_pad::SourceAnalysis::new(prefix);
     if analysis.protected.iter().any(|span| span.kind == crate::calculation_pad::ProtectedKind::Comment && span.range.end == caret) {
@@ -460,7 +486,9 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<(String, usize)> {
     let last = analysis.rows.len().checked_sub(1)?;
     let row = &analysis.rows[analysis.rows[last].owner.unwrap_or(last)];
     let line = row.text.as_str();
-    let mut stack: Vec<(Option<String>, usize)> = Vec::new();
+    let scope = crate::calculation_pad::editor_function_scope(source, caret);
+    if scope.in_declaration_header { return None; }
+    let mut stack: Vec<(Option<(String, Option<Vec<String>>)>, usize)> = Vec::new();
     let mut protected_spans = analysis.protected.iter().peekable();
     for (index, ch) in line.char_indices() {
         let protected = row.offsets.get(index).and_then(|offset| *offset).is_some_and(|offset| {
@@ -483,10 +511,10 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<(String, usize)> {
                     })
                     .unwrap_or(0);
                 let name = &before[start..];
-                stack.push((
-                    crate::calculation_pad::function_signature_help(name).map(str::to_owned),
-                    0,
-                ));
+                let user = scope.declarations.iter().find(|function| function.valid && function.line < scope.owner_line && function.name == name);
+                let signature = user.map(|function| (format!("{}({})", function.name, function.parameters.join(", ")), Some(function.parameters.clone())))
+                    .or_else(|| crate::calculation_pad::function_signature_help(name).map(|signature| (signature.to_owned(), None)));
+                stack.push((signature, 0));
             }
             '[' => stack.push((None, 0)),
             ')' | ']' => {
@@ -503,7 +531,17 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<(String, usize)> {
     stack
         .into_iter()
         .rev()
-        .find_map(|(signature, index)| signature.map(|signature| (signature, index)))
+        .find_map(|(signature, argument)| signature.map(|(signature, parameters)| {
+            let parameter = if let Some(parameters) = parameters {
+                parameters.get(argument).cloned()
+            } else {
+                let overload = if argument > 0 { signature.rsplit("  ·  ").next().unwrap_or(&signature) } else { signature.as_str() };
+                overload.split_once('(').and_then(|(_, rest)| rest.split_once(')'))
+                    .and_then(|(parameters, _)| parameters.split(',').nth(argument))
+                    .map(|parameter| parameter.trim().trim_matches(['[', ']']).trim().to_owned())
+            };
+            CallHint { signature, argument, parameter }
+        }))
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -768,7 +806,7 @@ mod tests {
         let ignored = source.find("],").unwrap();
         assert_eq!(matching_delimiters(source, ignored), None);
         let caret = source.find("2)").unwrap() + 1;
-        assert_eq!(call_hint(source, caret).map(|(_, argument)| argument), Some(1));
+        assert_eq!(call_hint(source, caret).map(|hint| hint.argument), Some(1));
         assert!(suggestions(source, source.find("ignore").unwrap() + 3).is_empty());
         let regions = fold_regions(source);
         assert!(regions.iter().any(|region| region.header == 0));
@@ -866,7 +904,7 @@ mod tests {
         let source = "round(extract(u8(3), 1, ";
         assert_eq!(
             call_hint(source, source.len()),
-            Some(("extract(value, start, count)".into(), 2))
+            Some(CallHint { signature: "extract(value, start, count)".into(), argument: 2, parameter: Some("count".into()) })
         );
         let source = "round(3) #";
         assert!(syntax_spans(source).iter().any(|span| span.kind == SyntaxKind::Call && &source[span.range.clone()] == "round"));
@@ -878,6 +916,60 @@ mod tests {
             crate::calculation_pad::function_signature_help("extract"),
             Some("extract(value, start, count)")
         );
+    }
+
+    #[test]
+    fn user_function_completion_and_hints_follow_local_scope_and_authored_names() {
+        let prefix = concat!(
+            "outside = 7\r\n",
+            "fn earlier({gross, total}, {other)}) = {gross, total} + {other)}\r\n",
+            "fn later({local}) = (\r\n  {lo",
+        );
+        let local_suggestions = suggestions(prefix, prefix.len());
+        assert!(local_suggestions.iter().any(|item| item.insertion == "{local}"));
+        assert!(local_suggestions.iter().all(|item| item.insertion != "outside" && item.insertion != "{gross, total}"));
+        let source = concat!(
+            "fn earlier({gross, total}, {other)}) = {gross, total} + {other)}\r\n",
+            "value = earlier(1, ",
+        );
+        let hint = call_hint(source, source.len()).unwrap();
+        assert_eq!(hint.signature, "earlier({gross, total}, {other)})");
+        assert_eq!(hint.argument, 1);
+        assert_eq!(hint.parameter.as_deref(), Some("{other)}"));
+        let incomplete = "fn bad(value) = unknown\nvalue = ba";
+        assert!(suggestions(incomplete, incomplete.len()).iter().all(|item| item.label != "bad()"));
+        let prior = "fn earlier(value) = value\nfn later(local) = (\n  ear";
+        assert!(suggestions(prior, prior.len()).iter().any(|item| item.label == "earlier()"));
+        let own = "fn earlier(value) = value\nfn later(local) = (\n  lat";
+        assert!(suggestions(own, own.len()).iter().all(|item| item.label != "later()"));
+        let forward = "answer = lat\nfn later(value) = value";
+        assert!(suggestions(forward, "answer = lat".len()).iter().all(|item| item.label != "later()"));
+        let same_name = "fn price(value) = value\nprice = 2\npri";
+        let names = suggestions(same_name, same_name.len());
+        assert!(names.iter().any(|item| item.label == "price" && item.insertion == "price"));
+        assert!(names.iter().any(|item| item.label == "price()" && item.insertion == "price()"));
+        let header = "fn sqrt(value";
+        assert!(call_hint(header, header.len()).is_none());
+    }
+
+    #[test]
+    fn user_function_source_ranges_highlight_and_fold_original_crlf() {
+        let source = "fn scaled({rate, gross}, x) = (\r\n  {rate, gross} * x)\r\nscaled(2, 3)";
+        let scope = crate::calculation_pad::editor_function_scope(source, source.len());
+        let function = scope.declarations.iter().find(|function| function.name == "scaled").unwrap();
+        assert!(function.valid);
+        assert_eq!(&source[function.keyword_range.clone()], "fn");
+        assert_eq!(&source[function.name_range.clone()], "scaled");
+        assert_eq!(&source[function.parameter_ranges[0].clone()], "{rate, gross}");
+        assert!(function.body_ranges.iter().any(|range| source[range.clone()].contains("{rate, gross}")));
+        let spans = syntax_spans(source);
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Keyword && &source[span.range.clone()] == "fn"));
+        assert_eq!(spans.iter().filter(|span| span.kind == SyntaxKind::Call && &source[span.range.clone()] == "scaled").count(), 2);
+        let region = fold_regions(source).into_iter().find(|region| region.header == 0).unwrap();
+        let projection = Projection::new(source, &[region.hidden]);
+        let projected = projection.project_spans(&spans);
+        assert_eq!(projected.iter().map(|span| &projection.visible[span.range.clone()]).collect::<String>(), projection.visible);
+        assert_eq!(projection.visible, "fn scaled({rate, gross}, x) = (\r\nscaled(2, 3)");
     }
 
     #[test]

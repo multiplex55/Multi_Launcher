@@ -44,7 +44,7 @@ pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
 pub use vector::CalculationVector;
 pub use document::CalculationSequence;
-pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, function_signature_help, FUNCTIONS};
+pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindings, editor_loop_header, editor_function_scope, function_signature_help, FUNCTIONS};
 
 pub(crate) use persistence::{PadViewMetadata, PadInputReference};
 pub use persistence::{

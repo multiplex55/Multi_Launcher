@@ -680,6 +680,35 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         ],
     },
     CalculationExampleGroup {
+        title: "Formula functions",
+        examples: &[
+            CalculationExample {
+                title: "Calculate a discounted price",
+                source: "fn discounted_price(price, discount) = price * (1 - discount)\ndiscounted_price(100, 0.10)",
+                explanation: "Parameters are local to each call and the definition has no result row.",
+                expected: ExampleExpectation::Scalar(90.0),
+            },
+            CalculationExample {
+                title: "Use an earlier formula function",
+                source: "fn double(value) = value * 2\nfn add_one(value) = double(value) + 1\nadd_one(4)",
+                explanation: "A function may call another function declared earlier in the document.",
+                expected: ExampleExpectation::Scalar(9.0),
+            },
+            CalculationExample {
+                title: "Use a lazy condition in a function",
+                source: "fn safe_inverse(value) = if(value == 0, 0, 1 / value)\nsafe_inverse(0)",
+                explanation: "The unused branch is not evaluated.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "Pass document values explicitly",
+                source: "tax = 0.2\nfn total(price) = price * (1 + tax)",
+                explanation: "Function bodies cannot capture document variables. Pass them as parameters.",
+                expected: ExampleExpectation::ErrorContains("parameters and constants"),
+            },
+        ],
+    },
+    CalculationExampleGroup {
         title: "Everyday numeric helpers",
         examples: &[
             CalculationExample { title: "Round to an increment", source: "round_to(137, 25)", explanation: "Round to the nearest positive increment, with ties away from zero.", expected: ExampleExpectation::Scalar(125.0) },
@@ -844,7 +873,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 91);
+        assert_eq!(checked, 95);
     }
 
     #[test]
@@ -890,6 +919,7 @@ mod tests {
             "percent_change",
             "permutations",
             "map_range",
+            "discounted_price",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group

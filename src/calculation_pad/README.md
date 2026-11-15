@@ -111,6 +111,22 @@ Python-style multiline `if` statements are unsupported. Collection functions
 For example, `median(range(1, 6))` is 3. `stdev` computes population standard
 deviation. Empty `sum` is zero and the other statistics reject an empty input.
 
+## Formula functions
+
+Declare a document-local function before using it. The body is one expression
+and can span grouped physical lines. Parameters are local to the call.
+
+```text
+fn discounted_price(price, discount) = price * (1 - discount)
+discounted_price(100, 0.10)
+```
+
+The result is 90. A function may call previously declared functions and pure
+built-ins. Pass document values as arguments because function bodies cannot
+capture document variables. Function definitions have no numeric row result.
+Definitions and calls are bounded to 64 functions, 16 parameters per function,
+and a call depth of 16. Recursive and forward calls are rejected.
+
 ## Everyday numeric helpers
 
 `round_to(value, step)`, `floor_to(value, step)`, and `ceil_to(value, step)`
