@@ -20,6 +20,7 @@ pub(super) fn editor_iterator(source: &str) -> Option<String> {
 
 enum Statement {
     Line(usize),
+    Definition,
     Loop {
         line: usize,
         name: String,
@@ -43,6 +44,7 @@ fn affected_rows(statements: &[Statement], output: &mut Vec<usize>) {
     for statement in statements {
         match statement {
             Statement::Line(line) => output.push(*line),
+            Statement::Definition => {}
             Statement::Loop { line, body, .. } => {
                 output.push(*line);
                 affected_rows(body, output);
@@ -137,6 +139,7 @@ fn next_statement(lines: &[&str], mut index: usize) -> usize {
 fn block(
     lines: &[&str],
     headers: &[Option<Result<LoopHeader, DiagnosticKind>>],
+    function_rows: &[Option<Result<(), DiagnosticKind>>],
     errors: &mut [Option<DiagnosticKind>],
     index: &mut usize,
     indent: usize,
@@ -168,6 +171,14 @@ fn block(
             continue;
         }
         *index += 1;
+        if let Some(definition) = &function_rows[line] {
+            if definition.is_ok() {
+                statements.push(Statement::Definition);
+            } else {
+                statements.push(Statement::Line(line));
+            }
+            continue;
+        }
         match &headers[line] {
             Some(Ok(header)) => {
                 let next = next_statement(lines, *index);
@@ -178,7 +189,7 @@ fn block(
                     ));
                     statements.push(Statement::Line(line));
                 } else if let Some(body_indent) = body_indent.filter(|value| *value > indent) {
-                    let body = block(lines, headers, errors, index, body_indent, depth + 1);
+                    let body = block(lines, headers, function_rows, errors, index, body_indent, depth + 1);
                     statements.push(Statement::Loop {
                         line,
                         name: header.name.clone(),
@@ -272,6 +283,7 @@ impl Execution {
             });
         };
         let mut dependencies = Vec::new();
+        self.work.called_definitions.clear();
         self.work.runtime_line = Some(line);
         let result = expression.evaluate(
             line,
@@ -281,6 +293,7 @@ impl Execution {
             &mut self.work,
         );
         self.work.runtime_line = None;
+        dependencies.extend(self.work.called_definitions.drain(..));
         let result = result.map_err(|kind| {
             let kind = match kind {
                 DiagnosticKind::DependencyFailed { dependency_line }
@@ -359,6 +372,7 @@ impl Execution {
     fn execute(&mut self, statements: &[Statement], path: &mut Vec<usize>) -> Result<(), Fault> {
         for statement in statements {
             match statement {
+                Statement::Definition => {}
                 Statement::Line(line) => {
                     let result = self.expression(*line, path);
                     match result {
@@ -627,9 +641,12 @@ impl Execution {
 pub(super) fn evaluate<'a>(
     source: &'a str,
     analysis: &syntax::SourceAnalysis,
+    functions: &[Arc<script::UserFunction>],
+    function_rows: &[Option<Result<(), DiagnosticKind>>],
+    function_identifiers: usize,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> CalculationEvaluation<'a> {
-    evaluate_analyzed(source, analysis, cancellation, MAX_LOOP_ITERATIONS)
+    evaluate_analyzed(source, analysis, functions, function_rows, function_identifiers, cancellation, MAX_LOOP_ITERATIONS)
 }
 
 #[cfg(test)]
@@ -638,12 +655,17 @@ fn evaluate_limited(
     cancellation: Option<Arc<AtomicBool>>,
     iteration_limit: usize,
 ) -> CalculationEvaluation<'_> {
-    evaluate_analyzed(source, &syntax::SourceAnalysis::new(source), cancellation, iteration_limit)
+    let analysis = syntax::SourceAnalysis::new(source);
+    let (functions, function_rows, function_identifiers) = script::build_functions(&analysis);
+    evaluate_analyzed(source, &analysis, &functions, &function_rows, function_identifiers, cancellation, iteration_limit)
 }
 
 fn evaluate_analyzed<'a>(
     source: &'a str,
     analysis: &syntax::SourceAnalysis,
+    functions: &[Arc<script::UserFunction>],
+    function_rows: &[Option<Result<(), DiagnosticKind>>],
+    function_identifiers: usize,
     cancellation: Option<Arc<AtomicBool>>,
     iteration_limit: usize,
 ) -> CalculationEvaluation<'a> {
@@ -654,7 +676,7 @@ fn evaluate_analyzed<'a>(
         declared.insert(header.name.clone());
     }
     let mut errors = vec![None; lines.len()];
-    let mut count = 0;
+    let mut count = function_identifiers;
     let mut canceled = false;
     let mut prepared = Vec::with_capacity(lines.len());
     let mut expressions = Vec::with_capacity(lines.len());
@@ -668,6 +690,13 @@ fn evaluate_analyzed<'a>(
             prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
             expressions.push(None);
             compound_targets.push(None);
+            continue;
+        }
+        if function_rows[index].is_some() {
+            prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+            expressions.push(None);
+            compound_targets.push(None);
+            if let Some(Err(error)) = &function_rows[index] { errors[index] = Some(error.clone()); }
             continue;
         }
         if canceled
@@ -690,7 +719,8 @@ fn evaluate_analyzed<'a>(
             Some(Ok(header)) => header.expression.as_str(),
             _ => text,
         };
-        let mut item = prepare_line(range, expression, &mut count, &declared);
+        let visible = functions.partition_point(|function| function.line < index);
+        let mut item = prepare_line_with_functions(range, expression, &mut count, &declared, &functions[..visible]);
         if let Some(diagnostic) = &row.diagnostic {
             item.diagnostic = Some(Diagnostic::new(diagnostic.clone()));
         }
@@ -744,7 +774,7 @@ fn evaluate_analyzed<'a>(
         prepared.push(item);
     }
     let mut index = 0;
-    let statements = block(&lines, &headers, &mut errors, &mut index, 0, 0);
+    let statements = block(&lines, &headers, function_rows, &mut errors, &mut index, 0, 0);
     let definitions = assignment_definitions(&prepared);
     let parse_errors = prepared
         .iter()
@@ -764,6 +794,11 @@ fn evaluate_analyzed<'a>(
                 if original.trim().is_empty() { LineOutcome::Blank }
                 else if is_full_line_comment(original.trim()) { LineOutcome::Comment }
                 else { LineOutcome::Continuation { owner_line: owner } }
+            } else if let Some(definition) = &function_rows[line] {
+                match definition {
+                    Ok(()) => LineOutcome::Definition,
+                    Err(kind) => LineOutcome::Error(Diagnostic::new(kind.clone())),
+                }
             } else if let Some(error) = errors[line]
                 .as_ref()
                 .map(|kind| Diagnostic::new(kind.clone()))
@@ -1283,5 +1318,33 @@ mod tests {
             })
         ));
         assert!(!result.final_bindings.contains_key("last"));
+    }
+    #[test]
+    fn function_declarations_preserve_loop_structure_and_nested_rollback() {
+        let source = concat!(
+            "for i in range(2):\n",
+            "fn identity(x) = x\n",
+            "  stray = 3\n",
+            "identity(4)"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert!(matches!(result.lines[0].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[1].outcome, LineOutcome::Definition));
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&result, 3), 4.0);
+
+        let source = concat!(
+            "total = 1\n",
+            "for i in range(2):\n",
+            "  total += 1\n",
+            "  fn invalid(x) = x\n",
+            "total"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert!(matches!(result.lines[1].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[3].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Error(_)));
     }
 }

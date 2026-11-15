@@ -130,6 +130,8 @@ pub(crate) struct WorkBudget {
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) runtime_line: Option<usize>,
     pub(super) runtime_definitions: Option<Arc<HashMap<String, Vec<usize>>>>,
+    call_depth: usize,
+    pub(super) called_definitions: Vec<usize>,
 }
 impl WorkBudget {
     pub(crate) fn charge(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
@@ -156,6 +158,8 @@ impl WorkBudget {
             cancellation: Some(cancellation),
             runtime_line: None,
             runtime_definitions: None,
+            call_depth: 0,
+            called_definitions: Vec::new(),
         }
     }
 }
@@ -182,6 +186,123 @@ pub(super) enum ScriptExpression {
     Call(Function, Vec<Self>),
     Decimal(String),
     ExactInteger(String),
+    UserCall(Arc<UserFunction>, Vec<Self>),
+}
+
+#[derive(Debug)]
+pub(super) struct UserFunction {
+    pub(super) name: String,
+    pub(super) line: usize,
+    parameters: Vec<String>,
+    body: ScriptExpression,
+}
+
+pub(super) type UserFunctions = Vec<Arc<UserFunction>>;
+
+pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) -> bool {
+    let mut index = 0;
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        if ch == '{' {
+            index += source[index..].find('}').map_or(source.len() - index, |end| end + 1);
+            continue;
+        }
+        if ch == '"' {
+            index += 1;
+            let mut escaped = false;
+            while index < source.len() {
+                let ch = source[index..].chars().next().unwrap();
+                index += ch.len_utf8();
+                if escaped { escaped = false; }
+                else if ch == '\\' { escaped = true; }
+                else if ch == '"' { break; }
+            }
+            continue;
+        }
+        if is_identifier_start(ch) {
+            let start = index;
+            index += ch.len_utf8();
+            while index < source.len() {
+                let next = source[index..].chars().next().unwrap();
+                if !is_identifier_continue(next) { break; }
+                index += next.len_utf8();
+            }
+            if source[index..].trim_start().starts_with('(')
+                && functions.iter().any(|function| function.name == source[start..index])
+            { return true; }
+        } else {
+            index += ch.len_utf8();
+        }
+    }
+    false
+}
+
+/// Recognize only the full callable prefix so existing uses of `fn` remain valid.
+pub(super) fn declaration(source: &str) -> Option<Result<(String, Vec<String>, &str), DiagnosticKind>> {
+    let source = source.trim_start();
+    let rest = source.strip_prefix("fn")?;
+    if !rest.starts_with(char::is_whitespace) { return None; }
+    let rest = rest.trim_start();
+    let end = rest.char_indices().find_map(|(index, ch)| (!is_identifier_continue(ch)).then_some(index)).unwrap_or(rest.len());
+    let name = &rest[..end];
+    if !is_bare_identifier(name) { return None; }
+    let after_name = rest[end..].trim_start();
+    if !after_name.starts_with('(') { return None; }
+    Some((|| {
+        let close = matching(after_name, 0)?;
+        let parameters = split_arguments(&after_name[1..close])?;
+        if parameters.len() > 16 { return Err(error("function exceeds the 16-parameter limit")); }
+        let mut result = Vec::with_capacity(parameters.len());
+        for parameter in parameters {
+            let parsed = parse_assignment_name(parameter)?;
+            if is_row_reference_name(&parsed.canonical)
+                || (!parsed.braced && is_reserved_name(&parsed.canonical))
+                || result.contains(&parsed.canonical)
+            { return Err(error("function parameters must be unique valid names")); }
+            result.push(parsed.canonical);
+        }
+        let body = after_name[close + 1..].trim_start().strip_prefix('=')
+            .ok_or_else(|| error("function declaration requires an expression body"))?.trim();
+        if body.is_empty() { return Err(error("function declaration requires an expression body")); }
+        if find_assignment_delimiter(body).is_some() {
+            return Err(error("function body must be an expression without assignments"));
+        }
+        if body.len() > MAX_EXPRESSION_BYTES { return Err(DiagnosticKind::ExpressionTooLong { max_bytes: MAX_EXPRESSION_BYTES }); }
+        Ok((name.to_owned(), result, body))
+    })())
+}
+
+pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctions, Vec<Option<Result<(), DiagnosticKind>>>, usize) {
+    let mut functions = Vec::new();
+    let mut rows = vec![None; analysis.rows.len()];
+    let mut identifiers = 0usize;
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() { continue; }
+        let Some(declaration) = declaration(&row.text) else { continue; };
+        let result = declaration.and_then(|(name, parameters, body)| {
+            if let Some(diagnostic) = &row.diagnostic { return Err(diagnostic.clone()); }
+            if row.text.len() != row.text.trim_start().len() {
+                return Err(error("function declarations must be top-level"));
+            }
+            if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
+            if signature(&name).is_some() || functions.iter().any(|function: &Arc<UserFunction>| function.name == name) {
+                return Err(error("function name collides with an existing function"));
+            }
+            let count = validate_source(body)?;
+            if identifiers.saturating_add(count) > MAX_DEPENDENCIES {
+                return Err(DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+            }
+            identifiers += count;
+            let declared: HashSet<_> = parameters.iter().cloned().collect();
+            let mut expression = prepare_with_functions(body, &declared, &functions)?;
+            expression.validate_parameters(&declared)?;
+            expression.resolve(MAX_SOURCE_LINES, 0, |name| parameters.iter().position(|parameter| parameter == name));
+            functions.push(Arc::new(UserFunction { name, line, parameters, body: expression }));
+            Ok(())
+        });
+        rows[line] = Some(result);
+    }
+    (functions, rows, identifiers)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,7 +554,15 @@ pub(super) fn prepare(
     source: &str,
     declared: &HashSet<String>,
 ) -> Result<ScriptExpression, DiagnosticKind> {
-    parse(source.trim(), declared, 0)
+    prepare_with_functions(source, declared, &[])
+}
+
+pub(super) fn prepare_with_functions(
+    source: &str,
+    declared: &HashSet<String>,
+    functions: &[Arc<UserFunction>],
+) -> Result<ScriptExpression, DiagnosticKind> {
+    parse(source.trim(), declared, functions, 0)
 }
 
 fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
@@ -572,6 +701,7 @@ fn top_operator(
 fn parse(
     source: &str,
     declared: &HashSet<String>,
+    functions: &[Arc<UserFunction>],
     depth: usize,
 ) -> Result<ScriptExpression, DiagnosticKind> {
     if depth > MAX_EXPRESSION_NESTING {
@@ -584,7 +714,7 @@ fn parse(
         return Err(DiagnosticKind::InvalidExpression);
     }
     if source.starts_with('(') && matching(source, 0)? == source.len() - 1 {
-        return parse(&source[1..source.len() - 1], declared, depth + 1);
+        return parse(&source[1..source.len() - 1], declared, functions, depth + 1);
     }
     for operators in [
         &["||"][..],
@@ -592,10 +722,11 @@ fn parse(
         &["==", "!=", "<=", ">=", "<", ">"][..],
     ] {
         if let Some((at, which)) = top_operator(source, operators)? {
-            let left = Box::new(parse(&source[..at], declared, depth + 1)?);
+            let left = Box::new(parse(&source[..at], declared, functions, depth + 1)?);
             let right = Box::new(parse(
                 &source[at + operators[which].len()..],
                 declared,
+                functions,
                 depth + 1,
             )?);
             return Ok(match operators[which] {
@@ -615,6 +746,7 @@ fn parse(
         return Ok(ScriptExpression::Not(Box::new(parse(
             rest,
             declared,
+            functions,
             depth + 1,
         )?)));
     }
@@ -645,8 +777,8 @@ fn parse(
         if ch == '(' {
             let close = matching(source, index)?;
             let inner = &source[index + 1..close];
-            if uses_script_syntax(inner) {
-                let node = parse(inner, declared, depth + 1)?;
+            if uses_script_syntax(inner) || contains_user_call(inner, functions) {
+                let node = parse(inner, declared, functions, depth + 1)?;
                 add_slot(&mut template, &mut slots, node, source, declared);
             } else {
                 template.push_str(&source[index..=close]);
@@ -693,6 +825,17 @@ fn parse(
             if source[open..].starts_with('(') {
                 let close = matching(source, open)?;
                 let args = split_arguments(&source[open + 1..close])?;
+                if let Some(function) = functions.iter().find(|function| function.name == name) {
+                    if function.parameters.len() != args.len() {
+                        return Err(error("incorrect number of function arguments"));
+                    }
+                    let children = args.into_iter().map(|arg| parse(arg, declared, functions, depth + 1)).collect::<Result<Vec<_>, _>>()?;
+                    let node = ScriptExpression::UserCall(Arc::clone(function), children);
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 let allowed = signature(name).ok_or(DiagnosticKind::InvalidExpression)?;
                 if !allowed.contains(&args.len()) {
                     return Err(DiagnosticKind::InvalidExpression);
@@ -719,7 +862,7 @@ fn parse(
                             {
                                 Ok(ScriptExpression::ExactInteger(arg.trim().to_owned()))
                             } else {
-                                parse(arg, declared, depth + 1)
+                                parse(arg, declared, functions, depth + 1)
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -743,12 +886,12 @@ fn parse(
                 template.push_str(&source[index..=open]);
                 let mut rendered = Vec::new();
                 for arg in args {
-                    if uses_script_syntax(arg) {
+                    if uses_script_syntax(arg) || contains_user_call(arg, functions) {
                         let mut slot = String::new();
                         add_slot(
                             &mut slot,
                             &mut slots,
-                            parse(arg, declared, depth + 1)?,
+                            parse(arg, declared, functions, depth + 1)?,
                             source,
                             declared,
                         );
@@ -780,6 +923,7 @@ fn parse(
         &mut count,
         &all_declared,
         true,
+        functions,
     );
     if let Some(diagnostic) = &line.diagnostic {
         if !matches!(
@@ -883,6 +1027,36 @@ fn validate_calls(source: &str) -> Result<(), DiagnosticKind> {
 }
 
 impl ScriptExpression {
+    fn validate_parameters(&self, parameters: &HashSet<String>) -> Result<(), DiagnosticKind> {
+        match self {
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::Boolean { .. } => Ok(()),
+            Self::Legacy { line, slots, .. } => {
+                for reference in &line.references {
+                    if slots.iter().any(|(name, _)| *name == reference.name) { continue; }
+                    if !matches!(reference.kind, ReferenceKind::Named) || !parameters.contains(&reference.name) {
+                        return Err(error("function bodies may only reference parameters and constants"));
+                    }
+                }
+                for (_, child) in slots { child.validate_parameters(parameters)?; }
+                Ok(())
+            }
+            Self::If(a, b, c) => {
+                a.validate_parameters(parameters)?;
+                b.validate_parameters(parameters)?;
+                c.validate_parameters(parameters)
+            }
+            Self::And(a, b) | Self::Or(a, b) | Self::Compare(_, a, b) => {
+                a.validate_parameters(parameters)?;
+                b.validate_parameters(parameters)
+            }
+            Self::Not(child) => child.validate_parameters(parameters),
+            Self::Call(_, args) | Self::UserCall(_, args) => {
+                for child in args { child.validate_parameters(parameters)?; }
+                Ok(())
+            }
+        }
+    }
+
     pub(super) fn resolve(
         &mut self,
         line_index: usize,
@@ -931,7 +1105,7 @@ impl ScriptExpression {
                 b.resolve_inner(line_index, row_count, named_binding);
             }
             Self::Not(child) => child.resolve_inner(line_index, row_count, named_binding),
-            Self::Call(_, args) => {
+            Self::Call(_, args) | Self::UserCall(_, args) => {
                 for arg in args {
                     arg.resolve_inner(line_index, row_count, named_binding);
                 }
@@ -1092,6 +1266,22 @@ impl ScriptExpression {
                     .collect::<Result<Vec<_>, _>>()?;
                 call(*function, &values, work)
             }
+            Self::UserCall(function, args) => {
+                let arguments = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
+                if work.call_depth >= 16 { return Err(error("function call depth exceeds 16")); }
+                work.charge(1)?;
+                work.call_depth += 1;
+                work.called_definitions.push(function.line);
+                let local_outcomes = arguments.iter().cloned().map(LineOutcome::Value).collect::<Vec<_>>();
+                let local_values = arguments.into_iter().map(Some).collect::<Vec<_>>();
+                let runtime_line = work.runtime_line.take();
+                let runtime_definitions = work.runtime_definitions.take();
+                let result = function.body.evaluate(MAX_SOURCE_LINES, &local_outcomes, &local_values, &mut Vec::new(), work);
+                work.runtime_line = runtime_line;
+                work.runtime_definitions = runtime_definitions;
+                work.call_depth -= 1;
+                result
+            }
         }
     }
 }
@@ -1146,6 +1336,7 @@ fn value_at(
         Some(LineOutcome::Blank | LineOutcome::Comment) => {
             Err(DiagnosticKind::UnknownRowReference(name.to_owned()))
         }
+        Some(LineOutcome::Definition) => Err(DiagnosticKind::DefinitionReference(name.to_owned())),
         Some(LineOutcome::Continuation { owner_line }) => Err(DiagnosticKind::ContinuationReference {
             reference: name.to_owned(), owner_line: *owner_line,
         }),

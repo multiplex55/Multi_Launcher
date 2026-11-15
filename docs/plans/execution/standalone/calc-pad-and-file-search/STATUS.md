@@ -22,9 +22,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M2-B | Verified and pushed | `54567303d7ff18aa5ce751a044cf103093b4e30e`. Manual lifecycle, immutable stale results, guarded actions. Focused batches passed 18/18 and 4/4. |
 | M3-A | Verified and pushed | `fad44d1cf51e88a2093eb9c1d74de86a1e2fa13c`. Exact arithmetic, bounds, canonical copy and approximation. Batches passed 12/12 and 7/7. |
 | M3-B | Verified and pushed | `7499ede1b9c064030df389bea999e3bf9993a8d8`. Exact display, comparison and current copy. Batches passed 13/13 and 5/5. |
-| M4-A | Verified | All ten helpers in runtime, signatures and examples. Focused batch passed 10/10. |
-| M5-A | In progress | Pure document-local formula declarations and calls. |
-| M5-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M4-A | Verified and pushed | `7fa01717e6fa7fd8e298255aaf67b18b24937e42`. All ten helpers. Focused batch passed 10/10. |
+| M5-A | Verified | Pure document functions, typed calls, physical outcomes and dependencies. Batches passed 11/11 and 7/7. |
+| M5-B | In progress | Formula-function editor and reference support. |
+| M5-C through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -34,7 +35,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C24 | Implemented | Focused scheduler, persistence and host tests passed. Native integrated check pending. | Session scheduling, worker stamps, persistence/recovery and companion observers |
 | C25 | Implemented | Focused exact/legacy, formatting, settings, copy and example checks passed. Native integrated check pending. | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Implemented | Focused numeric, compatibility, hint and executable example checks passed. | Script function catalog and signatures, editor hints, executable examples |
-| C18 | Pending | Pending | Shared syntax and bindings, typed script invocation, editor and dependencies |
+| C18 | Runtime implemented; editor pending | Focused formula and legacy loop checks passed | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Pending | Pending | Existing loop block parser, transactional execution and editor structure |
 | C22 | Pending | Pending | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Pending | Pending | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
@@ -91,3 +92,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Registered all ten helpers in the shared runtime and hint catalog and added all ten executable examples, for 91 total. Exact arithmetic and combinatorics preserve bounded integer/rational results above binary-float precision. Scalar and explicitly approximate behavior stays distinct.
 - Scoped library Nextest passed 10/10 with exit 0 in 2.48 seconds under the 100-second watchdog. Separate compile finished in 327.12 seconds under the 900-second deadline. Cleanup and output drain passed. See `m4a-build` and `m4a-run`.
+
+### M5-A formula runtime
+
+- Compiled earlier-only document callables with isolated typed parameters and shared work/call limits. Definition rows carry no value; call dependencies identify invoked physical definitions. The function declaration grammar preserves legacy uses of the variable `fn`.
+- Initial scoped library Nextest passed 11/11 in 2.71 seconds (332.25-second separate compile). Diff review exposed assignment syntax inside bodies and a missing structural boundary/rollback for declarations next to or inside loops. The correction's initial compile failed with E0425 because a new test was outside its own module. After moving the test, final focused Nextest passed 7/7 in 2.61 seconds after 213.56 seconds of compilation.
+- Cleanup and output drain passed. The cached deadline was 100 seconds, with 900-second compile bounds. Receipts are in `m5a-build`, `m5a-run`, `m5a-correction-build`, `m5a-final-build`, and `m5a-final-run`. Current results from formula calls are available to comparison by row or binding. Fresh Inspector expressions keep the existing frozen-result scope.

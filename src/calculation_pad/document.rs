@@ -248,6 +248,7 @@ impl CalculationDocument {
             || analysis.rows.iter().filter(|row| row.owner.is_none()).any(|row| {
                 let line = row.text.as_str();
                 let line = line.trim();
+                if script::declaration(line).is_some() { return true; }
                 if line.is_empty() || is_full_line_comment(line) {
                     return false;
                 }
@@ -289,23 +290,29 @@ impl CalculationDocument {
             };
         }
         let analysis = syntax::SourceAnalysis::new(source);
+        let (functions, function_rows, function_identifiers) = script::build_functions(&analysis);
         if loops::contains_loop_in(&analysis) {
-            return loops::evaluate(source, &analysis, cancellation);
+            return loops::evaluate(source, &analysis, &functions, &function_rows, function_identifiers, cancellation);
         }
 
         // Alias fallback must see forward declarations too, so
         // references keep the same diagnostics as ordinary named variables.
         let declared_names = declared_names_in(&analysis);
-        let mut total_identifiers = 0;
+        let mut total_identifiers = function_identifiers;
         let mut prepared = Vec::with_capacity(source_line_count);
-        for row in &analysis.rows {
+        for (line_index, row) in analysis.rows.iter().enumerate() {
             if row.owner.is_some() {
                 prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
                 continue;
             }
             let span_end = row.offsets.iter().rev().find_map(|offset| *offset)
                 .map_or(row.range.end, |offset| offset + 1);
-            let mut item = prepare_line(row.range.start..span_end, &row.text, &mut total_identifiers, &declared_names);
+            if function_rows[line_index].is_some() {
+                prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+                continue;
+            }
+            let visible = functions.partition_point(|function| function.line < line_index);
+            let mut item = prepare_line_with_functions(row.range.start..span_end, &row.text, &mut total_identifiers, &declared_names, &functions[..visible]);
             if let Some(diagnostic) = &row.diagnostic {
                 item.diagnostic = Some(Diagnostic::new(diagnostic.clone()));
             }
@@ -327,6 +334,7 @@ impl CalculationDocument {
         let mut terminal = false;
         for (line_index, line) in prepared.iter().enumerate() {
             let mut dependencies = line.dependencies.clone();
+            work.called_definitions.clear();
             let original = &source[analysis.rows[line_index].range.clone()];
             let outcome = if let Some(owner) = analysis.rows[line_index].owner {
                 if original.trim().is_empty() { LineOutcome::Blank }
@@ -334,6 +342,11 @@ impl CalculationDocument {
                 else { LineOutcome::Continuation { owner_line: owner } }
             } else if is_full_line_comment(original.trim()) {
                 LineOutcome::Comment
+            } else if let Some(definition) = &function_rows[line_index] {
+                match definition {
+                    Ok(()) => LineOutcome::Definition,
+                    Err(kind) => LineOutcome::Error(Diagnostic::new(kind.clone())),
+                }
             } else if terminal
                 && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
             {
@@ -350,6 +363,7 @@ impl CalculationDocument {
             } else {
                 evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values, &mut work)
             };
+            dependencies.extend(work.called_definitions.drain(..));
             if matches!(
                 outcome,
                 LineOutcome::Error(Diagnostic { kind: DiagnosticKind::WorkLimit | DiagnosticKind::Canceled })
@@ -462,6 +476,7 @@ pub struct CalculationLineResult {
 pub enum LineOutcome {
     Blank,
     Comment,
+    Definition,
     Continuation { owner_line: usize },
     Value(CalculationValue),
     Error(Diagnostic),
@@ -570,6 +585,7 @@ pub enum DiagnosticKind {
     ReservedName(String),
     UnknownName(String),
     UnknownRowReference(String),
+    DefinitionReference(String),
     ContinuationReference { reference: String, owner_line: usize },
     ForwardReference {
         reference: String,
@@ -637,6 +653,7 @@ impl fmt::Display for Diagnostic {
             Kind::UnknownRowReference(reference) => {
                 write!(formatter, "no result is available for {reference}")
             }
+            Kind::DefinitionReference(reference) => write!(formatter, "{reference} is a function definition and has no result"),
             Kind::ContinuationReference { reference, owner_line } => write!(
                 formatter, "{reference} is a continuation of line {} and has no result", owner_line + 1
             ),
@@ -922,7 +939,17 @@ fn prepare_line(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
 ) -> PreparedLine {
-    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false)
+    prepare_line_with_functions(source_range, source_line, total_identifiers, declared_names, &[])
+}
+
+fn prepare_line_with_functions(
+    source_range: Range<usize>,
+    source_line: &str,
+    total_identifiers: &mut usize,
+    declared_names: &HashSet<String>,
+    functions: &[std::sync::Arc<script::UserFunction>],
+) -> PreparedLine {
+    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false, functions)
 }
 
 fn prepare_line_internal(
@@ -931,6 +958,7 @@ fn prepare_line_internal(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
     internal_template: bool,
+    functions: &[std::sync::Arc<script::UserFunction>],
 ) -> PreparedLine {
     let trimmed = source_line.trim();
     if trimmed.is_empty() {
@@ -1008,7 +1036,7 @@ fn prepare_line_internal(
         if split_to_keyword(expression).is_some() {
             let previous_identifiers = *total_identifiers;
             let rhs = prepare_line_internal(
-                0..expression.len(), expression, total_identifiers, declared_names, true,
+                0..expression.len(), expression, total_identifiers, declared_names, true, functions,
             );
             if let Some(diagnostic) = rhs.diagnostic.clone() {
                 return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
@@ -1028,7 +1056,7 @@ fn prepare_line_internal(
             template_names.extend(slots.iter().map(|(name, _)| name.clone()));
             let mut template_identifiers = 0;
             let mut outer = prepare_line_internal(
-                source_range.clone(), &template, &mut template_identifiers, &template_names, true,
+                source_range.clone(), &template, &mut template_identifiers, &template_names, true, functions,
             );
             if let Some(diagnostic) = outer.diagnostic.take() {
                 return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
@@ -1058,14 +1086,14 @@ fn prepare_line_internal(
         }
         let composed = format!("{target} {operator} ({expression})");
         let mut prepared = prepare_line_internal(
-            source_range, &composed, total_identifiers, declared_names, true,
+            source_range, &composed, total_identifiers, declared_names, true, functions,
         );
         prepared.assignment_name = assignment_name;
         prepared.compound = Some(CompoundBinding { prior: None });
         return prepared;
     }
 
-    if script::uses_script_syntax(expression) {
+    if script::uses_script_syntax(expression) || script::contains_user_call(expression, functions) {
         let identifiers = match script::validate_source(expression) {
             Ok(count) => count,
             Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
@@ -1074,7 +1102,7 @@ fn prepare_line_internal(
             return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
         }
         *total_identifiers += identifiers;
-        return match script::prepare(expression, declared_names) {
+        return match script::prepare_with_functions(expression, declared_names, functions) {
             Ok(expression) => PreparedLine {
                 compound: None,
                 source_range, assignment_name,
@@ -2711,6 +2739,9 @@ fn evaluate_line(
         }
         match outcomes.get(dependency_line) {
             Some(LineOutcome::Value(_)) => {}
+            Some(LineOutcome::Definition) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::DefinitionReference(reference.name.clone())));
+            }
             Some(LineOutcome::Continuation { owner_line }) => {
                 return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ContinuationReference {
                     reference: reference.name.clone(), owner_line: *owner_line,
@@ -3005,7 +3036,7 @@ pub(super) fn evaluate_legacy_fragment(
 ) -> Result<CalculationValue, DiagnosticKind> {
     let declared = bindings.keys().cloned().collect();
     let mut count = 0;
-    let mut line = prepare_line_internal(0..source.len(), source, &mut count, &declared, true);
+    let mut line = prepare_line_internal(0..source.len(), source, &mut count, &declared, true, &[]);
     if let Some(diagnostic) = &line.diagnostic { return Err(diagnostic.kind.clone()); }
     if let PreparedStatement::Script(expression) = &mut line.statement {
         let mut names = bindings.keys().cloned().collect::<Vec<_>>();
@@ -3073,6 +3104,97 @@ mod tests {
     use crate::calculation_pad::{ProgrammerError, TypedInteger};
     use crate::common::numeric_base::NumericBase;
     use crate::unit_conversion::{Approximation, ConversionError, Unit};
+
+    #[test]
+    fn formula_functions_are_pure_prior_only_and_track_definition_dependencies() {
+        let document = CalculationDocument::new(concat!(
+            "price = 7\n",
+            "fn discounted_price(price, discount) = (price *\n",
+            "  (1 - discount))\n",
+            "fn twice(x) = discounted_price(x, 0) * 2\n",
+            "discounted_price(100, 0.10)\n",
+            "twice(4)\n",
+            "price\n",
+            "r2"
+        ));
+        let result = document.evaluate();
+        assert!(matches!(result.lines[1].outcome, LineOutcome::Definition));
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Continuation { owner_line: 1 }));
+        assert_eq!(scalar(&result, 4), 90.0);
+        assert_eq!(scalar(&result, 5), 8.0);
+        assert_eq!(scalar(&result, 6), 7.0);
+        assert_eq!(result.lines[4].dependency_indices, [1]);
+        assert_eq!(result.lines[5].dependency_indices, [1, 3]);
+        assert!(matches!(error(&result, 7), DiagnosticKind::DefinitionReference(_)));
+    }
+
+    #[test]
+    fn formula_functions_reject_capture_recursion_and_bad_definitions() {
+        let document = CalculationDocument::new(concat!(
+            "x = 10\n",
+            "fn capture(a) = if(false, x, a)\n",
+            "fn recur(a) = recur(a)\n",
+            "fn bad(a, a) = a\n",
+            "fn sin(a) = a\n",
+            "fn f(a) = a + 1\n",
+            "fn f(a) = a + 2\n",
+            "f(2, 3)\n",
+            "f(2)\n",
+            "fn assignment(a) = a = a + 1"
+        ));
+        let result = document.evaluate();
+        for index in 1..=4 { assert!(matches!(result.lines[index].outcome, LineOutcome::Error(_)), "row {index}"); }
+        assert!(matches!(result.lines[5].outcome, LineOutcome::Definition));
+        assert!(matches!(result.lines[6].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[7].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&result, 8), 3.0);
+        assert!(error_message(&result, 9).contains("without assignments"));
+    }
+
+    #[test]
+    fn formula_functions_support_typed_arguments_loop_and_contextual_fn() {
+        let document = CalculationDocument::new(concat!(
+            "fn = 2\n",
+            "fn half(x) = x / 2\n",
+            "total = fraction(0,1)\n",
+            "for i in range(1,4):\n",
+            "  total += half(fraction(1,1))\n",
+            "total\n",
+            "fn mod 2"
+        ));
+        let result = document.evaluate();
+        assert_eq!(value(&result, 5).canonical_result().as_deref(), Some("fraction(3,2)"));
+        assert_eq!(scalar(&result, 6), 0.0);
+        assert!(result.lines[4].dependency_indices.contains(&1));
+        assert!(result.lines[4].dependency_indices.iter().all(|&line| line < result.lines.len()));
+    }
+
+    #[test]
+    fn formula_function_calls_are_lazy_and_enforce_depth_and_count() {
+        let document = CalculationDocument::new(concat!(
+            "fn positive(x) = x > 0\n",
+            "if(false, positive(1), 7)\n",
+            "if(true, positive(2), false)"
+        ));
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 1), 7.0);
+        assert!(result.lines[1].dependency_indices.is_empty());
+        assert!(matches!(value(&result, 2), CalculationValue::Boolean(true)));
+        assert_eq!(result.lines[2].dependency_indices, [0]);
+
+        let mut source = String::from("fn f0(x) = x\n");
+        for index in 1..17 {
+            source.push_str(&format!("fn f{index}(x) = f{}(x)\n", index - 1));
+        }
+        source.push_str("f16(1)");
+        let document = CalculationDocument::new(source);
+        assert!(error_message(&document.evaluate(), 17).contains("depth"));
+
+        let mut source = String::new();
+        for index in 0..65 { source.push_str(&format!("fn p{index}(x) = x\n")); }
+        let document = CalculationDocument::new(source);
+        assert!(error_message(&document.evaluate(), 64).contains("64-function"));
+    }
 
     #[test]
     fn exact_decimal_fraction_arithmetic_and_canonical_round_trip() {
