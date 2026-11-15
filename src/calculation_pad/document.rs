@@ -321,14 +321,18 @@ impl CalculationDocument {
 
     /// Reevaluates every source line from the current document contents.
     pub fn evaluate(&self) -> CalculationEvaluation<'_> {
-        self.evaluate_inner(None)
+        self.evaluate_inner(None, None)
     }
 
     pub(crate) fn evaluate_with_cancellation(
         &self,
         cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> CalculationEvaluation<'_> {
-        self.evaluate_inner(Some(cancellation))
+        self.evaluate_inner(Some(cancellation), None)
+    }
+
+    pub(crate) fn evaluate_for_analysis(&self, cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>, aggregate: std::sync::Arc<script::AggregateWork>) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(Some(cancellation), Some(aggregate))
     }
 
     #[cfg(test)]
@@ -359,6 +363,7 @@ impl CalculationDocument {
     fn evaluate_inner(
         &self,
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        aggregate: Option<std::sync::Arc<script::AggregateWork>>,
     ) -> CalculationEvaluation<'_> {
         let source = self.source.as_str();
         let limits = super::limits::profile_limits(self.profile);
@@ -389,7 +394,7 @@ impl CalculationDocument {
         let analysis = syntax::SourceAnalysis::new(source);
         let (functions, function_rows, function_identifiers) = script::build_functions(&analysis);
         if loops::contains_loop_in(&analysis) {
-            return loops::evaluate(source, &analysis, &functions, &function_rows, function_identifiers, cancellation);
+            return loops::evaluate(source, &analysis, &functions, &function_rows, function_identifiers, cancellation, aggregate);
         }
 
         // Alias fallback must see forward declarations too, so
@@ -424,10 +429,11 @@ impl CalculationDocument {
         let mut values = vec![None; prepared.len()];
         let mut results = Vec::with_capacity(prepared.len());
 
-        let mut work = cancellation.map_or_else(
-            script::WorkBudget::default,
-            script::WorkBudget::with_cancellation,
-        );
+        let mut work = match (cancellation, aggregate) {
+            (Some(cancel), Some(aggregate)) => script::WorkBudget::with_analysis(cancel, aggregate),
+            (Some(cancel), None) => script::WorkBudget::with_cancellation(cancel),
+            _ => script::WorkBudget::default(),
+        };
         let mut terminal = false;
         for (line_index, line) in prepared.iter().enumerate() {
             let mut dependencies = line.dependencies.clone();

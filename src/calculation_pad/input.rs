@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive};
+use num_traits::{Signed, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 
 use super::document::script::WorkBudget;
@@ -155,6 +155,48 @@ enum Number {
     Integer(TypedInteger),
     ExactInteger(BigInt),
     Decimal(ExactNumber),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SampleNumber { Exact(BigRational) }
+
+pub(crate) fn sample_number(kind: &InputKind, text: &str, signed_delta: bool) -> Result<SampleNumber, String> {
+    if signed_delta && matches!(kind, InputKind::Integer(_) | InputKind::ExactInteger) {
+        return match parse(&InputKind::ExactInteger, text)? {
+            Number::ExactInteger(value) => Ok(SampleNumber::Exact(BigRational::from_integer(value))),
+            _ => Err("Step must be an integer.".into()),
+        };
+    }
+    Ok(match parse(kind, text)? {
+        Number::Float(_) => {
+            let rational = if super::document::integer_literal_token(text) && text.trim_start_matches(['+', '-']).get(..2).is_some_and(|prefix| matches!(prefix, "0x" | "0X" | "0b" | "0B" | "0o" | "0O")) {
+                match parse(&InputKind::ExactInteger, text)? { Number::ExactInteger(value) => BigRational::from_integer(value), _ => return Err("Invalid sample.".into()) }
+            } else {
+                ExactNumber::decimal(text, &mut WorkBudget::default()).map_err(|kind| super::document::Diagnostic { kind }.to_string())?.ratio().clone()
+            };
+            SampleNumber::Exact(rational)
+        },
+        Number::Integer(value) => SampleNumber::Exact(BigRational::from_integer(BigInt::parse_bytes(value.formatted_decimal().as_bytes(), 10).ok_or("Invalid integer.")?)),
+        Number::ExactInteger(value) => SampleNumber::Exact(BigRational::from_integer(value)),
+        Number::Decimal(value) => SampleNumber::Exact(value.ratio().clone()),
+    })
+}
+
+pub(crate) fn sample_text(kind: &InputKind, value: &SampleNumber) -> Result<String, String> {
+    match (kind, value) {
+        (InputKind::Scalar | InputKind::Quantity { .. }, SampleNumber::Exact(value)) => {
+            let number = value.to_f64().filter(|value| value.is_finite()).ok_or("Sample exceeds the finite range.")?;
+            if number == 0.0 && !value.is_zero() { return Err("Sample is too small for the input type.".into()); }
+            Ok(number.to_string())
+        }
+        (InputKind::Integer(_) | InputKind::ExactInteger, SampleNumber::Exact(value)) if value.is_integer() => Ok(value.to_integer().to_string()),
+        (InputKind::Decimal, SampleNumber::Exact(value)) => {
+            let exact = ExactNumber::fraction(value.numer().clone(), value.denom().clone(), &mut WorkBudget::default()).map_err(|kind| super::document::Diagnostic { kind }.to_string())?;
+            let decimal = exact.decimal_display(None);
+            if decimal.starts_with('≈') { Err("Sample cannot be represented as an exact decimal.".into()) } else { Ok(decimal) }
+        }
+        _ => Err("Sample is not representable for this input type.".into()),
+    }
 }
 
 fn parse(kind: &InputKind, source: &str) -> Result<Number, String> {

@@ -128,10 +128,30 @@ impl CalculationSequence {
 pub(crate) struct WorkBudget {
     used: usize,
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    aggregate: Option<Arc<AggregateWork>>,
     pub(super) runtime_line: Option<usize>,
     pub(super) runtime_definitions: Option<Arc<HashMap<String, Vec<usize>>>>,
     call_depth: usize,
     pub(super) called_definitions: Vec<usize>,
+}
+
+pub(crate) struct AggregateWork {
+    used: std::sync::atomic::AtomicUsize,
+    exhausted: std::sync::atomic::AtomicBool,
+    limit: usize,
+}
+impl AggregateWork {
+    pub(crate) fn new(limit: usize) -> Self { Self { used: std::sync::atomic::AtomicUsize::new(0), exhausted: std::sync::atomic::AtomicBool::new(false), limit } }
+    pub(crate) fn charge(&self, amount: usize) -> Result<(), DiagnosticKind> {
+        use std::sync::atomic::Ordering;
+        if self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(amount).filter(|next| *next <= self.limit)).is_err() {
+            self.exhausted.store(true, Ordering::Relaxed);
+            return Err(DiagnosticKind::WorkLimit);
+        }
+        Ok(())
+    }
+    pub(crate) fn exhausted(&self) -> bool { self.exhausted.load(std::sync::atomic::Ordering::Relaxed) }
+    pub(crate) fn used(&self) -> usize { self.used.load(std::sync::atomic::Ordering::Relaxed) }
 }
 impl WorkBudget {
     pub(crate) fn used(&self) -> usize { self.used }
@@ -143,6 +163,7 @@ impl WorkBudget {
         {
             return Err(DiagnosticKind::Canceled);
         }
+        if let Some(aggregate) = &self.aggregate { aggregate.charge(amount)?; }
         self.used = self
             .used
             .checked_add(amount)
@@ -157,11 +178,17 @@ impl WorkBudget {
         Self {
             used: 0,
             cancellation: Some(cancellation),
+            aggregate: None,
             runtime_line: None,
             runtime_definitions: None,
             call_depth: 0,
             called_definitions: Vec::new(),
         }
+    }
+    pub(crate) fn with_analysis(cancellation: Arc<std::sync::atomic::AtomicBool>, aggregate: Arc<AggregateWork>) -> Self {
+        let mut result = Self::with_cancellation(cancellation);
+        result.aggregate = Some(aggregate);
+        result
     }
 }
 fn error(message: &str) -> DiagnosticKind {

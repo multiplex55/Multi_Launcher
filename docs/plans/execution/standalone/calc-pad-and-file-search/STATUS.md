@@ -33,9 +33,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M8-A | Verified and pushed | `f0f87495d5cf2d2bafd1de456804cca2f188476a`. Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
 | M8-B | Verified and pushed | `c796de9d7d049fcf81ec26ea8c36d0c7a72d6ea7`. F2 and right-click preview, retained host actions, stale and history protection. |
 | M9-A | Verified and pushed | `c48bed1d9c7df339e6939ace09a70728401180be`. Typed input definitions, retained v3 configuration and source projection. Focused batch passed 12/12. |
-| M9-B | Verified | Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
-| M10-A | In progress | Bounded immutable sensitivity analysis and current-only publication. |
-| M10-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M9-B | Verified and pushed | `3f7a47d17e6e2d8571a90f177f6818d0993aca33`. Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
+| M10-A | Verified | Bounded immutable sensitivity analysis and current-only publication. Focused batch passed 15/15. |
+| M10-B | In progress | Persisted definition, retained panel and exact table exports. |
+| M11-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -51,7 +52,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check pending. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
 | C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
 | C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
-| C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
+| C4 | Analysis domain implemented; panel and exports in progress | Focused XP, sample, work/cancel, staleness and shared worker checks passed. Native integrated check pending. | Session-owned bounded worker evaluation and accepted Config Menu actions |
 | C5 | Pending | Pending | Committed snapshots, utility window host and render lifecycle, size/presentation settings and clipboard |
 | F3 | Pending | Pending | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and `domain` cases |
 
@@ -166,3 +167,10 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Editable Inputs now offer labels, descriptions, decorative suffixes, numeric ranges and steps, a field, step controls, or a bounded slider. Typed exact grids use small ordinal coordinates, including fixed integers above the exact-scalar range. A bare radix assignment keeps its existing ±2^53 magnitude ceiling. Unsuitable sliders retain the ordinary field.
 - Step and drag update drafts. Guarded Apply verifies the current document/revision, selected input/configuration and original logical statement before one source edit. It retains physical IDs even when adjacent reassignments become identical. Accepted changes use normal Manual/Automatic, recovery and history behavior. An out-of-range current value is flagged and remains in source.
 - Initial scoped library Nextest passed 8/8. A focused audit constrained bare-radix generated values and reused direct scalar token parsing in form validation. The final batch passed 9/9 with exit 0, 0.29 seconds reported by Nextest and 2.41 seconds owned elapsed. The separate final compile took 191.51 seconds. Each cached check met the 100-second deadline and compiles met 900 seconds. Cleanup and output drain passed. Receipts: `m9b-*` and `m9b-final-*`. Native desktop evidence remains pending.
+
+### M10-A sensitivity evaluation
+
+- Added one session-owned sensitivity lane using the main evaluator's coalescing transport. Its identity binds document, incarnation, source revision, semantic options, definition and analysis generation. Main same-revision Calculate runs have independent generations.
+- Generates indexed samples from exact authored grids, including decimal endpoints and descending unsigned inputs. Private projection varies one stable declaration, retains the authored type/unit and leaves main source, results, undo and dirty state alone. The C6 presentation bounds do not restrict the analysis range. Rows retain intended X, typed output data and cell diagnostics.
+- The 1,000-case/eight-output and 1,000,000-work caps apply to the full request, with a shared aggregate meter and bounded source preparation. Existing per-case evaluator limits remain in force. Canceled, superseded or aggregate-exhausted requests cannot publish a completed table.
+- Focused library Nextest passed 15/15 with exit 0, 0.72 seconds reported by Nextest and 2.95 seconds owned elapsed, including the five-row XP fixture, invalid cases, exact/unit scenarios, shared worker retirement and Manual isolation. The separate compile took 348.61 seconds. Cleanup and output drain passed. Receipts: `m10a-build` and `m10a-run`. The compiler flagged the retained older atomic update name on the current toolchain. Final scoped lints remain pending.

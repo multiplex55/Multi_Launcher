@@ -526,6 +526,13 @@ pub struct CalculationPadSession {
     scheduled_evaluation: Option<EvaluationStamp>,
     evaluation_failure: Option<(EvaluationStamp, String)>,
     canceled_evaluation: Option<EvaluationStamp>,
+    sensitivity_worker: Option<super::sensitivity::SensitivityWorker>,
+    sensitivity_active: Option<super::SensitivityBasis>,
+    sensitivity_progress: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+    sensitivity_table: Option<Arc<super::SensitivityTable>>,
+    sensitivity_failure: Option<String>,
+    sensitivity_canceled: bool,
+    sensitivity_generation: u64,
     #[cfg(test)]
     evaluation_attempts: usize,
 }
@@ -612,6 +619,13 @@ impl CalculationPadSession {
             scheduled_evaluation: None,
             evaluation_failure: None,
             canceled_evaluation: None,
+            sensitivity_worker: None,
+            sensitivity_active: None,
+            sensitivity_progress: None,
+            sensitivity_table: None,
+            sensitivity_failure: None,
+            sensitivity_canceled: false,
+            sensitivity_generation: 0,
             #[cfg(test)]
             evaluation_attempts: 0,
         }
@@ -622,6 +636,97 @@ impl CalculationPadSession {
         if self.evaluation_wake.is_none() {
             self.evaluation_wake = Some(Arc::new(wake));
         }
+    }
+
+    fn sensitivity_matches(&self, basis: &super::SensitivityBasis) -> bool {
+        self.pending.is_none() && self.current.as_ref().is_some_and(|current| {
+            current.id == basis.document && current.incarnation == basis.incarnation
+                && current.revision == basis.revision && current.options == basis.options
+                && current.line_ids.contains(&basis.definition.input)
+        })
+    }
+
+    fn retire_sensitivity(&mut self) {
+        if let Some(worker) = &self.sensitivity_worker { worker.retire(); }
+        self.sensitivity_active = None;
+        self.sensitivity_progress = None;
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = false;
+    }
+
+    fn invalidate_stale_sensitivity(&mut self) {
+        if self.sensitivity_active.as_ref().is_some_and(|basis| !self.sensitivity_matches(basis)) { self.retire_sensitivity(); }
+    }
+
+    pub(crate) fn request_sensitivity(&mut self, definition: super::SensitivityDefinition) -> Result<super::SensitivityBasis, String> {
+        self.ensure_editable().map_err(|error| error.to_string())?;
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let limits = super::limits::profile_limits(current.options.profile);
+        if current.source.len() > limits.bytes || physical_rows(&current.source) > limits.lines { return Err("The source exceeds the selected document profile.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == definition.input).ok_or("The selected input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line).ok_or("The selected input is not an eligible literal.")?;
+        let generation = self.sensitivity_generation.checked_add(1).ok_or("Sensitivity generation exhausted.")?;
+        let basis = super::SensitivityBasis { document: current.id, incarnation: current.incarnation, revision: current.revision, options: current.options,
+            input_name: descriptor.name.clone(), definition, generation };
+        let request = super::sensitivity::Request::new(basis.clone(), current.source.clone(), descriptor)?;
+        let progress = Arc::clone(&request.progress);
+        let count = request.count();
+        if self.sensitivity_worker.is_none() {
+            let wake = self.evaluation_wake.clone().unwrap_or_else(|| Arc::new(|| {}));
+            self.sensitivity_worker = Some(super::sensitivity::SensitivityWorker::start(wake)?);
+        }
+        self.sensitivity_generation = generation;
+        self.sensitivity_active = Some(basis.clone());
+        self.sensitivity_progress = Some((progress, count));
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = false;
+        if let Some(worker) = &self.sensitivity_worker { worker.submit(request); }
+        Ok(basis)
+    }
+
+    pub(crate) fn poll_sensitivity(&mut self) {
+        self.invalidate_stale_sensitivity();
+        let completion = self.sensitivity_worker.as_ref().and_then(|worker| worker.take());
+        if let Some((basis, result)) = completion
+            && self.sensitivity_active.as_ref() == Some(&basis) && self.sensitivity_matches(&basis) {
+            self.sensitivity_progress = None;
+            match result { Ok(table) if table.basis == basis => self.sensitivity_table = Some(Arc::new(table)),
+                Ok(_) => self.sensitivity_failure = Some("Sensitivity result identity is invalid.".into()),
+                Err(message) => self.sensitivity_failure = Some(message), }
+        }
+    }
+
+    pub(crate) fn cancel_sensitivity(&mut self, basis: &super::SensitivityBasis) -> bool {
+        if self.sensitivity_active.as_ref() != Some(basis) || self.sensitivity_progress.is_none() { return false; }
+        if let Some(worker) = &self.sensitivity_worker { worker.retire(); }
+        self.sensitivity_active = None;
+        self.sensitivity_progress = None;
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = true;
+        true
+    }
+
+    pub(crate) fn sensitivity_definition_changed(&mut self, definition: &super::SensitivityDefinition) {
+        if self.sensitivity_active.as_ref().is_some_and(|basis| &basis.definition != definition) {
+            self.retire_sensitivity();
+        }
+    }
+
+    pub(crate) fn sensitivity_status(&self) -> super::SensitivityStatus {
+        if self.sensitivity_canceled { return super::SensitivityStatus::Canceled; }
+        if let Some(basis) = &self.sensitivity_active {
+            if !self.sensitivity_matches(basis) { return super::SensitivityStatus::Outdated; }
+            if let Some((progress, total)) = &self.sensitivity_progress { return super::SensitivityStatus::Pending { completed: progress.load(std::sync::atomic::Ordering::Relaxed), total: *total }; }
+            if let Some(error) = &self.sensitivity_failure { return super::SensitivityStatus::Failed(error.clone()); }
+            if self.sensitivity_table.as_ref().is_some_and(|table| table.basis == *basis) { return super::SensitivityStatus::Ready; }
+        }
+        if self.sensitivity_table.is_some() { super::SensitivityStatus::Outdated } else { super::SensitivityStatus::Idle }
+    }
+
+    pub(crate) fn sensitivity_table(&self) -> Option<Arc<super::SensitivityTable>> {
+        let basis = self.sensitivity_active.as_ref()?;
+        if !self.sensitivity_matches(basis) || self.sensitivity_progress.is_some() || self.sensitivity_failure.is_some() { return None; }
+        self.sensitivity_table.as_ref().filter(|table| table.basis == *basis).cloned()
     }
 
     fn evaluation_stamp(&self) -> Option<EvaluationStamp> {
@@ -690,6 +795,7 @@ impl CalculationPadSession {
     pub fn set_document_options(&mut self, options: DocumentOptions) -> Result<bool, SessionError> {
         self.ensure_editable()?;
         if self.current.as_ref().is_some_and(|document| document.options == options) { return Ok(false); }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         let document = self.current.as_mut().ok_or(SessionError::NoActiveDocument)?;
         document.options = options;
@@ -1122,6 +1228,7 @@ impl CalculationPadSession {
             .checked_add(1)
             .ok_or(SessionError::RevisionExhausted)?;
 
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.history.record(before, after, related, watch_ids);
         let current = self
@@ -1181,6 +1288,7 @@ impl CalculationPadSession {
         if self.history.undo.pop_back().is_none() {
             return false;
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.before);
@@ -1211,6 +1319,7 @@ impl CalculationPadSession {
         if self.history.redo.pop_back().is_none() {
             return false;
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.after);
@@ -1402,6 +1511,7 @@ impl CalculationPadSession {
             current.view.clone(),
             current.options,
         )?;
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         let current = self
             .current
@@ -1440,6 +1550,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Open(id));
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = Some(ActiveDocument::from_loaded(loaded));
         self.history.clear();
@@ -1455,6 +1566,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Close);
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
@@ -1470,6 +1582,7 @@ impl CalculationPadSession {
         if self.is_saved() {
             return Err(SessionError::RecoveryScratchRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
@@ -1509,6 +1622,7 @@ impl CalculationPadSession {
             PendingAction::Open(id) => Some(ActiveDocument::from_loaded(self.store.open(id)?)),
             PendingAction::Close => None,
         };
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = current;
         self.pending = None;
@@ -1517,6 +1631,7 @@ impl CalculationPadSession {
     }
 
     fn install_new(&mut self) {
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = Some(ActiveDocument::new_blank());
         self.history.clear();
@@ -2247,6 +2362,87 @@ mod tests {
         assert_eq!(projection.config.suffix, "ore");
         assert!(projection.current_error.is_none());
         assert!(session.input_replacement(session.revision().unwrap(), id, &projection.descriptor.source_line, "4").unwrap().contains("4 cm"));
+    }
+
+    #[test]
+    fn sensitivity_is_independent_of_manual_main_results_and_supersedes_old_runs() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("ore = 1000\nxp = ore * 56.2\nremaining = 1000000 - xp").unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() }).unwrap();
+        session.request_calculate();
+        let original_result = session.shared_evaluation().unwrap();
+        let source = session.source().unwrap().to_owned();
+        let dirty = session.is_dirty();
+        let undo = session.history.undo.len();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "1000".into(), end: "5000".into(), sampling: super::super::Sampling::Step("1000".into()), outputs: vec!["xp".into(), "remaining".into()] };
+        let old = session.request_sensitivity(definition.clone()).unwrap();
+        let current = session.request_sensitivity(definition).unwrap();
+        assert_ne!(old.generation, current.generation);
+        for _ in 0..20 {
+            wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            session.poll_sensitivity();
+            if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; }
+        }
+        let table = session.sensitivity_table().unwrap();
+        assert_eq!(table.basis, current);
+        assert_eq!(table.rows.len(), 5);
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.is_dirty(), dirty);
+        assert_eq!(session.history.undo.len(), undo);
+        assert!(std::sync::Arc::ptr_eq(&session.shared_evaluation().unwrap(), &original_result));
+        session.request_calculate();
+        assert!(session.sensitivity_table().is_some());
+        session.replace_source("ore = 2000\nxp = ore * 56.2\nremaining = 1000000 - xp").unwrap();
+        assert!(session.sensitivity_table().is_none());
+        assert_eq!(session.sensitivity_status(), super::super::SensitivityStatus::Outdated);
+    }
+
+    #[test]
+    fn sensitivity_cancel_and_retry_retire_the_exact_run() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\ny = x + 1").unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "999".into(), sampling: super::super::Sampling::Count(1000), outputs: vec!["y".into()] };
+        let old = session.request_sensitivity(definition.clone()).unwrap();
+        assert!(session.cancel_sensitivity(&old));
+        assert_eq!(session.sensitivity_status(), super::super::SensitivityStatus::Canceled);
+        assert!(session.sensitivity_table().is_none());
+        let mut retry = definition;
+        retry.sampling = super::super::Sampling::Count(2);
+        let current = session.request_sensitivity(retry).unwrap();
+        assert!(!session.cancel_sensitivity(&old));
+        for _ in 0..20 {
+            wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            session.poll_sensitivity();
+            if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; }
+        }
+        assert_eq!(session.sensitivity_table().unwrap().basis, current);
+    }
+
+    #[test]
+    fn sensitivity_does_not_apply_editable_input_bounds() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\ny = x").unwrap();
+        let id = session.line_id(0).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id, name: "x".into(), unavailable: false, config: Default::default() }], ..Default::default() }).unwrap();
+        session.configure_input(id, super::super::InputConfig { minimum: Some("1".into()), maximum: Some("1".into()), ..Default::default() }).unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: id, start: "0".into(), end: "2".into(), sampling: super::super::Sampling::Count(3), outputs: vec!["y".into()] };
+        session.request_sensitivity(definition).unwrap();
+        for _ in 0..20 { wake_rx.recv_timeout(Duration::from_secs(10)).unwrap(); session.poll_sensitivity(); if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; } }
+        let table = session.sensitivity_table().unwrap();
+        assert_eq!(table.rows.len(), 3);
+        assert!(table.rows.iter().all(|row| row.cells[0].is_ok()));
     }
 
     #[test]

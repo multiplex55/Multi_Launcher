@@ -825,8 +825,9 @@ pub(super) fn evaluate<'a>(
     function_rows: &[Option<Result<(), DiagnosticKind>>],
     function_identifiers: usize,
     cancellation: Option<Arc<AtomicBool>>,
+    aggregate: Option<Arc<script::AggregateWork>>,
 ) -> CalculationEvaluation<'a> {
-    evaluate_analyzed(source, analysis, functions, function_rows, function_identifiers, cancellation, MAX_LOOP_ITERATIONS)
+    evaluate_analyzed(source, analysis, functions, function_rows, function_identifiers, cancellation, aggregate, MAX_LOOP_ITERATIONS)
 }
 
 #[cfg(test)]
@@ -837,7 +838,7 @@ fn evaluate_limited(
 ) -> CalculationEvaluation<'_> {
     let analysis = syntax::SourceAnalysis::new(source);
     let (functions, function_rows, function_identifiers) = script::build_functions(&analysis);
-    evaluate_analyzed(source, &analysis, &functions, &function_rows, function_identifiers, cancellation, iteration_limit)
+    evaluate_analyzed(source, &analysis, &functions, &function_rows, function_identifiers, cancellation, None, iteration_limit)
 }
 
 fn evaluate_analyzed<'a>(
@@ -847,6 +848,7 @@ fn evaluate_analyzed<'a>(
     function_rows: &[Option<Result<(), DiagnosticKind>>],
     function_identifiers: usize,
     cancellation: Option<Arc<AtomicBool>>,
+    aggregate: Option<Arc<script::AggregateWork>>,
     iteration_limit: usize,
 ) -> CalculationEvaluation<'a> {
     let lines = analysis.rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
@@ -1072,10 +1074,11 @@ fn evaluate_analyzed<'a>(
         outcomes[row.line_index] = row.outcome.clone();
     }
     let values = vec![None; outcomes.len()];
-    let mut work = cancellation.map_or_else(
-        script::WorkBudget::default,
-        script::WorkBudget::with_cancellation,
-    );
+    let mut work = match (cancellation, aggregate) {
+        (Some(cancel), Some(aggregate)) => script::WorkBudget::with_analysis(cancel, aggregate),
+        (Some(cancel), None) => script::WorkBudget::with_cancellation(cancel),
+        _ => script::WorkBudget::default(),
+    };
     work.runtime_definitions = Some(Arc::new(definitions));
     let mut execution = Execution {
         expressions,

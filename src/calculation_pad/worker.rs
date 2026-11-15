@@ -29,36 +29,31 @@ pub(super) struct Completion {
     pub result: Result<SessionEvaluation, String>,
 }
 
-#[derive(Default)]
-struct Queue {
-    pending: Option<Request>,
+struct Queue<R, C> {
+    pending: Option<R>,
     active: Option<Arc<AtomicBool>>,
-    completion: Option<Completion>,
+    completion: Option<C>,
     stopped: bool,
 }
+impl<R, C> Default for Queue<R, C> {
+    fn default() -> Self { Self { pending: None, active: None, completion: None, stopped: false } }
+}
 
-struct Shared {
-    queue: Mutex<Queue>,
+struct Shared<R, C> {
+    queue: Mutex<Queue<R, C>>,
     ready: Condvar,
     wake: Arc<dyn Fn() + Send + Sync>,
-    evaluate:
-        Arc<dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync>,
+    evaluate: Arc<dyn Fn(R, Arc<AtomicBool>) -> C + Send + Sync>,
 }
 
-pub(super) struct EvaluationWorker {
-    shared: Arc<Shared>,
+pub(super) struct CoalescingWorker<R, C> {
+    shared: Arc<Shared<R, C>>,
 }
-
-impl EvaluationWorker {
-    pub fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
-        Self::start_with(wake, Arc::new(evaluate))
-    }
-
-    pub(super) fn start_with(
+impl<R: Send + 'static, C: Send + 'static> CoalescingWorker<R, C> {
+    pub fn start(
+        name: &str,
         wake: Arc<dyn Fn() + Send + Sync>,
-        evaluate: Arc<
-            dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync,
-        >,
+        evaluate: Arc<dyn Fn(R, Arc<AtomicBool>) -> C + Send + Sync>,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue::default()),
@@ -68,13 +63,13 @@ impl EvaluationWorker {
         });
         let worker = Arc::clone(&shared);
         std::thread::Builder::new()
-            .name("calculation-pad-evaluator".into())
+            .name(name.into())
             .spawn(move || run(worker))
             .map_err(|error| format!("Could not start calculation worker: {error}"))?;
         Ok(Self { shared })
     }
 
-    pub fn submit(&self, request: Request) {
+    pub fn submit(&self, request: R) {
         let mut queue = self
             .shared
             .queue
@@ -101,7 +96,7 @@ impl EvaluationWorker {
         queue.completion = None;
     }
 
-    pub fn take(&self) -> Option<Completion> {
+    pub fn take(&self) -> Option<C> {
         self.shared
             .queue
             .lock()
@@ -111,7 +106,7 @@ impl EvaluationWorker {
     }
 }
 
-impl Drop for EvaluationWorker {
+impl<R, C> Drop for CoalescingWorker<R, C> {
     fn drop(&mut self) {
         let mut queue = self
             .shared
@@ -127,7 +122,7 @@ impl Drop for EvaluationWorker {
     }
 }
 
-fn run(shared: Arc<Shared>) {
+fn run<R: Send + 'static, C: Send + 'static>(shared: Arc<Shared<R, C>>) {
     loop {
         let (request, cancellation) = {
             let mut queue = shared
@@ -150,13 +145,7 @@ fn run(shared: Arc<Shared>) {
             queue.active = Some(Arc::clone(&cancellation));
             (request, cancellation)
         };
-        let stamp = request.stamp;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (shared.evaluate)(request, Arc::clone(&cancellation))
-        }))
-        .unwrap_or_else(|_| {
-            Err("Calculation worker failed while evaluating this revision.".to_owned())
-        });
+        let result = (shared.evaluate)(request, Arc::clone(&cancellation));
         let should_wake = {
             let mut queue = shared
                 .queue
@@ -164,7 +153,7 @@ fn run(shared: Arc<Shared>) {
                 .unwrap_or_else(|error| error.into_inner());
             queue.active = None;
             if !queue.stopped && !cancellation.load(Ordering::Relaxed) && queue.pending.is_none() {
-                queue.completion = Some(Completion { stamp, result });
+                queue.completion = Some(result);
                 true
             } else {
                 false
@@ -174,6 +163,23 @@ fn run(shared: Arc<Shared>) {
             (shared.wake)();
         }
     }
+}
+
+pub(super) struct EvaluationWorker { inner: CoalescingWorker<Request, Completion> }
+impl EvaluationWorker {
+    pub fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> { Self::start_with(wake, Arc::new(evaluate)) }
+    pub(super) fn start_with(wake: Arc<dyn Fn() + Send + Sync>, evaluate: Arc<dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync>) -> Result<Self, String> {
+        let task = Arc::new(move |request: Request, cancellation: Arc<AtomicBool>| {
+            let stamp = request.stamp;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluate(request, cancellation)))
+                .unwrap_or_else(|_| Err("Calculation worker failed while evaluating this revision.".to_owned()));
+            Completion { stamp, result }
+        });
+        Ok(Self { inner: CoalescingWorker::start("calculation-pad-evaluator", wake, task)? })
+    }
+    pub fn submit(&self, request: Request) { self.inner.submit(request); }
+    pub fn retire(&self) { self.inner.retire(); }
+    pub fn take(&self) -> Option<Completion> { self.inner.take() }
 }
 
 fn evaluate(request: Request, cancellation: Arc<AtomicBool>) -> Result<SessionEvaluation, String> {

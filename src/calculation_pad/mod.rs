@@ -19,6 +19,7 @@ mod persistence;
 mod programmer;
 mod quantity;
 mod session;
+mod sensitivity;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;
@@ -60,7 +61,8 @@ pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindi
 pub(crate) use document::rename::{RenamePlan, RenameScope};
 
 pub(crate) use persistence::{PadViewMetadata, PadInputReference};
-pub(crate) use input::{InputConfig, InputControl, InputKind};
+pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
+pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
 pub(crate) use input::{step_value, slider_values, exact_grid, exact_grid_value, project as project_input};
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, CalculationPolicy, DocumentOptions, DocumentProfile, DocumentId, LineId,
