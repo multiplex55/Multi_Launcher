@@ -27,7 +27,11 @@ pub(super) mod syntax;
 pub use script::CalculationSequence;
 
 pub(crate) fn editor_loop_header(source: &str) -> bool {
-    loops::editor_iterator(source).is_some()
+    loops::editor_block_header(source)
+}
+
+pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
+    loops::editor_control_keyword(source)
 }
 pub(crate) use script::{FUNCTIONS, function_signature_help};
 
@@ -553,6 +557,7 @@ pub enum LineOutcome {
     Blank,
     Comment,
     Definition,
+    Control,
     Continuation { owner_line: usize },
     Value(CalculationValue),
     Error(Diagnostic),
@@ -662,6 +667,7 @@ pub enum DiagnosticKind {
     UnknownName(String),
     UnknownRowReference(String),
     DefinitionReference(String),
+    ControlReference(String),
     ContinuationReference { reference: String, owner_line: usize },
     ForwardReference {
         reference: String,
@@ -730,6 +736,7 @@ impl fmt::Display for Diagnostic {
                 write!(formatter, "no result is available for {reference}")
             }
             Kind::DefinitionReference(reference) => write!(formatter, "{reference} is a function definition and has no result"),
+            Kind::ControlReference(reference) => write!(formatter, "{reference} is a control statement and has no result"),
             Kind::ContinuationReference { reference, owner_line } => write!(
                 formatter, "{reference} is a continuation of line {} and has no result", owner_line + 1
             ),
@@ -2817,6 +2824,9 @@ fn evaluate_line(
             Some(LineOutcome::Value(_)) => {}
             Some(LineOutcome::Definition) => {
                 return LineOutcome::Error(Diagnostic::new(DiagnosticKind::DefinitionReference(reference.name.clone())));
+            }
+            Some(LineOutcome::Control) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ControlReference(reference.name.clone())));
             }
             Some(LineOutcome::Continuation { owner_line }) => {
                 return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ContinuationReference {

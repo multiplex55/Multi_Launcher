@@ -40,12 +40,28 @@ impl SourceAnalysis {
         let mut protected = Vec::new();
         let mut pairs = Vec::new();
         let mut offset = 0;
-        let mut owner = None;
+        let mut owner: Option<usize> = None;
         let mut delimiters: Vec<(u8, usize, usize)> = Vec::new();
 
         for (line_index, raw) in source.split('\n').enumerate() {
             let line = raw.strip_suffix('\r').unwrap_or(raw);
             let range = offset..offset + line.len();
+            if let Some(start) = owner {
+                let original = &source[rows[start].range.clone()];
+                let owner_indent = original.len() - original.trim_start().len();
+                let current_indent = line.len() - line.trim_start().len();
+                let new_assignment = current_indent <= owner_indent
+                    && super::find_assignment_delimiter(line).is_some_and(|delimiter| {
+                        super::parse_assignment_name(line[..delimiter.left_end].trim()).is_ok()
+                    });
+                if new_assignment {
+                    if let Some((_, opening_line, column)) = delimiters.last() {
+                        rows[start].diagnostic = Some(location_error("unclosed delimiter", *opening_line, *column));
+                    }
+                    delimiters.clear();
+                    owner = None;
+                }
+            }
             let statement = owner.unwrap_or(line_index);
             rows.push(SourceRow {
                 range: range.clone(),
@@ -197,5 +213,18 @@ mod tests {
         assert!(format!("{:?}", unclosed.rows[0].diagnostic).contains("line 1, byte 6"));
         let mismatched = SourceAnalysis::new("x = (1\n  + 2]");
         assert!(format!("{:?}", mismatched.rows[0].diagnostic).contains("line 2, byte 6"));
+    }
+
+    #[test]
+    fn recovers_unclosed_statement_at_new_assignment_without_losing_grouped_lines() {
+        let source = "for x in range(0):\r\n    bad = (\r\nafter = bad\r\nindependent = 7\r\nvalue = (1 +\r\n2)\r\n{α#} = 3";
+        let analysis = SourceAnalysis::new(source);
+        assert!(format!("{:?}", analysis.rows[1].diagnostic).contains("unclosed delimiter at line 2"));
+        assert_eq!(analysis.rows[2].owner, None);
+        assert_eq!(analysis.rows[3].owner, None);
+        assert_eq!(analysis.rows[5].owner, Some(4));
+        assert_eq!(analysis.rows[4].text, "value = (1 + 2)");
+        assert_eq!(analysis.rows[6].owner, None);
+        assert_eq!(&source[analysis.rows[3].range.clone()], "independent = 7");
     }
 }

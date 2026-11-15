@@ -213,7 +213,7 @@ impl ComparisonContext {
             let value = match outcome {
                 LineOutcome::Value(value) => Ok(value),
                 LineOutcome::Error(error) => Err(error.to_string()),
-                LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Definition | LineOutcome::Continuation { .. } => Err("No result on this row".into()),
+                LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Definition | LineOutcome::Control | LineOutcome::Continuation { .. } => Err("No result on this row".into()),
             };
             ComparisonSide {
                 input: input.clone(),

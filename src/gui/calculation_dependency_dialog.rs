@@ -192,6 +192,7 @@ impl CalculationDependencyDialog {
                         LineOutcome::Blank => { ui.weak("Blank line"); }
                         LineOutcome::Comment => { ui.weak("Comment"); }
                         LineOutcome::Definition => { ui.weak("Function definition"); }
+                        LineOutcome::Control => { ui.weak("Control statement"); }
                         LineOutcome::Continuation { owner_line } => { ui.weak(format!("Continuation of line {}", owner_line + 1)); }
                     }
                     let go = ui.button("Go to source");

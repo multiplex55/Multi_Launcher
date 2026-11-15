@@ -4794,6 +4794,7 @@ impl CalculationPadDialog {
                     let formatted = match &line.outcome {
                         LineOutcome::Blank | LineOutcome::Comment => continue,
                         LineOutcome::Definition => None,
+                        LineOutcome::Control => None,
                         LineOutcome::Continuation { .. } => None,
                         LineOutcome::Value(value) => {
                             let formatted = result_format::display(value, self.display_preferences);
@@ -4845,6 +4846,7 @@ impl CalculationPadDialog {
                             match &line.outcome {
                                 LineOutcome::Blank | LineOutcome::Comment => {}
                                 LineOutcome::Definition => { row_response = row_response.union(ui.weak("Function definition")); }
+                                LineOutcome::Control => { row_response = row_response.union(ui.weak("Control statement")); }
                                 LineOutcome::Continuation { owner_line } => {
                                     row_response = row_response.union(ui.weak(format!("Continuation of r{}", owner_line + 1)));
                                 }
@@ -5408,7 +5410,7 @@ fn copy_all_results(
         let owner = analysis.rows.get(index).and_then(|row| row.owner).unwrap_or(index);
         let Some(owner_line) = evaluation.lines.get(owner) else { continue; };
         let outcome = match &owner_line.outcome {
-            LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Definition | LineOutcome::Continuation { .. } => None,
+            LineOutcome::Blank | LineOutcome::Comment | LineOutcome::Definition | LineOutcome::Control | LineOutcome::Continuation { .. } => None,
             LineOutcome::Value(value) => Some(
                 value
                     .canonical_result()

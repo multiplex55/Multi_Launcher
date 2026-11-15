@@ -106,7 +106,10 @@ and `!`. Conditions require Boolean values. `if()` is an expression and can
 be used within a larger calculation. Only the selected branch is evaluated.
 Logical operators also evaluate only the operands they need. Programmer
 operators such as `and`, `or`, `not`, `&`, and `|` keep their integer meanings.
-Python-style multiline `if` statements are unsupported. Collection functions
+`if condition:`, `elif condition:`, and `else:` introduce indented
+conditional blocks. Only the selected branch executes. Within a loop,
+`break` exits the nearest loop and `continue` starts its next iteration.
+Collection functions
 `sum`, `average`, `median`, `min`, `max`, and `stdev` accept vectors or ranges.
 For example, `median(range(1, 6))` is 3. `stdev` computes population standard
 deviation. Empty `sum` is zero and the other statistics reject an empty input.

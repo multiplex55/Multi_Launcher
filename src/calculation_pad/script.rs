@@ -1371,6 +1371,7 @@ fn value_at(
             Err(DiagnosticKind::UnknownRowReference(name.to_owned()))
         }
         Some(LineOutcome::Definition) => Err(DiagnosticKind::DefinitionReference(name.to_owned())),
+        Some(LineOutcome::Control) => Err(DiagnosticKind::ControlReference(name.to_owned())),
         Some(LineOutcome::Continuation { owner_line }) => Err(DiagnosticKind::ContinuationReference {
             reference: name.to_owned(), owner_line: *owner_line,
         }),

@@ -328,7 +328,12 @@ pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
                 let owner_line = functions.declarations.iter()
                     .find(|function| function.body_ranges.iter().any(|range| range.contains(&token_range.start)))
                     .map_or(physical_owner, |function| function.line);
-                if matches!(token, "for" | "in") || functions.declarations.iter().any(|function| function.keyword_range == token_range) {
+                let contextual_control = analysis.rows.get(line_index).is_some_and(|row| {
+                    row.owner.is_none()
+                        && crate::calculation_pad::editor_control_keyword(&row.text) == Some(token)
+                        && token_range.start == row.range.start + row.text.len() - row.text.trim_start().len()
+                });
+                if contextual_control || matches!(token, "for" | "in") || functions.declarations.iter().any(|function| function.keyword_range == token_range) {
                     SyntaxKind::Keyword
                 } else if functions.declarations.iter().any(|function| function.parameter_ranges.contains(&token_range)) {
                     SyntaxKind::Name
@@ -826,6 +831,21 @@ mod tests {
         let region = fold_regions(source).into_iter().find(|region| region.header == 0).unwrap();
         let projection = Projection::new(source, &[region.hidden]);
         assert_eq!(projection.visible, "for item in range(\r\nafter = 3");
+    }
+
+    #[test]
+    fn conditional_header_fold_and_contextual_keywords_preserve_source() {
+        let source = "if (\r\n  score > 80):\r\n    score += 10\r\nelse:\r\n    score = 0\r\nif = 2\r\nbreak += 1";
+        let regions = fold_regions(source);
+        let first = regions.iter().find(|region| region.header == 0).unwrap();
+        let projection = Projection::new(source, &[first.hidden.clone()]);
+        assert!(projection.visible.contains("else:\r\n"));
+        assert!(!projection.visible.contains("score += 10"));
+        let spans = syntax_spans(source);
+        let keywords = spans.iter().filter(|span| span.kind == SyntaxKind::Keyword)
+            .map(|span| &source[span.range.clone()]).collect::<Vec<_>>();
+        assert_eq!(keywords, ["if", "else"]);
+        assert_eq!(projection.apply_edit(source, &projection.visible).unwrap(), source);
     }
 
     #[test]

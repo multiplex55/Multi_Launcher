@@ -5,6 +5,66 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 const MAX_LOOP_DEPTH: usize = 8;
 const MAX_LOOP_ITERATIONS: usize = 10_000;
+const MAX_BLOCK_DEPTH: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchKind { If, Elif, Else }
+
+struct BranchHeader {
+    kind: BranchKind,
+    expression: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow { Next, Break, Continue }
+
+struct Branch {
+    line: usize,
+    body: Vec<Statement>,
+    otherwise: bool,
+}
+
+fn branch_header(source: &str) -> Option<Result<BranchHeader, DiagnosticKind>> {
+    let text = source.trim();
+    if text == "else:" {
+        return Some(Ok(BranchHeader { kind: BranchKind::Else, expression: None }));
+    }
+    for (keyword, kind) in [("if", BranchKind::If), ("elif", BranchKind::Elif)] {
+        let Some(rest) = text.strip_prefix(keyword) else { continue; };
+        if !(rest.starts_with(char::is_whitespace) || rest.starts_with('(')) || !rest.trim_end().ends_with(':') {
+            continue;
+        }
+        let expression = rest.trim_end().strip_suffix(':').unwrap().trim();
+        if expression.is_empty() || find_assignment_delimiter(expression).is_some() {
+            return Some(Err(DiagnosticKind::Script("conditional header requires a Boolean expression".into())));
+        }
+        return Some(Ok(BranchHeader { kind, expression: Some(expression.to_owned()) }));
+    }
+    None
+}
+
+fn flow_statement(source: &str) -> Option<Flow> {
+    match source.trim() {
+        "break" => Some(Flow::Break),
+        "continue" => Some(Flow::Continue),
+        _ => None,
+    }
+}
+
+pub(super) fn editor_block_header(source: &str) -> bool {
+    header(source).is_some() || branch_header(source).is_some()
+}
+
+pub(super) fn editor_control_keyword(source: &str) -> Option<&'static str> {
+    if let Some(Ok(header)) = branch_header(source) {
+        return Some(match header.kind { BranchKind::If => "if", BranchKind::Elif => "elif", BranchKind::Else => "else" });
+    }
+    match flow_statement(source) {
+        Some(Flow::Break) => Some("break"),
+        Some(Flow::Continue) => Some("continue"),
+        _ => None,
+    }
+}
 
 struct LoopHeader {
     name: String,
@@ -21,6 +81,8 @@ pub(super) fn editor_iterator(source: &str) -> Option<String> {
 enum Statement {
     Line(usize),
     Definition,
+    Flow { line: usize, flow: Flow },
+    Conditional { branches: Vec<Branch> },
     Loop {
         line: usize,
         name: String,
@@ -45,6 +107,13 @@ fn affected_rows(statements: &[Statement], output: &mut Vec<usize>) {
         match statement {
             Statement::Line(line) => output.push(*line),
             Statement::Definition => {}
+            Statement::Flow { line, .. } => output.push(*line),
+            Statement::Conditional { branches } => {
+                for branch in branches {
+                    output.push(branch.line);
+                    affected_rows(&branch.body, output);
+                }
+            }
             Statement::Loop { line, body, .. } => {
                 output.push(*line);
                 affected_rows(body, output);
@@ -112,7 +181,9 @@ fn header(source: &str) -> Option<Result<LoopHeader, DiagnosticKind>> {
 }
 
 pub(super) fn contains_loop_in(analysis: &syntax::SourceAnalysis) -> bool {
-    analysis.rows.iter().any(|row| row.owner.is_none() && header(&row.text).is_some())
+    analysis.rows.iter().any(|row| row.owner.is_none() && (
+        header(&row.text).is_some() || branch_header(&row.text).is_some() || flow_statement(&row.text).is_some()
+    ))
 }
 
 fn indentation(line: &str) -> Result<usize, DiagnosticKind> {
@@ -143,7 +214,8 @@ fn block(
     errors: &mut [Option<DiagnosticKind>],
     index: &mut usize,
     indent: usize,
-    depth: usize,
+    loop_depth: usize,
+    block_depth: usize,
 ) -> Vec<Statement> {
     let mut statements = Vec::new();
     while *index < lines.len() {
@@ -179,17 +251,69 @@ fn block(
             }
             continue;
         }
+        if let Some(flow) = flow_statement(lines[line]) {
+            if loop_depth == 0 {
+                errors[line] = Some(DiagnosticKind::Script("break and continue require a loop".into()));
+                statements.push(Statement::Line(line));
+            } else {
+                statements.push(Statement::Flow { line, flow });
+            }
+            continue;
+        }
+        if let Some(branch) = branch_header(lines[line]) {
+            match branch {
+                Ok(branch) if branch.kind == BranchKind::If => {
+                    let mut branches = Vec::new();
+                    let mut branch_line = line;
+                    let mut current_branch = branch;
+                    loop {
+                        let next = next_statement(lines, *index);
+                        let body_indent = lines.get(next).and_then(|line| indentation(line).ok());
+                        let body = if block_depth >= MAX_BLOCK_DEPTH {
+                            errors[branch_line] = Some(DiagnosticKind::Script("block nesting exceeds 32 levels".into()));
+                            Vec::new()
+                        } else if let Some(body_indent) = body_indent.filter(|value| *value > indent) {
+                            block(lines, headers, function_rows, errors, index, body_indent, loop_depth, block_depth + 1)
+                        } else {
+                            errors[branch_line] = Some(DiagnosticKind::Script("conditional branch requires an indented body".into()));
+                            Vec::new()
+                        };
+                        let otherwise = current_branch.kind == BranchKind::Else;
+                        branches.push(Branch { line: branch_line, body, otherwise });
+                        if otherwise { break; }
+                        let next = next_statement(lines, *index);
+                        let Some(next_line) = lines.get(next) else { break; };
+                        if indentation(next_line).ok() != Some(indent) { break; }
+                        let Some(Ok(next_branch)) = branch_header(next_line) else { break; };
+                        if next_branch.kind == BranchKind::If { break; }
+                        *index = next + 1;
+                        branch_line = next;
+                        current_branch = next_branch;
+                    }
+                    statements.push(Statement::Conditional { branches });
+                }
+                Ok(_) => {
+                    errors[line] = Some(DiagnosticKind::Script("orphan elif or else branch".into()));
+                    statements.push(Statement::Line(line));
+                }
+                Err(error) => {
+                    errors[line] = Some(error);
+                    statements.push(Statement::Line(line));
+                }
+            }
+            continue;
+        }
         match &headers[line] {
             Some(Ok(header)) => {
                 let next = next_statement(lines, *index);
                 let body_indent = lines.get(next).and_then(|line| indentation(line).ok());
-                if depth >= MAX_LOOP_DEPTH {
+                if loop_depth >= MAX_LOOP_DEPTH || block_depth >= MAX_BLOCK_DEPTH {
                     errors[line] = Some(DiagnosticKind::Script(
                         "loop nesting exceeds 8 levels".into(),
                     ));
                     statements.push(Statement::Line(line));
                 } else if let Some(body_indent) = body_indent.filter(|value| *value > indent) {
-                    let body = block(lines, headers, function_rows, errors, index, body_indent, depth + 1);
+                    let body = block(lines, headers, function_rows, errors, index, body_indent, loop_depth + 1, block_depth + 1);
                     statements.push(Statement::Loop {
                         line,
                         name: header.name.clone(),
@@ -369,10 +493,64 @@ impl Execution {
         }
     }
 
-    fn execute(&mut self, statements: &[Statement], path: &mut Vec<usize>) -> Result<(), Fault> {
+    fn execute(&mut self, statements: &[Statement], path: &mut Vec<usize>) -> Result<Flow, Fault> {
         for statement in statements {
             match statement {
                 Statement::Definition => {}
+                Statement::Flow { line, flow } => {
+                    self.work.charge(1).map_err(|kind| Fault { line: *line, kind, iteration: path.clone() })?;
+                    self.publish(*line, LineOutcome::Control, Vec::new(), path);
+                    return Ok(*flow);
+                }
+                Statement::Conditional { branches } => {
+                    let mut rows = Vec::new();
+                    for branch in branches {
+                        rows.push(branch.line);
+                        affected_rows(&branch.body, &mut rows);
+                    }
+                    if let Some(&bad_line) = rows.iter().find(|&&row| self.parse_errors[row].is_some()) {
+                        let fault = Fault {
+                            line: bad_line,
+                            kind: self.parse_errors[bad_line].clone().unwrap_or(DiagnosticKind::InvalidExpression),
+                            iteration: path.clone(),
+                        };
+                        self.publish(bad_line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
+                        if !path.is_empty() { return Err(fault); }
+                        continue;
+                    }
+                    for branch in branches {
+                        let selected = if branch.otherwise {
+                            self.work.charge(1).map_err(|kind| Fault { line: branch.line, kind, iteration: path.clone() })?;
+                            self.publish(branch.line, LineOutcome::Control, Vec::new(), path);
+                            true
+                        } else {
+                            match self.expression(branch.line, path) {
+                                Ok((CalculationValue::Boolean(value), dependencies)) => {
+                                    self.publish(branch.line, LineOutcome::Value(CalculationValue::Boolean(value)), dependencies, path);
+                                    value
+                                }
+                                Ok(_) => {
+                                    let fault = Fault { line: branch.line, kind: DiagnosticKind::Script("conditional expression requires a Boolean value".into()), iteration: path.clone() };
+                                    self.publish(branch.line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
+                                    if !path.is_empty() { return Err(fault); }
+                                    break;
+                                }
+                                Err(fault) => {
+                                    self.publish(branch.line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
+                                    if !path.is_empty() || matches!(fault.kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled) { return Err(fault); }
+                                    break;
+                                }
+                            }
+                        };
+                        if selected {
+                            match self.execute(&branch.body, path)? {
+                                Flow::Next => {}
+                                flow => return Ok(flow),
+                            }
+                            break;
+                        }
+                    }
+                }
                 Statement::Line(line) => {
                     let result = self.expression(*line, path);
                     match result {
@@ -513,6 +691,7 @@ impl Execution {
                             self.execute(body, path)
                         };
                         path.pop();
+                        let break_requested = matches!(&result, Ok(Flow::Break));
                         if let Err(fault) = result {
                             let attempted = old_counts
                                 .iter()
@@ -575,6 +754,7 @@ impl Execution {
                             }
                             break;
                         }
+                        if break_requested { break; }
                     }
                     for (index, count) in old_counts {
                         if path.is_empty() || self.execution_counts[index] > count {
@@ -588,7 +768,7 @@ impl Execution {
                 }
             }
         }
-        Ok(())
+        Ok(Flow::Next)
     }
 
     fn poison(
@@ -699,6 +879,13 @@ fn evaluate_analyzed<'a>(
             if let Some(Err(error)) = &function_rows[index] { errors[index] = Some(error.clone()); }
             continue;
         }
+        let branch = branch_header(line);
+        if flow_statement(line).is_some() || matches!(&branch, Some(Ok(BranchHeader { kind: BranchKind::Else, .. }))) {
+            prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+            expressions.push(None);
+            compound_targets.push(None);
+            continue;
+        }
         if canceled
             || cancellation
                 .as_ref()
@@ -717,7 +904,10 @@ fn evaluate_analyzed<'a>(
         let text = line.trim();
         let expression = match &headers[index] {
             Some(Ok(header)) => header.expression.as_str(),
-            _ => text,
+            _ => match &branch {
+                Some(Ok(branch)) => branch.expression.as_deref().unwrap_or(text),
+                _ => text,
+            },
         };
         let visible = functions.partition_point(|function| function.line < index);
         let mut item = prepare_line_with_functions(range, expression, &mut count, &declared, &functions[..visible]);
@@ -736,7 +926,7 @@ fn evaluate_analyzed<'a>(
         if let Some(Err(error)) = &headers[index] {
             item.diagnostic = Some(Diagnostic::new(error.clone()));
         }
-        let rhs = if headers[index].is_some() {
+        let rhs = if headers[index].is_some() || branch.is_some() {
             expression
         } else {
             find_assignment_delimiter(text).map_or(text, |delimiter| text[delimiter.right_start..].trim())
@@ -774,7 +964,7 @@ fn evaluate_analyzed<'a>(
         prepared.push(item);
     }
     let mut index = 0;
-    let statements = block(&lines, &headers, function_rows, &mut errors, &mut index, 0, 0);
+    let statements = block(&lines, &headers, function_rows, &mut errors, &mut index, 0, 0, 0);
     let definitions = assignment_definitions(&prepared);
     let parse_errors = prepared
         .iter()
@@ -828,9 +1018,18 @@ fn evaluate_analyzed<'a>(
     let mut loop_rows = Vec::new();
     fn collect_loop_rows(statements: &[Statement], rows: &mut Vec<usize>) {
         for statement in statements {
-            if let Statement::Loop { line, body, .. } = statement {
-                rows.push(*line);
-                affected_rows(body, rows);
+            match statement {
+                Statement::Loop { line, body, .. } => {
+                    rows.push(*line);
+                    affected_rows(body, rows);
+                }
+                Statement::Conditional { branches } => {
+                    for branch in branches {
+                        rows.push(branch.line);
+                        affected_rows(&branch.body, rows);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -926,6 +1125,143 @@ mod tests {
             LineOutcome::Value(CalculationValue::Scalar(value)) => *value,
             other => panic!("expected scalar at line {line}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn conditional_branches_and_loop_control_run_lazily() {
+        let source = concat!(
+            "score = 85\n",
+            "if score >= 80:\n",
+            "  score += 10\n",
+            "elif score > 0:\n",
+            "  score = 1 / 0\n",
+            "else:\n",
+            "  score = 0\n",
+            "score"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 7), 95.0);
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })));
+
+        let source = concat!(
+            "first = 0\n",
+            "for n in range(1, 15):\n",
+            "  if n % 7 == 0:\n",
+            "    first = n\n",
+            "    break\n",
+            "first"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 5), 7.0);
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Control));
+
+        let source = concat!(
+            "total = 0\n",
+            "for n in range(1, 11):\n",
+            "  if n % 2 == 0:\n",
+            "    continue\n",
+            "  total += n\n",
+            "total"
+        );
+        let document = CalculationDocument::new(source);
+        assert_eq!(scalar(&document.evaluate(), 5), 25.0);
+    }
+
+    #[test]
+    fn conditional_structure_contextual_names_and_failures_are_preserved() {
+        let source = concat!(
+            "if = 2\n",
+            "break = 3\n",
+            "break += 1\n",
+            "if(false, 1 / 0, if + break)"
+        );
+        let document = CalculationDocument::new(source);
+        assert_eq!(scalar(&document.evaluate(), 3), 6.0);
+
+        let source = concat!(
+            "base = 4\n",
+            "if false:\n",
+            "  if true:\n",
+            "  misplaced = 5\n",
+            "else:\n",
+            "  base = 8\n",
+            "base\n",
+            "continue\n",
+            "elif true:\n",
+            "  1"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert!(result.lines.iter().any(|line| matches!(&line.outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::Script(message) }) if message.contains("indented body"))));
+        assert!(matches!(result.lines[7].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[8].outcome, LineOutcome::Error(_)));
+
+        let document = CalculationDocument::new("if 1:\n  x = 2\n3");
+        assert!(matches!(document.evaluate().lines[0].outcome, LineOutcome::Error(_)));
+
+        let document = CalculationDocument::new("x = 4\nif false:\n  x = 9\nx");
+        assert_eq!(scalar(&document.evaluate(), 3), 4.0);
+
+        let document = CalculationDocument::new("if false:\n  x = 2\nelif false:\n  x = 3\nelse:\n  x = 5\nx");
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 6), 5.0);
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Control));
+
+        let document = CalculationDocument::new("if false:\n  only_skipped = 2\nonly_skipped");
+        assert!(matches!(document.evaluate().lines[2].outcome, LineOutcome::Error(_)));
+    }
+
+    #[test]
+    fn nested_loop_control_preserves_bindings_and_real_errors_roll_back() {
+        let source = concat!(
+            "count = 0\n",
+            "for outer in range(3):\n",
+            "  for inner in range(3):\n",
+            "    if inner == 1:\n",
+            "      break\n",
+            "    count += 1\n",
+            "count"
+        );
+        let document = CalculationDocument::new(source);
+        assert_eq!(scalar(&document.evaluate(), 6), 3.0);
+
+        let source = concat!(
+            "total = 1\n",
+            "for n in range(3):\n",
+            "  total += 1\n",
+            "  if n == 1:\n",
+            "    bad = 1 / 0\n",
+            "total"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert!(matches!(result.lines[1].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[5].outcome, LineOutcome::Error(_)));
+    }
+
+    #[test]
+    fn conditional_function_calls_and_physical_control_rows_remain_distinct() {
+        let source = concat!(
+            "fn positive(x) = x > 0\r\n",
+            "total = 0\r\n",
+            "for n in range(1, 3):\r\n",
+            "  if (positive(\r\n",
+            "    n)):\r\n",
+            "    total += n\r\n",
+            "    break\r\n",
+            "total\r\n",
+            "r7"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(result.source, source);
+        assert_eq!(scalar(&result, 7), 1.0);
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Continuation { owner_line: 3 }));
+        assert!(matches!(result.lines[6].outcome, LineOutcome::Control));
+        assert!(matches!(result.lines[8].outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::ControlReference(_) })));
+        assert!(result.lines[3].dependency_indices.contains(&0));
     }
 
     #[test]
