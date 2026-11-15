@@ -551,6 +551,15 @@ pub(crate) struct RenamePreview {
 }
 
 impl CalculationPadSession {
+    pub(crate) fn rename_target(&self, caret: usize) -> Result<(String, super::RenameScope), String> {
+        if self.pending.is_some() { return Err("Resolve the pending document transition first.".into()); }
+        let source = self.source().ok_or("No document is open.")?;
+        super::document::rename::target(source, caret)
+    }
+    pub(crate) fn rename_preview_is_current(&self, preview: &RenamePreview) -> bool {
+        self.pending.is_none() && self.evaluation_basis() == Some(preview.basis)
+            && self.current.as_ref().is_some_and(|current| current.view == preview.view)
+    }
     pub(crate) fn preview_rename(&self, caret: usize, replacement: &str) -> Result<RenamePreview, String> {
         let current = self.current.as_ref().ok_or("No document is open.")?;
         if self.pending.is_some() { return Err("Resolve the pending document transition first.".into()); }

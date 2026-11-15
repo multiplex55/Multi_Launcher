@@ -154,6 +154,19 @@ struct InputDraft {
 #[derive(Clone)]
 struct InputCommit { id: LineId, original: String, revision: u64, value: String }
 
+#[derive(Clone)]
+struct RenameState {
+    basis: crate::calculation_pad::EvaluationBasis,
+    caret: usize,
+    old_name: String,
+    scope: crate::calculation_pad::RenameScope,
+    draft: String,
+    preview: Option<crate::calculation_pad::RenamePreview>,
+    error: Option<String>,
+}
+
+enum RenameAction { Open(usize), Draft(String), Preview(String), Apply, Cancel }
+
 pub(crate) struct CalculationPadDialog {
     pub(crate) open: bool,
     focus_source: bool,
@@ -180,6 +193,8 @@ pub(crate) struct CalculationPadDialog {
     pad_view: PadView,
     completion: CompletionState,
     folds: FoldState,
+    rename: Option<RenameState>,
+    rename_context_caret: Option<(crate::calculation_pad::EvaluationBasis, usize)>,
     editor_tool_focus_pending: bool,
     selected_result: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
     active_source_line: Option<(DocumentIncarnation, DocumentId, u64, LineId)>,
@@ -207,6 +222,8 @@ pub(crate) struct CalculationPadDialog {
     test_editor_scroll_id: Option<egui::Id>,
     #[cfg(test)]
     test_editor_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_rename_context_button: Option<egui::Rect>,
     #[cfg(test)]
     test_editor_clip: Option<egui::Rect>,
     #[cfg(test)]
@@ -405,6 +422,8 @@ struct HostEffects {
     editor_tool_focus_acknowledged: bool,
     selected_result: Option<LineId>,
     editor_primary_caret: Option<usize>,
+    rename_action: Option<RenameAction>,
+    rename_context_caret: Option<(crate::calculation_pad::EvaluationBasis, usize)>,
     result_scroll: Option<ResultScrollUpdate>,
     split_action: Option<SplitAction>,
     editor_history_action: Option<bool>,
@@ -543,6 +562,8 @@ impl CalculationPadDialog {
             editor_tool_focus_acknowledged: false,
             selected_result: None,
             editor_primary_caret: None,
+            rename_action: None,
+            rename_context_caret: None,
             result_scroll: None,
             split_action: None,
             editor_history_action: None,
@@ -691,6 +712,8 @@ impl CalculationPadDialog {
             pad_view: PadView::default(),
             completion: CompletionState::default(),
             folds: FoldState::default(),
+            rename: None,
+            rename_context_caret: None,
             editor_tool_focus_pending: false,
             selected_result: None,
             active_source_line: None,
@@ -718,6 +741,8 @@ impl CalculationPadDialog {
             test_editor_scroll_id: None,
             #[cfg(test)]
             test_editor_rect: None,
+            #[cfg(test)]
+            test_rename_context_button: None,
             #[cfg(test)]
             test_editor_clip: None,
             #[cfg(test)]
@@ -1708,6 +1733,53 @@ impl CalculationPadDialog {
         if let Err(message) = self.session.set_view_metadata(view) { self.error = Some(message.into()); }
     }
 
+    fn rename_ui(&self, ui: &mut egui::Ui, effects: &mut HostEffects) {
+        let Some(state) = &self.rename else { return; };
+        let current = Some(state.basis) == self.session.evaluation_basis();
+        let preview_current = state.preview.as_ref().is_some_and(|preview| self.session.rename_preview_is_current(preview));
+        ui.group(|ui| {
+            ui.heading("Rename Variable");
+            let scope = match &state.scope {
+                crate::calculation_pad::RenameScope::Document => "Document scope, including loop bindings".to_owned(),
+                crate::calculation_pad::RenameScope::Parameter { owner_line } => format!("Parameter of function at r{}", owner_line + 1),
+            };
+            ui.label(format!("{} · {scope}", state.old_name));
+            let mut draft = state.draft.clone();
+            ui.horizontal(|ui| {
+                ui.label("New name:");
+                if ui.text_edit_singleline(&mut draft).changed() { effects.rename_action = Some(RenameAction::Draft(draft.clone())); }
+                if ui.add_enabled(current, egui::Button::new("Preview")).clicked() { effects.rename_action = Some(RenameAction::Preview(draft.clone())); }
+                if ui.add_enabled(current && preview_current && draft == state.draft, egui::Button::new("Apply")).clicked() { effects.rename_action = Some(RenameAction::Apply); }
+                if ui.button("Cancel").clicked() { effects.rename_action = Some(RenameAction::Cancel); }
+            });
+            if !current { ui.colored_label(ui.visuals().warn_fg_color, "Document changed; start a new rename."); }
+            if current && state.preview.is_some() && !preview_current { ui.colored_label(ui.visuals().warn_fg_color, "Related references changed; preview again."); }
+            if let Some(error) = &state.error { ui.colored_label(ui.visuals().error_fg_color, error); }
+            if preview_current && let Some(preview) = &state.preview {
+                ui.label(format!("{} occurrence(s) on {} physical line(s)", preview.plan.ranges.len(), preview.plan.lines.len()));
+                let before = self.session.source().unwrap_or_default().lines().collect::<Vec<_>>();
+                let after = preview.plan.source.lines().collect::<Vec<_>>();
+                egui::ScrollArea::vertical().max_height(150.0).id_salt("rename-preview").show_rows(ui, 24.0, preview.plan.lines.len(), |ui, range| {
+                    for &line in &preview.plan.lines[range] {
+                        let text = format!("r{}: {} → {}", line + 1, before.get(line).copied().unwrap_or(""), after.get(line).copied().unwrap_or(""));
+                        ui.add(egui::Label::new(&text).truncate()).on_hover_text(text);
+                    }
+                });
+            }
+        });
+    }
+
+    fn refresh_related_view(&mut self) {
+        let metadata = self.session.view_metadata().cloned().unwrap_or_default();
+        let same = self.pad_view.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable)).eq(metadata.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable)))
+            && self.pad_view.watches == metadata.watches;
+        if same { return; }
+        self.pad_view.inputs = metadata.inputs.into_iter().map(|input| InputSelection {
+            id: input.id, name: input.name, unavailable: input.unavailable, draft: None,
+        }).collect();
+        self.pad_view.watches = metadata.watches;
+    }
+
     fn restore_view_from_session(&mut self) {
         let metadata = self.session.view_metadata().cloned().unwrap_or_default();
         self.pad_view = PadView {
@@ -2183,6 +2255,16 @@ impl CalculationPadDialog {
                         &mut fold_request, identity, viewport_id, effects,
                     );
                     let popup_owns_input = popup_was_open || egui::Popup::is_any_open(ui.ctx());
+                    if actions_allowed && !popup_owns_input && self.session.pending_transition().is_none()
+                        && ui.memory(|memory| memory.has_focus(editor_id))
+                        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2))
+                        && let Some(selection) = egui::widgets::text_edit::TextEditState::load(ctx, editor_id).and_then(|state| state.cursor.char_range())
+                    {
+                        let projection = self.fold_projection(&source, &self.folds).1;
+                        if let Some(caret) = projection.byte_at_character(selection.primary.index.0).and_then(|byte| projection.source_byte(byte)) {
+                            effects.rename_action = Some(RenameAction::Open(caret));
+                        }
+                    }
                     if !popup_owns_input && effects.config_editor_focus.is_none() {
                         effects.config_editor_focus = Some(None);
                     }
@@ -2192,6 +2274,7 @@ impl CalculationPadDialog {
                     if view != self.pad_view || effects.input_commit.is_some() { effects.pad_view = Some(view); }
                     let mut tools = effects.editor_tools.clone().unwrap_or_else(|| self.editor_tools.clone());
                     self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input);
+                    self.rename_ui(ui, effects);
                     if tools != self.editor_tools { effects.editor_tools = Some(tools); }
                     let mut completion = effects.completion.clone().unwrap_or_else(|| self.completion.clone());
                     let mut staged_save_as_name = self.save_as_name.clone();
@@ -2210,6 +2293,8 @@ impl CalculationPadDialog {
                         &mut effects.inspector_selection,
                         &mut effects.inspector_caret,
                         &mut effects.editor_primary_caret,
+                        &mut effects.rename_action,
+                        &mut effects.rename_context_caret,
                         &mut effects.open_inspector,
                         &mut effects.dependency_applied,
                         &mut effects.result_navigation,
@@ -2567,6 +2652,8 @@ impl CalculationPadDialog {
             host.editor_tool_focus_acknowledged = false;
             host.selected_result = None;
             host.editor_primary_caret = None;
+            host.rename_action = None;
+            host.rename_context_caret = None;
             host.result_scroll = None;
         }
 
@@ -2620,18 +2707,57 @@ impl CalculationPadDialog {
             || host.editor_tool_focus.is_some()
             || host.selected_result.is_some()
             || host.editor_primary_caret.is_some()
+            || host.rename_action.is_some()
+            || host.rename_context_caret.is_some()
             || host.result_scroll.is_some()
             || host.close_requested
             || host.focus_viewport
             || self.host_state.bootstrap_pending();
         let host_request_requested = host.host_request.is_some();
-        let accepted_source_or_history =
-            host.edited_source.is_some() || host.editor_history_action.is_some();
+        if let Some(caret) = host.rename_context_caret.take() { self.rename_context_caret = Some(caret); }
+        let mut renamed = false;
+        if host.document_basis == current_basis && host.evaluation_basis == self.session.evaluation_basis()
+            && host.edited_source.is_none() && host.editor_history_action.is_none()
+            && host.pad_view.is_none() && host.input_commit.is_none()
+            && host.intent.is_none() && host.host_request.is_none() && !host.close_requested && !host.native_close_requested
+            && self.session.pending_transition().is_none()
+            && let Some(action) = host.rename_action.take()
+        {
+            match action {
+                RenameAction::Open(caret) => match self.session.rename_target(caret) {
+                    Ok((old_name, scope)) => if let Some(basis) = self.session.evaluation_basis() {
+                        self.rename = Some(RenameState { basis, caret, old_name, scope, draft: String::new(), preview: None, error: None });
+                    },
+                    Err(error) => self.error = Some(error),
+                },
+                RenameAction::Draft(draft) => if let Some(state) = self.rename.as_mut() {
+                    state.draft = draft; state.preview = None; state.error = None;
+                },
+                RenameAction::Preview(draft) => if let Some(state) = self.rename.as_mut() {
+                    state.draft = draft;
+                    if Some(state.basis) == self.session.evaluation_basis() {
+                        match self.session.preview_rename(state.caret, &state.draft) {
+                            Ok(preview) => { state.preview = Some(preview); state.error = None; }
+                            Err(error) => { state.preview = None; state.error = Some(error); }
+                        }
+                    }
+                },
+                RenameAction::Apply => if let Some(state) = self.rename.as_mut() && let Some(preview) = state.preview.as_ref() {
+                    match self.session.apply_rename(preview) {
+                        Ok(true) => { renamed = true; self.rename = None; host.pad_view = None; }
+                        Ok(false) => { state.error = Some("No rename was applied.".into()); }
+                        Err(error) => { state.preview = None; state.error = Some(error); }
+                    }
+                },
+                RenameAction::Cancel => self.rename = None,
+            }
+        }
+        let accepted_source_or_history = renamed || host.edited_source.is_some() || host.editor_history_action.is_some();
         let before_document = self
             .session
             .document_incarnation()
             .zip(self.session.current_id());
-        let source_was_edited = host.edited_source.is_some();
+        let source_was_edited = renamed || host.edited_source.is_some();
         let old_source = (!self.pad_view.inputs.is_empty() && accepted_source_or_history)
             .then(|| self.session.source().unwrap_or_default().to_owned());
         let old_ids = old_source.as_ref().map(|_| self.session.line_ids().unwrap_or_default().to_vec());
@@ -2662,17 +2788,19 @@ impl CalculationPadDialog {
                 Some((id, state, projection.source_character(source, selection.primary.index.0)?, projection.source_character(source, selection.secondary.index.0)?))
             })
         } else { None };
-        match host.editor_history_action {
+        let history_changed = match host.editor_history_action {
             Some(true) => {
-                self.session.undo();
+                let changed = self.session.undo();
                 ctx.request_repaint();
+                changed
             }
             Some(false) => {
-                self.session.redo();
+                let changed = self.session.redo();
                 ctx.request_repaint();
+                changed
             }
-            None => {}
-        }
+            None => false,
+        };
         if let Some((id, mut state, primary, secondary)) = history_caret
             && let Some(source) = self.session.source()
         {
@@ -2684,6 +2812,7 @@ impl CalculationPadDialog {
             state.cursor.set_char_range(Some(selection));
             state.store(ctx, id);
         }
+        if renamed || history_changed { self.refresh_related_view(); host.pad_view = None; }
         if self.session.pending_transition().is_none()
             && let Some(view) = host.pad_view.take()
         { self.pad_view = view; }
@@ -2832,6 +2961,8 @@ impl CalculationPadDialog {
                 self.restore_view_from_session();
             }
             self.completion = CompletionState::default();
+            self.rename = None;
+            self.rename_context_caret = None;
             self.editor_tools = EditorTools::default();
             self.folds.collapsed.clear();
             self.selected_result = None;
@@ -3680,6 +3811,8 @@ impl CalculationPadDialog {
         inspector_selection: &mut Option<LineId>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         editor_primary_caret: &mut Option<usize>,
+        rename_action: &mut Option<RenameAction>,
+        rename_context_caret: &mut Option<(crate::calculation_pad::EvaluationBasis, usize)>,
         open_inspector: &mut bool,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         result_navigation: &mut Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
@@ -3770,6 +3903,8 @@ impl CalculationPadDialog {
                             edited_source,
                             inspector_caret,
                             editor_primary_caret,
+                            rename_action,
+                            rename_context_caret,
                             dependency_applied,
                             display_preferences,
                             display_selection,
@@ -3827,6 +3962,8 @@ impl CalculationPadDialog {
                 edited_source,
                 inspector_caret,
                 editor_primary_caret,
+                rename_action,
+                rename_context_caret,
                 dependency_applied,
                 display_preferences,
                 display_selection,
@@ -4044,6 +4181,8 @@ impl CalculationPadDialog {
         edited_source: &mut Option<String>,
         inspector_caret: &mut Option<std::ops::Range<usize>>,
         editor_primary_caret: &mut Option<usize>,
+        rename_action: &mut Option<RenameAction>,
+        rename_context_caret: &mut Option<(crate::calculation_pad::EvaluationBasis, usize)>,
         dependency_applied: &mut Option<DependencyEditorUpdate>,
         display_preferences: &mut Option<crate::settings::CalculationPadDisplayPreferences>,
         display_selection: &mut Option<egui::text::CCursorRange>,
@@ -4643,6 +4782,21 @@ impl CalculationPadDialog {
             self.test_editor_geometry = Some((scroll.inner.galley.size().x, scroll.inner_rect.width(), scroll.content_size.x, rows));
         }
         let response = &scroll.inner.response;
+        if authorized_pass && response.secondary_clicked()
+            && let Some(position) = response.interact_pointer_pos()
+        {
+            let cursor = scroll.inner.galley.cursor_from_pos(position - scroll.inner.galley_pos);
+            *rename_context_caret = projection.byte_at_character(cursor.index.0).and_then(|byte| projection.source_byte(byte)).zip(self.session.evaluation_basis()).map(|(caret, basis)| (basis, caret));
+        }
+        response.context_menu(|ui| {
+            let caret = (*rename_context_caret).or(self.rename_context_caret).filter(|(basis, _)| Some(*basis) == self.session.evaluation_basis()).map(|(_, caret)| caret);
+            let button = ui.add_enabled(authorized_pass && caret.is_some(), egui::Button::new("Rename Variable…"));
+            #[cfg(test)] { self.test_rename_context_button = Some(button.rect); }
+            if button.clicked() {
+                if let Some(caret) = caret { *rename_action = Some(RenameAction::Open(caret)); }
+                ui.close();
+            }
+        });
         let cursor_interaction = response.clicked()
             || response.dragged()
             || response.changed()
@@ -5280,6 +5434,8 @@ impl CalculationPadDialog {
         self.split_preview = None;
         self.source_highlight = None;
         self.editor_tools = EditorTools::default();
+        self.rename = None;
+        self.rename_context_caret = None;
         self.folds.collapsed.clear();
         self.editor_tool_focus_pending = false;
         self.selected_result = None;
@@ -5582,6 +5738,85 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().to_path_buf());
         let dialog = CalculationPadDialog::new(&root);
         (directory, root, dialog)
+    }
+
+    #[test]
+    fn rename_f2_requires_editor_focus_and_context_targets_clicked_line() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(1000.0, 700.0);
+        dialog.open();
+        dialog.test_replace_source("alpha = 1\nbeta = alpha");
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let editor = dialog.test_editor_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("unrelated-input")));
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::F2, egui::Modifiers::NONE)]);
+        assert!(dialog.rename.is_none());
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(1))));
+        state.store(&ctx, editor);
+        frame(&mut dialog, &ctx, size, vec![key(egui::Key::F2, egui::Modifiers::NONE)]);
+        assert_eq!(dialog.rename.as_ref().unwrap().old_name, "alpha");
+        let mut cancel = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        cancel.pass_accepted = true;
+        cancel.rename_action = Some(super::RenameAction::Cancel);
+        complete_host_effects(&mut dialog, &ctx, cancel);
+        for _ in 0..2 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        let y = dialog.test_editor_geometry.as_ref().unwrap().3[1].1 + 4.0;
+        let x = dialog.test_editor_rect.unwrap().left() + 8.0;
+        let point = egui::pos2(x, y);
+        assert!(dialog.test_editor_rect.unwrap().contains(point) && dialog.test_editor_clip.unwrap().contains(point), "right-click point {point:?}, editor {:?}, clip {:?}", dialog.test_editor_rect, dialog.test_editor_clip);
+        right_click(&mut dialog, &ctx, size, point);
+        let button = dialog.test_rename_context_button.expect("rename context action after clicking visible editor row");
+        click(&mut dialog, &ctx, size, button.center());
+        assert_eq!(dialog.rename.as_ref().unwrap().old_name, "beta");
+    }
+
+    #[test]
+    fn rename_retained_preview_undo_and_metadata_in_manual_mode() {
+        use crate::calculation_pad::{CalculationPolicy, DocumentOptions, DocumentProfile, EvaluationStatus};
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.session.set_document_options(DocumentOptions { calculation: CalculationPolicy::Manual, profile: DocumentProfile::Standard }).unwrap();
+        dialog.test_replace_source("x = 2\nx + 1");
+        let id = dialog.session.line_id(0).unwrap();
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, draft: None });
+        dialog.pad_view.watches.push("x".into());
+        dialog.persist_view_state_in_session();
+        let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discarded.rename_action = Some(super::RenameAction::Open(0));
+        complete_host_effects(&mut dialog, &ctx, discarded);
+        assert!(dialog.rename.is_none());
+        for action in [super::RenameAction::Open(0), super::RenameAction::Preview("long_name".into()), super::RenameAction::Apply] {
+            let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+            host.pass_accepted = true;
+            host.rename_action = Some(action);
+            complete_host_effects(&mut dialog, &ctx, host);
+        }
+        assert_eq!(dialog.test_source(), Some("long_name = 2\nlong_name + 1"));
+        assert_eq!(dialog.pad_view.inputs[0].name, "long_name");
+        assert_eq!(dialog.pad_view.watches, vec!["long_name"]);
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+        let mut undo = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        undo.pass_accepted = true;
+        undo.editor_history_action = Some(true);
+        complete_host_effects(&mut dialog, &ctx, undo);
+        assert_eq!(dialog.test_source(), Some("x = 2\nx + 1"));
+        assert_eq!(dialog.pad_view.inputs[0].name, "x");
+        assert_eq!(dialog.pad_view.watches, vec!["x"]);
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+        let mut open = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        open.pass_accepted = true;
+        open.rename_action = Some(super::RenameAction::Open(0));
+        complete_host_effects(&mut dialog, &ctx, open);
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true;
+        stale.rename_action = Some(super::RenameAction::Preview("y".into()));
+        dialog.test_replace_source("x = 3");
+        complete_host_effects(&mut dialog, &ctx, stale);
+        assert!(dialog.rename.as_ref().unwrap().preview.is_none());
     }
 
     #[test]
@@ -8156,6 +8391,7 @@ mod tests {
         let mut child_discard = dialog.empty_host_effects(super::pad_viewport_id());
         child_discard.pass_accepted = false;
         child_discard.edited_source = Some("amount = 5\namount * 2".into());
+        child_discard.rename_action = Some(super::RenameAction::Open(0));
         child_discard.native_close_requested = true;
         child_discard.result_copy = Some(super::ResultCopyIntent {
             host: child_discard.identity,
@@ -8167,11 +8403,13 @@ mod tests {
         assert!(complete_host_effects(&mut dialog, &ctx, child_discard).is_empty());
         assert_eq!(dialog.test_source(), Some(original_source.as_str()));
         assert!(dialog.open);
+        assert!(dialog.rename.is_none());
 
         let mut stale_host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         stale_host.pass_accepted = true;
         stale_host.identity = retired_host_identity;
         stale_host.edited_source = Some("amount = 8\namount * 2".into());
+        stale_host.rename_action = Some(super::RenameAction::Open(0));
         stale_host.result_copy = Some(super::ResultCopyIntent {
             host: stale_host.identity,
             viewport_id: egui::ViewportId::ROOT,
@@ -8182,6 +8420,7 @@ mod tests {
         assert!(complete_host_effects(&mut dialog, &ctx, stale_host).is_empty());
         assert_eq!(dialog.test_source(), Some(original_source.as_str()));
         assert!(dialog.open);
+        assert!(dialog.rename.is_none());
     }
 
     #[test]

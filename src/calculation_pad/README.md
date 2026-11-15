@@ -398,6 +398,14 @@ recovery record is separate from named documents; disabling the preference
 clears only that record. A recovered expression may still contain ordinary
 evaluation errors, and remains editable.
 
+## Rename variables
+
+With the source editor focused, press **F2**, or right-click a source name and
+choose **Rename Variable…**. Enter a new name and choose **Preview** to inspect
+the scope and affected physical lines before applying. The preview expires if
+the document changes. Applying updates related input and watch references in
+the same transaction; one Undo restores them and the source.
+
 ## Resource limits
 
 The evaluator checks these bounds before invoking expression or unit parsers:

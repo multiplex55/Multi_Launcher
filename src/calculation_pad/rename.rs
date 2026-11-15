@@ -17,6 +17,23 @@ pub(crate) struct RenamePlan {
     pub source: String,
 }
 
+fn select_token(tokens: &[Token], caret: usize) -> Result<&Token, String> {
+    let selected = tokens.iter().find(|t| t.range.start <= caret && caret < t.range.end)
+        .or_else(|| tokens.iter().find(|t| t.range.end == caret))
+        .ok_or("Place the cursor on a variable or parameter.")?;
+    if !tokens.iter().any(|t| t.scope == selected.scope && t.declaration && t.name == selected.name) {
+        return Err("The selected name has no declaration in this scope.".into());
+    }
+    Ok(selected)
+}
+
+pub(crate) fn target(source: &str, caret: usize) -> Result<(String, RenameScope), String> {
+    if !source.is_char_boundary(caret) { return Err("Invalid source position.".into()); }
+    let tokens = tokens(source)?;
+    let selected = select_token(&tokens, caret)?;
+    Ok((selected.name.clone(), selected.scope.clone()))
+}
+
 #[derive(Clone)]
 struct Token {
     name: String,
@@ -333,19 +350,9 @@ pub(crate) fn plan(source: &str, caret: usize, replacement: &str) -> Result<Rena
         return Err("That name is reserved.".into());
     }
     let tokens = tokens(source)?;
-    let selected = tokens
-        .iter()
-        .find(|t| t.range.start <= caret && caret < t.range.end)
-        .or_else(|| tokens.iter().find(|t| t.range.end == caret))
-        .ok_or("Place the cursor on a variable or parameter.")?;
+    let selected = select_token(&tokens, caret)?;
     if selected.name == parsed.canonical {
         return Err("Choose a different name.".into());
-    }
-    if !tokens
-        .iter()
-        .any(|t| t.scope == selected.scope && t.declaration && t.name == selected.name)
-    {
-        return Err("The selected name has no declaration in this scope.".into());
     }
     if tokens
         .iter()

@@ -27,6 +27,7 @@ pub(crate) use document::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_LOOP_ITERATIONS, 
 pub(crate) use vector::{MAX_VECTOR_COMPONENTS, MAX_VECTOR_WORK};
 pub(crate) use exact::{MAX_BITS as MAX_EXACT_BITS, MAX_SCALE as MAX_EXACT_SCALE};
 pub(crate) use session::{MAX_UNDO_BYTES, MAX_UNDO_ENTRIES};
+pub(crate) use session::RenamePreview;
 pub(crate) use limits::source_admitted;
 pub use calendar::CalendarValue;
 

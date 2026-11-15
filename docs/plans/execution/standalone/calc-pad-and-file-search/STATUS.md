@@ -30,9 +30,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M6-B | Verified and pushed | `ae72a9246fdd000ba41fc7750e6f49e43c5cfcb0`. Calendar presentation and examples. Focused batch passed 14/14. |
 | M7-A | Verified and pushed | `07857478c05296eda7b3554b3399d27ee09887a5`. Extended source lifecycle, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
 | M7-B | Verified and pushed | `9039f3296226184de3aaa37cf45fd12f0b919fd5`. Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
-| M8-A | Verified | Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
-| M8-B | In progress | Focus-scoped editor/context entry and retained preview Apply. |
-| M9-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M8-A | Verified and pushed | `f0f87495d5cf2d2bafd1de456804cca2f188476a`. Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
+| M8-B | Verified | F2 and right-click preview, retained host actions, stale and history protection. |
+| M9-A | In progress | Typed source-backed input definitions and persistence. |
+| M9-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -46,7 +47,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
 | C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check pending. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
-| C14 | Domain implemented; editor integration in progress | Focused scope, contextual syntax, transaction and persistence tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
+| C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
 | C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
 | C5 | Pending | Pending | Committed snapshots, utility window host and render lifecycle, size/presentation settings and clipboard |
@@ -146,3 +147,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Static preview distinguishes document reassignment families from function-local parameters. It preserves active/inactive lexical spans, protected source, CRLF, physical references, actual conditional/loop/quantity/operator grammar and programmer radix notation. Conflicts, capture, malformed source, and oversized projections are checked before application.
 - Apply checks document identity, revision/run basis, current metadata and the plan. The one source edit preserves physical line IDs and the allocator. Source-aware input names and watches follow the rename with one Undo/Redo. Ephemeral watch identities preserve chains, independently pinned/removed watches and source history at full watch capacity. Saved metadata keeps its established persisted shape.
 - Initial focused library run passed 10/10. The first expanded contextual-alias run passed 10/11; its fixture used bare terminal `to` in a position where the legacy evaluator attempts a conversion. The corrected fixture uses valid punctuation-adjacent references, adds radix coverage, and passed 12/12. A separate destination safeguard braces `to` so a renamed reference cannot become an attempted conversion; exact before/after value checks and directly related regressions passed 6/6. Each cached run met the 100-second deadline, final elapsed 2.32 seconds; separate compiles met 900-second deadlines, final 181.52 seconds. Cleanup and output drain passed. Receipts: `m8a-*`, `m8a-correction-*`, `m8a-final-*`, `m8a-destination-*`.
+
+### M8-B editor rename interaction
+
+- Exposed editor-owned F2 and `Rename Variable…` on the right-clicked source name, including projected folded text. Preview shows the resolved scope and bounded before/after physical rows. An invalid or stale preview disables Apply. A retained current host transaction refreshes authoritative input/watch metadata, and normal Undo/Redo restores it.
+- The initial compile and first corrective compile identified two mismatched error-handler sites. After restoring the existing session error path, the batch passed 8/9, including F2 focus, Manual-mode Apply/Undo, stale and retired-host checks. The pointer test fixture rendered its next click after an empty injected Cancel frame; refresh of the actual editor geometry and hit targets fixed the fixture. The final directly affected Nextest batch passed 4/4, including real egui context-event targeting and the existing results context menu. Cached checks stayed within 100 seconds, final elapsed 2.69 seconds. Separate compiles stayed within 900 seconds, final elapsed 153.57 seconds. Cleanup and output drain passed. Receipts: `m8b-build`, `m8b-correction-build`, `m8b-final-*`, `m8b-context-*`. Native desktop evidence remains pending.
