@@ -205,6 +205,16 @@ pub(super) enum Function {
     Fraction,
     DecimalDivide,
     ToFloat,
+    RoundTo,
+    FloorTo,
+    CeilTo,
+    Clamp,
+    PercentChange,
+    PercentOf,
+    Choose,
+    Permutations,
+    Lerp,
+    MapRange,
 }
 
 /// Runtime arity and editor presentation share one function catalog.
@@ -216,6 +226,16 @@ pub(crate) struct FunctionSignature {
     insensitive: bool,
 }
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "round_to", help: "round_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "floor_to", help: "floor_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "ceil_to", help: "ceil_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "clamp", help: "clamp(value, min, max)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "percent_change", help: "percent_change(new, old)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "percent_of", help: "percent_of(part, total)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "choose", help: "choose(n, k)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "permutations", help: "permutations(n, k)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "lerp", help: "lerp(start, end, t)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "map_range", help: "map_range(value, a, b, c, d)", arities: &[5], insensitive: true },
     FunctionSignature { name: "decimal", help: "decimal(\"value\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "fraction", help: "fraction(numerator, denominator)", arities: &[2], insensitive: true },
     FunctionSignature { name: "decimal_div", help: "decimal_div(numerator, denominator, places)", arities: &[3], insensitive: true },
@@ -301,6 +321,16 @@ mod signature_catalog_tests {
 
 fn special(name: &str, arity: usize) -> Option<Function> {
     match name.to_ascii_lowercase().as_str() {
+        "round_to" => Some(Function::RoundTo),
+        "floor_to" => Some(Function::FloorTo),
+        "ceil_to" => Some(Function::CeilTo),
+        "clamp" => Some(Function::Clamp),
+        "percent_change" => Some(Function::PercentChange),
+        "percent_of" => Some(Function::PercentOf),
+        "choose" => Some(Function::Choose),
+        "permutations" => Some(Function::Permutations),
+        "lerp" => Some(Function::Lerp),
+        "map_range" => Some(Function::MapRange),
         "fraction" => Some(Function::Fraction),
         "decimal_div" => Some(Function::DecimalDivide),
         "to_float" => Some(Function::ToFloat),
@@ -378,7 +408,8 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
         if source[end..].trim_start().starts_with('(')
             && matches!(
                 name.to_ascii_lowercase().as_str(),
-                "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float"
+                "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
+                "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
             )
         {
             return true;
@@ -1169,7 +1200,69 @@ fn call(
     arguments: &[CalculationValue],
     work: &mut WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
-    use super::super::exact::ExactNumber;
+    use super::super::exact::{EverydayFunction, ExactNumber};
+    let everyday = match function {
+        Function::RoundTo => Some(EverydayFunction::RoundTo),
+        Function::FloorTo => Some(EverydayFunction::FloorTo),
+        Function::CeilTo => Some(EverydayFunction::CeilTo),
+        Function::Clamp => Some(EverydayFunction::Clamp),
+        Function::PercentChange => Some(EverydayFunction::PercentChange),
+        Function::PercentOf => Some(EverydayFunction::PercentOf),
+        Function::Choose => Some(EverydayFunction::Choose),
+        Function::Permutations => Some(EverydayFunction::Permutations),
+        Function::Lerp => Some(EverydayFunction::Lerp),
+        Function::MapRange => Some(EverydayFunction::MapRange),
+        _ => None,
+    };
+    if let Some(helper) = everyday {
+        if matches!(helper, EverydayFunction::Choose | EverydayFunction::Permutations) {
+            return ExactNumber::combinatorial(helper, arguments, work);
+        }
+        if arguments.iter().any(|argument| matches!(argument, CalculationValue::Exact(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. })) {
+            return ExactNumber::everyday(helper, arguments, work);
+        }
+        let mut approximate = false;
+        let values = arguments.iter().map(|argument| match argument {
+            CalculationValue::Scalar(value) if value.is_finite() => Ok(*value),
+            CalculationValue::ApproximateScalar(value) if value.is_finite() => { approximate = true; Ok(*value) }
+            _ => Err(error("numeric helper requires finite numeric arguments")),
+        }).collect::<Result<Vec<_>, _>>()?;
+        work.charge(values.len())?;
+        let result = match (helper, values.as_slice()) {
+            (EverydayFunction::RoundTo | EverydayFunction::FloorTo | EverydayFunction::CeilTo, [value, step]) => {
+                if *step <= 0.0 { return Err(error("step must be positive")); }
+                let ratio = finite(value / step)?;
+                let rounded = match helper {
+                    EverydayFunction::RoundTo => ratio.round(),
+                    EverydayFunction::FloorTo => ratio.floor(),
+                    _ => ratio.ceil(),
+                };
+                finite(rounded * step)?
+            }
+            (EverydayFunction::Clamp, [value, min, max]) => {
+                if min > max { return Err(error("clamp minimum must not exceed maximum")); }
+                value.clamp(*min, *max)
+            }
+            (EverydayFunction::PercentChange, [new, old]) => {
+                if *old == 0.0 { return Err(error("old value must not be zero")); }
+                finite(finite(new - old)? / old)?
+            }
+            (EverydayFunction::PercentOf, [part, total]) => {
+                if *total == 0.0 { return Err(error("total must not be zero")); }
+                finite(part / total)?
+            }
+            (EverydayFunction::Lerp, [start, end, t]) => finite(start + finite(finite(end - start)? * t)?)?,
+            (EverydayFunction::MapRange, [value, a, b, c, d]) => {
+                if a == b { return Err(error("input range endpoints must differ")); }
+                let offset = finite(value - a)?;
+                let width = finite(b - a)?;
+                let output = finite(d - c)?;
+                finite(c + finite(finite(offset / width)? * output)?)?
+            }
+            _ => return Err(DiagnosticKind::InvalidExpression),
+        };
+        return Ok(if approximate { CalculationValue::ApproximateScalar(result) } else { CalculationValue::Scalar(result) });
+    }
     match (function, arguments) {
         (Function::Fraction, [numerator, denominator]) => {
             return Ok(CalculationValue::Exact(ExactNumber::fraction(ExactNumber::integer(numerator)?, ExactNumber::integer(denominator)?, work)?));
@@ -1302,7 +1395,10 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat => unreachable!(),
+        Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
+        | Function::RoundTo | Function::FloorTo | Function::CeilTo | Function::Clamp
+        | Function::PercentChange | Function::PercentOf | Function::Choose | Function::Permutations
+        | Function::Lerp | Function::MapRange => unreachable!(),
     };
     Ok(CalculationValue::Scalar(finite(result)?))
 }
@@ -1336,6 +1432,72 @@ mod tests {
         match value {
             LineOutcome::Value(CalculationValue::Boolean(value)) => *value,
             other => panic!("expected Boolean: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn everyday_helpers_evaluate_all_scalar_contracts_and_boundaries() {
+        let source = concat!(
+            "round_to(137,25)\nfloor_to(137,25)\nceil_to(137,25)\n",
+            "clamp(125,0,100)\npercent_change(120,100)\npercent_of(25,100)\n",
+            "choose(10,2)\npermutations(5,2)\nlerp(10,20,0.5)\nmap_range(50,0,100,0,10)\n",
+            "round_to(-12.5,25)\nfloor_to(-1,25)\nceil_to(-1,25)\nlerp(10,20,2)\nmap_range(50,100,0,0,10)\n",
+            "round_to(1,0)\nclamp(1,2,0)\npercent_change(1,0)\npercent_of(1,0)\n",
+            "choose(3,4)\npermutations(5,1.5)\nmap_range(1,2,2,0,1)\nround_to(1 m, 1)"
+        );
+        let values = evaluated(source);
+        let expected = [125.0, 125.0, 150.0, 100.0, 0.2, 0.25, 45.0, 20.0, 15.0, 5.0, -25.0, -25.0, 0.0, 30.0, 5.0];
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert!((scalar(&values[index]) - expected).abs() < 1e-12, "line {index}");
+        }
+        assert!(values[15..].iter().all(|outcome| matches!(outcome, LineOutcome::Error(_))));
+    }
+
+    #[test]
+    fn everyday_helpers_preserve_exactness_approximation_and_large_counts() {
+        let source = concat!(
+            "round_to(decimal(\"-0.15\"), decimal(\"0.1\"))\n",
+            "round_to(decimal(\"1\"), decimal(\"0.3\"))\n",
+            "map_range(decimal(\"1\"), decimal(\"0\"), decimal(\"3\"), decimal(\"0\"), decimal(\"3\"))\n",
+            "percent_of(fraction(1,3), fraction(2,3))\n",
+            "choose(60,30)\n",
+            "lerp(to_float(fraction(1,2)), 1, 0.5)\n",
+            "percent_of(decimal(\"1\"), decimal(\"3\"))\n",
+            "lerp(decimal(\"1\"), decimal(\"2\"), 0.5)\n",
+            "permutations(10000,10000)"
+        );
+        let values = evaluated(source);
+        for (index, expected) in [(0, "decimal(\"-0.2\")"), (1, "decimal(\"0.9\")"), (2, "decimal(\"1\")"), (3, "fraction(1,2)"), (4, "fraction(118264581564861424,1)")] {
+            let LineOutcome::Value(value) = &values[index] else { panic!("expected exact value at {index}: {:?}", values[index]); };
+            assert_eq!(value.canonical_result().as_deref(), Some(expected));
+        }
+        assert!(matches!(values[5], LineOutcome::Value(CalculationValue::ApproximateScalar(value)) if value == 0.75));
+        assert!(values[6..].iter().all(|outcome| matches!(outcome, LineOutcome::Error(_))));
+    }
+
+    #[test]
+    fn everyday_helpers_work_in_loops_and_leave_names_assignable() {
+        let source = "round_to = 9\ntotal = 0\nfor x in range(1,4):\n    total += clamp(x, 0, 2)\ntotal + round_to";
+        let values = evaluated(source);
+        assert_eq!(scalar(&values[4]), 14.0);
+        assert_eq!(super::signature("MAP_RANGE"), Some(&[5][..]));
+    }
+
+    #[test]
+    fn everyday_helpers_keep_fraction_and_decimal_types_through_each_operation() {
+        let source = concat!(
+            "floor_to(fraction(-7,4),fraction(1,2))\n",
+            "ceil_to(fraction(-7,4),fraction(1,2))\n",
+            "clamp(decimal(\"4\"),decimal(\"0\"),decimal(\"3\"))\n",
+            "percent_change(decimal(\"120\"),decimal(\"100\"))\n",
+            "lerp(decimal(\"10\"),decimal(\"20\"),decimal(\"0.5\"))\n",
+            "permutations(u64(5),u64(2))"
+        );
+        let values = evaluated(source);
+        let expected = ["fraction(-2,1)", "fraction(-3,2)", "decimal(\"3\")", "decimal(\"0.2\")", "decimal(\"15\")", "fraction(20,1)"];
+        for (outcome, expected) in values.iter().zip(expected) {
+            let LineOutcome::Value(value) = outcome else { panic!("expected exact value: {outcome:?}"); };
+            assert_eq!(value.canonical_result().as_deref(), Some(expected));
         }
     }
 

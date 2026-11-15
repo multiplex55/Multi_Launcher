@@ -11,6 +11,13 @@ use super::document::script::WorkBudget;
 
 const MAX_BITS: u64 = 4096;
 const MAX_SCALE: u32 = 1000;
+const MAX_COMBINATORIAL_STEPS: u64 = 10_000;
+
+#[derive(Clone, Copy)]
+pub(crate) enum EverydayFunction {
+    RoundTo, FloorTo, CeilTo, Clamp, PercentChange, PercentOf,
+    Choose, Permutations, Lerp, MapRange,
+}
 
 fn error(message: &str) -> DiagnosticKind {
     DiagnosticKind::Script(message.to_owned())
@@ -25,6 +32,127 @@ pub struct ExactNumber {
 }
 
 impl ExactNumber {
+    fn bounded_binary(left: &BigRational, right: &BigRational, op: char, work: &mut WorkBudget) -> Result<BigRational, DiagnosticKind> {
+        work.charge(((left.numer().bits() + left.denom().bits() + right.numer().bits() + right.denom().bits()) / 32 + 1) as usize)?;
+        if op == '/' && right.is_zero() { return Err(error("division by zero")); }
+        if matches!(op, '*' | '/') {
+            let (right_numerator, right_denominator) = if op == '*' {
+                (right.numer().clone(), right.denom().clone())
+            } else {
+                (right.denom().clone(), right.numer().clone())
+            };
+            let first = left.numer().gcd(&right_denominator);
+            let second = right_numerator.gcd(left.denom());
+            let a = left.numer() / &first;
+            let d = right_denominator / first;
+            let c = right_numerator / &second;
+            let b = left.denom() / second;
+            if a.bits().saturating_add(c.bits()) > MAX_BITS + 1
+                || b.bits().saturating_add(d.bits()) > MAX_BITS + 1
+            { return Err(error("exact arithmetic intermediate exceeds the 4096-bit limit")); }
+            return Ok(BigRational::new(a * c, b * d));
+        }
+        let gcd = left.denom().gcd(right.denom());
+        let left_factor = right.denom() / &gcd;
+        let right_factor = left.denom() / gcd;
+        let numerator_bits = left.numer().bits().saturating_add(left_factor.bits())
+            .max(right.numer().bits().saturating_add(right_factor.bits()));
+        let denominator_bits = left.denom().bits().saturating_add(left_factor.bits());
+        if numerator_bits > MAX_BITS || denominator_bits > MAX_BITS + 1 {
+            return Err(error("exact arithmetic intermediate exceeds the 4096-bit limit"));
+        }
+        let first = left.numer() * &left_factor;
+        let second = right.numer() * &right_factor;
+        let numerator = if op == '+' { first + second } else { first - second };
+        if numerator.bits() > MAX_BITS { return Err(error("exact arithmetic intermediate exceeds the 4096-bit limit")); }
+        Ok(BigRational::new(numerator, left.denom() * left_factor))
+    }
+
+    pub(crate) fn combinatorial(function: EverydayFunction, args: &[CalculationValue], work: &mut WorkBudget) -> Result<CalculationValue, DiagnosticKind> {
+        let [n, k] = args else { return Err(DiagnosticKind::InvalidExpression); };
+        let n = Self::integer(n)?;
+        let k = Self::integer(k)?;
+        if n.is_negative() || k.is_negative() || k > n { return Err(error("n and k must be nonnegative integers with k no greater than n")); }
+        let steps = if matches!(function, EverydayFunction::Choose) { k.clone().min(&n - &k) } else { k };
+        let count = steps.to_u64().filter(|steps| *steps <= MAX_COMBINATORIAL_STEPS)
+            .ok_or_else(|| error("combinatorial work exceeds the 10000-step limit"))?;
+        let mut result = BigInt::one();
+        for index in 0..count {
+            work.charge((result.bits() / 64 + n.bits() / 64 + 1) as usize)?;
+            let mut factor = &n - BigInt::from(index);
+            if matches!(function, EverydayFunction::Choose) {
+                let mut denominator = BigInt::from(index + 1);
+                let gcd = factor.gcd(&denominator);
+                factor /= &gcd;
+                denominator /= gcd;
+                let gcd = result.gcd(&denominator);
+                result /= &gcd;
+                denominator /= gcd;
+                if !denominator.is_one() { return Err(error("invalid combinatorial intermediate")); }
+            }
+            if result.bits().saturating_add(factor.bits()) > MAX_BITS + 1 {
+                return Err(error("combinatorial result exceeds the 4096-bit limit"));
+            }
+            result *= factor;
+            if result.bits() > MAX_BITS { return Err(error("combinatorial result exceeds the 4096-bit limit")); }
+        }
+        if args.iter().all(|arg| matches!(arg, CalculationValue::Scalar(_)))
+            && result <= BigInt::from(1u64 << 53)
+        {
+            return Ok(CalculationValue::Scalar(result.to_f64().ok_or_else(|| error("integer conversion failed"))?));
+        }
+        Ok(CalculationValue::Exact(Self::fraction(result, BigInt::one(), work)?))
+    }
+
+    pub(crate) fn everyday(function: EverydayFunction, args: &[CalculationValue], work: &mut WorkBudget) -> Result<CalculationValue, DiagnosticKind> {
+        let values = args.iter().map(Self::rational).collect::<Result<Vec<_>, _>>()?;
+        let decimal = values.iter().all(|(_, decimal, _)| *decimal);
+        let rounded = values.iter().any(|(_, _, rounded)| *rounded);
+        let values = values.into_iter().map(|(value, _, _)| value).collect::<Vec<_>>();
+        let binary = |a: &BigRational, b: &BigRational, op, work: &mut WorkBudget| Self::bounded_binary(a, b, op, work);
+        let result = match (function, values.as_slice()) {
+            (EverydayFunction::RoundTo | EverydayFunction::FloorTo | EverydayFunction::CeilTo, [value, step]) => {
+                if !step.is_positive() { return Err(error("step must be positive")); }
+                let ratio = binary(value, step, '/', work)?;
+                let (quotient, remainder) = ratio.numer().div_rem(ratio.denom());
+                let integer = match function {
+                    EverydayFunction::FloorTo => ratio.numer().div_floor(ratio.denom()),
+                    EverydayFunction::CeilTo => ratio.numer().div_ceil(ratio.denom()),
+                    _ if remainder.abs() * 2u8 >= *ratio.denom() => quotient + if ratio.is_negative() { -1 } else { 1 },
+                    _ => quotient,
+                };
+                binary(&BigRational::from_integer(integer), step, '*', work)?
+            }
+            (EverydayFunction::Clamp, [value, min, max]) => {
+                if min > max { return Err(error("clamp minimum must not exceed maximum")); }
+                value.clone().max(min.clone()).min(max.clone())
+            }
+            (EverydayFunction::PercentChange, [new, old]) => {
+                let difference = binary(new, old, '-', work)?;
+                binary(&difference, old, '/', work)?
+            }
+            (EverydayFunction::PercentOf, [part, total]) => binary(part, total, '/', work)?,
+            (EverydayFunction::Lerp, [start, end, t]) => {
+                let difference = binary(end, start, '-', work)?;
+                let scaled = binary(&difference, t, '*', work)?;
+                binary(start, &scaled, '+', work)?
+            }
+            (EverydayFunction::MapRange, [value, a, b, c, d]) => {
+                let offset = binary(value, a, '-', work)?;
+                let width = binary(b, a, '-', work)?;
+                if width.is_zero() { return Err(error("input range endpoints must differ")); }
+                let fraction = binary(&offset, &width, '/', work)?;
+                let output_width = binary(d, c, '-', work)?;
+                let scaled = binary(&fraction, &output_width, '*', work)?;
+                binary(c, &scaled, '+', work)?
+            }
+            _ => return Err(DiagnosticKind::InvalidExpression),
+        };
+        if decimal && Self::finite_scale(result.denom(), work)?.is_none() {
+            return Err(error("decimal result is nonterminating; use a fraction or decimal_div"));
+        }
+        Ok(CalculationValue::Exact(Self::checked(result, decimal, rounded, work)?))
+    }
     fn checked(value: BigRational, decimal: bool, rounded: bool, work: &mut WorkBudget) -> Result<Self, DiagnosticKind> {
         if value.numer().bits() > MAX_BITS || value.denom().bits() > MAX_BITS {
             return Err(error("exact number exceeds the 4096-bit limit"));

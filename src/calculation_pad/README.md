@@ -111,6 +111,19 @@ Python-style multiline `if` statements are unsupported. Collection functions
 For example, `median(range(1, 6))` is 3. `stdev` computes population standard
 deviation. Empty `sum` is zero and the other statistics reject an empty input.
 
+## Everyday numeric helpers
+
+`round_to(value, step)`, `floor_to(value, step)`, and `ceil_to(value, step)`
+use a positive increment. Nearest rounding resolves ties away from zero.
+`clamp(value, min, max)` uses inclusive bounds. `percent_change(new, old)`
+and `percent_of(part, total)` return ratios, so 0.2 represents 20%.
+`choose(n, k)` and `permutations(n, k)` count unordered and ordered selections
+using nonnegative integers with `k <= n`. Large results remain exact within
+the arithmetic and work limits. `lerp(start, end, t)` and
+`map_range(value, a, b, c, d)` allow extrapolation and reversed ranges.
+Exact operands preserve exact results, and nonintegral floating-point operands
+require an explicit conversion before mixing with exact values.
+
 ## Scalar expressions
 
 Scalar expressions use the `exmex` expression grammar with finite `f64`

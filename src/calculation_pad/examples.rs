@@ -679,6 +679,21 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
         ],
     },
+    CalculationExampleGroup {
+        title: "Everyday numeric helpers",
+        examples: &[
+            CalculationExample { title: "Round to an increment", source: "round_to(137, 25)", explanation: "Round to the nearest positive increment, with ties away from zero.", expected: ExampleExpectation::Scalar(125.0) },
+            CalculationExample { title: "Floor to an increment", source: "floor_to(137, 25)", explanation: "Round down to the next increment.", expected: ExampleExpectation::Scalar(125.0) },
+            CalculationExample { title: "Ceil to an increment", source: "ceil_to(137, 25)", explanation: "Round up to the next increment.", expected: ExampleExpectation::Scalar(150.0) },
+            CalculationExample { title: "Clamp to bounds", source: "clamp(125, 0, 100)", explanation: "Limit a value to inclusive bounds.", expected: ExampleExpectation::Scalar(100.0) },
+            CalculationExample { title: "Percentage change", source: "percent_change(120, 100)", explanation: "The result is a ratio, so 0.2 represents a 20% increase.", expected: ExampleExpectation::Scalar(0.2) },
+            CalculationExample { title: "Part of a total", source: "percent_of(25, 100)", explanation: "Divide the part by the total to obtain a ratio.", expected: ExampleExpectation::Scalar(0.25) },
+            CalculationExample { title: "Combinations", source: "choose(10, 2)", explanation: "Count unordered selections without computing factorials.", expected: ExampleExpectation::Scalar(45.0) },
+            CalculationExample { title: "Permutations", source: "permutations(5, 2)", explanation: "Count ordered selections.", expected: ExampleExpectation::Scalar(20.0) },
+            CalculationExample { title: "Interpolate", source: "lerp(10, 20, 0.5)", explanation: "Interpolate or extrapolate between two values.", expected: ExampleExpectation::Scalar(15.0) },
+            CalculationExample { title: "Map between ranges", source: "map_range(50, 0, 100, 0, 10)", explanation: "Map a value between ranges, including reversed ranges.", expected: ExampleExpectation::Scalar(5.0) },
+        ],
+    },
 ];
 
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
@@ -829,7 +844,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 81);
+        assert_eq!(checked, 91);
     }
 
     #[test]
@@ -871,6 +886,10 @@ mod tests {
             "+=",
             "median",
             "iteration",
+            "round_to",
+            "percent_change",
+            "permutations",
+            "map_range",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group
