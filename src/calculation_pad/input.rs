@@ -2,10 +2,12 @@
 use std::cmp::Ordering;
 
 use num_bigint::{BigInt, Sign};
+use num_rational::BigRational;
+use num_traits::{Signed, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
 use super::document::script::WorkBudget;
-use super::document::{CalculationDocument, CalculationValue, LineOutcome, LiteralInput};
+use super::document::{CalculationValue, LiteralInput};
 use super::exact::ExactNumber;
 use super::integer::{IntegerMode, IntegerWidth, TypedInteger};
 
@@ -206,17 +208,13 @@ fn parse(kind: &InputKind, source: &str) -> Result<Number, String> {
             .map(Number::Decimal)
             .map_err(|kind| super::document::Diagnostic { kind }.to_string()),
         InputKind::Scalar | InputKind::Quantity { .. } => {
-            let document = CalculationDocument::new(source);
-            let evaluation = document.evaluate();
-            match evaluation.lines.first().map(|line| &line.outcome) {
-                Some(LineOutcome::Value(CalculationValue::Scalar(value)))
-                    if value.is_finite()
-                        && (crate::unit_conversion::parse_quantity_number_prefix(source)
-                            .is_ok_and(|(_, end)| end == source.len())
-                            || super::document::integer_literal_token(source)) =>
-                {
-                    Ok(Number::Float(*value))
-                }
+            if super::document::integer_literal_token(source) {
+                let Number::ExactInteger(integer) = parse(&InputKind::ExactInteger, source)? else { return Err("Enter a finite numeric literal.".into()); };
+                if integer.abs() > BigInt::from(1_u64 << 53) { return Err("Integer exceeds the exact scalar limit.".into()); }
+                return integer.to_f64().map(Number::Float).ok_or("Enter a finite numeric literal.".into());
+            }
+            match crate::unit_conversion::parse_quantity_number_prefix(source) {
+                Ok((value, end)) if end == source.len() && value.is_finite() => Ok(Number::Float(value)),
                 _ => Err("Enter a finite numeric literal.".into()),
             }
         }
@@ -312,6 +310,94 @@ pub(crate) fn validate_value(
         return Err("Value is above the configured maximum.".into());
     }
     Ok(())
+}
+
+/// Adjust a draft using its own numeric domain; no source is mutated or clamped.
+pub(crate) fn step_value(kind: &InputKind, config: &InputConfig, value: &str, increase: bool) -> Result<String, String> {
+    validate_config(kind, config)?;
+    let step = config.step.as_deref().unwrap_or("1");
+    let next = match (parse(kind, value)?, parse(kind, step)?) {
+        (Number::Float(a), Number::Float(b)) => {
+            let result = if increase { a + b } else { a - b };
+            if !result.is_finite() { return Err("Step exceeds the numeric range.".into()); }
+            result.to_string()
+        }
+        (Number::Integer(a), Number::Integer(b)) => {
+            let a = BigInt::parse_bytes(a.formatted_decimal().as_bytes(), 10).ok_or("Invalid integer.")?;
+            let b = BigInt::parse_bytes(b.formatted_decimal().as_bytes(), 10).ok_or("Invalid step.")?;
+            (if increase { a + b } else { a - b }).to_string()
+        }
+        (Number::ExactInteger(a), Number::ExactInteger(b)) => (if increase { a + b } else { a - b }).to_string(),
+        (Number::Decimal(a), Number::Decimal(b)) => {
+            let result = ExactNumber::arithmetic(&CalculationValue::Exact(a), &CalculationValue::Exact(b), if increase { '+' } else { '-' }, &mut WorkBudget::default())
+                .map_err(|kind| super::document::Diagnostic { kind }.to_string())?;
+            let CalculationValue::Exact(result) = result else { return Err("Invalid decimal step.".into()); };
+            result.display()
+        }
+        _ => return Err("Input values have incompatible types.".into()),
+    };
+    validate_value(kind, config, &next)?;
+    if !generated_bare_safe(kind, &next) { return Err("Integer exceeds the exact scalar limit.".into()); }
+    Ok(next)
+}
+
+fn generated_bare_safe(kind: &InputKind, value: &str) -> bool {
+    if !matches!(kind, InputKind::ExactInteger) { return true; }
+    matches!(parse(kind, value), Ok(Number::ExactInteger(number)) if number.abs() <= BigInt::from(1_u64 << 53))
+}
+
+/// Slider coordinates are limited to domains with safely representable endpoints.
+pub(crate) fn slider_values(kind: &InputKind, config: &InputConfig, value: &str) -> Option<(f64, f64, f64, Option<f64>)> {
+    validate_value(kind, config, value).ok()?;
+    let to_float = |value: &str| match parse(kind, value).ok()? {
+        Number::Float(value) => Some(value),
+        Number::Integer(value) => value.formatted_decimal().parse::<f64>().ok().filter(|number| number.abs() <= (1_u64 << 53) as f64),
+        _ => None,
+    };
+    let min = to_float(config.minimum.as_deref()?)?;
+    let max = to_float(config.maximum.as_deref()?)?;
+    let value = to_float(value)?;
+    let step = match config.step.as_deref() { Some(value) => Some(to_float(value)?), None => None };
+    (min < max && (max - min).is_finite() && value >= min && value <= max).then_some((min, max, value, step))
+}
+
+fn exact_ratio(kind: &InputKind, text: &str) -> Option<BigRational> {
+    let ratio = match parse(kind, text).ok()? {
+        Number::Integer(value) => BigRational::from_integer(BigInt::parse_bytes(value.formatted_decimal().as_bytes(), 10)?),
+        Number::ExactInteger(value) => BigRational::from_integer(value),
+        Number::Decimal(value) => value.ratio().clone(),
+        _ => return None,
+    };
+    (ratio.numer().bits() <= 512 && ratio.denom().bits() <= 512).then_some(ratio)
+}
+
+pub(crate) fn exact_grid(kind: &InputKind, config: &InputConfig, value: &str) -> Option<(u32, u32)> {
+    validate_value(kind, config, value).ok()?;
+    if !generated_bare_safe(kind, config.minimum.as_deref()?) || !generated_bare_safe(kind, config.maximum.as_deref()?) { return None; }
+    let min = exact_ratio(kind, config.minimum.as_deref()?)?;
+    let max = exact_ratio(kind, config.maximum.as_deref()?)?;
+    let step = exact_ratio(kind, config.step.as_deref().unwrap_or("1"))?;
+    if step <= BigRational::from_integer(0.into()) || min >= max { return None; }
+    let count = (max - &min) / &step;
+    let index = (exact_ratio(kind, value)? - min) / step;
+    if !count.is_integer() || !index.is_integer() { return None; }
+    let count = count.to_integer().to_u32().filter(|count| *count <= 100_000)?;
+    let index = index.to_integer().to_u32()?;
+    (count > 0 && index <= count).then_some((index, count))
+}
+
+pub(crate) fn exact_grid_value(kind: &InputKind, config: &InputConfig, index: u32) -> Option<String> {
+    let min = exact_ratio(kind, config.minimum.as_deref()?)?;
+    let step = exact_ratio(kind, config.step.as_deref().unwrap_or("1"))?;
+    let result = min + step * BigRational::from_integer(index.into());
+    let text = match kind {
+        InputKind::Integer(_) | InputKind::ExactInteger if result.is_integer() => result.to_integer().to_string(),
+        InputKind::Decimal => ExactNumber::fraction(result.numer().clone(), result.denom().clone(), &mut WorkBudget::default()).ok()?.decimal_display(None),
+        _ => return None,
+    };
+    validate_value(kind, config, &text).ok()?;
+    if !generated_bare_safe(kind, &text) { return None; }
+    Some(text)
 }
 
 pub(crate) fn project(
@@ -423,6 +509,36 @@ pub(crate) fn replace_literal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_step_and_grid_preserve_decimal_and_integer_precision() {
+        let decimal = configured(&InputKind::Decimal, "0", "1", "0.1");
+        assert_eq!(step_value(&InputKind::Decimal, &decimal, "0.2", true).unwrap(), "0.3");
+        assert_eq!(exact_grid(&InputKind::Decimal, &decimal, "0.3"), Some((3, 10)));
+        assert_eq!(exact_grid_value(&InputKind::Decimal, &decimal, 7).as_deref(), Some("0.7"));
+        assert!(step_value(&InputKind::Decimal, &decimal, "1", true).is_err());
+        let kind = InputKind::Integer(IntegerMode::unsigned(IntegerWidth::Bits64));
+        let integer = configured(&kind, "9007199254740992", "9007199254741002", "1");
+        assert_eq!(step_value(&kind, &integer, "9007199254740992", true).unwrap(), "9007199254740993");
+        assert_eq!(exact_grid(&kind, &integer, "9007199254740993"), Some((1, 10)));
+        assert_eq!(exact_grid_value(&kind, &integer, 2).as_deref(), Some("9007199254740994"));
+        let bare = configured(&InputKind::ExactInteger, "9007199254740991", "9007199254740994", "1");
+        assert!(exact_grid(&InputKind::ExactInteger, &bare, "9007199254740992").is_none());
+        assert!(step_value(&InputKind::ExactInteger, &bare, "9007199254740992", true).is_err());
+        let floating = configured(&InputKind::Scalar, "-1e308", "1e308", "1");
+        assert!(slider_values(&InputKind::Scalar, &floating, "0").is_none());
+    }
+
+    #[test]
+    fn scalar_draft_parser_accepts_supported_literals_without_evaluation() {
+        let config = InputConfig::default();
+        for literal in ["1", "-2", "+3.25", "-1.5e-3", "0xff", "-0b101", "1_000"] {
+            assert!(validate_value(&InputKind::Scalar, &config, literal).is_ok(), "{literal}");
+        }
+        for literal in ["1+2", "inf", "1e999", "9007199254740993"] {
+            assert!(validate_value(&InputKind::Scalar, &config, literal).is_err(), "{literal}");
+        }
+    }
 
     fn configured(kind: &InputKind, minimum: &str, maximum: &str, step: &str) -> InputConfig {
         InputConfig {

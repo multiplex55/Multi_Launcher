@@ -324,6 +324,7 @@ impl ExactNumber {
     }
 
     pub(crate) fn is_rounded(&self) -> bool { self.rounded }
+    pub(crate) fn ratio(&self) -> &BigRational { &self.value }
 
     pub(crate) fn display(&self) -> String {
         let canonical = self.canonical();

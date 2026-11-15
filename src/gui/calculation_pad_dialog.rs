@@ -135,6 +135,18 @@ struct PadView {
     inputs: Vec<InputSelection>,
     watches: Vec<String>,
     watch_entry: String,
+    config_editor: Option<InputConfigDraft>,
+}
+#[derive(Clone, PartialEq)]
+struct InputConfigDraft {
+    id: LineId,
+    basis: crate::calculation_pad::EvaluationBasis,
+    original: crate::calculation_pad::InputConfig,
+    config: crate::calculation_pad::InputConfig,
+    minimum: String,
+    maximum: String,
+    step: String,
+    error: Option<String>,
 }
 #[derive(Clone, PartialEq)]
 struct InputSelection {
@@ -151,9 +163,11 @@ struct InputDraft {
     revision: u64,
     error: Option<String>,
     dirty: bool,
+    basis: crate::calculation_pad::EvaluationBasis,
+    config: crate::calculation_pad::InputConfig,
 }
 #[derive(Clone)]
-struct InputCommit { id: LineId, original: String, revision: u64, value: String }
+struct InputCommit { id: LineId, original: String, revision: u64, value: String, basis: crate::calculation_pad::EvaluationBasis, config: crate::calculation_pad::InputConfig }
 
 #[derive(Clone)]
 struct RenameState {
@@ -390,6 +404,7 @@ struct HostEffects {
     edited_source: Option<String>,
     pad_view: Option<PadView>,
     input_commit: Option<InputCommit>,
+    input_config_commit: Option<InputConfigDraft>,
     watch_copy: Option<(String, bool)>,
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
     evaluation_basis: Option<crate::calculation_pad::EvaluationBasis>,
@@ -525,6 +540,7 @@ impl CalculationPadDialog {
             edited_source: None,
             pad_view: None,
             input_commit: None,
+            input_config_commit: None,
             watch_copy: None,
             document_basis: self
                 .session
@@ -2099,23 +2115,58 @@ impl CalculationPadDialog {
                     for (index, selected) in view.inputs.iter_mut().enumerate() {
                         let descriptor = available.iter().find(|input| ids.get(input.line) == Some(&selected.id) && input.name == selected.name);
                         ui.push_id(selected.id.get(), |ui| { ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("{} · line {}", selected.name, descriptor.map_or(0, |input| input.line + 1)));
+                            let label = if selected.config.label.is_empty() { &selected.name } else { &selected.config.label };
+                            ui.label(format!("{} · line {}", label, descriptor.map_or(0, |input| input.line + 1)));
                             if selected.unavailable || descriptor.is_none() {
                                 ui.weak("Unavailable; reselect this input");
-                            } else if let Some(input) = descriptor {
-                                let draft = selected.draft.get_or_insert_with(|| InputDraft {
-                                    value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false,
-                                });
-                                if !draft.dirty && draft.revision != revision {
-                                    *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false };
+                            } else if let (Some(input), Some(basis)) = (descriptor, effects.evaluation_basis) {
+                                if !selected.config.description.is_empty() { ui.label(&selected.config.description); }
+                                if ui.small_button("Configure…").clicked() {
+                                    view.config_editor = Some(InputConfigDraft { id: selected.id, basis, original: selected.config.clone(), config: selected.config.clone(), minimum: selected.config.minimum.clone().unwrap_or_default(), maximum: selected.config.maximum.clone().unwrap_or_default(), step: selected.config.step.clone().unwrap_or_default(), error: None });
                                 }
-                                if draft.revision != revision { draft.error = Some("Source changed; reset this draft.".into()); }
-                                if ui.add(egui::TextEdit::singleline(&mut draft.value).desired_width(90.0).char_limit(crate::calculation_pad::MAX_EXPRESSION_BYTES)).changed() { draft.dirty = true; draft.error = None; }
+                                let draft = selected.draft.get_or_insert_with(|| InputDraft {
+                                    value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false, basis, config: selected.config.clone(),
+                                });
+                                if !draft.dirty && (draft.basis != basis || draft.config != selected.config) {
+                                    *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false, basis, config: selected.config.clone() };
+                                }
+                                if draft.basis != basis || draft.config != selected.config { draft.error = Some("Source or settings changed; reset this draft.".into()); }
+                                if ui.add(egui::TextEdit::singleline(&mut draft.value).desired_width(90.0).char_limit(crate::calculation_pad::MAX_EXPRESSION_BYTES + 1)).changed() { draft.dirty = true; draft.error = None; }
+                                if !selected.config.suffix.is_empty() { ui.label(&selected.config.suffix); }
+                                if selected.config.control != crate::calculation_pad::InputControl::Field {
+                                    for (label, increase) in [("−", false), ("+", true)] {
+                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Button::new(label)).clicked() {
+                                            match crate::calculation_pad::step_value(&input.kind, &selected.config, &draft.value, increase) {
+                                                Ok(value) => { draft.value = value; draft.dirty = true; draft.error = None; }
+                                                Err(error) => draft.error = Some(error),
+                                            }
+                                        }
+                                    }
+                                }
+                                if selected.config.control == crate::calculation_pad::InputControl::Slider {
+                                    if let Some((mut ordinal, count)) = crate::calculation_pad::exact_grid(&input.kind, &selected.config, &draft.value) {
+                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, egui::Slider::new(&mut ordinal, 0..=count).show_value(false)).changed()
+                                            && let Some(value) = crate::calculation_pad::exact_grid_value(&input.kind, &selected.config, ordinal)
+                                        { draft.value = value; draft.dirty = true; draft.error = None; }
+                                    } else if matches!(&input.kind, crate::calculation_pad::InputKind::Scalar | crate::calculation_pad::InputKind::Quantity { .. })
+                                        && let Some((minimum, maximum, mut value, step)) = crate::calculation_pad::slider_values(&input.kind, &selected.config, &draft.value) {
+                                        let mut slider = egui::Slider::new(&mut value, minimum..=maximum).show_value(false);
+                                        if let Some(step) = step { slider = slider.step_by(step); }
+                                        if ui.add_enabled(draft.basis == basis && draft.config == selected.config, slider).changed() {
+                                            draft.value = value.to_string();
+                                            draft.dirty = true; draft.error = None;
+                                        }
+                                    } else { ui.weak("Slider unavailable for this range or value; use the field."); }
+                                }
+                                match crate::calculation_pad::project_input(input.clone(), selected.config.clone()) {
+                                    Ok(projection) => if let Some(error) = projection.current_error { ui.colored_label(ui.visuals().warn_fg_color, format!("Current value: {error}")); },
+                                    Err(error) => { ui.colored_label(ui.visuals().warn_fg_color, error); }
+                                }
                                 if ui.button("Apply").clicked() {
-                                    effects.input_commit = Some(InputCommit { id: selected.id, original: draft.original.clone(), revision: draft.revision, value: draft.value.clone() });
+                                    effects.input_commit = Some(InputCommit { id: selected.id, original: draft.original.clone(), revision: draft.revision, value: draft.value.clone(), basis: draft.basis, config: draft.config.clone() });
                                 }
                                 if ui.button("Reset").clicked() {
-                                    *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false };
+                                    *draft = InputDraft { value: input.value.clone(), original: input.source_line.clone(), revision, error: None, dirty: false, basis, config: selected.config.clone() };
                                 }
                                 if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                             }
@@ -2124,6 +2175,37 @@ impl CalculationPadDialog {
                     }
                     if let Some(index) = remove { view.inputs.remove(index); }
                 });
+                let mut cancel_settings = false;
+                if let Some(config) = view.config_editor.as_mut() {
+                    ui.separator();
+                    ui.label("Input settings");
+                    egui::Grid::new("input-config-grid").num_columns(2).show(ui, |ui| {
+                        ui.label("Label"); ui.add(egui::TextEdit::singleline(&mut config.config.label).char_limit(257)); ui.end_row();
+                        ui.label("Description"); ui.add(egui::TextEdit::singleline(&mut config.config.description).char_limit(1025)); ui.end_row();
+                        ui.label("Suffix (decorative)"); ui.add(egui::TextEdit::singleline(&mut config.config.suffix).char_limit(129)); ui.end_row();
+                        ui.label("Minimum"); ui.add(egui::TextEdit::singleline(&mut config.minimum).char_limit(257)); ui.end_row();
+                        ui.label("Maximum"); ui.add(egui::TextEdit::singleline(&mut config.maximum).char_limit(257)); ui.end_row();
+                        ui.label("Step"); ui.add(egui::TextEdit::singleline(&mut config.step).char_limit(257)); ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Field, "Field");
+                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Stepper, "Step buttons");
+                        ui.selectable_value(&mut config.config.control, crate::calculation_pad::InputControl::Slider, "Slider");
+                    });
+                    if Some(config.basis) != effects.evaluation_basis { ui.colored_label(ui.visuals().warn_fg_color, "Source changed; reopen settings."); }
+                    if let Some(error) = &config.error { ui.colored_label(ui.visuals().error_fg_color, error); }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(Some(config.basis) == effects.evaluation_basis, egui::Button::new("Save settings")).clicked() {
+                            let mut commit = config.clone();
+                            commit.config.minimum = (!commit.minimum.is_empty()).then(|| commit.minimum.clone());
+                            commit.config.maximum = (!commit.maximum.is_empty()).then(|| commit.maximum.clone());
+                            commit.config.step = (!commit.step.is_empty()).then(|| commit.step.clone());
+                            effects.input_config_commit = Some(commit);
+                        }
+                        if ui.button("Cancel settings").clicked() { cancel_settings = true; }
+                    });
+                }
+                if cancel_settings { view.config_editor = None; }
             });
         }
         if view.show_watches {
@@ -2272,7 +2354,7 @@ impl CalculationPadDialog {
                     ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
                         self.panels_ui(ui, &source, evaluation.as_deref(), &mut view, effects);
                     });
-                    if view != self.pad_view || effects.input_commit.is_some() { effects.pad_view = Some(view); }
+                    if view != self.pad_view || effects.input_commit.is_some() || effects.input_config_commit.is_some() { effects.pad_view = Some(view); }
                     let mut tools = effects.editor_tools.clone().unwrap_or_else(|| self.editor_tools.clone());
                     self.editor_tools_ui(ui, editor_id, &source, &mut tools, effects, popup_owns_input);
                     self.rename_ui(ui, effects);
@@ -2628,6 +2710,7 @@ impl CalculationPadDialog {
             host.edited_source = None;
             host.pad_view = None;
             host.input_commit = None;
+            host.input_config_commit = None;
             host.watch_copy = None;
             host.calculation_policy = None;
             host.document_profile = None;
@@ -2661,17 +2744,41 @@ impl CalculationPadDialog {
         if host.edited_source.is_some() || host.editor_history_action.is_some() {
             host.pad_view = None;
             host.input_commit = None;
+            host.input_config_commit = None;
             host.watch_copy = None;
         }
         let mut accepted_input_commit = false;
         if host.edited_source.is_none() && host.editor_history_action.is_none()
-            && host.intent.is_none() && host.host_request.is_none() && !host.close_requested
+            && host.intent.is_none() && host.host_request.is_none() && !host.close_requested && !host.native_close_requested
+            && let Some(commit) = host.input_config_commit.take()
+        {
+            let same = Some(commit.basis) == self.session.evaluation_basis()
+                && self.session.view_metadata().is_some_and(|view| view.inputs.iter().any(|input| input.id == commit.id && !input.unavailable && input.config == commit.original));
+            let result = if same { self.session.configure_input(commit.id, commit.config) } else { Err("Source or settings changed; reopen settings.".into()) };
+            match result {
+                Ok(()) => {
+                    if let Some(view) = host.pad_view.as_mut() {
+                        if let Some(config) = self.session.view_metadata().and_then(|metadata| metadata.inputs.iter().find(|input| input.id == commit.id)).map(|input| input.config.clone())
+                            && let Some(input) = view.inputs.iter_mut().find(|input| input.id == commit.id) { input.config = config; input.draft = None; }
+                        view.config_editor = None;
+                    }
+                    self.schedule_recovery_snapshot(ctx);
+                }
+                Err(error) => if let Some(editor) = host.pad_view.as_mut().and_then(|view| view.config_editor.as_mut()) { editor.error = Some(error); },
+            }
+            ctx.request_repaint_of(host.viewport_id);
+        }
+        if host.edited_source.is_none() && host.editor_history_action.is_none()
+            && host.intent.is_none() && host.host_request.is_none() && !host.close_requested && !host.native_close_requested
             && let Some(commit) = host.input_commit.take()
         {
-            match self.session.input_replacement(commit.revision, commit.id, &commit.original, &commit.value) {
-                Ok(source) => {
-                    accepted_input_commit = true;
-                    host.edited_source = Some(source);
+            let result = if commit.revision == commit.basis.revision {
+                self.session.apply_input(commit.basis, commit.id, &commit.original, &commit.config, &commit.value)
+            } else { Err("Source changed; reset this draft.".into()) };
+            match result {
+                Ok(changed) => {
+                    accepted_input_commit = changed;
+                    if changed { ctx.request_repaint_of(host.viewport_id); }
                     if let Some(view) = host.pad_view.as_mut()
                         && let Some(input) = view.inputs.iter_mut().find(|input| input.id == commit.id)
                     { input.draft = None; }
@@ -2684,6 +2791,7 @@ impl CalculationPadDialog {
             }
         }
         if host.edited_source.is_none()
+            && !accepted_input_commit
             && host.editor_history_action.is_none()
             && self.session.pending_transition().is_none()
             && let Some(replacement) = host.editor_replacement.take()
@@ -2710,6 +2818,7 @@ impl CalculationPadDialog {
             || host.editor_primary_caret.is_some()
             || host.rename_action.is_some()
             || host.rename_context_caret.is_some()
+            || host.input_config_commit.is_some()
             || host.result_scroll.is_some()
             || host.close_requested
             || host.focus_viewport
@@ -2718,6 +2827,7 @@ impl CalculationPadDialog {
         if let Some(caret) = host.rename_context_caret.take() { self.rename_context_caret = Some(caret); }
         let mut renamed = false;
         if host.document_basis == current_basis && host.evaluation_basis == self.session.evaluation_basis()
+            && !accepted_input_commit
             && host.edited_source.is_none() && host.editor_history_action.is_none()
             && host.pad_view.is_none() && host.input_commit.is_none()
             && host.intent.is_none() && host.host_request.is_none() && !host.close_requested && !host.native_close_requested
@@ -2753,12 +2863,12 @@ impl CalculationPadDialog {
                 RenameAction::Cancel => self.rename = None,
             }
         }
-        let accepted_source_or_history = renamed || host.edited_source.is_some() || host.editor_history_action.is_some();
+        let accepted_source_or_history = renamed || accepted_input_commit || host.edited_source.is_some() || host.editor_history_action.is_some();
         let before_document = self
             .session
             .document_incarnation()
             .zip(self.session.current_id());
-        let source_was_edited = renamed || host.edited_source.is_some();
+        let source_was_edited = renamed || accepted_input_commit || host.edited_source.is_some();
         let old_source = (!self.pad_view.inputs.is_empty() && accepted_source_or_history)
             .then(|| self.session.source().unwrap_or_default().to_owned());
         let old_ids = old_source.as_ref().map(|_| self.session.line_ids().unwrap_or_default().to_vec());
@@ -6149,19 +6259,89 @@ mod tests {
         dialog.test_replace_source("x = 1\nx = 2");
         let id = dialog.session.line_id(1).unwrap();
         let revision = dialog.session.revision().unwrap();
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None });
+        dialog.persist_view_state_in_session();
+        let basis = dialog.session.evaluation_basis().unwrap();
         let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host.pass_accepted = true;
-        host.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision, value: "8".into() });
+        host.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision, value: "8".into(), basis, config: Default::default() });
         complete_host_effects(&mut dialog, &ctx, host);
         assert_eq!(dialog.test_source(), Some("x = 1\nx = 8"));
         assert!(dialog.session.undo());
         assert_eq!(dialog.test_source(), Some("x = 1\nx = 2"));
         let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
         stale.pass_accepted = true;
-        stale.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision: dialog.session.revision().unwrap(), value: "9".into() });
+        stale.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision: dialog.session.revision().unwrap(), value: "9".into(), basis: dialog.session.evaluation_basis().unwrap(), config: Default::default() });
         dialog.test_replace_source("x = 1\nx = 4");
         complete_host_effects(&mut dialog, &ctx, stale);
         assert_eq!(dialog.test_source(), Some("x = 1\nx = 4"));
+    }
+
+    #[test]
+    fn configured_input_retained_manual_apply_and_stale_settings() {
+        use crate::calculation_pad::{CalculationPolicy, DocumentOptions, DocumentProfile, EvaluationStatus, InputControl};
+        let (_directory, root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.session.set_document_options(DocumentOptions { calculation: CalculationPolicy::Manual, profile: DocumentProfile::Standard }).unwrap();
+        dialog.test_replace_source("x = 2\nx + 1");
+        let id = dialog.session.line_id(0).unwrap();
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None });
+        dialog.persist_view_state_in_session();
+        let basis = dialog.session.evaluation_basis().unwrap();
+        let mut draft = super::InputConfigDraft { id, basis, original: Default::default(), config: Default::default(), minimum: "0".into(), maximum: "10".into(), step: "1".into(), error: None };
+        draft.config.label = "Count".into();
+        draft.config.suffix = "ore".into();
+        draft.config.control = InputControl::Stepper;
+        draft.config.minimum = Some(draft.minimum.clone());
+        draft.config.maximum = Some(draft.maximum.clone());
+        draft.config.step = Some(draft.step.clone());
+        let mut view = dialog.pad_view.clone();
+        view.config_editor = Some(draft.clone());
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true; host.pad_view = Some(view); host.input_config_commit = Some(draft);
+        complete_host_effects(&mut dialog, &ctx, host);
+        let config = dialog.pad_view.inputs[0].config.clone();
+        assert_eq!(config.label, "Count");
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision: dialog.session.revision().unwrap(), value: "3".into(), basis: dialog.session.evaluation_basis().unwrap(), config: config.clone() });
+        complete_host_effects(&mut dialog, &ctx, host);
+        assert_eq!(dialog.test_source(), Some("x = 3\nx + 1"));
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+        assert!(dialog.session.undo());
+        assert_eq!(dialog.test_source(), Some("x = 2\nx + 1"));
+        dialog.session.save_as("configured").unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(dialog.session.current_id().unwrap()).unwrap();
+        assert_eq!(reopened.view_metadata().unwrap().inputs[0].config, config);
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true;
+        stale.input_commit = Some(super::InputCommit { id, original: "x = 2".into(), revision: dialog.session.revision().unwrap(), value: "4".into(), basis: dialog.session.evaluation_basis().unwrap(), config: Default::default() });
+        complete_host_effects(&mut dialog, &ctx, stale);
+        assert_eq!(dialog.test_source(), Some("x = 2\nx + 1"));
+    }
+
+    #[test]
+    fn input_apply_preserves_duplicate_row_identities_and_undo() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("x = 1\nx = 2");
+        let ids = dialog.session.line_ids().unwrap().to_vec();
+        dialog.pad_view.inputs.push(super::InputSelection { id: ids[0], name: "x".into(), unavailable: false, config: Default::default(), draft: None });
+        dialog.persist_view_state_in_session();
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.input_commit = Some(super::InputCommit { id: ids[0], original: "x = 1".into(), revision: dialog.session.revision().unwrap(), value: "2".into(), basis: dialog.session.evaluation_basis().unwrap(), config: Default::default() });
+        complete_host_effects(&mut dialog, &ctx, host);
+        assert_eq!(dialog.test_source(), Some("x = 2\nx = 2"));
+        assert_eq!(dialog.session.line_ids().unwrap(), ids);
+        assert!(!dialog.pad_view.inputs[0].unavailable);
+        assert!(dialog.session.undo());
+        assert_eq!(dialog.test_source(), Some("x = 1\nx = 2"));
+        assert_eq!(dialog.session.line_ids().unwrap(), ids);
     }
 
     #[test]

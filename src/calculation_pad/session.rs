@@ -971,6 +971,19 @@ impl CalculationPadSession {
         Ok(replacement)
     }
 
+    pub(crate) fn apply_input(&mut self, basis: super::EvaluationBasis, line_id: LineId, original: &str, config: &super::input::InputConfig, value: &str) -> Result<bool, String> {
+        if self.evaluation_basis() != Some(basis) { return Err("Source changed; reset this draft.".into()); }
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if !current.view.inputs.iter().any(|input| input.id == line_id && !input.unavailable && &input.config == config) {
+            return Err("Input settings changed; reset this draft.".into());
+        }
+        let source = self.input_replacement(basis.revision, line_id, original, value)?;
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let ids = current.line_ids.clone();
+        let next = current.next_line_id;
+        self.commit_source_edit(source, ids, next, RelatedReferenceEdits::default()).map_err(|error| error.to_string())
+    }
+
     pub(crate) fn input_projection(&self, line_id: LineId) -> Result<super::input::InputProjection, String> {
         let current = self.current.as_ref().ok_or("No document is open.")?;
         let selection = current.view.inputs.iter().find(|input| input.id == line_id).ok_or("Input is not selected.")?;

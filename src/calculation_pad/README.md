@@ -368,6 +368,12 @@ and saved text remain intact. Ctrl+F opens Find, Ctrl+H opens Replace, and
 Ctrl+G goes to a physical line. Replace All is one undoable source edit.
 
 **Config Menu → View** independently shows **Editable inputs** and **Output watches**.
+For each selected input, **Configure…** sets an optional label, description,
+decorative suffix, minimum, maximum, step, and preferred field, step buttons,
+or slider. Save settings separately; editing a field or moving a slider changes
+only its draft until **Apply**. A slider is unavailable for an unsuitable or
+off-grid range or value; the field remains usable. Bounds never rewrite or
+silently clamp an existing value. Step defaults to one when omitted.
 Both start hidden. Choose a top-level literal assignment as an input, edit its
 value and select **Apply**; invalid or unfinished values stay in the field until
 corrected or reset. Assignments with the same name are listed by source line.

@@ -32,9 +32,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M7-B | Verified and pushed | `9039f3296226184de3aaa37cf45fd12f0b919fd5`. Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
 | M8-A | Verified and pushed | `f0f87495d5cf2d2bafd1de456804cca2f188476a`. Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
 | M8-B | Verified and pushed | `c796de9d7d049fcf81ec26ea8c36d0c7a72d6ea7`. F2 and right-click preview, retained host actions, stale and history protection. |
-| M9-A | Verified | Typed input definitions, retained v3 configuration and source projection. Focused batch passed 12/12. |
-| M9-B | In progress | Numeric fields, controls, draft and guarded Apply integration. |
-| M10-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M9-A | Verified and pushed | `c48bed1d9c7df339e6939ace09a70728401180be`. Typed input definitions, retained v3 configuration and source projection. Focused batch passed 12/12. |
+| M9-B | Verified | Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
+| M10-A | In progress | Bounded immutable sensitivity analysis and current-only publication. |
+| M10-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -49,7 +50,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check pending. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
 | C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
-| C6 | Typed input model implemented; controls in progress | Focused numeric and persistence checks passed. Native integrated check pending. | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
+| C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
 | C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
 | C5 | Pending | Pending | Committed snapshots, utility window host and render lifecycle, size/presentation settings and clipboard |
 | F3 | Pending | Pending | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and `domain` cases |
@@ -159,3 +160,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Source-backed descriptors carry exact numeric kind and original logical statement/span. Configuration persists on the selected stable input ID in v3, with conservative defaults for existing v1/v2/v3 documents and strict legacy v2 decoding. Saved bounds and positive steps validate against their type or authored unit. Labels and decorative suffixes survive source-type changes; incompatible numeric limits require review.
 - Draft validation retains fixed-width bounds and exact decimal precision, preserves wrappers, unit text, comments and CRLF, and reports out-of-range source without clamping it. Private projection uses the same literal slot without mutating the session. Ordinary bare radix source still follows the existing exact-scalar range; full-width values remain available through typed integer constructors.
 - Focused library Nextest passed 12/12 with exit 0, in 0.42 seconds reported by Nextest and 2.53 seconds owned elapsed. Separate compile took 353.75 seconds under its 900-second deadline. Tests cover old metadata, named save/reopen, rename, stale source/host Apply, long exact decimal, source spans and type/unit boundary. Cleanup and output drain passed. Receipts: `m9a-build` and `m9a-run`.
+
+### M9-B input controls
+
+- Editable Inputs now offer labels, descriptions, decorative suffixes, numeric ranges and steps, a field, step controls, or a bounded slider. Typed exact grids use small ordinal coordinates, including fixed integers above the exact-scalar range. A bare radix assignment keeps its existing ±2^53 magnitude ceiling. Unsuitable sliders retain the ordinary field.
+- Step and drag update drafts. Guarded Apply verifies the current document/revision, selected input/configuration and original logical statement before one source edit. It retains physical IDs even when adjacent reassignments become identical. Accepted changes use normal Manual/Automatic, recovery and history behavior. An out-of-range current value is flagged and remains in source.
+- Initial scoped library Nextest passed 8/8. A focused audit constrained bare-radix generated values and reused direct scalar token parsing in form validation. The final batch passed 9/9 with exit 0, 0.29 seconds reported by Nextest and 2.41 seconds owned elapsed. The separate final compile took 191.51 seconds. Each cached check met the 100-second deadline and compiles met 900 seconds. Cleanup and output drain passed. Receipts: `m9b-*` and `m9b-final-*`. Native desktop evidence remains pending.
