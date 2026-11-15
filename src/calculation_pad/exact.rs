@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use super::document::{CalculationValue, DiagnosticKind, MAX_EXPRESSION_BYTES};
 use super::document::script::WorkBudget;
 
-const MAX_BITS: u64 = 4096;
-const MAX_SCALE: u32 = 1000;
+pub(crate) const MAX_BITS: u64 = 4096;
+pub(crate) const MAX_SCALE: u32 = 1000;
 const MAX_COMBINATORIAL_STEPS: u64 = 10_000;
 
 #[derive(Clone, Copy)]

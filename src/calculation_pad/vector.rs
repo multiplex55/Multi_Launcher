@@ -6,7 +6,7 @@ use crate::common::number_format::format_number;
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_VECTOR_COMPONENTS: usize = 128;
-const MAX_VECTOR_WORK: usize = 1024;
+pub(crate) const MAX_VECTOR_WORK: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalculationVector(Vec<f64>);

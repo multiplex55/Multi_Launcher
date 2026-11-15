@@ -18,8 +18,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-const MAX_UNDO_ENTRIES: usize = 64;
-const MAX_UNDO_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_UNDO_ENTRIES: usize = 64;
+pub(crate) const MAX_UNDO_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionLineResult {
@@ -40,6 +40,7 @@ pub struct SessionEvaluation {
     /// Physical rows holding the final bindings in this evaluation.
     pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
     pub diagnostic: Option<DocumentDiagnostic>,
+    pub usage: Option<super::document::EvaluationUsage>,
 }
 
 pub(super) fn project_evaluation(
@@ -76,6 +77,7 @@ pub(super) fn project_evaluation(
         lines,
         final_bindings: Arc::new(evaluation.final_bindings),
         diagnostic: evaluation.diagnostic,
+        usage: evaluation.usage,
     })
 }
 
@@ -1729,6 +1731,100 @@ mod tests {
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         session.advance_automatic();
         assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
+    fn extended_capacity_worker_and_controlled_cancellation_observation() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluator = Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(request.stamp).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)).unwrap();
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended }).unwrap();
+        let source = vec![format!("1 #{}", "x".repeat(127)); 1000].join("\n");
+        session.replace_source(&source).unwrap();
+        let start = Instant::now();
+        session.request_calculate();
+        let retired = started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(session.cancel_calculation(retired));
+        session.request_calculate();
+        let current = session.evaluation_basis().unwrap();
+        assert_ne!(retired, current);
+        continue_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(30)).unwrap(), current);
+        assert!(session.displayed_evaluation().is_none());
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        session.advance_automatic();
+        let evaluation = session.displayed_evaluation().unwrap();
+        assert_eq!(evaluation.basis, current);
+        assert!(evaluation.diagnostic.is_none());
+        println!("capacity worker profile=Extended bytes={} rows=1000 elapsed={:?} usage={:?} retired_never_published=true", source.len(), start.elapsed(), evaluation.usage);
+    }
+
+    #[test]
+    fn usage_counters_belong_to_current_evaluation_basis() {
+        let (_dir, _root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        session.replace_source("for i in range(3):\n  x = i + 1").unwrap();
+        session.request_calculate();
+        let first = session.displayed_evaluation().unwrap();
+        let usage = first.usage.unwrap();
+        assert_eq!(usage.loop_iterations, 3);
+        assert!(usage.work_units > 0);
+        session.replace_source("1").unwrap();
+        assert_ne!(Some(first.basis), session.evaluation_basis());
+        assert!(session.evaluation_with_source().is_none());
+    }
+
+    #[test]
+    fn profile_shrink_keeps_source_and_reports_current_admission_failure() {
+        let (_dir, _root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended }).unwrap();
+        let source = vec!["1"; 257].join("\n");
+        session.replace_source(&source).unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::NotCalculated);
+        session.request_calculate();
+        let result = session.displayed_evaluation().unwrap();
+        assert!(matches!(&result.diagnostic, Some(super::DocumentDiagnostic::TooManyLines { .. })));
+        assert_eq!(result.usage, None);
+        session.replace_source("1").unwrap();
+        assert_eq!(session.source(), Some("1"));
+    }
+
+    #[test]
+    fn extended_evaluation_limits_preserve_larger_admitted_saved_source() {
+        use super::super::limits::{EXTENDED_BYTES, EXTENDED_LINES};
+        let (_dir, root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() }).unwrap();
+        let exact_bytes = format!("#{}", "x".repeat(EXTENDED_BYTES - 1));
+        session.replace_source(&exact_bytes).unwrap();
+        assert!(session.evaluation().unwrap().diagnostic.is_none());
+        let larger = format!("{exact_bytes}x");
+        session.replace_source(&larger).unwrap();
+        assert!(matches!(&session.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::DocumentTooLarge { max_bytes }) if *max_bytes == EXTENDED_BYTES));
+        session.save_as("over extended limit").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.source(), Some(larger.as_str()));
+        reopened.replace_source(vec!["1"; EXTENDED_LINES].join("\n")).unwrap();
+        assert!(reopened.evaluation().unwrap().diagnostic.is_none());
+        reopened.replace_source(vec!["1"; EXTENDED_LINES + 1].join("\n")).unwrap();
+        assert!(matches!(&reopened.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { max_lines }) if *max_lines == EXTENDED_LINES));
     }
 
     #[test]

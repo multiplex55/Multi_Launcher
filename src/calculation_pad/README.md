@@ -402,10 +402,24 @@ evaluation errors, and remains editable.
 
 The evaluator checks these bounds before invoking expression or unit parsers:
 
+Choose **Config Menu → Calculation → Standard document** or **Extended document**
+per document. Standard permits 64 KiB and 256 physical rows; Extended permits
+128 KiB and 1,024 rows. Switching to Standard preserves larger source and reports
+an evaluation diagnostic until it is reduced. The absolute edit and storage
+admission envelope is 256 KiB / 2,048 rows; undo history is bounded to 2 MiB
+and 64 entries. Extended uses the same evaluation budgets as Standard.
+
+Expand **Document Usage** to see current source bytes and rows, plus work units
+and loop iterations from the current completed evaluation. Counters are not
+shown as current after an edit or profile change; viewing usage does not start a
+Manual calculation. Each counter warns independently at 90% and over its limit.
+
 | Limit | Maximum |
 | --- | ---: |
-| Source document | 64 KiB |
-| Physical source lines | 256 |
+| Source document | 64 KiB Standard; 128 KiB Extended |
+| Physical source lines | 256 Standard; 1,024 Extended |
+| Charged evaluation work | 50,000 units |
+| Loop iterations | 10,000 |
 | Expression or conversion line | 2,048 UTF-8 bytes |
 | Normalized scalar expression | 8 KiB |
 | Parenthesis nesting | 32 levels |

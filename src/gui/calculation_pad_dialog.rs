@@ -356,6 +356,12 @@ struct SourceHighlight {
     expires_at: f64,
 }
 
+fn usage_line(ui: &mut egui::Ui, label: &str, used: usize, limit: usize) {
+    let suffix = if used > limit { " · over limit" } else if used.saturating_mul(10) >= limit.saturating_mul(9) { " · approaching limit" } else { "" };
+    let text = format!("{label}: {used} / {limit}{suffix}");
+    if suffix.is_empty() { ui.label(text); } else { ui.colored_label(ui.visuals().warn_fg_color, text); }
+}
+
 struct HostEffects {
     identity: PadHostIdentity,
     viewport_id: egui::ViewportId,
@@ -370,6 +376,7 @@ struct HostEffects {
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
     evaluation_basis: Option<crate::calculation_pad::EvaluationBasis>,
     calculation_policy: Option<crate::calculation_pad::CalculationPolicy>,
+    document_profile: Option<crate::calculation_pad::DocumentProfile>,
     calculate: Option<crate::calculation_pad::EvaluationBasis>,
     cancel_calculation: Option<crate::calculation_pad::EvaluationBasis>,
     inspector_selection: Option<LineId>,
@@ -507,6 +514,7 @@ impl CalculationPadDialog {
                 .map(|((incarnation, document), revision)| (incarnation, document, revision)),
             evaluation_basis: self.session.evaluation_basis(),
             calculation_policy: None,
+            document_profile: None,
             calculate: None,
             cancel_calculation: None,
             inspector_selection: None,
@@ -1784,6 +1792,11 @@ impl CalculationPadDialog {
                         ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Automatic, "Automatic");
                         ui.selectable_value(&mut policy, crate::calculation_pad::CalculationPolicy::Manual, "Manual");
                         if policy != options.calculation { effects.calculation_policy = Some(policy); }
+                        ui.separator();
+                        let mut profile = options.profile;
+                        ui.selectable_value(&mut profile, crate::calculation_pad::DocumentProfile::Standard, "Standard document");
+                        ui.selectable_value(&mut profile, crate::calculation_pad::DocumentProfile::Extended, "Extended document");
+                        if profile != options.profile { effects.document_profile = Some(profile); }
                     }
                 });
 
@@ -1934,6 +1947,38 @@ impl CalculationPadDialog {
                 ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
             }
         });
+        if let (Some(source), Some(options)) = (self.session.source(), self.session.document_options()) {
+            let limits = crate::calculation_pad::profile_limits(options.profile);
+            let rows = self.session.line_ids().map_or(0, |ids| ids.len());
+            let status = |used: usize, limit: usize| if used > limit { " over limit" } else if used.saturating_mul(10) >= limit.saturating_mul(9) { " near limit" } else { "" };
+            let title = format!("Document Usage ({:?}) · {} / {} bytes{} · {} / {} rows{}", options.profile, source.len(), limits.bytes, status(source.len(), limits.bytes), rows, limits.lines, status(rows, limits.lines));
+            egui::CollapsingHeader::new(title).id_salt("calculation-pad-document-usage").default_open(false).show(ui, |ui| {
+                usage_line(ui, "Source bytes", source.len(), limits.bytes);
+                usage_line(ui, "Physical rows", rows, limits.lines);
+                if source.len() > limits.bytes || rows > limits.lines {
+                    if options.profile == crate::calculation_pad::DocumentProfile::Standard {
+                        ui.label("Reduce the source, or choose Extended document under Config Menu → Calculation. Source remains editable and saveable.");
+                    } else {
+                        ui.label("Reduce the source to evaluate it. Source remains editable and saveable within the absolute admission limit.");
+                    }
+                }
+                if let Some(evaluation) = self.session.displayed_evaluation().filter(|value| Some(value.basis) == self.session.evaluation_basis()) {
+                    if let Some(usage) = evaluation.usage {
+                        usage_line(ui, "Work units", usage.work_units, crate::calculation_pad::MAX_WORK);
+                        usage_line(ui, "Loop iterations", usage.loop_iterations, crate::calculation_pad::MAX_LOOP_ITERATIONS);
+                    } else { ui.label(format!("Evaluation counters unavailable for this source (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
+                } else { ui.label(format!("Evaluation counters unavailable until current calculation completes (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
+                ui.small(format!("Absolute source admission: {} bytes / {} rows", crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES, crate::calculation_pad::MAX_ADMITTED_SOURCE_LINES));
+                ui.small(format!("Saved document / recovery envelopes: {} / {} bytes", crate::calculation_pad::MAX_STORED_DOCUMENT_BYTES, crate::calculation_pad::MAX_STORED_RECOVERY_BYTES));
+                ui.small(format!("Undo history: {} bytes / {} entries", crate::calculation_pad::MAX_UNDO_BYTES, crate::calculation_pad::MAX_UNDO_ENTRIES));
+                ui.small(format!("Expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
+                ui.small(format!("Identifiers: {} per document / {} per expression; name: {} bytes", crate::calculation_pad::MAX_DEPENDENCIES, crate::calculation_pad::MAX_DEPENDENCIES_PER_LINE, crate::calculation_pad::MAX_NAME_BYTES));
+                ui.small(format!("Range / sequence elements: {}; vector components: {}; vector work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_WORK));
+                ui.small(format!("Loop nesting: {}; control block nesting: {}", crate::calculation_pad::MAX_LOOP_DEPTH, crate::calculation_pad::MAX_BLOCK_DEPTH));
+                ui.small(format!("Exact number: {} bits / {} decimal places", crate::calculation_pad::MAX_EXACT_BITS, crate::calculation_pad::MAX_EXACT_SCALE));
+                ui.small("Functions: 64 definitions / 16 parameters / 16 call depth");
+            });
+        }
     }
 
     fn panels_ui(
@@ -2499,6 +2544,7 @@ impl CalculationPadDialog {
             host.input_commit = None;
             host.watch_copy = None;
             host.calculation_policy = None;
+            host.document_profile = None;
             host.calculate = None;
             host.cancel_calculation = None;
             host.editor_history_action = None;
@@ -2560,6 +2606,7 @@ impl CalculationPadDialog {
         }
         let needs_repaint = host.edited_source.is_some()
             || host.calculation_policy.is_some()
+            || host.document_profile.is_some()
             || host.calculate.is_some()
             || host.cancel_calculation.is_some()
             || host.save_as_name.is_some()
@@ -2797,10 +2844,11 @@ impl CalculationPadDialog {
             && before_document == after_document
         {
             if host.evaluation_basis == self.session.evaluation_basis() {
-                if let Some(policy) = host.calculation_policy.take()
+                if (host.calculation_policy.is_some() || host.document_profile.is_some())
                     && let Some(mut options) = self.session.document_options()
                 {
-                    options.calculation = policy;
+                    if let Some(policy) = host.calculation_policy.take() { options.calculation = policy; }
+                    if let Some(profile) = host.document_profile.take() { options.profile = profile; }
                     match self.session.set_document_options(options) {
                         Ok(true) => { self.schedule_recovery_snapshot(ctx); ctx.request_repaint_of(host.viewport_id); }
                         Ok(false) => {}
@@ -3919,7 +3967,7 @@ impl CalculationPadDialog {
                         ui.label("Quantities preserve dimensions and support compatible arithmetic and conversions. Names and rN references use earlier physical source lines.");
                         ui.label("Compatible units can be added, scaled, multiplied, divided and converted using 'to'. Temperature and fuel-economy units remain conversion-only; month/year conversions may be approximate.");
                         ui.label("Braced names may contain spaces and Unicode. rN counts physical source lines, including comments and blanks; forward or failed references are diagnosed.");
-                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, and identifiers to 64 per line and 512 per document. Standard documents evaluate up to 64 KiB and 256 lines; Extended documents allow 256 KiB and 2,048 lines.");
+                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, and identifiers to 64 per line and 512 per document. Standard documents evaluate up to 64 KiB and 256 lines; Extended documents allow 128 KiB and 1,024 lines.");
                         ui.label("Quantity expressions are limited to 256 tokens and unit powers from -8 through 8. Finite operands and intermediate values are required.");
                     });
                     ui.collapsing("Dates and times", |ui| {
@@ -4423,6 +4471,7 @@ impl CalculationPadDialog {
                     ).intersect(ui.clip_rect());
                     let painter = ui.painter().with_clip_rect(clip);
                     for (visible_line, y) in physical_line_positions(&scroll.inner.galley, scroll.inner.galley_pos.y) {
+                        if y > clip.bottom() || y + ui.text_style_height(&egui::TextStyle::Monospace) < clip.top() { continue; }
                         let line_number = projection.visible_lines.get(visible_line - 1).copied().unwrap_or(visible_line - 1) + 1;
                         painter.text(
                             egui::pos2(gutter.right() - 4.0, y),
@@ -4750,10 +4799,12 @@ impl CalculationPadDialog {
         }
 
         let mut scroll_target = None;
+        let mut virtual_target = None;
+        const COMPACT_ROW_HEIGHT: f32 = 36.0;
         let scroll = egui::ScrollArea::vertical()
             .id_salt("calculation-pad-results")
             .max_height(max_height)
-            .show(ui, |ui| {
+            .show_viewport(ui, |ui, viewport| {
                 let Some(evaluation) = evaluation else {
                     match self.session.evaluation_status() {
                         crate::calculation_pad::EvaluationStatus::Pending => { ui.label("Calculating…"); }
@@ -4791,7 +4842,24 @@ impl CalculationPadDialog {
                             && self.session.revision() == Some(*revision)
                     }).map(|(_, _, _, line)| line))
                     .or_else(|| self.dependency_seed());
-                for line in &evaluation.lines {
+                let compact = evaluation.lines.len() > crate::calculation_pad::MAX_SOURCE_LINES;
+                let visible_rows = if compact {
+                    evaluation.lines.iter().filter(|line| !matches!(line.outcome, LineOutcome::Blank | LineOutcome::Comment)).collect::<Vec<_>>()
+                } else { Vec::new() };
+                let start = if compact { ((viewport.min.y / COMPACT_ROW_HEIGHT).floor().max(0.0) as usize).saturating_sub(1).min(visible_rows.len()) } else { 0 };
+                let end = if compact { ((viewport.max.y / COMPACT_ROW_HEIGHT).ceil().max(0.0) as usize + 1).min(visible_rows.len()) } else { evaluation.lines.len() };
+                if compact {
+                    ui.add_space(start as f32 * COMPACT_ROW_HEIGHT);
+                    if current && let Some((_, _, revision, target)) = self.pending_result_scroll
+                        && revision == evaluation.basis.revision
+                        && let Some(index) = visible_rows.iter().position(|line| line.id == target)
+                        && (index < start || index >= end)
+                    { virtual_target = Some(index as f32 * COMPACT_ROW_HEIGHT); }
+                }
+                let rows: Box<dyn Iterator<Item = &crate::calculation_pad::SessionLineResult> + '_> = if compact {
+                    Box::new(visible_rows[start..end].iter().copied())
+                } else { Box::new(evaluation.lines.iter()) };
+                for line in rows {
                     let formatted = match &line.outcome {
                         LineOutcome::Blank | LineOutcome::Comment => continue,
                         LineOutcome::Definition => None,
@@ -4799,7 +4867,7 @@ impl CalculationPadDialog {
                         LineOutcome::Continuation { .. } => None,
                         LineOutcome::Value(value) => {
                             let formatted = result_format::display(value, self.display_preferences);
-                            if formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
+                            if !compact && formatted.as_ref().is_some_and(|text| text.trim().is_empty()) {
                                 continue;
                             }
                             formatted
@@ -4823,7 +4891,29 @@ impl CalculationPadDialog {
                         ui.set_min_width(ui.available_width());
                         #[cfg(test)]
                         self.test_rendered_result_rows.push((line.line_index, line.id));
-                        ui.horizontal_wrapped(|ui| {
+                        if compact {
+                            let margin = egui::Frame::group(ui.style()).inner_margin;
+                            ui.set_min_height((COMPACT_ROW_HEIGHT - ui.spacing().item_spacing.y - f32::from(margin.top) - f32::from(margin.bottom)).max(0.0));
+                            let detail = match &line.outcome {
+                                LineOutcome::Value(value) => {
+                                    let text = formatted.as_deref().unwrap_or("unavailable");
+                                    if value.is_approximate() && !text.starts_with("≈ ") { format!("{text} approx.") } else { text.to_owned() }
+                                },
+                                LineOutcome::Error(error) => error.to_string(),
+                                LineOutcome::Definition => "Function definition".into(),
+                                LineOutcome::Control => "Control statement".into(),
+                                LineOutcome::Continuation { owner_line } => format!("Continuation of r{}", owner_line + 1),
+                                _ => String::new(),
+                            };
+                            let name = line.assignment_name.as_deref().map_or(String::new(), |name| format!(" {name}"));
+                            let refs = if line.dependency_indices.is_empty() { String::new() } else {
+                                format!(" uses {}", line.dependency_indices.iter().map(|index| format!("r{}", index + 1)).collect::<Vec<_>>().join(", "))
+                            };
+                            let text = format!("r{}{name}{refs}  {detail}", line.line_index + 1);
+                            let response = ui.add(egui::Label::new(&text).truncate().sense(egui::Sense::click())).on_hover_text(text);
+                            #[cfg(test)] { text_rect = response.rect; if matches!(line.outcome, LineOutcome::Value(_)) { self.test_result_rows.push((line.line_index, response.rect)); } }
+                            response
+                        } else { ui.horizontal_wrapped(|ui| {
                             let row = ui
                                 .monospace(format!("r{}", line.line_index + 1))
                                 .interact(egui::Sense::click());
@@ -4871,7 +4961,7 @@ impl CalculationPadDialog {
                                 }
                             }
                             row_response
-                        }).inner
+                        }).inner }
                     }),
                     );
                     #[cfg(test)]
@@ -4957,12 +5047,17 @@ impl CalculationPadDialog {
                         }
                     });
                 }
+                if compact { ui.add_space((visible_rows.len() - end) as f32 * COMPACT_ROW_HEIGHT); }
             });
         if let (Some(target), Some(identity)) = (scroll_target, self.pending_result_scroll) {
             let mut state = scroll.state;
             if !scroll.inner_rect.contains_rect(target) {
                 state.offset.y = (state.offset.y + target.center().y - scroll.inner_rect.center().y).max(0.0);
             }
+            *result_scroll = Some(ResultScrollUpdate { target: identity, scroll_id: scroll.id, state });
+        } else if let (Some(offset), Some(identity)) = (virtual_target, self.pending_result_scroll) {
+            let mut state = scroll.state;
+            state.offset.y = (offset - scroll.inner_rect.height() / 2.0).max(0.0);
             *result_scroll = Some(ResultScrollUpdate { target: identity, scroll_id: scroll.id, state });
         }
     }
@@ -5487,6 +5582,111 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().to_path_buf());
         let dialog = CalculationPadDialog::new(&root);
         (directory, root, dialog)
+    }
+
+    #[test]
+    fn profile_and_policy_are_retained_together_without_manual_calculation() {
+        use crate::calculation_pad::{CalculationPolicy, DocumentProfile, EvaluationStatus};
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        host.pass_accepted = true;
+        host.calculation_policy = Some(CalculationPolicy::Manual);
+        host.document_profile = Some(DocumentProfile::Extended);
+        complete_host_effects(&mut dialog, &ctx, host);
+        let options = dialog.session.document_options().unwrap();
+        assert_eq!((options.calculation, options.profile), (CalculationPolicy::Manual, DocumentProfile::Extended));
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+        let old = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        dialog.test_replace_source("1");
+        let mut stale = old;
+        stale.pass_accepted = true;
+        stale.document_profile = Some(DocumentProfile::Standard);
+        complete_host_effects(&mut dialog, &ctx, stale);
+        assert_eq!(dialog.session.document_options().unwrap().profile, DocumentProfile::Extended);
+        assert_eq!(dialog.session.evaluation_status(), EvaluationStatus::NotCalculated);
+    }
+
+    #[test]
+    fn near_capacity_focused_editor_observation() {
+        use std::time::Instant;
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        fn memory() -> Option<u64> {
+            let pid = sysinfo::Pid::from_u32(std::process::id());
+            let mut system = System::new();
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_memory());
+            system.process(pid).map(|process| process.memory())
+        }
+        for (profile, rows, width) in [(crate::calculation_pad::DocumentProfile::Standard, 248, 255), (crate::calculation_pad::DocumentProfile::Extended, 1000, 130)] {
+            let (_directory, _root, mut dialog) = fixture();
+            let ctx = egui::Context::default();
+            dialog.open();
+            let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+            dialog.session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+            dialog.session.set_document_options(crate::calculation_pad::DocumentOptions { calculation: crate::calculation_pad::CalculationPolicy::Manual, profile }).unwrap();
+            let mut lines = vec![format!("1 #{}", "x".repeat(width - 3)); rows];
+            lines[0] = "# region measured".into();
+            lines[rows - 2] = "# endregion".into();
+            lines[rows - 1] = "1".into();
+            let source = lines.join("\n");
+            let before = memory();
+            let started = Instant::now();
+            dialog.test_replace_source(&source);
+            dialog.folds.collapsed.push(dialog.session.line_id(0).unwrap());
+            let size = egui::vec2(1000.0, 700.0);
+            for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+            let loaded = started.elapsed();
+            let editor = dialog.test_editor_id.unwrap();
+            ctx.memory_mut(|memory| memory.request_focus(editor));
+            let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+            let visible_len = "# region measured\n1".chars().count();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(visible_len))));
+            state.store(&ctx, editor);
+            let edit_start = Instant::now();
+            frame(&mut dialog, &ctx, size, vec![egui::Event::Text("+1".into())]);
+            let edit = edit_start.elapsed();
+            assert!(dialog.test_source().unwrap().ends_with("1+1"));
+            frame(&mut dialog, &ctx, size, vec![key(egui::Key::F, egui::Modifiers::COMMAND)]);
+            assert!(dialog.editor_tools.open);
+            frame(&mut dialog, &ctx, size, vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -200.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move }]);
+            ctx.memory_mut(|memory| memory.request_focus(editor));
+            frame(&mut dialog, &ctx, size, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+            let copied = frame_effects(&mut dialog, &ctx, size, vec![egui::Event::Copy]);
+            assert!(copied.contains(&CalculationPadDialogEffect::CopyText(dialog.test_source().unwrap().to_owned())));
+            let calculation_start = Instant::now();
+            dialog.session.request_calculate();
+            if profile == crate::calculation_pad::DocumentProfile::Extended {
+                wake_rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap();
+                dialog.session.advance_automatic();
+            }
+            let calculation = calculation_start.elapsed();
+            let result = dialog.session.displayed_evaluation().unwrap();
+            assert_eq!(Some(result.basis), dialog.session.evaluation_basis());
+            assert!(result.diagnostic.is_none());
+            let render_start = Instant::now();
+            frame(&mut dialog, &ctx, size, Vec::new());
+            let result_render = render_start.elapsed();
+            if profile == crate::calculation_pad::DocumentProfile::Extended {
+                assert!(dialog.test_rendered_result_rows.len() < 100);
+                let warmed_start = Instant::now();
+                frame(&mut dialog, &ctx, size, Vec::new());
+                let warmed_render = warmed_start.elapsed();
+                let last = dialog.session.line_id(rows - 1).unwrap();
+                dialog.pending_result_scroll = Some((dialog.session.document_incarnation().unwrap(), dialog.session.current_id().unwrap(), dialog.session.revision().unwrap(), last));
+                let jump_start = Instant::now();
+                for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+                let jump = jump_start.elapsed();
+                assert!(dialog.test_rendered_result_rows.iter().any(|(index, id)| *index == rows - 1 && *id == last));
+                assert!(dialog.test_rendered_result_rows.len() < 100);
+                dialog.session.set_document_options(crate::calculation_pad::DocumentOptions { calculation: crate::calculation_pad::CalculationPolicy::Manual, profile: crate::calculation_pad::DocumentProfile::Standard }).unwrap();
+                frame(&mut dialog, &ctx, size, Vec::new());
+                assert!(!dialog.test_rendered_result_rows.is_empty() && dialog.test_rendered_result_rows.len() < 100);
+                assert_ne!(Some(result.basis), dialog.session.evaluation_basis());
+                println!("capacity warmed_render={warmed_render:?} offscreen_jump_three_frames={jump:?} stale_profile_rendered_rows={}", dialog.test_rendered_result_rows.len());
+            }
+            println!("capacity profile={profile:?} bytes={} rows={rows} loaded={loaded:?} edit={edit:?} calculation={calculation:?} result_render={result_render:?} usage={:?} working_set_before={before:?} working_set_after={:?}", source.len(), result.usage, memory());
+        }
     }
 
     fn copy_all_session(session: &mut CalculationPadSession) -> String {

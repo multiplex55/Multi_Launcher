@@ -4,8 +4,8 @@ use super::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-const MAX_SEQUENCE_ELEMENTS: usize = 1024;
-const MAX_WORK: usize = 50_000;
+pub(crate) const MAX_SEQUENCE_ELEMENTS: usize = 1024;
+pub(crate) const MAX_WORK: usize = 50_000;
 
 pub(super) fn validate_source(source: &str) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
@@ -134,6 +134,7 @@ pub(crate) struct WorkBudget {
     pub(super) called_definitions: Vec<usize>,
 }
 impl WorkBudget {
+    pub(crate) fn used(&self) -> usize { self.used }
     pub(crate) fn charge(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
         if self
             .cancellation

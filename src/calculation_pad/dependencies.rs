@@ -152,6 +152,7 @@ mod tests {
             kind: DiagnosticKind::CyclicDependency,
         });
         let evaluation = SessionEvaluation {
+            usage: None,
             basis: super::super::EvaluationBasis { document: DocumentId(1), incarnation: DocumentIncarnation(DocumentId(2)), revision: 7, generation: 3 },
             source: std::sync::Arc::from("a\nb\nc\nd"),
             final_bindings: Default::default(),

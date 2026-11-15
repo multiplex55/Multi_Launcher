@@ -3,9 +3,9 @@
 use super::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
-const MAX_LOOP_DEPTH: usize = 8;
-const MAX_LOOP_ITERATIONS: usize = 10_000;
-const MAX_BLOCK_DEPTH: usize = 32;
+pub(crate) const MAX_LOOP_DEPTH: usize = 8;
+pub(crate) const MAX_LOOP_ITERATIONS: usize = 10_000;
+pub(crate) const MAX_BLOCK_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchKind { If, Elif, Else }
@@ -1113,6 +1113,7 @@ fn evaluate_analyzed<'a>(
         lines: execution.rows,
         final_bindings,
         diagnostic: None,
+        usage: Some(EvaluationUsage { work_units: execution.work.used(), loop_iterations: execution.iterations }),
     }
 }
 

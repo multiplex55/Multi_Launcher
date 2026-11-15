@@ -34,6 +34,8 @@ pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
     loops::editor_control_keyword(source)
 }
 pub(crate) use script::{FUNCTIONS, function_signature_help};
+pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS};
+pub(crate) use loops::{MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
 
 #[derive(Clone, Debug)]
 pub(crate) struct EditorFunction {
@@ -363,6 +365,7 @@ impl CalculationDocument {
                 diagnostic: Some(DocumentDiagnostic::DocumentTooLarge {
                     max_bytes: limits.bytes,
                 }),
+                usage: None,
             };
         }
 
@@ -375,6 +378,7 @@ impl CalculationDocument {
                 diagnostic: Some(DocumentDiagnostic::TooManyLines {
                     max_lines: limits.lines,
                 }),
+                usage: None,
             };
         }
         let analysis = syntax::SourceAnalysis::new(source);
@@ -492,6 +496,7 @@ impl CalculationDocument {
                 })
                 .collect(),
             diagnostic: None,
+            usage: Some(EvaluationUsage { work_units: work.used(), loop_iterations: 0 }),
         }
     }
 }
@@ -538,6 +543,14 @@ pub struct CalculationEvaluation<'a> {
     /// The physical row of each name's latest binding, including failures.
     pub(crate) final_bindings: HashMap<String, FinalBinding>,
     pub diagnostic: Option<DocumentDiagnostic>,
+    pub usage: Option<EvaluationUsage>,
+}
+
+/// Counters charged by this evaluation, absent when source admission prevented evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvaluationUsage {
+    pub work_units: usize,
+    pub loop_iterations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -28,9 +28,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M5-C | Verified and pushed | `3aa2402776a075c74673cc4e792535923871902d`. Conditional blocks, loop flow and recovery. Final batch passed 16/16. |
 | M6-A | Verified and pushed | `da6d58cca7453770c95079c3a031dee10941f608`. Calendar domain. Batches passed 11/11 and 5/5. |
 | M6-B | Verified and pushed | `ae72a9246fdd000ba41fc7750e6f49e43c5cfcb0`. Calendar presentation and examples. Focused batch passed 14/14. |
-| M7-A | Verified | Extended source admission, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
-| M7-B | In progress | Profile/usage UI and deterministic capacity observations. |
-| M8-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M7-A | Verified and pushed | `07857478c05296eda7b3554b3399d27ee09887a5`. Extended source lifecycle, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
+| M7-B | Verified | Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
+| M8-A | In progress | Binding-aware rename planning and one source-plus-metadata transaction. |
+| M8-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -43,7 +44,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C18 | Implemented | Focused runtime, editor, navigation and examples passed. Native integrated check pending. | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
 | C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
-| C26 | Lifecycle implemented; UI and capacity observation pending | Focused edit, worker, recovery and storage checks passed | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
+| C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check pending. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
 | C14 | Pending | Pending | Binding identity, session history/metadata, guarded editor preview and apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
 | C4 | Pending | Pending | Session-owned bounded worker evaluation and accepted Config Menu actions |
@@ -130,3 +131,11 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Standard evaluation remains 64 KiB/256 rows; Extended and absolute source admission use 256 KiB/2,048. Both records use a shared 4 MiB envelope. Physical rows remain distinct from runtime binding slots. GUI Extended uses the coalescing worker even without control flow. Undo keeps its existing entry and byte budget.
 - Initial compile exited 101 on a fixture calling private recovery store methods. The fixture now uses the production writer boundary. The correction also rejects oversized Find/Replace content atomically, including when the widget would otherwise truncate a paste. Preflight avoids analyzing over-profile Standard source before returning its diagnostic.
 - Scoped Nextest passed 19/19 with exit 0 in 2.90 seconds after a 317.37-second separate compile. It covers high rows, UTF-8 and trailing rows, profile retirement, save/reopen/recovery, exact source and stable IDs, atomic oversized edits, older versions and envelope checks. Cleanup and output drain passed. Receipts in `m7a-build`, `m7a-correction-build`, and `m7a-correction-run`.
+
+### M7-B usage and capacity
+
+- Added per-document profile controls, source/evaluation usage and independent 90% warnings. Large Results snapshots draw visible rows, including stale Extended results still displayed after switching to Standard. Navigation can jump to a physical row outside the painted range.
+- The initial measurement at 255,647 bytes and 2,000 rows showed about 482 ms for the first result frame, reduced to about 221 ms with visible-row rendering. A subsequent expanded-editor pass still took about 264 ms warmed and 636 ms across three offscreen-navigation frames. Based on those measurements, the Extended evaluation ceiling is 128 KiB and 1,024 physical rows. Text above it can still be edited, saved and reopened within the independent 256 KiB/2,048-row absolute admission limits. The 4 MiB serialized envelope and existing work/history limits remain in force.
+- Final deterministic headless observations in the same fast-dev profile: Standard, 62,751 bytes/248 rows, 10.38 ms folded typing, 18.52 ms calculation, 88.64 ms first populated frame. Extended, 130,638 bytes/1,000 rows, 22.81 ms folded typing, 70.13 ms worker calculation, 113.69 ms first populated frame, 112.83 ms warmed expanded frame, 304.79 ms across the three-frame offscreen jump. Extended process working set went from 29.07 MB to 35.14 MB. This is within the selected scope on this machine, with perceptible lag in the fully expanded near-ceiling editor. These are single headless fixture observations, not Windows interaction or latency guarantees.
+- Channel-controlled Extended worker cancellation and replacement passed at 130,999 bytes/1,000 rows in 144.06 ms end to end. The retired generation never published. Tests also cover byte/row admission boundaries, over-profile source saving/reopening, folding, Find, full-source Copy, navigation and result-basis isolation.
+- Focused library Nextest final batch passed 9/9 with exit 0, 2.05 seconds reported by Nextest and 4.21 seconds owned elapsed under the 100-second deadline. Separate final compile took 348.45 seconds under a 900-second deadline. Cleanup and output drain passed. Receipts: `m7b-build`, `m7b-correction-*`, `m7b-final-*`, `m7b-stale-*`, `m7b-editor-cache-*`, `m7b-validated-ceiling-*`.
