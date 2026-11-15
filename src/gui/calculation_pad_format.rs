@@ -127,6 +127,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn calendar_presentation_ignores_numeric_preferences() {
+        use crate::calculation_pad::{CalculationDocument, LineOutcome};
+        let document = CalculationDocument::new("date(\"2026-11-15\")\nweekday(date(\"2026-11-15\"))");
+        let evaluation = document.evaluate();
+        let mut preferences = Preferences::default();
+        preferences.number_mode = Mode::Scientific;
+        preferences.decimal_places = 4;
+        preferences.group_digits = true;
+        preferences.percent = true;
+        let LineOutcome::Value(date) = &evaluation.lines[0].outcome else { panic!("date"); };
+        let LineOutcome::Value(day) = &evaluation.lines[1].outcome else { panic!("weekday"); };
+        assert_eq!(display(date, preferences).as_deref(), Some("2026-11-15"));
+        assert_eq!(display(day, preferences).as_deref(), Some("Sunday"));
+        assert!(!supports_precision(date));
+        assert!(!supports_percent(date));
+    }
+
+    #[test]
     fn exact_views_preserve_value_and_show_rounding_provenance() {
         use crate::calculation_pad::{CalculationDocument, LineOutcome};
         let document = CalculationDocument::new("fraction(7,4)\nfraction(-7,4)\nfraction(1,3)\ndecimal_div(decimal(\"1\"),decimal(\"8\"),2)\nto_float(fraction(1,2))\ndecimal(\"1.75\")");

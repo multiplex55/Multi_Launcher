@@ -10,7 +10,7 @@ use super::document::{CalculationValue, DiagnosticKind};
 use super::quantity;
 use crate::date_arithmetic::{
     shift_calendar_months,
-    zones::{FoldChoice, LocalResolution, NamedTimeZone, resolve_local_datetime},
+    zones::{FoldChoice, LocalResolution, NamedTimeZone, format_utc_offset, resolve_local_datetime},
 };
 use crate::unit_conversion::{self, Unit};
 
@@ -50,18 +50,21 @@ fn offset_local(value: &DateTime<FixedOffset>) -> Result<NaiveDateTime, Diagnost
     Ok(local)
 }
 
-fn local(instant: DateTime<Utc>, zone: NamedTimeZone) -> Result<NaiveDateTime, DiagnosticKind> {
+fn local_with_offset(instant: DateTime<Utc>, zone: NamedTimeZone) -> Result<(NaiveDateTime, i32), DiagnosticKind> {
     let tz: chrono_tz::Tz = zone.name().parse().map_err(|_| range())?;
     let projected = instant.with_timezone(&tz);
     use chrono::Offset;
+    let offset = projected.offset().fix().local_minus_utc();
     let local = instant
         .naive_utc()
-        .checked_add_signed(Duration::seconds(i64::from(
-            projected.offset().fix().local_minus_utc(),
-        )))
+        .checked_add_signed(Duration::seconds(i64::from(offset)))
         .ok_or_else(range)?;
     valid_date(local.date())?;
-    Ok(local)
+    Ok((local, offset))
+}
+
+fn local(instant: DateTime<Utc>, zone: NamedTimeZone) -> Result<NaiveDateTime, DiagnosticKind> {
+    local_with_offset(instant, zone).map(|(local, _)| local)
 }
 
 fn resolve(
@@ -89,19 +92,33 @@ fn fold(value: Option<&str>) -> Result<Option<FoldChoice>, DiagnosticKind> {
 }
 
 impl CalendarValue {
+    pub fn type_label(&self) -> &'static str {
+        match self {
+            Self::Date(_) => "date",
+            Self::Time(_) => "time",
+            Self::Offset(_) => "timestamp",
+            Self::Zoned { .. } => "zoned timestamp",
+            Self::Weekday(_) => "weekday",
+        }
+    }
+
     pub fn display(&self) -> String {
         match self {
             Self::Date(v) => v.format("%Y-%m-%d").to_string(),
             Self::Time(v) => v.format("%H:%M:%S%.f").to_string(),
             Self::Offset(v) => v.to_rfc3339(),
-            Self::Zoned { instant, zone } => format!(
-                "{} {}",
-                local(*instant, *zone)
-                    .map(|v| v.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
-                    .unwrap_or_else(|_| "out of range".into()),
-                zone.name()
-            ),
-            Self::Weekday(v) => format!("{v:?}"),
+            Self::Zoned { instant, zone } => {
+                match local_with_offset(*instant, *zone) {
+                    Ok((value, offset)) => format!("{} {} {}", value.format("%Y-%m-%dT%H:%M:%S%.f"), format_utc_offset(offset), zone.name()),
+                    Err(_) => "out of range".into(),
+                }
+            }
+            Self::Weekday(v) => match v {
+                Weekday::Mon => "Monday", Weekday::Tue => "Tuesday",
+                Weekday::Wed => "Wednesday", Weekday::Thu => "Thursday",
+                Weekday::Fri => "Friday", Weekday::Sat => "Saturday",
+                Weekday::Sun => "Sunday",
+            }.to_owned(),
         }
     }
     pub fn canonical(&self) -> Option<String> {
@@ -153,6 +170,35 @@ impl CalendarValue {
                 Ok(a.num_days_from_monday().cmp(&b.num_days_from_monday()))
             }
             _ => Err(err("calendar values have incompatible types")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::calculation_pad::{CalculationDocument, CalculationValue, LineOutcome};
+
+    #[test]
+    fn calendar_display_and_copy_preserve_fold_offset_and_subseconds() {
+        let document = CalculationDocument::new(concat!(
+            "zoned_datetime(\"2026-11-01T01:30:00.123456789\", \"America/New_York\", \"earlier\")\n",
+            "zoned_datetime(\"2026-11-01T01:30:00.123456789\", \"America/New_York\", \"later\")\n",
+            "datetime(\"2026-11-15T12:34:56.123456789-05:00\")\n",
+            "weekday(date(\"2026-11-15\"))"
+        ));
+        let evaluation = document.evaluate();
+        for (index, expected) in [
+            (0, "2026-11-01T01:30:00.123456789 UTC-04:00 America/New_York"),
+            (1, "2026-11-01T01:30:00.123456789 UTC-05:00 America/New_York"),
+            (2, "2026-11-15T12:34:56.123456789-05:00"),
+            (3, "Sunday"),
+        ] {
+            let LineOutcome::Value(value @ CalculationValue::Calendar(_)) = &evaluation.lines[index].outcome else {
+                panic!("expected calendar value at {index}");
+            };
+            assert_eq!(value.formatted_result().as_deref(), Some(expected));
+            let copy = CalculationDocument::new(value.canonical_result().unwrap());
+            assert_eq!(&copy.evaluate().lines[0].outcome, &evaluation.lines[index].outcome);
         }
     }
 }

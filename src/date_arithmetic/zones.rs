@@ -297,7 +297,7 @@ fn from_zone_datetime(
     })
 }
 
-fn format_utc_offset(seconds: i32) -> String {
+pub(crate) fn format_utc_offset(seconds: i32) -> String {
     let seconds = i64::from(seconds);
     let sign = if seconds < 0 { '-' } else { '+' };
     let magnitude = seconds.abs();

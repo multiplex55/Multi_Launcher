@@ -26,6 +26,7 @@ enum ExampleExpectation {
     },
     ExactBase(&'static str),
     Exact(&'static str),
+    Calendar(&'static str),
     ExactInteger {
         mode: &'static str,
         value: &'static str,
@@ -68,6 +69,7 @@ impl CalculationExample {
             ),
             ExampleExpectation::ExactBase(digits) => digits.into(),
             ExampleExpectation::Exact(value) => value.into(),
+            ExampleExpectation::Calendar(value) => value.into(),
             ExampleExpectation::ExactInteger { value, .. } => value.into(),
             ExampleExpectation::Dimensional {
                 formatted_result, ..
@@ -78,6 +80,82 @@ impl CalculationExample {
 }
 
 const EXAMPLES: &[CalculationExampleGroup] = &[
+    CalculationExampleGroup {
+        title: "Variables and physical lines",
+        examples: &[
+            CalculationExample {
+                title: "Assign and reuse a value",
+                source: "radius = 3\nPI * radius ^ 2",
+                explanation: "Assignments are available to later lines.",
+                expected: ExampleExpectation::Scalar(std::f64::consts::PI * 9.0),
+            },
+            CalculationExample {
+                title: "Reference a physical source line",
+                source: "# Input\n2 + 3\nr2 * 4",
+                explanation: "rN uses one-based physical lines; comments and blanks count.",
+                expected: ExampleExpectation::Scalar(20.0),
+            },
+            CalculationExample {
+                title: "Use a Unicode name",
+                source: "{顧客 名} = 4\n{顧客 名} * 2",
+                explanation: "Braced names can contain spaces and Unicode.",
+                expected: ExampleExpectation::Scalar(8.0),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Dates and times",
+        examples: &[
+            CalculationExample {
+                title: "Shift a calendar date",
+                source: "add_days(date(\"2026-11-15\"), 45)",
+                explanation: "Calendar day shifts preserve the date type.",
+                expected: ExampleExpectation::Calendar("2026-12-30"),
+            },
+            CalculationExample {
+                title: "Count signed calendar days",
+                source: "days_between(date(\"2026-12-30\"), date(\"2026-11-15\"))",
+                explanation: "Days between follows start-to-end order and may be negative.",
+                expected: ExampleExpectation::Scalar(-45.0),
+            },
+            CalculationExample {
+                title: "Clamp a month-end shift",
+                source: "add_months(date(\"2024-01-31\"), 1)",
+                explanation: "A month shift clamps to the last valid day in the target month.",
+                expected: ExampleExpectation::Calendar("2024-02-29"),
+            },
+            CalculationExample {
+                title: "Name a weekday",
+                source: "weekday(date(\"2026-11-15\"))",
+                explanation: "Weekday results display their names.",
+                expected: ExampleExpectation::Calendar("Sunday"),
+            },
+            CalculationExample {
+                title: "Keep an explicit offset and fractional seconds",
+                source: "datetime(\"2026-11-15T12:34:56.125-05:00\")",
+                explanation: "Offset timestamps retain their instant and subsecond precision.",
+                expected: ExampleExpectation::Calendar("2026-11-15T12:34:56.125-05:00"),
+            },
+            CalculationExample {
+                title: "Choose a daylight-saving fold",
+                source: "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\", \"later\")",
+                explanation: "Ambiguous named-zone wall times need an explicit earlier or later choice.",
+                expected: ExampleExpectation::Calendar("2026-11-01T01:30:00 UTC-05:00 America/New_York"),
+            },
+            CalculationExample {
+                title: "Measure elapsed time",
+                source: "elapsed_between(time(\"08:00\"), time(\"09:30\"))",
+                explanation: "Elapsed differences produce a physical time quantity in seconds.",
+                expected: ExampleExpectation::Physical { value: 5400.0, unit: Unit::Second },
+            },
+            CalculationExample {
+                title: "Reject time-only date rollover",
+                source: "add_duration(time(\"23:30\"), 1 h)",
+                explanation: "Use a timestamp when adding a duration crosses a date boundary.",
+                expected: ExampleExpectation::ErrorContains("use a timestamp"),
+            },
+        ],
+    },
     CalculationExampleGroup {
         title: "Exact decimals and fractions",
         examples: &[
@@ -122,29 +200,6 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 source: "decimal(\"1\") / decimal(\"3\")",
                 explanation: "Use decimal_div with an explicit precision for repeating decimal results.",
                 expected: ExampleExpectation::ErrorContains("nonterminating"),
-            },
-        ],
-    },
-    CalculationExampleGroup {
-        title: "Variables and physical lines",
-        examples: &[
-            CalculationExample {
-                title: "Assign and reuse a value",
-                source: "radius = 3\nPI * radius ^ 2",
-                explanation: "Assignments are available to later lines.",
-                expected: ExampleExpectation::Scalar(std::f64::consts::PI * 9.0),
-            },
-            CalculationExample {
-                title: "Reference a physical source line",
-                source: "# Input\n2 + 3\nr2 * 4",
-                explanation: "rN uses one-based physical lines; comments and blanks count.",
-                expected: ExampleExpectation::Scalar(20.0),
-            },
-            CalculationExample {
-                title: "Use a Unicode name",
-                source: "{顧客 名} = 4\n{顧客 名} * 2",
-                explanation: "Braced names can contain spaces and Unicode.",
-                expected: ExampleExpectation::Scalar(8.0),
             },
         ],
     },
@@ -791,6 +846,9 @@ mod tests {
                     (ExampleExpectation::Exact(expected), LineOutcome::Value(actual @ CalculationValue::Exact(_))) => {
                         assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
                     }
+                    (ExampleExpectation::Calendar(expected), LineOutcome::Value(actual @ CalculationValue::Calendar(_))) => {
+                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
+                    }
                     (
                         ExampleExpectation::Vector(expected),
                         LineOutcome::Value(CalculationValue::Vector(actual)),
@@ -873,7 +931,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 95);
+        assert_eq!(checked, 103);
     }
 
     #[test]

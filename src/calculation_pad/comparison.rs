@@ -49,7 +49,7 @@ impl ComparisonSide {
     }
     pub fn type_label(&self) -> &'static str {
         match &self.value {
-            Ok(CalculationValue::Calendar(_)) => "calendar",
+            Ok(CalculationValue::Calendar(value)) => value.type_label(),
             Ok(CalculationValue::Integer(value)) => value.mode().type_name(),
             Ok(CalculationValue::ExactBase { .. }) => "exact base",
             Ok(CalculationValue::Exact(_)) => "exact",
@@ -101,6 +101,9 @@ pub enum ComparisonRelation {
         ordering: Ordering,
         difference: String,
         approximate: bool,
+    },
+    Calendar {
+        ordering: Ordering,
     },
     Quantity {
         ordering: Ordering,
@@ -156,6 +159,7 @@ impl ComparisonRelation {
                 difference,
                 approximate,
             } => format!("{}; left − right = {}{difference}.", ordering(*order), if *approximate { "≈ " } else { "" }),
+            Self::Calendar { ordering: order } => format!("{}.", ordering(*order)),
             Self::Quantity {
                 ordering: order,
                 difference,
@@ -270,6 +274,12 @@ impl ComparisonContext {
                     differing_bits: xor.count_ones(),
                 }
             }
+            (Ok(CalculationValue::Calendar(a)), Ok(CalculationValue::Calendar(b))) => {
+                match a.compare(b) {
+                    Ok(ordering) => ComparisonRelation::Calendar { ordering },
+                    Err(_) => ComparisonRelation::TypeMismatch { left: left.type_label(), right: right.type_label() },
+                }
+            }
             (Ok(a @ CalculationValue::Exact(_)), Ok(b))
             | (Ok(a), Ok(b @ CalculationValue::Exact(_))) => {
                 let mut work = super::document::script::WorkBudget::default();
@@ -339,6 +349,31 @@ mod tests {
     use super::*;
     use crate::calculation_pad::{CalculationPadSession, IntegerMode, IntegerWidth};
     use crate::platform::app_data::AppDataRoot;
+
+    #[test]
+    fn calendar_comparisons_use_instants_and_reject_incompatible_kinds() {
+        let (_directory, mut session, context) = frozen(concat!(
+            "zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", \"earlier\")\n",
+            "zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", \"later\")\n",
+            "datetime(\"2026-11-01T06:30:00Z\")\n",
+            "date(\"2026-11-01\")"
+        ));
+        let selected = |index: usize| ComparisonSlot::Result(ComparisonResultRef {
+            incarnation: context.incarnation,
+            document_id: context.document_id,
+            line_id: context.rows[index].id,
+        });
+        let compared = context.compare(ComparisonRequest { left: selected(0), right: selected(1) });
+        assert_eq!(compared.relation, ComparisonRelation::Calendar { ordering: Ordering::Less });
+        assert_eq!(compared.left.type_label(), "zoned timestamp");
+        let same = context.compare(ComparisonRequest { left: selected(1), right: selected(2) });
+        assert_eq!(same.relation, ComparisonRelation::Calendar { ordering: Ordering::Equal });
+        assert_eq!(same.right.type_label(), "timestamp");
+        let incompatible = context.compare(ComparisonRequest { left: selected(2), right: selected(3) });
+        assert!(matches!(incompatible.relation, ComparisonRelation::TypeMismatch { left: "timestamp", right: "date" }));
+        session.replace_source("date(\"2027-01-01\")").unwrap();
+        assert!(session.comparison_context().is_none());
+    }
 
     #[test]
     fn exact_comparison_preserves_rational_difference_and_provenance() {

@@ -26,9 +26,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M5-A | Verified and pushed | `0cdba26a511b5c3abb3c0e14b9b433bbb2608a9a`. Formula runtime. Batches passed 11/11 and 7/7. |
 | M5-B | Verified and pushed | `c5a7fbfed5fe53dbd31ee0944ff6232c088d647b`. Formula editor and examples. Focused batch passed 13/13. |
 | M5-C | Verified and pushed | `3aa2402776a075c74673cc4e792535923871902d`. Conditional blocks, loop flow and recovery. Final batch passed 16/16. |
-| M6-A | Verified | Typed deterministic dates/durations, named-zone semantics and canonical replay. Batches passed 11/11 and 5/5. |
-| M6-B | In progress | Calendar presentation, comparison and reference. |
-| M7-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M6-A | Verified and pushed | `da6d58cca7453770c95079c3a031dee10941f608`. Calendar domain. Batches passed 11/11 and 5/5. |
+| M6-B | Verified | Calendar presentation, comparison, copy and examples. Focused batch passed 14/14. |
+| M7-A | In progress | Extended source admission, evaluation, worker and persistence. |
+| M7-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -40,7 +41,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C21 | Implemented | Focused numeric, compatibility, hint and executable example checks passed. | Script function catalog and signatures, editor hints, executable examples |
 | C18 | Implemented | Focused runtime, editor, navigation and examples passed. Native integrated check pending. | Shared syntax and bindings, typed script invocation, editor and dependencies |
 | C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check pending. | Existing loop block parser, transactional execution and editor structure |
-| C22 | Domain implemented; presentation pending | Focused date, DST, precision and legacy unit checks passed | Existing calendar and named-zone domain, typed Pad operations and formatting |
+| C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check pending. | Existing calendar and named-zone domain, typed Pad operations and formatting |
 | C26 | Pending | Pending | Source limits, session/history, worker, saved and recovery envelopes, editor. Synthetic value slots require review when expanding physical row capacity. |
 | C14 | Pending | Pending | Binding identity, session history/metadata, guarded editor preview and apply |
 | C6 | Pending | Pending | Literal input discovery and replacement, persisted Pad input references, existing input drafts |
@@ -117,3 +118,8 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Added deterministic calendar constructors and operations, with compatibility for existing physical-time quantities. Named-zone resolution uses explicit fold/gap semantics and distinguishes local calendar shifts from elapsed time. Output constructors retain kind, zone/fold, offset and supported fractional precision.
 - Initial scoped library Nextest passed 11/11 in 2.53 seconds. Corrected false duration precision rejection caused by f64 representation and blocked excess fractional clock digits before parsing. The focused correction run passed 5/5 in 2.26 seconds. Separate compilation ran 282.86 and 193.37 seconds under 900-second deadlines. Cached tests used 100-second deadlines; cleanup and output drain passed. Receipts are in `m6a-build`, `m6a-run`, `m6a-correction-build`, and `m6a-correction-run`.
+
+### M6-B calendar presentation
+
+- Show distinct zone/fold offsets and named weekdays, typed temporal comparison, and canonical versus formatted copy with current evaluation guards. Added eight calendar examples for 103 total; retained the original Variables group first for existing reference-window interactions.
+- After fixing the inferred index in a new comparison test (initial compile exit 101), scoped Nextest passed 14/14 with exit 0 in 3.31 seconds. The successful separate compile took 219.13 seconds. Tested canonical/Manual copy, hints, same-instant comparisons, all executable examples, and legacy reference-window search/copy. Cleanup and output drain passed. Receipts are in `m6b-build`, `m6b-correction-build`, and `m6b-correction-run`.

@@ -2037,7 +2037,7 @@ impl CalculationPadDialog {
                                             crate::calculation_pad::CalculationValue::Vector(_) => "vector",
                                             crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. } => "integer",
                                             crate::calculation_pad::CalculationValue::Exact(_) => "exact",
-                                            crate::calculation_pad::CalculationValue::Calendar(_) => "calendar",
+                                            crate::calculation_pad::CalculationValue::Calendar(value) => value.type_label(),
                                             crate::calculation_pad::CalculationValue::ApproximateScalar(_) => "approximate scalar",
                                             _ => "quantity",
                                         });
@@ -3905,8 +3905,8 @@ impl CalculationPadDialog {
             .vertical_scroll_offset(self.examples_scroll).max_height(ui.available_height())
             .show(ui, |ui| {
                 if !active {
-                    ui.label("Use one expression, assignment, or for header per line. Start full-line comments with # or //.");
-                    ui.label("Results include scalars, vectors, exact integers, quantities, and exact base conversions.");
+                    ui.label("Expressions and headers can continue across grouped lines. Use # or // for comments.");
+                    ui.label("Results include scalars, vectors, exact numbers, quantities, dates, times, and timestamps.");
                     ui.collapsing("Operator and function reference", |ui| {
                         ui.label("Functions are case-insensitive in call position. Unbound pi and pie mean PI. Infix mod matches signed %, while mod(a, b) is Euclidean.");
                         ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, max.");
@@ -3921,6 +3921,10 @@ impl CalculationPadDialog {
                         ui.label("Braced names may contain spaces and Unicode. rN counts physical source lines, including comments and blanks; forward or failed references are diagnosed.");
                         ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, documents to 64 KiB and 256 lines, and identifiers to 64 per line and 512 per document.");
                         ui.label("Quantity expressions are limited to 256 tokens and unit powers from -8 through 8. Finite operands and intermediate values are required.");
+                    });
+                    ui.collapsing("Dates and times", |ui| {
+                        ui.label("Use date, time, datetime, and zoned_datetime constructors. Ambiguous named-zone times require an earlier or later fold choice.");
+                        ui.label("add_days, add_months, and add_years use calendar shifts. days_between returns signed calendar days. elapsed_between and add_duration use physical time quantities.");
                     });
                     ui.separator();
                 }
@@ -7332,6 +7336,40 @@ mod tests {
         let select = dialog.test_select_comparison.unwrap();
         click(&mut dialog, &ctx, size, select.center());
         assert_eq!(dialog.inspector_context().selected_line, dialog.session.line_id(0));
+    }
+
+    #[test]
+    fn calendar_copy_and_watch_observe_current_manual_result() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.session.set_document_options(crate::calculation_pad::DocumentOptions {
+            calculation: crate::calculation_pad::CalculationPolicy::Manual,
+            profile: crate::calculation_pad::DocumentProfile::Standard,
+        }).unwrap();
+        dialog.test_replace_source("meeting = zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", \"later\")");
+        assert!(dialog.session.shared_evaluation().is_none());
+        dialog.session.request_calculate();
+        let evaluation = dialog.session.shared_evaluation().unwrap();
+        let binding = &evaluation.final_bindings["meeting"];
+        let LineOutcome::Value(CalculationValue::Calendar(value)) = &binding.outcome else { panic!("calendar watch"); };
+        assert_eq!(value.type_label(), "zoned timestamp");
+        let line = dialog.session.line_id(0).unwrap();
+        let canonical = super::ResultCopyIntent {
+            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT,
+            document_id: evaluation.basis.document, basis: evaluation.basis,
+            target: super::ResultCopyTarget::Line(line),
+        };
+        let formatted = super::ResultCopyIntent { target: super::ResultCopyTarget::FormattedLine(line), ..canonical };
+        assert_eq!(dialog.resolve_result_copy(canonical), Some(CalculationPadDialogEffect::CopyText(
+            "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\", \"later\")".into()
+        )));
+        assert_eq!(dialog.resolve_result_copy(formatted), Some(CalculationPadDialogEffect::CopyText(
+            "2026-11-01T01:30:00 UTC-05:00 America/New_York".into()
+        )));
+        dialog.test_replace_source("meeting = date(\"2026-11-02\")");
+        assert!(dialog.resolve_result_copy(canonical).is_none());
+        assert!(dialog.session.comparison_context().is_none());
+        assert_eq!(dialog.session.evaluation_status(), crate::calculation_pad::EvaluationStatus::Outdated);
     }
 
     #[test]

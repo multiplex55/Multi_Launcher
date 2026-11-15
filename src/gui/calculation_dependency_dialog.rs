@@ -257,7 +257,7 @@ fn describe_value(value: &crate::calculation_pad::CalculationValue) -> String {
         CalculationValue::Scalar(_) => "Scalar".to_owned(),
         CalculationValue::ApproximateScalar(_) => "Approximate scalar".to_owned(),
         CalculationValue::Exact(_) => "Exact".to_owned(),
-        CalculationValue::Calendar(_) => "Calendar".to_owned(),
+        CalculationValue::Calendar(value) => value.type_label().to_owned(),
         CalculationValue::Boolean(_) => "Boolean".to_owned(),
         CalculationValue::Sequence(_) => "Sequence".to_owned(),
         CalculationValue::Vector(_) => "Vector".to_owned(),

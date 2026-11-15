@@ -198,6 +198,29 @@ and braced references retain their ordinary meaning.
 used, `*`, `/`, and `%` group left to right; expressions without these forms
 keep the original operator precedence.
 
+## Dates and times
+
+Construct a date with `date("2026-11-15")`, a time with `time("09:30")`,
+an offset timestamp with `datetime("2026-11-15T12:34:56-05:00")`, or
+a named-zone timestamp with
+`zoned_datetime("2026-11-01T01:30", "America/New_York", "later")`.
+Ambiguous named-zone wall times require an explicit `"earlier"` or
+`"later"` fold choice. A nonexistent wall time reports an error. Named-zone
+results show the UTC offset so the two sides of a fold are distinguishable.
+
+`add_days`, `add_months`, and `add_years` shift dates or timestamps.
+Month and year shifts clamp to the last valid day in the target month.
+`days_between(start, end)` returns signed calendar days for dates, and
+`weekday(date)` returns a named weekday. `elapsed_between(start, end)`
+returns a physical time quantity. `add_duration(value, duration)` accepts
+an unapproximated physical time quantity such as `24 h`. A calendar-day
+shift of a zoned timestamp preserves its local wall time, while a 24-hour
+duration advances its instant by exactly 24 hours. Time-only values reject
+duration additions that cross a date boundary.
+
+Canonical copying retains the date/time kind, precision, offset or zone and
+the fold choice needed to reproduce the represented instant.
+
 ## Vectors
 
 Vectors contain one to 128 finite dimensionless scalar components, for example

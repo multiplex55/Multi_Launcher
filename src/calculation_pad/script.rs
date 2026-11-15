@@ -1718,7 +1718,7 @@ mod tests {
             "move_date(alias)\n",
             "date(\"2026-11-15\") < finish"
         ));
-        for (index, expected) in [(1, "2026-12-30"), (3, "Sun"), (4, "2024-02-29"), (5, "2025-02-28"), (6, "2026-12-30"), (8, "2026-12-31")] {
+        for (index, expected) in [(1, "2026-12-30"), (3, "Sunday"), (4, "2024-02-29"), (5, "2025-02-28"), (6, "2026-12-30"), (8, "2026-12-31")] {
             let LineOutcome::Value(value) = &rows[index] else { panic!("{index}: {:?}", rows[index]); };
             assert_eq!(value.formatted_result().as_deref(), Some(expected));
         }

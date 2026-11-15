@@ -939,6 +939,18 @@ mod tests {
     }
 
     #[test]
+    fn calendar_hints_follow_nested_quoted_arguments() {
+        let inner = "add_days(zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", ";
+        let hint = call_hint(inner, inner.len()).unwrap();
+        assert_eq!(hint.signature, "zoned_datetime(\"local\", \"zone\"[, \"earlier\" or \"later\"])");
+        assert_eq!(hint.argument, 2);
+        let outer = "add_days(zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", \"later\"), ";
+        let hint = call_hint(outer, outer.len()).unwrap();
+        assert_eq!(hint.signature, "add_days(value, days[, fold])");
+        assert_eq!(hint.argument, 1);
+    }
+
+    #[test]
     fn user_function_completion_and_hints_follow_local_scope_and_authored_names() {
         let prefix = concat!(
             "outside = 7\r\n",
