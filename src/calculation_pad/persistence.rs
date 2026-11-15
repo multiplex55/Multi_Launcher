@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
 pub const MAX_STORED_DOCUMENT_BYTES: usize = 512 * 1024;
-pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 3;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
 const DOCUMENTS_DIRECTORY: &str = "documents";
 const RECOVERY_FILE: &str = "last_source.json";
 const MAX_DIRECTORY_ENTRIES: usize = MAX_SAVED_DOCUMENTS * 4;
-pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 2;
 pub const MAX_STORED_RECOVERY_BYTES: usize = 512 * 1024;
 const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(350);
 
@@ -30,18 +30,53 @@ pub struct PadRecoverySnapshot {
     pub document_id: DocumentId,
     pub revision: u64,
     pub source: String,
+    pub options: DocumentOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalculationPolicy {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentProfile {
+    #[default]
+    Standard,
+    Extended,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentOptions {
+    pub calculation: CalculationPolicy,
+    pub profile: DocumentProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PadRecoveryWriteFailure {
     pub document_id: DocumentId,
     pub revision: u64,
+    pub options: DocumentOptions,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct StoredRecovery {
+    format_version: u32,
+    document_id: DocumentId,
+    revision: u64,
+    source: String,
+    options: DocumentOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRecoveryV1 {
     format_version: u32,
     document_id: DocumentId,
     revision: u64,
@@ -87,15 +122,22 @@ impl PadRecoveryStore {
         let Some(bytes) = read_recovery_limited(&self.path)? else {
             return Ok(None);
         };
-        let stored: StoredRecovery = serde_json::from_slice(&bytes)
+        let version: DocumentVersion = serde_json::from_slice(&bytes)
             .map_err(|error| anyhow::anyhow!("invalid Calculation Pad recovery JSON: {error}"))?;
-        if stored.format_version != CURRENT_RECOVERY_FORMAT_VERSION {
+        if version.format_version != 1 && version.format_version != CURRENT_RECOVERY_FORMAT_VERSION {
             anyhow::bail!(
                 "unsupported Calculation Pad recovery version {} (supported version is {})",
-                stored.format_version,
+                version.format_version,
                 CURRENT_RECOVERY_FORMAT_VERSION
             );
         }
+        let stored = if version.format_version == 1 {
+            let old: StoredRecoveryV1 = serde_json::from_slice(&bytes)?;
+            StoredRecovery { format_version: old.format_version, document_id: old.document_id,
+                revision: old.revision, source: old.source, options: DocumentOptions::default() }
+        } else {
+            serde_json::from_slice::<StoredRecovery>(&bytes)?
+        };
         if stored.document_id.0 == 0 {
             anyhow::bail!("Calculation Pad recovery document identity is invalid");
         }
@@ -104,6 +146,7 @@ impl PadRecoveryStore {
             document_id: stored.document_id,
             revision: stored.revision,
             source: stored.source,
+            options: stored.options,
         }))
     }
 
@@ -121,6 +164,7 @@ impl PadRecoveryStore {
             document_id: snapshot.document_id,
             revision: snapshot.revision,
             source: snapshot.source.clone(),
+            options: snapshot.options,
         };
         let bytes = serde_json::to_vec(&stored)
             .map_err(|error| anyhow::anyhow!("encode Calculation Pad recovery: {error}"))?;
@@ -131,6 +175,7 @@ impl PadRecoveryStore {
         }
         let _transaction = self.lock_transaction();
         self.ensure_write_directory()?;
+        self.ensure_supported_existing()?;
         crate::common::atomic_file::save_atomic(&self.path, &bytes)
             .map_err(|error| anyhow::anyhow!("write Calculation Pad recovery: {error}"))?;
         Ok(())
@@ -142,7 +187,12 @@ impl PadRecoveryStore {
             return Ok(());
         }
         match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                self.ensure_supported_existing()?;
+                fs::remove_file(&self.path)
+                    .map_err(|error| anyhow::anyhow!("clear Calculation Pad recovery: {error}"))?;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
                 fs::remove_file(&self.path)
                     .map_err(|error| anyhow::anyhow!("clear Calculation Pad recovery: {error}"))?;
             }
@@ -165,6 +215,16 @@ impl PadRecoveryStore {
         self.transaction
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn ensure_supported_existing(&self) -> anyhow::Result<()> {
+        if let Some(bytes) = read_recovery_limited(&self.path)?
+            && let Ok(version) = serde_json::from_slice::<DocumentVersion>(&bytes)
+            && version.format_version > CURRENT_RECOVERY_FORMAT_VERSION
+        {
+            anyhow::bail!("unsupported Calculation Pad recovery version {}", version.format_version);
+        }
+        Ok(())
     }
 
     fn ensure_existing_directory(&self) -> anyhow::Result<bool> {
@@ -455,7 +515,7 @@ fn recovery_worker(store: PadRecoveryStore, shared: Arc<(Mutex<RecoveryQueue>, C
                     &shared,
                     result,
                     reply,
-                    Some((snapshot.document_id, snapshot.revision)),
+                    Some((snapshot.document_id, snapshot.revision, snapshot.options)),
                 );
             }
             RecoveryCommand::Clear { reply } => {
@@ -496,11 +556,11 @@ fn finish_recovery_command(
     shared: &Arc<(Mutex<RecoveryQueue>, Condvar)>,
     result: anyhow::Result<()>,
     reply: Option<mpsc::Sender<anyhow::Result<()>>>,
-    failure_identity: Option<(DocumentId, u64)>,
+    failure_identity: Option<(DocumentId, u64, DocumentOptions)>,
 ) {
     if let Some(reply) = reply {
         let _ = reply.send(result);
-    } else if let (Err(error), Some((document_id, revision))) = (result, failure_identity) {
+    } else if let (Err(error), Some((document_id, revision, options))) = (result, failure_identity) {
         let (state, changed) = &**shared;
         state
             .lock()
@@ -509,6 +569,7 @@ fn finish_recovery_command(
             .push(PadRecoveryWriteFailure {
                 document_id,
                 revision,
+                options,
                 message: error.to_string(),
             });
         changed.notify_all();
@@ -719,6 +780,18 @@ struct StoredDocumentV1 {
     next_line_id: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDocumentV2 {
+    format_version: u32,
+    id: DocumentId,
+    name: String,
+    source: String,
+    line_ids: Vec<LineId>,
+    next_line_id: u64,
+    view: PadViewMetadata,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredDocument {
@@ -729,6 +802,7 @@ pub(super) struct StoredDocument {
     pub line_ids: Vec<LineId>,
     pub next_line_id: u64,
     pub view: PadViewMetadata,
+    pub options: DocumentOptions,
 }
 
 impl StoredDocument {
@@ -747,6 +821,7 @@ impl StoredDocument {
             line_ids,
             next_line_id,
             view: PadViewMetadata::default(),
+            options: DocumentOptions::default(),
         }
     }
 
@@ -824,9 +899,9 @@ impl PadDocumentStore {
     }
 
     pub(super) fn save_as_with_metadata(
-        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata,
+        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata, options: DocumentOptions,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
-        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, save_atomic)
+        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, options, save_atomic)
     }
 
     pub(super) fn save_as_with_writer(
@@ -844,6 +919,7 @@ impl PadDocumentStore {
             line_ids,
             next_line_id,
             PadViewMetadata::default(),
+            DocumentOptions::default(),
             writer,
         )
     }
@@ -856,6 +932,7 @@ impl PadDocumentStore {
         line_ids: Vec<LineId>,
         next_line_id: u64,
         view: PadViewMetadata,
+        options: DocumentOptions,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
         let name = validate_name(name)?;
@@ -880,6 +957,7 @@ impl PadDocumentStore {
         }
         let mut stored = StoredDocument::new(id, name, source, line_ids, next_line_id);
         stored.view = view;
+        stored.options = options;
         let bytes = encode_document(&path, &stored)?;
         self.ensure_write_directories()?;
         writer(&path, &bytes).map_err(|source| PadStoreError::AtomicWrite {
@@ -1171,12 +1249,15 @@ fn decode_document(
     }
     let version: DocumentVersion = serde_json::from_slice(bytes)
         .map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
-    if version.format_version != 1 && version.format_version != CURRENT_DOCUMENT_FORMAT_VERSION {
+    if !(1..=CURRENT_DOCUMENT_FORMAT_VERSION).contains(&version.format_version) {
         return Err(PadStoreError::UnsupportedVersion { found: version.format_version, supported: CURRENT_DOCUMENT_FORMAT_VERSION });
     }
     let stored = if version.format_version == 1 {
         let old: StoredDocumentV1 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
-        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default() }
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default(), options: DocumentOptions::default() }
+    } else if version.format_version == 2 {
+        let old: StoredDocumentV2 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: old.view, options: DocumentOptions::default() }
     } else {
         serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?
     };
@@ -1314,6 +1395,7 @@ mod tests {
             document_id: DocumentId(41),
             revision,
             source: source.to_owned(),
+            options: super::DocumentOptions::default(),
         }
     }
 
@@ -1330,9 +1412,48 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), old);
         session.save().unwrap();
         let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(upgraded["format_version"], 2);
+        assert_eq!(upgraded["format_version"], CURRENT_DOCUMENT_FORMAT_VERSION);
         assert_eq!(upgraded["source"], "x = 2\r\n");
         assert_eq!(upgraded["view"]["inputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn legacy_v2_preserves_view_and_upgrades_options_only_on_save() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("v2", "x = 2".into(), vec![LineId(1)], 2).unwrap();
+        let path = store.document_path(saved.id);
+        let bytes = format!(r#"{{"format_version":2,"id":{},"name":"v2","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false}}],"watches":["x"]}}}}"#, saved.id.as_u128()).into_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut session = crate::calculation_pad::CalculationPadSession::with_store(store.clone());
+        session.request_open(saved.id).unwrap();
+        assert_eq!(session.document_options(), Some(super::DocumentOptions::default()));
+        assert_eq!(session.view_metadata().unwrap().watches, ["x"]);
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "x");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        session.save().unwrap();
+        let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(upgraded["format_version"], CURRENT_DOCUMENT_FORMAT_VERSION);
+        assert_eq!(upgraded["view"]["watches"], serde_json::json!(["x"]));
+        assert_eq!(upgraded["view"]["inputs"][0]["name"], "x");
+    }
+
+    #[test]
+    fn legacy_recovery_defaults_options_and_future_record_is_preserved() {
+        let (_directory, _root, store) = recovery_fixture();
+        store.save(&recovery_snapshot("source", 4)).unwrap();
+        let mut old: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        old["format_version"] = serde_json::json!(1);
+        old.as_object_mut().unwrap().remove("options");
+        std::fs::write(store.path(), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().options, super::DocumentOptions::default());
+        old["format_version"] = serde_json::json!(CURRENT_RECOVERY_FORMAT_VERSION + 1);
+        old["future"] = serde_json::json!(true);
+        let future = serde_json::to_vec(&old).unwrap();
+        std::fs::write(store.path(), &future).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.save(&recovery_snapshot("replacement", 5)).is_err());
+        assert!(store.clear().is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), future);
     }
 
     #[test]
@@ -1358,7 +1479,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
         assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
         let mut future = original.clone();
-        future["format_version"] = serde_json::json!(3);
+        future["format_version"] = serde_json::json!(CURRENT_DOCUMENT_FORMAT_VERSION + 1);
         future["future_payload"] = serde_json::json!({"preserve": true});
         std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
         assert!(matches!(store.open(saved.id), Err(PadStoreError::UnsupportedVersion { .. })));
@@ -1556,6 +1677,7 @@ mod tests {
                 vec![LineId(1)],
                 2,
                 super::PadViewMetadata::default(),
+                super::DocumentOptions::default(),
                 |_, _| anyhow::bail!("occupied path must not reach the writer")
             ),
             Err(PadStoreError::OccupiedPath(path)) if path == store.document_path(saved.id)

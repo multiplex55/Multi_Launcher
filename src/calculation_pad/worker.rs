@@ -8,11 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct EvaluationStamp {
+pub struct EvaluationBasis {
     pub document: DocumentId,
     pub incarnation: DocumentIncarnation,
     pub revision: u64,
+    pub generation: u64,
 }
+
+pub(super) type EvaluationStamp = EvaluationBasis;
 
 pub(super) struct Request {
     pub stamp: EvaluationStamp,
@@ -175,7 +178,7 @@ fn run(shared: Arc<Shared>) {
 fn evaluate(request: Request, cancellation: Arc<AtomicBool>) -> Result<SessionEvaluation, String> {
     let document = CalculationDocument::new(request.source);
     let evaluation = document.evaluate_with_cancellation(cancellation);
-    project_evaluation(evaluation, &request.line_ids, request.stamp.revision)
+    project_evaluation(evaluation, &request.line_ids, request.stamp)
 }
 
 #[cfg(test)]
@@ -210,6 +213,7 @@ mod tests {
                 document: id,
                 incarnation,
                 revision,
+                generation: revision,
             },
             source: format!("{revision}"),
             line_ids: vec![LineId(1)],
@@ -248,6 +252,7 @@ mod tests {
                 document,
                 incarnation,
                 revision,
+                generation: revision,
             },
             source: "1".into(),
             line_ids: vec![LineId(1)],
@@ -258,5 +263,38 @@ mod tests {
         worker.submit(request(2));
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(worker.take().unwrap().result.is_ok());
+    }
+
+    #[test]
+    fn worker_retires_old_generation_at_same_revision() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake = Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluate = Arc::new(move |request: Request, cancellation: Arc<AtomicBool>| {
+            started_tx.send(request.stamp.generation).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            super::evaluate(request, cancellation)
+        });
+        let worker = EvaluationWorker::start_with(wake, evaluate).unwrap();
+        let document = DocumentId::fresh();
+        let incarnation = DocumentIncarnation(DocumentId::fresh());
+        let request = |generation| Request {
+            stamp: EvaluationStamp { document, incarnation, revision: 7, generation },
+            source: "1".into(),
+            line_ids: vec![LineId(1)],
+        };
+        worker.submit(request(1));
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
+        worker.submit(request(2));
+        continue_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 2);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let result = worker.take().unwrap();
+        assert_eq!(result.stamp.generation, 2);
+        assert_eq!(result.result.unwrap().basis, result.stamp);
+        assert!(worker.take().is_none());
     }
 }

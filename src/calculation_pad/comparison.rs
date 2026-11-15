@@ -10,6 +10,7 @@ pub struct ComparisonRow {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComparisonContext {
+    pub basis: super::EvaluationBasis,
     pub incarnation: DocumentIncarnation,
     pub document_id: DocumentId,
     pub revision: u64,

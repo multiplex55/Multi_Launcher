@@ -17,6 +17,7 @@ mod quantity;
 mod session;
 mod vector;
 mod worker;
+pub use worker::EvaluationBasis;
 
 pub(crate) use document::syntax::{ProtectedKind, SourceAnalysis};
 
@@ -46,7 +47,7 @@ pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindi
 
 pub(crate) use persistence::{PadViewMetadata, PadInputReference};
 pub use persistence::{
-    CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,
+    CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, CalculationPolicy, DocumentOptions, DocumentProfile, DocumentId, LineId,
     MAX_SAVED_DOCUMENTS, MAX_STORED_DOCUMENT_BYTES, MAX_STORED_RECOVERY_BYTES, PadDocumentStore,
     PadDocumentSummary, PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure,
     PadRecoveryWriter, PadStoreError,

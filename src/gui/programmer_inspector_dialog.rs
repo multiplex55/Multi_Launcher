@@ -1304,9 +1304,7 @@ impl ProgrammerInspectorDialog {
                     if let Some(result) = &draft.comparison_result {
                         let current_request = draft.comparison_request();
                         let current_context = runtime.context.comparison.as_ref().is_some_and(|context| {
-                            context.incarnation == result.context.incarnation
-                                && context.document_id == result.context.document_id
-                                && context.revision == result.context.revision
+                            context.basis == result.context.basis
                         });
                         let comparison_current = current_context
                             && result.request == current_request

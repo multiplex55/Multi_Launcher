@@ -17,16 +17,17 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M0-A | Verified | Exact parent and baseline, fresh task branch, successful push |
 | M0-B | Verified and pushed | `8d76bb28e0f7dd82229d6d3bd53e1d473d569079`. Five Calc Pad and three File Search baseline cases passed. |
 | M1-A | Verified and pushed | `80d790e5af3eab84b5b2435a6f4385646c1be2cf`. Shared analysis and evaluator routes. 13 focused tests passed. |
-| M1-B | Verified | Shared editor/observer mapping, folded highlighting, input edits and result presentation. Focused batches passed 20/20 and 3/3. |
-| M2-A | In progress | Document options, migration and evaluation identity. |
-| M2-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M1-B | Verified and pushed | `5a724285e402db21411c5cf3454ed9a797e22c61`. Shared editor/observer mapping; focused batches passed 20/20 and 3/3. |
+| M2-A | Verified | Versioned options and recovery, evaluation identity/receipts, related-reference edit seam. Focused batch passed 20/20. |
+| M2-B | In progress | Manual calculation scheduling and observer freshness. |
+| M3-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
 | ID | Implementation | Verification | Owners and boundaries |
 | --- | --- | --- | --- |
 | C20 | Implemented | Focused automated domain/editor checks passed. Native integrated check pending. | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
-| C24 | Pending | Pending | Session scheduling, worker stamps, persistence/recovery and companion observers |
+| C24 | Scheduling and UI pending; persistence/identity ready | M2-A focused checks passed | Session scheduling, worker stamps, persistence/recovery and companion observers |
 | C25 | Pending | Pending | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
 | C21 | Pending | Pending | Script function catalog and signatures, editor hints, executable examples |
 | C18 | Pending | Pending | Shared syntax and bindings, typed script invocation, editor and dependencies |
@@ -58,3 +59,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 
 - Scoped library Nextest passed 20/20 in 2.58 seconds, including folding and projected highlighting, multiline hints and references, original-byte literal edit/undo, and physical result copying and navigation. Diff inspection exposed a dedented-continuation completion issue. The correction uses the logical owner's indentation and excludes the current assignment as a prior binding. Its three-test focused rerun passed in 1.95 seconds.
 - Both batches used a 100-second watchdog. Separate compile stages finished in 330.53 and 210.43 seconds under the 900-second deadline. Receipts are in `m1b-build`, `m1b-run`, `m1b-correction-build`, and `m1b-correction-run`; cleanup and output drain passed.
+
+### M2-A document and run identity
+
+- The initial library compile exited 101 on a missed fixture call to the expanded Save As helper. After updating that call, an all-case diagnostic run passed 19/20. Its lone failure was the new v2 fixture converting a full-width document ID through `serde_json::Value`. The fixture now emits the exact numeric ID and asserts selected input and watch retention.
+- Final library Nextest passed 20/20 with exit 0 in 3.03 seconds under the 100-second watchdog. The final separate compile exited 0 in 182.59 seconds under the 900-second deadline. Both cleanup and output drain were verified. Receipts are in `m2a-build`, `m2a-correction-build`, `m2a-correction-run`, `m2a-failure-diagnosis`, `m2a-final-build`, and `m2a-final-run`.
+- Coverage includes v1 and v2 migration, options and recovery, rejection/preservation of future records, atomic writes, same-revision worker retirement, Save As and derived receipt lifetimes, and the source/reference undo seam. C14 must handle the case where the old watch name is pinned separately after a rename. The M2-A transaction currently refuses conflicting replay to avoid dropping that later pin.

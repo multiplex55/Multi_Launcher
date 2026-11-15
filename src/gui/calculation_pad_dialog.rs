@@ -163,14 +163,14 @@ pub(crate) struct CalculationPadDialog {
     inspector_selection_generation: u64,
     inspector_caret_generation: u64,
     inspector_context: std::sync::Arc<InspectorPadContext>,
-    inspector_context_key: Option<(DocumentIncarnation, DocumentId, u64, Option<LineId>, u64, bool)>,
+    inspector_context_key: Option<(crate::calculation_pad::EvaluationBasis, Option<LineId>, u64, bool)>,
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
     display_preferences: crate::settings::CalculationPadDisplayPreferences,
     config_editor_focus: Option<(PadHostIdentity, (DocumentIncarnation, DocumentId, u64), egui::text::CCursorRange)>,
     split_preview: Option<SplitPreview>,
     recovery_attempted: bool,
-    last_recovery_identity: Option<(DocumentId, u64)>,
+    last_recovery_identity: Option<(DocumentId, u64, crate::calculation_pad::DocumentOptions)>,
     host_state: UtilityHostState,
     presentation_prepared: bool,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
@@ -368,6 +368,7 @@ struct HostEffects {
     input_commit: Option<InputCommit>,
     watch_copy: Option<(String, bool)>,
     document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
+    evaluation_basis: Option<crate::calculation_pad::EvaluationBasis>,
     inspector_selection: Option<LineId>,
     inspector_caret: Option<std::ops::Range<usize>>,
     open_inspector: bool,
@@ -450,6 +451,7 @@ struct ResultCopyIntent {
     host: PadHostIdentity,
     viewport_id: egui::ViewportId,
     document_id: DocumentId,
+    basis: crate::calculation_pad::EvaluationBasis,
     target: ResultCopyTarget,
 }
 
@@ -500,6 +502,7 @@ impl CalculationPadDialog {
                 .zip(self.session.current_id())
                 .zip(self.session.revision())
                 .map(|((incarnation, document), revision)| (incarnation, document, revision)),
+            evaluation_basis: self.session.evaluation_basis(),
             inspector_selection: None,
             inspector_caret: None,
             open_inspector: false,
@@ -945,7 +948,7 @@ impl CalculationPadDialog {
         self.recovery_attempted = true;
         match self.recovery_writer.load() {
             Ok(Some(snapshot)) => {
-                if let Err(error) = self.session.restore_recovered_source(snapshot.source) {
+                if let Err(error) = self.session.restore_recovered_document(snapshot.source, snapshot.options) {
                     self.set_recovery_error(error.to_string());
                 }
             }
@@ -959,6 +962,7 @@ impl CalculationPadDialog {
             document_id: self.session.current_id()?,
             revision: self.session.revision()?,
             source: self.session.source()?.to_owned(),
+            options: self.session.document_options()?,
         })
     }
 
@@ -969,7 +973,7 @@ impl CalculationPadDialog {
         let Some(snapshot) = self.recovery_snapshot() else {
             return;
         };
-        let identity = (snapshot.document_id, snapshot.revision);
+        let identity = (snapshot.document_id, snapshot.revision, snapshot.options);
         if let Err(error) = self.recovery_writer.schedule(snapshot) {
             self.set_recovery_error(error.to_string());
         } else {
@@ -985,7 +989,7 @@ impl CalculationPadDialog {
         let Some(snapshot) = snapshot.or_else(|| self.recovery_snapshot()) else {
             return Ok(());
         };
-        let identity = (snapshot.document_id, snapshot.revision);
+        let identity = (snapshot.document_id, snapshot.revision, snapshot.options);
         self.recovery_writer.save_now(snapshot)?;
         self.last_recovery_identity = Some(identity);
         Ok(())
@@ -996,10 +1000,12 @@ impl CalculationPadDialog {
         self.publish_recovery_failures(failures);
     }
 
-    fn recovery_error_identity(&self) -> Option<(DocumentId, u64)> {
+    fn recovery_error_identity(&self) -> Option<(DocumentId, u64, crate::calculation_pad::DocumentOptions)> {
         self.session
             .current_id()
             .zip(self.session.revision())
+            .zip(self.session.document_options())
+            .map(|((document, revision), options)| (document, revision, options))
             .or(self.last_recovery_identity)
     }
 
@@ -1010,7 +1016,7 @@ impl CalculationPadDialog {
             .flatten();
         let messages = failures
             .into_iter()
-            .filter(|failure| current_identity == Some((failure.document_id, failure.revision)))
+            .filter(|failure| current_identity == Some((failure.document_id, failure.revision, failure.options)))
             .map(|failure| failure.message)
             .collect::<Vec<_>>();
         if !messages.is_empty() {
@@ -1053,7 +1059,7 @@ impl CalculationPadDialog {
         direct_errors.extend(
             failures
                 .into_iter()
-                .filter(|failure| current_identity == Some((failure.document_id, failure.revision)))
+                .filter(|failure| current_identity == Some((failure.document_id, failure.revision, failure.options)))
                 .map(|failure| failure.message),
         );
         if direct_errors.is_empty() {
@@ -1863,11 +1869,12 @@ impl CalculationPadDialog {
                 let copy = ui.button("Copy all");
                 #[cfg(test)]
                 { self.test_copy_all_rect = Some(copy.rect); }
-                if copy.clicked() && let Some(document_id) = self.session.current_id() {
+                if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
                     effects.result_copy = Some(ResultCopyIntent {
                         host: identity,
                         viewport_id,
                         document_id,
+                        basis,
                         target: ResultCopyTarget::All,
                     });
                     ui.close();
@@ -2812,11 +2819,12 @@ impl CalculationPadDialog {
         self.sync_inspector_context();
         if !accepted_source_or_history
             && !host.close_requested && !host.native_close_requested && host.host_request.is_none()
+            && host.evaluation_basis == self.session.evaluation_basis()
             && let Some((incarnation, document, revision)) = host.document_basis
             && let Some(line) = host.selected_result.take()
             && self.session.line_ids().is_some_and(|ids| ids.contains(&line))
         {
-            let navigation = super::calculation_dependency_dialog::DependencyNavigation { incarnation, document, line };
+            let navigation = super::calculation_dependency_dialog::DependencyNavigation { incarnation, document, line, basis: host.evaluation_basis };
             if self.can_navigate_source(navigation, host.identity) {
                 self.selected_result = Some((incarnation, document, revision, line));
                 self.active_source_line = None;
@@ -2837,7 +2845,7 @@ impl CalculationPadDialog {
             && let Some(index) = SourcePositions::new(source).line_at(range.start)
             && let Some(line) = self.session.line_id(index)
         {
-            let navigation = super::calculation_dependency_dialog::DependencyNavigation { incarnation, document, line };
+            let navigation = super::calculation_dependency_dialog::DependencyNavigation { incarnation, document, line, basis: None };
             if self.can_navigate_live_source(navigation, host.identity) {
                 self.dependency_navigation = Some(SourceNavigation {
                     host: host.identity, navigation, revision, result_navigation: false,
@@ -2903,6 +2911,7 @@ impl CalculationPadDialog {
             && !host.close_requested
             && !host.native_close_requested
             && host.host_request.is_none()
+            && host.evaluation_basis == self.session.evaluation_basis()
             && self.session.revision() == Some(revision)
             && self.can_navigate_source(nav, host.identity)
         {
@@ -2927,6 +2936,7 @@ impl CalculationPadDialog {
             ctx.request_repaint_of(host.viewport_id);
         }
         if let Some(update) = host.dependency_applied
+            && (update.selection.is_some() || update.navigation.basis == self.session.evaluation_basis())
             && self.dependency_navigation == Some(SourceNavigation {
                 host: host.identity,
                 navigation: update.navigation,
@@ -3135,6 +3145,7 @@ impl CalculationPadDialog {
             && !accepted_source_or_history && !transition_intent && !host_request_requested
             && !host.close_requested && !host.native_close_requested && self.session.pending_transition().is_none()
             && self.host_identity() == host.identity && host.document_basis == current_basis
+            && host.evaluation_basis == self.session.evaluation_basis()
             && self.session.revision() == current_basis.map(|(_, _, revision)| revision)
             && let Some(evaluation) = self.session.shared_evaluation()
             && let Some(binding) = evaluation.final_bindings.get(&name)
@@ -3142,17 +3153,28 @@ impl CalculationPadDialog {
             && let Some(text) = if formatted { result_format::display(value, self.display_preferences) } else { value.canonical_result() }
         { delivered.push(CalculationPadDialogEffect::CopyText(text)); }
 
-        if let Some(copy) = host.result_copy.take()
+        if let Some(mut copy) = host.result_copy.take()
             && !host.close_requested
             && self.open
             && copy.host == self.host_identity()
             && copy.viewport_id == host.viewport_id
+            && Some(copy.basis) == host.evaluation_basis
+            && host.document_basis.map(|(incarnation, document, _)| (incarnation, document))
+                == self.session.document_incarnation().zip(self.session.current_id())
+            && (accepted_source_or_history || host.evaluation_basis == self.session.evaluation_basis())
             && (!matches!(copy.target, ResultCopyTarget::FormattedLine(_))
                 || (!accepted_source_or_history && !transition_intent && !host_request_requested
                     && !host.native_close_requested && self.session.pending_transition().is_none()
+                    && host.evaluation_basis == self.session.evaluation_basis()
                     && host.document_basis == current_basis
                     && self.session.revision() == current_basis.map(|(_, _, revision)| revision)))
         {
+            if accepted_source_or_history
+                && !matches!(copy.target, ResultCopyTarget::FormattedLine(_))
+                && let Some(basis) = self.session.evaluation_basis()
+            {
+                copy.basis = basis;
+            }
             let copied = self.resolve_result_copy(copy);
             if let Some(effect) = copied {
                 delivered.push(effect);
@@ -3233,13 +3255,10 @@ impl CalculationPadDialog {
         self.session.evaluation();
         let evaluation_ready = self.session.evaluation_status() == crate::calculation_pad::EvaluationStatus::Ready;
         let key =
-            identity
-                .zip(self.session.revision())
-                .map(|((incarnation, document), revision)| {
+            self.session.evaluation_basis()
+                .map(|basis| {
                     (
-                        incarnation,
-                        document,
-                        revision,
+                        basis,
                         self.inspector_selection
                             .as_ref()
                             .map(|selection| selection.line),
@@ -3259,8 +3278,7 @@ impl CalculationPadDialog {
                 .comparison
                 .as_ref()
                 .filter(|context| {
-                    Some((context.incarnation, context.document_id)) == identity
-                        && Some(context.revision) == self.session.revision()
+                    Some(context.basis) == self.session.evaluation_basis()
                 })
                 .cloned()
                 .or_else(|| self.session.comparison_context().map(std::sync::Arc::new));
@@ -3374,7 +3392,8 @@ impl CalculationPadDialog {
         nav: super::calculation_dependency_dialog::DependencyNavigation,
         source_host: PadHostIdentity,
     ) -> bool {
-        !(self.host_identity() != source_host
+        !(nav.basis != self.session.evaluation_basis()
+            || self.host_identity() != source_host
             || !self.open
             || self.host_close_requested
             || self.open_chooser
@@ -3491,7 +3510,9 @@ impl CalculationPadDialog {
         &mut self,
         intent: ResultCopyIntent,
     ) -> Option<CalculationPadDialogEffect> {
-        if self.session.current_id() != Some(intent.document_id) {
+        if self.session.current_id() != Some(intent.document_id)
+            || self.session.evaluation_basis() != Some(intent.basis)
+        {
             return None;
         }
         let text = match intent.target {
@@ -4214,6 +4235,7 @@ impl CalculationPadDialog {
             (authorized_pass
                 && pending.host == self.host_identity()
                 && self.session.revision() == Some(pending.revision)
+                && (pending.selection.is_some() || nav.basis == self.session.evaluation_basis())
                 && self.open
                 && !self.open_chooser
                 && !self.save_as_open
@@ -4765,7 +4787,7 @@ impl CalculationPadDialog {
                         ));
                     }
                     if self.pending_result_scroll.is_some_and(|(_, _, revision, target)| {
-                        revision == evaluation.revision && target == line.id
+                        revision == evaluation.basis.revision && target == line.id
                     }) {
                         scroll_target = Some(row_response.rect);
                     }
@@ -4781,7 +4803,7 @@ impl CalculationPadDialog {
                             )
                         {
                             *result_navigation = Some((super::calculation_dependency_dialog::DependencyNavigation {
-                                document, incarnation, line: line.id,
+                                document, incarnation, line: line.id, basis: Some(evaluation.basis),
                             }, revision));
                             ui.close();
                         }
@@ -4793,21 +4815,23 @@ impl CalculationPadDialog {
                             ui.close();
                         }
                         let copy = ui.add_enabled(has_value, egui::Button::new("Copy"));
-                        if copy.clicked() && let Some(document_id) = self.session.current_id() {
+                        if copy.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
                             *result_copy = Some(ResultCopyIntent {
                                 host: host_identity,
                                 viewport_id,
                                 document_id,
+                                basis,
                                 target: ResultCopyTarget::Line(line.id),
                             });
                             ui.close();
                         }
                         let copy_formatted = ui.add_enabled(has_value, egui::Button::new("Copy formatted"));
-                        if copy_formatted.clicked() && let Some(document_id) = self.session.current_id() {
+                        if copy_formatted.clicked() && let (Some(document_id), Some(basis)) = (self.session.current_id(), self.session.evaluation_basis()) {
                             *result_copy = Some(ResultCopyIntent {
                                 host: host_identity,
                                 viewport_id,
                                 document_id,
+                                basis,
                                 target: ResultCopyTarget::FormattedLine(line.id),
                             });
                             ui.close();
@@ -5786,6 +5810,7 @@ mod tests {
             document: dialog.session.current_id().unwrap(),
             incarnation: dialog.session.document_incarnation().unwrap(),
             line: dialog.session.line_id(0).unwrap(),
+            basis: None,
         };
         let revision = dialog.session.revision().unwrap();
         let identity = dialog.host_identity();
@@ -5865,6 +5890,7 @@ mod tests {
             document: snapshot.document_id,
             incarnation: snapshot.incarnation,
             line: target.id,
+            basis: Some(snapshot.basis),
         };
         let host = dialog.host_identity();
         let editor_id = dialog.test_editor_id.unwrap();
@@ -6597,6 +6623,7 @@ mod tests {
             document: dialog.session.current_id().unwrap(),
             incarnation: dialog.session.document_incarnation().unwrap(),
             line: dialog.session.line_id(1).unwrap(),
+            basis: dialog.session.evaluation_basis(),
         };
         let revision = dialog.session.revision().unwrap();
         let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
@@ -6628,6 +6655,7 @@ mod tests {
             document: dialog.session.current_id().unwrap(),
             incarnation: dialog.session.document_incarnation().unwrap(),
             line: dialog.session.line_id(0).unwrap(),
+            basis: dialog.session.evaluation_basis(),
         };
         let revision = dialog.session.revision().unwrap();
         let identity = dialog.host_identity();
@@ -7179,7 +7207,7 @@ mod tests {
         dialog.display_preferences.decimal_places = 2;
         dialog.display_preferences.group_digits = true;
         let intent = |target| super::ResultCopyIntent {
-            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT, document_id, target,
+            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT, document_id, basis: dialog.session.evaluation_basis().unwrap(), target,
         };
         let canonical = intent(super::ResultCopyTarget::Line(line));
         let formatted = intent(super::ResultCopyTarget::FormattedLine(line));
@@ -7203,14 +7231,40 @@ mod tests {
         let mut accepted = dialog.empty_host_effects(egui::ViewportId::ROOT);
         accepted.pass_accepted = true;
         accepted.result_copy = Some(super::ResultCopyIntent { host: accepted.identity,
-            viewport_id: egui::ViewportId::ROOT, document_id, target: super::ResultCopyTarget::FormattedLine(line) });
+            viewport_id: egui::ViewportId::ROOT, document_id, basis: dialog.session.evaluation_basis().unwrap(), target: super::ResultCopyTarget::FormattedLine(line) });
         assert_eq!(complete_host_effects(&mut dialog, &ctx, accepted), vec![CalculationPadDialogEffect::CopyText("0.33".into())]);
         let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
         stale.pass_accepted = true;
         stale.edited_source = Some("x = 2 / 3".into());
         stale.result_copy = Some(super::ResultCopyIntent { host: stale.identity,
-            viewport_id: egui::ViewportId::ROOT, document_id, target: super::ResultCopyTarget::FormattedLine(line) });
+            viewport_id: egui::ViewportId::ROOT, document_id, basis: dialog.session.evaluation_basis().unwrap(), target: super::ResultCopyTarget::FormattedLine(line) });
         assert!(!complete_host_effects(&mut dialog, &ctx, stale).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::CopyText(_))));
+    }
+
+    #[test]
+    fn same_revision_retired_result_actions_reject_old_evaluation_basis() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("u8(3)");
+        dialog.session.evaluation().unwrap();
+        let line = dialog.session.line_id(0).unwrap();
+        let snapshot = dialog.session.dependency_snapshot().unwrap();
+        let copy = super::ResultCopyIntent {
+            host: dialog.host_identity(), viewport_id: egui::ViewportId::ROOT,
+            document_id: snapshot.document_id, basis: snapshot.basis,
+            target: super::ResultCopyTarget::Line(line),
+        };
+        let navigation = super::super::calculation_dependency_dialog::DependencyNavigation {
+            document: snapshot.document_id, incarnation: snapshot.incarnation, line,
+            basis: Some(snapshot.basis),
+        };
+        dialog.session.retire_background_evaluation();
+        dialog.session.evaluation().unwrap();
+        assert_eq!(dialog.session.revision(), Some(snapshot.revision));
+        assert!(dialog.resolve_result_copy(copy).is_none());
+        let host = dialog.host_identity();
+        assert!(!dialog.navigate_dependency(navigation, snapshot.revision, host, &ctx));
     }
 
     #[test]
@@ -7230,6 +7284,7 @@ mod tests {
             host: host.identity,
             viewport_id: egui::ViewportId::ROOT,
             document_id,
+            basis: dialog.session.evaluation_basis().unwrap(),
             target: super::ResultCopyTarget::Line(retained_line),
         });
 
@@ -7255,6 +7310,7 @@ mod tests {
             host: host.identity,
             viewport_id: egui::ViewportId::ROOT,
             document_id,
+            basis: dialog.session.evaluation_basis().unwrap(),
             target: super::ResultCopyTarget::All,
         });
         assert_eq!(
@@ -7285,6 +7341,7 @@ mod tests {
             host: host.identity,
             viewport_id: egui::ViewportId::ROOT,
             document_id,
+            basis: dialog.session.evaluation_basis().unwrap(),
             target: super::ResultCopyTarget::Line(retired_line),
         });
 
@@ -7548,6 +7605,7 @@ mod tests {
                 document_id: saved_id,
                 revision: 7,
                 source: "π = 2\r\nπ * 3\r\n".into(),
+                options: crate::calculation_pad::DocumentOptions::default(),
             })
             .unwrap();
         writer.shutdown().unwrap();
@@ -7707,6 +7765,7 @@ mod tests {
             host: child_discard.identity,
             viewport_id: super::pad_viewport_id(),
             document_id,
+            basis: dialog.session.evaluation_basis().unwrap(),
             target: super::ResultCopyTarget::Line(line_id),
         });
         assert!(complete_host_effects(&mut dialog, &ctx, child_discard).is_empty());
@@ -7721,6 +7780,7 @@ mod tests {
             host: stale_host.identity,
             viewport_id: egui::ViewportId::ROOT,
             document_id,
+            basis: dialog.session.evaluation_basis().unwrap(),
             target: super::ResultCopyTarget::Line(line_id),
         });
         assert!(complete_host_effects(&mut dialog, &ctx, stale_host).is_empty());

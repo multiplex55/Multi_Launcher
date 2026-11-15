@@ -9,7 +9,7 @@ use super::inspector::{
 };
 use super::persistence::{
     DocumentId, LineId, LoadedDocument, PadDocumentStore, PadDocumentSummary, PadStoreError,
-    StoredDocument, PadViewMetadata,
+    StoredDocument, PadViewMetadata, DocumentOptions,
 };
 use super::{IntegerMode, IntegerWidth, TypedInteger};
 use super::worker::{EvaluationStamp, EvaluationWorker, Request as EvaluationRequest};
@@ -34,7 +34,7 @@ pub struct SessionLineResult {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionEvaluation {
-    pub revision: u64,
+    pub basis: super::EvaluationBasis,
     pub lines: Vec<SessionLineResult>,
     /// Physical rows holding the final bindings in this evaluation.
     pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
@@ -44,7 +44,7 @@ pub struct SessionEvaluation {
 pub(super) fn project_evaluation(
     evaluation: CalculationEvaluation<'_>,
     line_ids: &[LineId],
-    revision: u64,
+    basis: super::EvaluationBasis,
 ) -> Result<SessionEvaluation, String> {
     if evaluation.diagnostic.is_none() && evaluation.lines.len() != line_ids.len() {
         return Err("Calculation results do not match the current source lines.".into());
@@ -69,7 +69,7 @@ pub(super) fn project_evaluation(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(SessionEvaluation {
-        revision,
+        basis,
         lines,
         final_bindings: Arc::new(evaluation.final_bindings),
         diagnostic: evaluation.diagnostic,
@@ -120,6 +120,8 @@ pub enum SessionError {
     LineIdStateMismatch,
     LineIdExhausted,
     RevisionExhausted,
+    StaleRelatedEdit,
+    InvalidRelatedMetadata(&'static str),
 }
 
 impl std::fmt::Display for SessionError {
@@ -156,6 +158,8 @@ impl std::fmt::Display for SessionError {
             }
             Self::LineIdExhausted => formatter.write_str("no more stable line IDs are available"),
             Self::RevisionExhausted => formatter.write_str("document revision limit was reached"),
+            Self::StaleRelatedEdit => formatter.write_str("the document changed before the edit was applied"),
+            Self::InvalidRelatedMetadata(message) => formatter.write_str(message),
         }
     }
 }
@@ -202,6 +206,65 @@ impl EditableState {
 struct HistoryEntry {
     before: EditableState,
     after: EditableState,
+    related: RelatedReferenceEdits,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RelatedReferenceEdits {
+    pub inputs: Vec<RelatedInputRename>,
+    pub watches: Vec<RelatedWatchRename>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RelatedInputRename {
+    pub id: LineId,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RelatedWatchRename {
+    pub before: String,
+    pub after: String,
+}
+
+impl RelatedReferenceEdits {
+    fn byte_size(&self) -> usize {
+        self.inputs.iter().map(|item| std::mem::size_of::<LineId>() + item.before.len() + item.after.len())
+            .chain(self.watches.iter().map(|item| item.before.len() + item.after.len()))
+            .fold(0usize, usize::saturating_add)
+    }
+
+    fn apply(&self, view: &PadViewMetadata, reverse: bool, strict: bool) -> Result<PadViewMetadata, &'static str> {
+        let mut result = view.clone();
+        for (index, item) in self.inputs.iter().enumerate() {
+            if self.inputs[..index].iter().any(|previous| previous.id == item.id) {
+                return Err("Duplicate input reference edit.");
+            }
+            let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+            if let Some(input) = result.inputs.iter_mut().find(|input| input.id == item.id && input.name.as_str() == from.as_str()) {
+                input.name.clone_from(to);
+            } else if strict {
+                return Err("An input reference changed before the edit was applied.");
+            }
+        }
+        for (index, item) in self.watches.iter().enumerate() {
+            let (from, _) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+            if self.watches[..index].iter().any(|previous| if reverse { &previous.after == from } else { &previous.before == from }) {
+                return Err("Duplicate watch reference edit.");
+            }
+            if strict && !view.watches.contains(from) {
+                return Err("A watch reference changed before the edit was applied.");
+            }
+        }
+        for watch in &mut result.watches {
+            if let Some(item) = self.watches.iter().find(|item| if reverse { item.after.as_str() == watch.as_str() } else { item.before.as_str() == watch.as_str() }) {
+                watch.clone_from(if reverse { &item.before } else { &item.after });
+            }
+        }
+        super::persistence::validate_view_metadata(&result)?;
+        Ok(result)
+    }
 }
 
 impl HistoryEntry {
@@ -209,6 +272,7 @@ impl HistoryEntry {
         self.before
             .byte_size()
             .saturating_add(self.after.byte_size())
+            .saturating_add(self.related.byte_size())
     }
 }
 
@@ -219,12 +283,12 @@ struct EditHistory {
 }
 
 impl EditHistory {
-    fn record(&mut self, before: EditableState, after: EditableState) {
+    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits) {
         if before == after {
             return;
         }
         self.redo.clear();
-        self.undo.push_back(HistoryEntry { before, after });
+        self.undo.push_back(HistoryEntry { before, after, related });
         self.trim();
     }
 
@@ -260,6 +324,7 @@ struct DocumentBaseline {
     disk_sha256: Option<[u8; 32]>,
     next_line_id: u64,
     view: PadViewMetadata,
+    options: DocumentOptions,
     format_version: u32,
 }
 
@@ -271,7 +336,9 @@ struct ActiveDocument {
     line_ids: Vec<LineId>,
     next_line_id: u64,
     revision: u64,
+    generation: u64,
     view: PadViewMetadata,
+    options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
     dependency_snapshot: Option<Arc<super::dependencies::DependencySnapshot>>,
@@ -292,7 +359,9 @@ impl ActiveDocument {
             line_ids: vec![LineId(1)],
             next_line_id: 2,
             revision: 0,
+            generation: 0,
             view: PadViewMetadata::default(),
+            options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -303,6 +372,7 @@ impl ActiveDocument {
                 disk_sha256: None,
                 next_line_id: 2,
                 view: PadViewMetadata::default(),
+                options: DocumentOptions::default(),
                 format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
             },
             cached_evaluation: None,
@@ -329,7 +399,9 @@ impl ActiveDocument {
             line_ids: stored.line_ids,
             next_line_id: stored.next_line_id,
             revision: 0,
+            generation: 0,
             view: stored.view.clone(),
+            options: stored.options,
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -340,6 +412,7 @@ impl ActiveDocument {
                 disk_sha256: Some(loaded.disk_sha256),
                 next_line_id: saved_next_line_id,
                 view: stored.view,
+                options: stored.options,
                 format_version: stored.format_version,
             },
             cached_evaluation: None,
@@ -367,12 +440,14 @@ impl ActiveDocument {
             || self.name != self.baseline.name
             || self.next_line_id != self.baseline.next_line_id
             || self.view != self.baseline.view
+            || self.options != self.baseline.options
     }
 
     fn stored_document(&self) -> Result<StoredDocument, SessionError> {
         let name = self.name.clone().ok_or(SessionError::SaveAsRequired)?;
         let mut stored = StoredDocument::new(self.id, name, self.source.clone(), self.line_ids.clone(), self.next_line_id);
         stored.view = self.view.clone();
+        stored.options = self.options;
         Ok(stored)
     }
 }
@@ -446,6 +521,7 @@ impl CalculationPadSession {
             document: current.id,
             incarnation: current.incarnation,
             revision: current.revision,
+            generation: current.generation,
         })
     }
 
@@ -455,6 +531,14 @@ impl CalculationPadSession {
         }
         self.scheduled_evaluation = None;
         self.evaluation_failure = None;
+        if let Some(current) = self.current.as_mut() {
+            if let Some(next) = current.generation.checked_add(1) {
+                current.generation = next;
+            } else {
+                current.incarnation = DocumentIncarnation(DocumentId::fresh());
+                current.generation = 0;
+            }
+        }
     }
 
     pub fn evaluation_status(&self) -> EvaluationStatus {
@@ -470,7 +554,7 @@ impl CalculationPadSession {
             .current
             .as_ref()
             .and_then(|current| current.cached_evaluation.as_ref())
-            .is_some_and(|evaluation| evaluation.revision == stamp.revision)
+            .is_some_and(|evaluation| evaluation.basis == stamp)
         {
             EvaluationStatus::Ready
         } else {
@@ -480,6 +564,24 @@ impl CalculationPadSession {
 
     pub(crate) fn view_metadata(&self) -> Option<&PadViewMetadata> {
         self.current.as_ref().map(|document| &document.view)
+    }
+
+    pub fn document_options(&self) -> Option<DocumentOptions> {
+        self.current.as_ref().map(|document| document.options)
+    }
+
+    pub fn set_document_options(&mut self, options: DocumentOptions) -> Result<bool, SessionError> {
+        self.ensure_editable()?;
+        if self.current.as_ref().is_some_and(|document| document.options == options) { return Ok(false); }
+        self.retire_background_evaluation();
+        let document = self.current.as_mut().ok_or(SessionError::NoActiveDocument)?;
+        document.options = options;
+        document.dependency_snapshot = None;
+        Ok(true)
+    }
+
+    pub fn evaluation_basis(&self) -> Option<super::EvaluationBasis> {
+        self.evaluation_stamp()
     }
 
     pub(crate) fn is_view_dirty(&self) -> bool {
@@ -557,7 +659,7 @@ impl CalculationPadSession {
     pub fn comparison_context(&self) -> Option<super::comparison::ComparisonContext> {
         let document = self.current.as_ref()?;
         let evaluation = document.cached_evaluation.as_ref()?;
-        if evaluation.revision != document.revision || evaluation.diagnostic.is_some() {
+        if Some(evaluation.basis) != self.evaluation_stamp() || evaluation.diagnostic.is_some() {
             return None;
         }
         let rows = evaluation
@@ -570,6 +672,7 @@ impl CalculationPadSession {
             })
             .collect::<Vec<_>>();
         Some(super::comparison::ComparisonContext {
+            basis: evaluation.basis,
             incarnation: document.incarnation,
             document_id: document.id,
             revision: document.revision,
@@ -582,13 +685,11 @@ impl CalculationPadSession {
     pub fn dependency_snapshot(&mut self) -> Option<Arc<super::DependencySnapshot>> {
         let current = self.current.as_mut()?;
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if evaluation.basis != (EvaluationStamp { document: current.id, incarnation: current.incarnation, revision: current.revision, generation: current.generation }) {
             return None;
         }
         if let Some(snapshot) = current.dependency_snapshot.as_ref()
-            && snapshot.document_id == current.id
-            && snapshot.incarnation == current.incarnation
-            && snapshot.revision == current.revision
+            && snapshot.basis == evaluation.basis
         {
             return Some(Arc::clone(snapshot));
         }
@@ -618,7 +719,7 @@ impl CalculationPadSession {
             return None;
         }
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if Some(evaluation.basis) != self.evaluation_stamp() {
             return None;
         }
         let row = evaluation.lines.iter().find(|row| row.id == id)?;
@@ -633,7 +734,7 @@ impl CalculationPadSession {
     pub fn inspector_source(&self, line_id: LineId) -> Option<InspectorSourceSnapshot> {
         let current = self.current.as_ref()?;
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if Some(evaluation.basis) != self.evaluation_stamp() {
             return None;
         }
         let line = evaluation.lines.iter().find(|line| line.id == line_id)?;
@@ -658,6 +759,7 @@ impl CalculationPadSession {
             incarnation: current.incarnation,
             document_id: current.id,
             revision: current.revision,
+            basis: evaluation.basis,
             line_id,
             source_range: line.source_range.clone(),
             source_text: std::sync::Arc::from(current.source.get(line.source_range.clone())?),
@@ -723,8 +825,18 @@ impl CalculationPadSession {
     }
 
     pub fn replace_source(&mut self, source: impl Into<String>) -> Result<bool, SessionError> {
+        let basis = self.evaluation_basis().ok_or(SessionError::NoActiveDocument)?;
+        self.commit_related_edit(basis, source.into(), RelatedReferenceEdits::default())
+    }
+
+    pub(crate) fn commit_related_edit(
+        &mut self,
+        basis: super::EvaluationBasis,
+        source: String,
+        related: RelatedReferenceEdits,
+    ) -> Result<bool, SessionError> {
         self.ensure_editable()?;
-        let source = source.into();
+        if self.evaluation_basis() != Some(basis) { return Err(SessionError::StaleRelatedEdit); }
         validate_source_size(&source)?;
         let current = self
             .current
@@ -739,15 +851,24 @@ impl CalculationPadSession {
             &source,
             current.next_line_id,
         )?;
-        self.commit_source_edit(source, line_ids, next_line_id)
+        self.commit_source_edit(source, line_ids, next_line_id, related)
     }
 
     /// Restores an unnamed recovery draft over the session's initial blank
     /// document. Recovery starts with fresh line identities, no undo history,
     /// and the blank source as its saved baseline so restored text stays dirty.
+    #[cfg(test)]
     pub(crate) fn restore_recovered_source(
         &mut self,
         source: String,
+    ) -> Result<bool, SessionError> {
+        self.restore_recovered_document(source, DocumentOptions::default())
+    }
+
+    pub(crate) fn restore_recovered_document(
+        &mut self,
+        source: String,
+        options: DocumentOptions,
     ) -> Result<bool, SessionError> {
         self.ensure_editable()?;
         validate_source_size(&source)?;
@@ -763,6 +884,8 @@ impl CalculationPadSession {
             return Ok(false);
         }
         if source.is_empty() {
+            self.retire_background_evaluation();
+            if let Some(current) = self.current.as_mut() { current.options = options; }
             self.history.clear();
             return Ok(true);
         }
@@ -786,6 +909,7 @@ impl CalculationPadSession {
         current.line_ids = line_ids;
         current.next_line_id = next_line_id;
         current.revision = next_revision;
+        current.options = options;
         current.cached_evaluation = None;
         self.history.clear();
         Ok(true)
@@ -796,6 +920,7 @@ impl CalculationPadSession {
         source: String,
         line_ids: Vec<LineId>,
         next_line_id: u64,
+        related: RelatedReferenceEdits,
     ) -> Result<bool, SessionError> {
         let current = self
             .current
@@ -805,6 +930,7 @@ impl CalculationPadSession {
             return Ok(false);
         }
         let before = current.editable_state();
+        let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
         after.line_ids = line_ids.clone();
@@ -814,7 +940,7 @@ impl CalculationPadSession {
             .ok_or(SessionError::RevisionExhausted)?;
 
         self.retire_background_evaluation();
-        self.history.record(before, after);
+        self.history.record(before, after, related);
         let current = self
             .current
             .as_mut()
@@ -823,6 +949,7 @@ impl CalculationPadSession {
         current.line_ids = line_ids;
         current.next_line_id = next_line_id;
         current.revision = next_revision;
+        current.view = view;
         Ok(true)
     }
 
@@ -850,7 +977,7 @@ impl CalculationPadSession {
         }
         let line_ids = current.line_ids.clone();
         let next_line_id = current.next_line_id;
-        self.commit_source_edit(source, line_ids, next_line_id)
+        self.commit_source_edit(source, line_ids, next_line_id, RelatedReferenceEdits::default())
     }
 
     pub fn undo(&mut self) -> bool {
@@ -863,6 +990,9 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
+        let Some(view) = self.history.undo.back().and_then(|entry| entry.related.apply(&current.view, true, false).ok()) else {
+            return false;
+        };
         let Some(entry) = self.history.undo.pop_back() else {
             return false;
         };
@@ -870,6 +1000,7 @@ impl CalculationPadSession {
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.before);
             current.revision = next_revision;
+            current.view = view;
         }
         self.history.redo.push_back(entry);
         true
@@ -885,6 +1016,9 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
+        let Some(view) = self.history.redo.back().and_then(|entry| entry.related.apply(&current.view, false, false).ok()) else {
+            return false;
+        };
         let Some(entry) = self.history.redo.pop_back() else {
             return false;
         };
@@ -892,6 +1026,7 @@ impl CalculationPadSession {
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.after);
             current.revision = next_revision;
+            current.view = view;
         }
         self.history.undo.push_back(entry);
         true
@@ -904,11 +1039,11 @@ impl CalculationPadSession {
             .evaluation_worker
             .as_ref()
             .and_then(EvaluationWorker::take)
-            && completion.stamp == stamp
+            && completion.stamp == stamp && self.scheduled_evaluation == Some(stamp)
         {
             self.scheduled_evaluation = None;
             match completion.result {
-                Ok(result) => {
+                Ok(result) if result.basis == stamp => {
                     if let Some(current) = self.current.as_mut() {
                         current.cached_evaluation = Some(Arc::new(result));
                         current.dependency_snapshot = None;
@@ -918,6 +1053,7 @@ impl CalculationPadSession {
                         }
                     }
                 }
+                Ok(_) => self.evaluation_failure = Some((stamp, "Calculation results have an invalid evaluation identity.".into())),
                 Err(message) => self.evaluation_failure = Some((stamp, message)),
             }
         }
@@ -926,7 +1062,7 @@ impl CalculationPadSession {
             .as_ref()?
             .cached_evaluation
             .as_ref()
-            .is_none_or(|evaluation| evaluation.revision != stamp.revision);
+            .is_none_or(|evaluation| evaluation.basis != stamp);
         if needs_evaluation && self.evaluation_wake.is_some() {
             if self.scheduled_evaluation == Some(stamp)
                 || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
@@ -966,11 +1102,11 @@ impl CalculationPadSession {
         if current
             .cached_evaluation
             .as_ref()
-            .is_none_or(|evaluation| evaluation.revision != current.revision)
+            .is_none_or(|evaluation| evaluation.basis != stamp)
         {
             let document = CalculationDocument::new(current.source.clone());
             let evaluation = document.evaluate();
-            match project_evaluation(evaluation, &current.line_ids, current.revision) {
+            match project_evaluation(evaluation, &current.line_ids, stamp) {
                 Ok(result) => current.cached_evaluation = Some(Arc::new(result)),
                 Err(message) => {
                     self.evaluation_failure = Some((stamp, message));
@@ -1001,7 +1137,7 @@ impl CalculationPadSession {
         self.current
             .as_ref()
             .and_then(|document| document.cached_evaluation.as_ref())
-            .map(|evaluation| evaluation.revision)
+            .map(|evaluation| evaluation.basis.revision)
     }
 
     pub fn save(&mut self) -> Result<(), SessionError> {
@@ -1041,6 +1177,7 @@ impl CalculationPadSession {
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
             view: current.view.clone(),
+            options: current.options,
             format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
@@ -1057,6 +1194,7 @@ impl CalculationPadSession {
             current.line_ids.clone(),
             current.next_line_id,
             current.view.clone(),
+            current.options,
         )?;
         self.retire_background_evaluation();
         let current = self
@@ -1072,6 +1210,7 @@ impl CalculationPadSession {
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
             view: current.view.clone(),
+            options: current.options,
             format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
@@ -1378,6 +1517,79 @@ mod tests {
         session.replace_source(replacement).unwrap();
         assert!(session.undo());
         assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
+    fn options_round_trip_dirty_state_and_retire_same_revision_results() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("u8(3)").unwrap();
+        let line = session.line_id(0).unwrap();
+        session.evaluation().unwrap();
+        let original = session.inspector_source(line).unwrap();
+        let basis = session.evaluation_basis().unwrap();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended };
+        session.set_document_options(options).unwrap();
+        assert_eq!(session.revision(), Some(basis.revision));
+        assert_ne!(session.evaluation_basis(), Some(basis));
+        assert!(session.is_dirty());
+        assert!(session.inspector_source(line).is_none());
+        session.evaluation().unwrap();
+        assert_ne!(session.inspector_source(line).unwrap().basis, original.basis);
+        session.save_as("options").unwrap();
+        assert!(session.inspector_source(line).is_none());
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.document_options(), Some(options));
+    }
+
+    #[test]
+    fn related_reference_transaction_undo_preserves_later_view_changes() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let line = session.line_id(0).unwrap();
+        let view = super::PadViewMetadata {
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false }],
+            watches: vec!["x".into(), "other".into()],
+        };
+        session.set_view_metadata(view).unwrap();
+        let edits = super::RelatedReferenceEdits {
+            inputs: vec![super::RelatedInputRename { id: line, before: "x".into(), after: "y".into() }],
+            watches: vec![super::RelatedWatchRename { before: "x".into(), after: "y".into() }],
+        };
+        let basis = session.evaluation_basis().unwrap();
+        assert!(session.commit_related_edit(basis, "y = 2\ny + 1".into(), edits.clone()).unwrap());
+        let mut later = session.view_metadata().unwrap().clone();
+        later.inputs[0].unavailable = true;
+        later.watches.push("later".into());
+        session.set_view_metadata(later).unwrap();
+        session.save_as("related edit").unwrap();
+        let saved_id = session.current_id();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some("x = 2\nx + 1"));
+        assert_eq!(session.current_id(), saved_id);
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "x");
+        assert!(session.view_metadata().unwrap().inputs[0].unavailable);
+        assert_eq!(session.view_metadata().unwrap().watches, ["x", "other", "later"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "y");
+        assert_eq!(session.view_metadata().unwrap().watches, ["y", "other", "later"]);
+        let before = session.source().unwrap().to_owned();
+        assert!(matches!(session.commit_related_edit(basis, "z = 1".into(), edits), Err(super::SessionError::StaleRelatedEdit)));
+        assert_eq!(session.source(), Some(before.as_str()));
+    }
+
+    #[test]
+    fn recovery_restores_blank_nondefault_options_as_dirty_scratch() {
+        let (_dir, _root, mut session) = fixture();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard };
+        assert!(session.restore_recovered_document(String::new(), options).unwrap());
+        assert_eq!(session.source(), Some(""));
+        assert_eq!(session.revision(), Some(0));
+        assert_eq!(session.document_options(), Some(options));
+        assert!(session.is_dirty());
+        assert!(!session.can_undo());
+        assert!(!session.is_saved());
     }
 
     #[test]
