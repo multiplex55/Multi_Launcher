@@ -6,6 +6,7 @@
 mod bit_labels;
 mod calendar;
 mod chart;
+pub(crate) use chart::{ChartDefinition, ChartSource};
 mod comparison;
 mod dependencies;
 mod document;

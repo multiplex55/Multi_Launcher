@@ -763,6 +763,8 @@ pub(crate) struct PadViewMetadata {
     pub watches: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitivity: Option<SensitivitySettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<super::ChartDefinition>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -790,7 +792,7 @@ struct LegacyViewMetadata { inputs: Vec<LegacyInputReference>, watches: Vec<Stri
 
 impl From<LegacyViewMetadata> for PadViewMetadata {
     fn from(old: LegacyViewMetadata) -> Self {
-        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches, sensitivity: None }
+        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches, sensitivity: None, chart: None }
     }
 }
 #[derive(Deserialize)]
@@ -1230,6 +1232,15 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
             || definition.outputs.len() > 8 || definition.outputs.iter().any(|name| !valid_name(name) || !outputs.insert(name))
             || match &definition.sampling { super::Sampling::Step(step) => step.len() > 256 || step.chars().any(char::is_control), super::Sampling::Count(count) => *count > 1000 }
         { return Err("invalid sensitivity definition"); }
+    }
+    if let Some(chart) = &view.chart {
+        if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > 1000 || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
+            || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
+            || chart.hidden.len() > 8 || chart.hidden.iter().any(|index| *index >= 8)
+            || match &chart.source {
+                super::ChartSource::Vectors { x, y } => { let mut seen = HashSet::new(); x.is_some_and(|id| id.0 == 0) || y.len() > 8 || y.iter().any(|id| id.0 == 0 || !seen.insert(id)) },
+                super::ChartSource::Sensitivity { outputs } => { let mut seen = HashSet::new(); outputs.len() > 8 || outputs.iter().any(|name| !valid_name(name) || !seen.insert(name)) },
+            } { return Err("invalid chart definition"); }
     }
     Ok(())
 }

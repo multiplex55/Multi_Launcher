@@ -422,6 +422,15 @@ retains the definition, while computed rows remain transient. Cancel retires
 the active run. Copy Table, CSV, and Markdown require a current completed
 table; source, option, or definition changes make previous results outdated.
 
+## Charts
+
+Open **Config Menu → Tools → Charts…** to plot current numeric vectors or a
+completed current Sensitivity Table. Choose line, bar, or scatter, select the
+series and optional X vector, and adjust labels, visibility, and the view.
+Hover a point for its original value. **Copy Chart as Image** copies the chart
+itself when its data is current. Opening Charts never starts a calculation;
+calculate or generate again when the source data is outdated.
+
 ## Resource limits
 
 The evaluator checks these bounds before invoking expression or unit parsers:

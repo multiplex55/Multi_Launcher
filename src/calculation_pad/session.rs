@@ -215,6 +215,7 @@ struct HistoryEntry {
     watches: Vec<WatchReplay>,
     sensitivity_input_live: bool,
     sensitivity_outputs: Vec<WatchReplay>,
+    chart_outputs: Vec<WatchReplay>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +227,7 @@ pub(crate) struct RelatedReferenceEdits {
     pub watches: Vec<RelatedWatchRename>,
     pub sensitivity_input: Option<RelatedInputRename>,
     pub sensitivity_outputs: Vec<RelatedWatchRename>,
+    pub chart_outputs: Vec<RelatedWatchRename>,
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +249,7 @@ impl RelatedReferenceEdits {
             .chain(self.watches.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.sensitivity_input.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .fold(0usize, usize::saturating_add)
     }
 
@@ -288,14 +291,20 @@ impl RelatedReferenceEdits {
                     && let Some(output) = settings.definition.outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
             }
         }
+        if let Some(super::ChartDefinition { source: super::ChartSource::Sensitivity { outputs }, .. }) = result.chart.as_mut() {
+            for item in &self.chart_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if !outputs.contains(to) && let Some(output) = outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
+            }
+        }
         super::persistence::validate_view_metadata(&result)?;
         Ok(result)
     }
 }
 
 impl HistoryEntry {
-    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
-        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new() };
+    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new() };
         let mut result = inputs.apply(view, reverse, false)?;
         let mut sensitivity_ids = sensitivity_ids.to_vec();
         let mut sensitivity_hidden = sensitivity_hidden.clone();
@@ -304,14 +313,19 @@ impl HistoryEntry {
         } else { self.sensitivity_input_live = false; for state in &mut self.sensitivity_outputs { state.id = None; } }
         let mut ids = ids.to_vec();
         let mut hidden = hidden.clone();
+        let mut chart_ids = chart_ids.to_vec();
+        let mut chart_hidden = chart_hidden.clone();
+        if let Some(super::ChartDefinition { source: super::ChartSource::Sensitivity { outputs }, .. }) = result.chart.as_mut() {
+            replay_names(outputs, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse);
+        } else { for state in &mut self.chart_outputs { state.id = None; } }
         replay_names(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse);
         super::persistence::validate_view_metadata(&result)?;
-        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden))
+        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden))
     }
 
     fn byte_size(&self) -> usize {
         self.before.byte_size().saturating_add(self.after.byte_size()).saturating_add(self.related.byte_size())
-            .saturating_add((self.watches.len() + self.sensitivity_outputs.len()).saturating_mul(std::mem::size_of::<WatchReplay>()))
+            .saturating_add((self.watches.len() + self.sensitivity_outputs.len() + self.chart_outputs.len()).saturating_mul(std::mem::size_of::<WatchReplay>()))
     }
 }
 
@@ -341,7 +355,7 @@ struct EditHistory {
 }
 
 impl EditHistory {
-    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>, sensitivity_ids: Vec<Option<u64>>) {
+    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>, sensitivity_ids: Vec<Option<u64>>, chart_ids: Vec<Option<u64>>) {
         if before == after {
             return;
         }
@@ -349,7 +363,8 @@ impl EditHistory {
         let watches = watch_ids.into_iter().map(|id| WatchReplay { id }).collect();
         let sensitivity_input_live = related.sensitivity_input.is_some();
         let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id }).collect();
-        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs });
+        let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id }).collect();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs });
         self.trim();
     }
 
@@ -389,6 +404,13 @@ struct DocumentBaseline {
     format_version: u32,
 }
 
+fn chart_output_names(view: &PadViewMetadata) -> &[String] {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Sensitivity { outputs }) => outputs,
+        _ => &[],
+    }
+}
+
 struct ActiveDocument {
     id: DocumentId,
     incarnation: DocumentIncarnation,
@@ -405,6 +427,9 @@ struct ActiveDocument {
     sensitivity_output_ids: Vec<u64>,
     hidden_sensitivity_output_ids: HashSet<u64>,
     next_sensitivity_output_id: u64,
+    chart_output_ids: Vec<u64>,
+    hidden_chart_output_ids: HashSet<u64>,
+    next_chart_output_id: u64,
     options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
@@ -434,6 +459,9 @@ impl ActiveDocument {
             sensitivity_output_ids: Vec::new(),
             hidden_sensitivity_output_ids: HashSet::new(),
             next_sensitivity_output_id: 1,
+            chart_output_ids: Vec::new(),
+            hidden_chart_output_ids: HashSet::new(),
+            next_chart_output_id: 1,
             options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
@@ -479,6 +507,9 @@ impl ActiveDocument {
             sensitivity_output_ids: (1..=stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64).collect(),
             hidden_sensitivity_output_ids: HashSet::new(),
             next_sensitivity_output_id: stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64 + 1,
+            chart_output_ids: (1..=chart_output_names(&stored.view).len() as u64).collect(),
+            hidden_chart_output_ids: HashSet::new(),
+            next_chart_output_id: chart_output_names(&stored.view).len() as u64 + 1,
             view: stored.view.clone(),
             options: stored.options,
             baseline: DocumentBaseline {
@@ -615,6 +646,9 @@ impl CalculationPadSession {
             && current.view.sensitivity.as_ref().is_some_and(|settings| settings.definition.outputs.contains(&plan.old_name) && settings.definition.outputs.contains(&plan.new_name)) {
             return Err("The new name is already a sensitivity output.".into());
         }
+        if matches!(plan.scope, super::RenameScope::Document) && chart_output_names(&current.view).contains(&plan.old_name) && chart_output_names(&current.view).contains(&plan.new_name) {
+            return Err("The new name is already a chart output.".into());
+        }
         Ok(RenamePreview { basis, plan, caret, replacement: replacement.to_owned(), view: current.view.clone() })
     }
 
@@ -643,6 +677,9 @@ impl CalculationPadSession {
                 if settings.definition.outputs.contains(&preview.plan.old_name) {
                     related.sensitivity_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
                 }
+            }
+            if chart_output_names(&current.view).contains(&preview.plan.old_name) {
+                related.chart_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
             }
         }
         let line_ids = current.line_ids.clone();
@@ -895,9 +932,27 @@ impl CalculationPadSession {
             && self.sensitivity_active.as_ref().is_some_and(|basis| view.sensitivity.as_ref().is_none_or(|settings| settings.definition != basis.definition || settings.input_name != basis.input_name)) {
             self.retire_sensitivity();
         }
+        let (chart_ids, chart_next) = if let Some(current) = self.current.as_ref() {
+            let old = chart_output_names(&current.view);
+            let new = chart_output_names(&view);
+            let mut next = current.next_chart_output_id;
+            let mut ids = Vec::with_capacity(new.len());
+            for name in new {
+                let id = if let Some(index) = old.iter().position(|old| old == name) { current.chart_output_ids[index] }
+                    else { let id = next; next = next.checked_add(1).ok_or("Chart output identity space exhausted.")?; id };
+                ids.push(id);
+            }
+            let removed: HashSet<_> = current.chart_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+                for state in &mut entry.chart_outputs { if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; } }
+            }
+            (ids, next)
+        } else { return Err("No document is open."); };
         let document = self.current.as_mut().ok_or("No document is open.")?;
         document.sensitivity_output_ids = sensitivity_ids;
         document.next_sensitivity_output_id = sensitivity_next;
+        document.chart_output_ids = chart_ids;
+        document.next_chart_output_id = chart_next;
         if document.view.watches == view.watches {
             document.view = view;
             self.prune_hidden_watch_ids();
@@ -936,6 +991,8 @@ impl CalculationPadSession {
             current.hidden_watch_ids.retain(|id| retained.contains(id));
             let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.sensitivity_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
             current.hidden_sensitivity_output_ids.retain(|id| retained.contains(id));
+            let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.chart_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
+            current.hidden_chart_output_ids.retain(|id| retained.contains(id));
         }
     }
 
@@ -1305,6 +1362,7 @@ impl CalculationPadSession {
         let before = current.editable_state();
         let watch_ids = related.watches.iter().map(|edit| current.view.watches.iter().position(|name| name == &edit.before).map(|index| current.watch_ids[index])).collect();
         let sensitivity_ids = related.sensitivity_outputs.iter().map(|edit| current.view.sensitivity.as_ref().and_then(|settings| settings.definition.outputs.iter().position(|name| name == &edit.before)).map(|index| current.sensitivity_output_ids[index])).collect();
+        let chart_ids = related.chart_outputs.iter().map(|edit| chart_output_names(&current.view).iter().position(|name| name == &edit.before).map(|index| current.chart_output_ids[index])).collect();
         let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
@@ -1316,7 +1374,7 @@ impl CalculationPadSession {
 
         self.retire_sensitivity();
         self.retire_background_evaluation();
-        self.history.record(before, after, related, watch_ids, sensitivity_ids);
+        self.history.record(before, after, related, watch_ids, sensitivity_ids, chart_ids);
         let current = self
             .current
             .as_mut()
@@ -1368,7 +1426,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.undo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, true) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, true) else {
             return false;
         };
         if self.history.undo.pop_back().is_none() {
@@ -1384,6 +1442,8 @@ impl CalculationPadSession {
             current.hidden_watch_ids = hidden_watch_ids;
             current.sensitivity_output_ids = sensitivity_ids;
             current.hidden_sensitivity_output_ids = sensitivity_hidden;
+            current.chart_output_ids = chart_ids;
+            current.hidden_chart_output_ids = chart_hidden;
         }
         self.history.redo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -1401,7 +1461,7 @@ impl CalculationPadSession {
             return false;
         };
         let Some(mut entry) = self.history.redo.back().cloned() else { return false; };
-        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, false) else {
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, false) else {
             return false;
         };
         if self.history.redo.pop_back().is_none() {
@@ -1417,6 +1477,8 @@ impl CalculationPadSession {
             current.hidden_watch_ids = hidden_watch_ids;
             current.sensitivity_output_ids = sensitivity_ids;
             current.hidden_sensitivity_output_ids = sensitivity_hidden;
+            current.chart_output_ids = chart_ids;
+            current.hidden_chart_output_ids = chart_hidden;
         }
         self.history.undo.push_back(entry);
         self.prune_hidden_watch_ids();
@@ -2074,6 +2136,28 @@ mod tests {
         let settings = session.view_metadata().unwrap().sensitivity.as_ref().unwrap();
         assert_eq!(settings.input_name, "other");
         assert_eq!(settings.definition.input, session.line_id(1).unwrap());
+    }
+
+    #[test]
+    fn chart_definition_roundtrip_and_rename_history_keeps_independent_selection() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()] });
+        session.set_view_metadata(view).unwrap();
+        session.save_as("chart").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root); reopened.request_open(id).unwrap();
+        assert!(matches!(&reopened.view_metadata().unwrap().chart.as_ref().unwrap().source, super::super::ChartSource::Sensitivity { outputs } if outputs == &["x"]));
+        let first = reopened.preview_rename(0, "y").unwrap(); reopened.apply_rename(&first).unwrap();
+        let second = reopened.preview_rename(0, "z").unwrap(); reopened.apply_rename(&second).unwrap();
+        let mut view = reopened.view_metadata().unwrap().clone();
+        let Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs }, .. }) = view.chart.as_mut() else { panic!("sensitivity chart"); };
+        outputs.clear(); reopened.set_view_metadata(view.clone()).unwrap();
+        let Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs }, .. }) = view.chart.as_mut() else { panic!("sensitivity chart"); };
+        outputs.push("y".into()); reopened.set_view_metadata(view).unwrap();
+        assert!(reopened.undo()); assert!(reopened.undo());
+        assert!(matches!(&reopened.view_metadata().unwrap().chart.as_ref().unwrap().source, super::super::ChartSource::Sensitivity { outputs } if outputs == &["y"]));
     }
 
     #[test]

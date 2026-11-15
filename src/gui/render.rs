@@ -2251,6 +2251,7 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
             Panel::CalculationDependencyDialog => self.calculation_dependency_host.root_layer(),
+            Panel::CalculationChartDialog => self.calculation_chart_host.root_layer(),
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer(),
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
@@ -4953,6 +4954,7 @@ impl LauncherApp {
             .prepare_open(ctx, &self.programmer_inspector_dialog);
         self.calculation_dependency_host
             .prepare_open(ctx, &self.calculation_dependency_dialog);
+        self.calculation_chart_host.prepare_open(ctx, &self.calculation_chart_dialog);
         self.explorer_tabs_host
             .prepare_open(ctx, &self.explorer_tabs_dialog);
         let (visibility_request, visibility_invocation_id, should_be_visible, _) =
@@ -5049,6 +5051,7 @@ impl LauncherApp {
                 || self
                     .calculation_dependency_host
                     .needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
+                || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
                 || self
                     .file_preview_host
                     .needs_root_ui_when_hidden(self.file_search_dialog.preview_dialog.open)
@@ -5994,6 +5997,59 @@ impl LauncherApp {
         self.calculation_dependency_host.show(
             ctx,
             &mut self.calculation_dependency_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
+    fn show_calculation_charts(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+    ) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        if !self.calculation_chart_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.calculation_chart_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::CalculationChartDialog);
+        let runtime = self.calculation_pad_dialog.chart_runtime(pinned);
+        self.calculation_chart_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_chart_host.show(
+            ctx,
+            &mut self.calculation_chart_dialog,
             &runtime,
             HostInput {
                 first,
@@ -10685,6 +10741,7 @@ impl LauncherApp {
             self.show_file_search_children(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
+            self.show_calculation_charts(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -12551,6 +12608,7 @@ impl LauncherApp {
             self.show_file_search_children(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
+            self.show_calculation_charts(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -13079,6 +13137,7 @@ impl LauncherApp {
         self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_dependencies(&ctx, first_ui_pass, frame_logic.should_be_visible);
+            self.show_calculation_charts(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
@@ -14354,6 +14413,7 @@ impl LauncherApp {
         }
         let mut inspector_open = None;
         let mut dependency_open = None;
+        let mut chart_open = None;
         for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
             match pad_effect {
                 super::CalculationPadDialogEffect::ShowRoot => {
@@ -14371,6 +14431,7 @@ impl LauncherApp {
                 super::CalculationPadDialogEffect::OpenDependencies(origin) => {
                     dependency_open = Some(origin);
                 }
+                super::CalculationPadDialogEffect::OpenCharts(origin) => { chart_open = Some(origin); }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
@@ -14378,6 +14439,42 @@ impl LauncherApp {
                     self.request_calculation_pad_display_preference_save(ctx, preferences);
                 }
             }
+        }
+        if !self.calculation_pad_dialog.open && self.calculation_chart_dialog.open {
+            self.calculation_chart_host.close_from_app(ctx);
+            self.calculation_chart_dialog.close();
+            self.panel_stack.retain(|panel| *panel != super::Panel::CalculationChartDialog);
+        }
+        if let Some(completion) = self.calculation_chart_host.complete(ctx, &mut self.calculation_chart_dialog) {
+            use super::utility_window_host::CalculationChartHostCommand;
+            for command in completion.commands {
+                match command {
+                    CalculationChartHostCommand::Closed => { self.calculation_chart_dialog.close(); self.panel_stack.retain(|panel| *panel != super::Panel::CalculationChartDialog); }
+                    CalculationChartHostCommand::Apply(actions) => {
+                        let runtime = self.calculation_pad_dialog.chart_runtime(false);
+                        let current = super::calculation_chart_dialog::actions_current(&actions, &runtime)
+                            && !self.confirm_modal.is_open() && !self.action_sheet.is_open();
+                        if current {
+                            self.calculation_chart_dialog.commit(&actions);
+                            if let Some(definition) = actions.definition.clone() && let Err(error) = self.calculation_pad_dialog.set_chart_definition(&runtime, definition) { self.calculation_chart_dialog.feedback = Some(error); }
+                            if actions.definition.is_none() && let Some((stamp, definition, scene)) = actions.copy
+                                && super::calculation_chart_dialog::chart_stamp(&runtime, &definition).is_some_and(|current| current == stamp) {
+                                self.calculation_chart_dialog.copy_with(&scene, |image| arboard::Clipboard::new().map_err(|_| ())?.set_image(image).map_err(|_| ()));
+                            }
+                        }
+                    }
+                }
+            }
+            if completion.show_root && !self.calculation_chart_host.is_popped_out() { effects.push(RootDialogEffect::ShowRoot); }
+        }
+        if let Some(origin) = chart_open && self.calculation_pad_dialog.accepts_inspector_origin(&origin)
+            && !self.confirm_modal.is_open() && !self.action_sheet.is_open() {
+            let was_open = self.calculation_chart_dialog.open;
+            self.calculation_chart_dialog.open();
+            let desired = self.calculation_chart_host.open_from_origin(ctx, &self.calculation_chart_dialog, was_open, &super::utility_host::ChildOpenOrigin::Parent(origin));
+            self.panel_stack.retain(|panel| *panel != super::Panel::CalculationChartDialog);
+            self.panel_stack.push(super::Panel::CalculationChartDialog);
+            if desired == Some(super::utility_host::UtilityPresentation::Docked) { effects.push(RootDialogEffect::ShowRoot); }
         }
         let current_dependency_context = if self.calculation_dependency_dialog.open {
             self.calculation_pad_dialog.dependency_context()

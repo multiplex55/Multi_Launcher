@@ -36,9 +36,10 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | M9-B | Verified and pushed | `3f7a47d17e6e2d8571a90f177f6818d0993aca33`. Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
 | M10-A | Verified and pushed | `b5bd5b163e95b201faf506f8331cd163245f4862`. Bounded immutable sensitivity analysis and current-only publication. Focused batch passed 15/15. |
 | M10-B | Verified and pushed | `64cf01ae222c1fd2e03d0ae9952f2aa58c1eaa93`. Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
-| M11-A | Verified | Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5; PNG inspected. |
-| M11-B | In progress | Dockable Charts companion, persisted definition and guarded image copy. |
-| M12-A through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
+| M11-A | Verified and pushed | `349088413ef4d38d45099273a4e521b72645fcbc`. Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5, and the PNG was inspected. |
+| M11-B | Verified | Dockable Charts companion, persisted definition and guarded image copy. Final batch passed 12/12. |
+| M12-A | In progress | Typed semantic/resolved date and size criteria. |
+| M12-B through M13-B | Pending | Sequential checkpoints follow the Goal contract. |
 
 ## Requirements and live owners
 
@@ -55,7 +56,7 @@ The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f29
 | C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check pending. | Binding identity, session history/metadata, guarded editor preview and Apply |
 | C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check pending. | Source-authoritative typed input configuration and accepted draft Apply |
 | C4 | Implemented | Focused XP, sample, worker, panel, exact exports, stale actions, persistence and rename history passed. Native integrated check pending. | Session-owned bounded worker and retained Config Menu actions |
-| C5 | Chart model implemented; companion integration in progress | Focused dataset/scene/raster checks passed and chart-only PNG inspected. Native integrated check pending. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
+| C5 | Implemented | Focused chart model, raster, clipboard, ownership and persistence tests passed. Chart-only PNG inspected. Native integrated check pending. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
 | F3 | Pending | Pending | Search model/settings, executor/coordinator, WalkDir/native/ripgrep/Everything, dialog filters and `domain` cases |
 
 ## Verification evidence
@@ -189,3 +190,9 @@ Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The 
 - Added bounded typed vector/sensitivity adapters, shared line/bar/scatter scene, stable view transforms, unit normalization, explicit gaps, exact and round-trip tooltip text, and approximation/collision disclosure. Axis coordinates and chart-only raster work are checked before drawing.
 - Initial scoped library Nextest passed 6/6. Inspection of the first PNG showed that the 1-pixel annotation stroke skipped integer-coordinate axes. The corrected shared scene uses visible axis/tick strokes. Final focused selection passed 5/5, including actual axis pixels, aligned labels, and absence of a line across a missing row. The corrected sample image `target/calc-pad-and-file-search-evidence/m11a-final-chart.png` was opened and inspected.
 - The final compile completed with exit 0 in 208.26 seconds and drained output. Its wrapper initially could not verify one observed process after exit. A read-only Windows PID/creation-time comparison confirmed the ID had been reused by a different system process, and no Cargo/compiler process remained. The completed build was reused for the final cached run, which passed with exit 0 in 2.64 seconds and verified cleanup/output drain. Receipts: `m11a-*` and `m11a-final-*`. Native viewport and clipboard checks remain pending.
+
+### M11-B Charts companion
+
+- Config Menu offers a parent-owned Charts companion with existing dock/pop-out and size/presentation persistence. It observes current Pad and sensitivity snapshots, reports stale or unavailable data, and resets transient view on document changes. Cached typed data and the shared chart scene serve both screen and copy. The same chart supports line/bar/scatter, source and visible series selection, axis labels and real units, bar labels, pan/zoom/reset and raw tooltips.
+- One bounded chart definition persists per named Pad. Observable image copy uses the retained owner, current source/definition stamps and the chart-only raster path. Chart selections follow source rename transactions and retain independent later output selections. Closing the Pad retires its Charts host.
+- Initial library compile exited 101 because the tracked Panel array count needed updating. The correction compile passed in 381.33 seconds. Scoped Nextest passed 12/12 with exit 0, 0.44 seconds reported by Nextest and 2.65 seconds owned elapsed. Verification covers chart source and owner guards, injected clipboard success/failure, type/quantity and raster models, definition round-trip, name history, and neighboring retained actions. Cleanup and output drain passed. Receipts: `m11b-build`, `m11b-correction-build`, and `m11b-correction-run`. Windows desktop interaction remains pending.

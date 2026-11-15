@@ -314,6 +314,7 @@ pub(super) enum CalculationPadDialogEffect {
     CopyText(String),
     OpenInspector(PadOpenReceipt),
     OpenDependencies(PadOpenReceipt),
+    OpenCharts(PadOpenReceipt),
     ShowRoot,
     SaveRecoveryPreference(bool),
     SaveDisplayPreferences(crate::settings::CalculationPadDisplayPreferences),
@@ -419,6 +420,7 @@ struct HostEffects {
     inspector_caret: Option<std::ops::Range<usize>>,
     open_inspector: bool,
     open_dependencies: bool,
+    open_charts: bool,
     dependency_applied: Option<DependencyEditorUpdate>,
     result_navigation: Option<(super::calculation_dependency_dialog::DependencyNavigation, u64)>,
     save_as_name: Option<String>,
@@ -567,6 +569,7 @@ impl CalculationPadDialog {
             inspector_caret: None,
             open_inspector: false,
             open_dependencies: false,
+            open_charts: false,
             dependency_applied: None,
             result_navigation: None,
             save_as_name: None,
@@ -1757,6 +1760,7 @@ impl CalculationPadDialog {
             }).collect(),
             watches: self.pad_view.watches.clone(),
             sensitivity: self.pad_view.sensitivity.clone(),
+            chart: self.session.view_metadata().and_then(|view| view.chart.clone()),
         };
         if let Err(message) = self.session.set_view_metadata(view) { self.error = Some(message.into()); }
     }
@@ -1920,6 +1924,7 @@ impl CalculationPadDialog {
                         effects.open_dependencies = true;
                         ui.close();
                     }
+                    if ui.button("Charts…").clicked() { effects.open_charts = true; ui.close(); }
                     let inspector = ui.button("Programmer Inspector…");
                     #[cfg(test)]
                     { self.test_inspector_reopen = Some((inspector.rect, ui.clip_rect(), inspector.enabled())); }
@@ -2817,6 +2822,7 @@ impl CalculationPadDialog {
             host.inspector_caret = None;
             host.open_inspector = false;
             host.open_dependencies = false;
+            host.open_charts = false;
             host.dependency_applied = None;
             host.result_navigation = None;
             host.result_copy = None;
@@ -2916,6 +2922,7 @@ impl CalculationPadDialog {
             || host.rename_action.is_some()
             || host.rename_context_caret.is_some()
             || host.sensitivity_action.is_some()
+            || host.open_charts
             || host.input_config_commit.is_some()
             || host.result_scroll.is_some()
             || host.close_requested
@@ -3403,6 +3410,11 @@ impl CalculationPadDialog {
         {
             delivered.push(CalculationPadDialogEffect::OpenDependencies(receipt));
         }
+        if host.open_charts && !accepted_source_or_history && !host.close_requested && !host.native_close_requested && host.host_request.is_none()
+            && host.document_basis == current_basis && self.session.pending_transition().is_none()
+            && let (Some(incarnation), Some(document), Some(owner)) = (self.session.document_incarnation(), self.session.current_id(), host.pass)
+            && let Some(receipt) = super::utility_host::AcceptedParentOpen::from_retained(ctx, host.identity, (incarnation, document), root, owner)
+        { delivered.push(CalculationPadDialogEffect::OpenCharts(receipt)); }
         if let Some((nav, revision)) = host.result_navigation.take()
             && !accepted_source_or_history
             && !host.close_requested
@@ -3838,6 +3850,24 @@ impl CalculationPadDialog {
             && !self.save_as_open
             && self.session.pending_transition().is_none())
         .then(|| self.host_identity())
+    }
+
+    pub(super) fn chart_runtime(&mut self, pinned: bool) -> super::calculation_chart_dialog::ChartRuntime {
+        let identity = if self.open && self.session.pending_transition().is_none() { self.session.current_id().zip(self.session.document_incarnation()) } else { None };
+        let evaluation = if identity.is_some() { self.session.shared_evaluation() } else { None };
+        let table = if identity.is_some() { self.session.sensitivity_table() } else { None };
+        let definition = self.session.view_metadata().and_then(|view| view.chart.clone());
+        super::calculation_chart_dialog::ChartRuntime { identity, evaluation, table, definition, basis: self.session.evaluation_basis(), pad_host: self.dependency_host(), pinned }
+    }
+
+    pub(super) fn set_chart_definition(&mut self, runtime: &super::calculation_chart_dialog::ChartRuntime, definition: crate::calculation_pad::ChartDefinition) -> Result<(), String> {
+        if !self.open || self.session.pending_transition().is_some() || runtime.identity != self.session.current_id().zip(self.session.document_incarnation()) || runtime.pad_host != self.dependency_host() {
+            return Err("The Calculation Pad changed; reopen the chart settings.".into());
+        }
+        let mut view = self.session.view_metadata().cloned().ok_or("No document is open.")?;
+        if view.chart != runtime.definition { return Err("Chart settings changed; review them again.".into()); }
+        view.chart = Some(definition);
+        self.session.set_view_metadata(view).map_err(str::to_owned)
     }
 
     pub(super) fn dependency_seed(&self) -> Option<LineId> {
@@ -5978,6 +6008,24 @@ mod tests {
         let root = AppDataRoot::from_path(directory.path().to_path_buf());
         let dialog = CalculationPadDialog::new(&root);
         (directory, root, dialog)
+    }
+
+    #[test]
+    fn chart_open_requires_retained_current_pad_owner() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("[1, 2]");
+        let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        discarded.open_charts = true;
+        assert!(!complete_host_effects(&mut dialog, &ctx, discarded).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::OpenCharts(_))));
+        let mut current = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        current.pass_accepted = true; current.open_charts = true;
+        assert!(complete_host_effects(&mut dialog, &ctx, current).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::OpenCharts(_))));
+        let mut stale = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        stale.pass_accepted = true; stale.open_charts = true;
+        dialog.test_replace_source("[3, 4]");
+        assert!(!complete_host_effects(&mut dialog, &ctx, stale).iter().any(|effect| matches!(effect, CalculationPadDialogEffect::OpenCharts(_))));
     }
 
     #[test]

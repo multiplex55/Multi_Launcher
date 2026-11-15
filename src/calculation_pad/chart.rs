@@ -26,11 +26,30 @@ const COLORS: [[u8; 4]; 8] = [
     [90, 95, 110, 255],
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ChartKind {
     Line,
     Bar,
     Scatter,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ChartSource {
+    Vectors { x: Option<super::LineId>, y: Vec<super::LineId> },
+    Sensitivity { outputs: Vec<String> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChartDefinition {
+    pub source: ChartSource,
+    pub kind: ChartKind,
+    pub x_label: String,
+    pub y_label: String,
+    pub hidden: Vec<usize>,
+    pub bar_labels: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
