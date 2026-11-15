@@ -130,6 +130,9 @@ impl HelpWindow {
                             ui.label(
                                 "Clear results cancels the current search and clears rows, selection, preview, refinement and diagnostics. Query, roots, filters and sort remain; press Search to run again. Filename contains matches a literal contiguous part of the leaf name, including its extension.",
                             );
+                            ui.label(
+                                "Filters includes Date Modified and File Size. Changes take effect when you press Search. The content-reading size limit remains separate from the File Size filter. When a filtered filename search would otherwise use Everything, it uses WalkDir instead and may be slower.",
+                            );
                             ui.separator();
                             ui.label(egui::RichText::new("Calculation Pad").strong());
                             ui.label(

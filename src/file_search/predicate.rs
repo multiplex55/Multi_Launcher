@@ -24,6 +24,20 @@ pub struct DatePreference {
     pub start: String,
     pub end: String,
 }
+impl DatePreference {
+    pub fn validate_draft(&self) -> Result<(), String> {
+        if self.mode == DateMode::Custom {
+            let start = parse_date(&self.start)?;
+            let end = parse_date(&self.end)?;
+            if start > end {
+                return Err("Start date must not be after end date.".into());
+            }
+            end.checked_add_days(Days::new(1))
+                .ok_or("End date is outside the supported range.")?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +80,33 @@ pub struct SizePreference {
     pub lower: String,
     pub upper: String,
     pub unit: SizeUnit,
+}
+impl SizePreference {
+    pub fn resolve_draft(&self) -> Result<Option<SizePredicate>, String> {
+        Ok(match self.mode {
+            SizeMode::Any => None,
+            SizeMode::Empty => Some(SizePredicate::Empty),
+            SizeMode::SmallerThan => Some(SizePredicate::SmallerThan(parse_bytes(
+                &self.upper,
+                self.unit,
+            )?)),
+            SizeMode::LargerThan => Some(SizePredicate::LargerThan(parse_bytes(
+                &self.lower,
+                self.unit,
+            )?)),
+            SizeMode::Between => {
+                let min = parse_bytes(&self.lower, self.unit)?;
+                let max = parse_bytes(&self.upper, self.unit)?;
+                if min > max {
+                    return Err("Minimum file size must not exceed maximum file size.".into());
+                }
+                Some(SizePredicate::Between(min, max))
+            }
+        })
+    }
+    pub fn content_warning(&self, cap: u64) -> Result<Option<String>, String> {
+        content_warning(self.resolve_draft()?.as_ref(), cap)
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -147,11 +188,30 @@ impl ResolvedMetadata {
 }
 
 /// Evaluate a filesystem entry with the same frozen predicate on every backend.
-pub(crate) fn metadata_matches(filters: &ResolvedMetadata, metadata: Option<&std::fs::Metadata>) -> Result<bool, MissingMetadata> {
-    if !filters.active() { return Ok(true); }
-    let metadata = metadata.ok_or(if filters.date.is_some() { MissingMetadata::Modified } else { MissingMetadata::Size })?;
-    let kind = if metadata.is_file() { FileKind::File } else if metadata.is_dir() { FileKind::Directory } else { FileKind::Other };
-    filters.matches(kind, metadata.modified().ok(), metadata.is_file().then(|| metadata.len()))
+pub(crate) fn metadata_matches(
+    filters: &ResolvedMetadata,
+    metadata: Option<&std::fs::Metadata>,
+) -> Result<bool, MissingMetadata> {
+    if !filters.active() {
+        return Ok(true);
+    }
+    let metadata = metadata.ok_or(if filters.date.is_some() {
+        MissingMetadata::Modified
+    } else {
+        MissingMetadata::Size
+    })?;
+    let kind = if metadata.is_file() {
+        FileKind::File
+    } else if metadata.is_dir() {
+        FileKind::Directory
+    } else {
+        FileKind::Other
+    };
+    filters.matches(
+        kind,
+        metadata.modified().ok(),
+        metadata.is_file().then(|| metadata.len()),
+    )
 }
 
 #[cfg(test)]
@@ -159,11 +219,27 @@ mod backend_metadata_tests {
     use super::*;
     #[test]
     fn missing_metadata_is_reported_only_when_required() {
-        assert_eq!(metadata_matches(&ResolvedMetadata::default(), None), Ok(true));
-        let size = ResolvedMetadata { size: Some(SizePredicate::Empty), ..Default::default() };
+        assert_eq!(
+            metadata_matches(&ResolvedMetadata::default(), None),
+            Ok(true)
+        );
+        let size = ResolvedMetadata {
+            size: Some(SizePredicate::Empty),
+            ..Default::default()
+        };
         assert_eq!(metadata_matches(&size, None), Err(MissingMetadata::Size));
-        let date = ResolvedMetadata { date: Some(DateWindow { start: SystemTime::UNIX_EPOCH, end: SystemTime::UNIX_EPOCH, end_inclusive: true }), ..Default::default() };
-        assert_eq!(metadata_matches(&date, None), Err(MissingMetadata::Modified));
+        let date = ResolvedMetadata {
+            date: Some(DateWindow {
+                start: SystemTime::UNIX_EPOCH,
+                end: SystemTime::UNIX_EPOCH,
+                end_inclusive: true,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            metadata_matches(&date, None),
+            Err(MissingMetadata::Modified)
+        );
     }
 }
 
@@ -384,26 +460,7 @@ impl MetadataPreferences {
         content_cap: u64,
     ) -> Result<ResolvedMetadata, String> {
         let date = date_window(&self.date, now, zone)?;
-        let size = match self.size.mode {
-            SizeMode::Any => None,
-            SizeMode::Empty => Some(SizePredicate::Empty),
-            SizeMode::SmallerThan => Some(SizePredicate::SmallerThan(parse_bytes(
-                &self.size.upper,
-                self.size.unit,
-            )?)),
-            SizeMode::LargerThan => Some(SizePredicate::LargerThan(parse_bytes(
-                &self.size.lower,
-                self.size.unit,
-            )?)),
-            SizeMode::Between => {
-                let min = parse_bytes(&self.size.lower, self.size.unit)?;
-                let max = parse_bytes(&self.size.upper, self.size.unit)?;
-                if min > max {
-                    return Err("Minimum file size must not exceed maximum file size.".into());
-                }
-                Some(SizePredicate::Between(min, max))
-            }
-        };
+        let size = self.size.resolve_draft()?;
         let warning = if kind == SearchKind::Content {
             content_warning(size.as_ref(), content_cap)?
         } else {
@@ -477,6 +534,26 @@ mod tests {
     }
 
     #[test]
+    fn draft_validation_is_clock_free_and_reports_independent_content_limit() {
+        let date = DatePreference {
+            mode: DateMode::Custom,
+            start: "2026-11-16".into(),
+            end: "2026-11-15".into(),
+        };
+        assert!(date.validate_draft().is_err());
+        let mut size = SizePreference {
+            mode: SizeMode::Between,
+            lower: "1".into(),
+            upper: "3".into(),
+            unit: SizeUnit::KB,
+        };
+        assert!(size.resolve_draft().is_ok());
+        assert!(size.content_warning(2000).unwrap().is_some());
+        size.lower = "4".into();
+        assert!(size.resolve_draft().is_err());
+    }
+
+    #[test]
     fn decimal_size_boundaries_are_checked_without_float_rounding() {
         assert_eq!(parse_bytes("1.5", SizeUnit::KB).unwrap(), 1500);
         assert_eq!(parse_bytes("1.5", SizeUnit::KiB).unwrap(), 1536);
@@ -532,25 +609,19 @@ mod tests {
         let mut invalid = preferences(DateMode::Custom, SizeMode::Any);
         invalid.date.start = "+2026-03-01".into();
         invalid.date.end = "2026-03-02".into();
-        assert!(
-            invalid
-                .resolve_at(now, Some(zone), SearchKind::Filename, 1024)
-                .is_err()
-        );
+        assert!(invalid
+            .resolve_at(now, Some(zone), SearchKind::Filename, 1024)
+            .is_err());
         invalid.date.start = "2026-03-03".into();
-        assert!(
-            invalid
-                .resolve_at(now, Some(zone), SearchKind::Filename, 1024)
-                .is_err()
-        );
+        assert!(invalid
+            .resolve_at(now, Some(zone), SearchKind::Filename, 1024)
+            .is_err());
         let sao_paulo = "America/Sao_Paulo".parse().unwrap();
         invalid.date.start = "2018-11-04".into();
         invalid.date.end = "2018-11-04".into();
-        assert!(
-            invalid
-                .resolve_at(now, Some(sao_paulo), SearchKind::Filename, 1024)
-                .is_err()
-        );
+        assert!(invalid
+            .resolve_at(now, Some(sao_paulo), SearchKind::Filename, 1024)
+            .is_err());
     }
 
     #[test]
@@ -599,13 +670,11 @@ mod tests {
         };
         assert_eq!(larger.matches(FileKind::File, None, Some(10)), Ok(false));
         assert_eq!(larger.matches(FileKind::File, None, Some(11)), Ok(true));
-        assert!(
-            prefs
-                .resolve_at(now, None, SearchKind::Content, 5)
-                .unwrap()
-                .warning
-                .is_some()
-        );
+        assert!(prefs
+            .resolve_at(now, None, SearchKind::Content, 5)
+            .unwrap()
+            .warning
+            .is_some());
         prefs.size.lower = "6".into();
         assert!(prefs.resolve_at(now, None, SearchKind::Content, 5).is_err());
         prefs.size.mode = SizeMode::Empty;

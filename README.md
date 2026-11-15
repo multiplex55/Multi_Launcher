@@ -465,6 +465,9 @@ Examples: `fs`, `fs file README`, `fs content "TODO item"`, `fs here content lau
 
 ### Filters and refinement
 
+- **Date Modified** supports local-calendar Today, Yesterday, and inclusive custom dates, plus rolling 24-hour, 7-day, and 30-day windows. Rolling windows end when you press Search; editing filters does not rerun a search.
+- **File Size** supports Empty, strict Smaller Than/Larger Than, and inclusive Between. B/KB/MB/GB use decimal units; KiB/MiB/GiB use binary units. Fractional-byte boundaries are rejected. Size filtering searches files only while retaining your normal type preference for when it is cleared.
+- Date and size filters combine with the other search criteria. When a metadata-filtered filename search would otherwise use Everything, it uses the filesystem-backed WalkDir path instead and may be slower. Content searches retain their separate content-reading size limit; the dialog reports impossible or partially scannable size ranges.
 - **Include extensions** and **Exclude extensions** accept comma-separated extensions. Leading dots are optional and normalized, so `rs, .md, toml` is valid. Include filters limit results to those extensions; exclude filters remove matching extensions.
 - **Excluded directories** contains directory names to skip, not paths or globs. Use **Add exclusion** to add names such as `.git`, `target`, `node_modules`, `bin`, or `obj`; use **Remove** per entry, **Restore defaults** to return to `settings.json`, or **Clear** to temporarily search without those exclusions.
 - Directory-exclusion edits in the dialog are temporary UI overrides for the next search request and do not rewrite the configured defaults unless preferences are explicitly saved by the app.
