@@ -167,7 +167,7 @@ pub(crate) fn watch_name(input: &str) -> Option<String> {
         && (parsed.braced || !is_reserved_name(&parsed.canonical))).then_some(parsed.canonical)
 }
 
-fn integer_literal_token(value: &str) -> bool {
+pub(super) fn integer_literal_token(value: &str) -> bool {
     let value = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
     let (digits, radix) = if let Some(rest) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) { (rest, 16) }
         else if let Some(rest) = value.strip_prefix("0b").or_else(|| value.strip_prefix("0B")) { (rest, 2) }
@@ -183,7 +183,9 @@ pub(crate) struct LiteralInput {
     pub line: usize,
     pub value: String,
     pub value_range: Range<usize>,
+    pub statement_range: Range<usize>,
     pub source_line: String,
+    pub kind: super::input::InputKind,
 }
 
 pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
@@ -233,33 +235,34 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
             };
             if valid_shape {
                 let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
-                let is_decimal_literal = expr.find('(').is_some_and(|open| expr[..open].eq_ignore_ascii_case("decimal"));
-                let evaluation = is_decimal_literal || CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
-                if evaluation {
+                let document = CalculationDocument::new(expr);
+                let evaluation = document.evaluate();
+                let kind = evaluation.lines.first().and_then(|line| match &line.outcome {
+                    LineOutcome::Value(CalculationValue::Integer(value)) if !needs_quantity => Some(super::input::InputKind::Integer(value.mode())),
+                    LineOutcome::Value(CalculationValue::Exact(_)) if !needs_quantity => Some(super::input::InputKind::Decimal),
+                    LineOutcome::Value(CalculationValue::Scalar(_)) if !needs_quantity && value.trim_start_matches(['+', '-']).get(..2).is_some_and(|prefix| matches!(prefix, "0x" | "0X" | "0b" | "0B" | "0o" | "0O")) => Some(super::input::InputKind::ExactInteger),
+                    LineOutcome::Value(CalculationValue::Scalar(_)) if !needs_quantity => Some(super::input::InputKind::Scalar),
+                    LineOutcome::Value(CalculationValue::ExactBase { .. }) if !needs_quantity => Some(super::input::InputKind::ExactInteger),
+                    LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) if needs_quantity => Some(super::input::InputKind::Quantity { unit: expr[value.len()..].trim().to_owned() }),
+                    _ => None,
+                });
+                if let Some(kind) = kind {
                     let logical_start = delimiter.right_start + leading + start;
                     let logical_end = logical_start + value.len();
                     if let Some(offsets) = row.offsets.get(logical_start..logical_end)
                         && let Some(Some(value_start)) = offsets.first()
                         && offsets.iter().enumerate().all(|(index, offset)| *offset == Some(*value_start + index))
                     {
+                        let mut last = line;
+                        while analysis.rows.get(last + 1).is_some_and(|next| next.owner == Some(line)) { last += 1; }
                         result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
-                            value_range: *value_start..*value_start + value.len(), source_line: source[row.range.clone()].to_owned() });
+                            value_range: *value_start..*value_start + value.len(), statement_range: row.range.start..analysis.rows[last].range.end, source_line: source[row.range.start..analysis.rows[last].range.end].to_owned(), kind });
                     }
                 }
             }
         }
     }
     result
-}
-
-impl CalculationDocument {
-    fn evaluate_owned_literal(&self, needs_quantity: bool) -> bool {
-        self.evaluate().lines.first().is_some_and(|line| match &line.outcome {
-            LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) => true,
-            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. } | CalculationValue::Exact(_)) => !needs_quantity,
-            _ => false,
-        })
-    }
 }
 
 pub const MAX_DOCUMENT_BYTES: usize = super::limits::STANDARD_BYTES;

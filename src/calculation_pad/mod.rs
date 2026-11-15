@@ -11,6 +11,7 @@ mod document;
 mod exact;
 mod examples;
 mod inspector;
+mod input;
 mod integer;
 mod limits;
 mod operators;
@@ -59,6 +60,7 @@ pub(crate) use document::{literal_inputs, LiteralInput, watch_name, editor_bindi
 pub(crate) use document::rename::{RenamePlan, RenameScope};
 
 pub(crate) use persistence::{PadViewMetadata, PadInputReference};
+pub(crate) use input::{InputConfig, InputControl, InputKind};
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, CalculationPolicy, DocumentOptions, DocumentProfile, DocumentId, LineId,
     MAX_SAVED_DOCUMENTS, MAX_STORED_DOCUMENT_BYTES, MAX_STORED_RECOVERY_BYTES, PadDocumentStore,

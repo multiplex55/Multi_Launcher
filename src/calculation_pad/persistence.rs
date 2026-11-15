@@ -768,6 +768,22 @@ pub(crate) struct PadInputReference {
     pub id: LineId,
     pub name: String,
     pub unavailable: bool,
+    #[serde(default)]
+    pub config: super::input::InputConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyInputReference { id: LineId, name: String, unavailable: bool }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyViewMetadata { inputs: Vec<LegacyInputReference>, watches: Vec<String> }
+
+impl From<LegacyViewMetadata> for PadViewMetadata {
+    fn from(old: LegacyViewMetadata) -> Self {
+        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches }
+    }
 }
 #[derive(Deserialize)]
 struct DocumentVersion { format_version: u32 }
@@ -791,7 +807,7 @@ struct StoredDocumentV2 {
     source: String,
     line_ids: Vec<LineId>,
     next_line_id: u64,
-    view: PadViewMetadata,
+    view: LegacyViewMetadata,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1192,6 +1208,7 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
     if view.inputs.iter().any(|input| input.id.0 == 0 || !valid_name(&input.name) || !lines.insert(input.id)) {
         return Err("invalid or duplicate input reference");
     }
+    for input in &view.inputs { input.config.validate_storage()?; }
     let mut names = HashSet::new();
     if view.watches.iter().any(|name| !valid_name(name) || !names.insert(name)) {
         return Err("invalid or duplicate watch name");
@@ -1259,7 +1276,7 @@ fn decode_document(
         StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default(), options: DocumentOptions::default() }
     } else if version.format_version == 2 {
         let old: StoredDocumentV2 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
-        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: old.view, options: DocumentOptions::default() }
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: old.view.into(), options: DocumentOptions::default() }
     } else {
         serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?
     };
@@ -1431,12 +1448,30 @@ mod tests {
         assert_eq!(session.document_options(), Some(super::DocumentOptions::default()));
         assert_eq!(session.view_metadata().unwrap().watches, ["x"]);
         assert_eq!(session.view_metadata().unwrap().inputs[0].name, "x");
+        assert_eq!(session.view_metadata().unwrap().inputs[0].config, Default::default());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         session.save().unwrap();
         let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(upgraded["format_version"], CURRENT_DOCUMENT_FORMAT_VERSION);
         assert_eq!(upgraded["view"]["watches"], serde_json::json!(["x"]));
         assert_eq!(upgraded["view"]["inputs"][0]["name"], "x");
+    }
+
+    #[test]
+    fn input_config_v3_defaults_and_v2_rejects_new_fields() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("input migration", "x = 2".into(), vec![LineId(1)], 2).unwrap();
+        let path = store.document_path(saved.id);
+        let v3 = format!(r#"{{"format_version":3,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false}}],"watches":[]}},"options":{{"calculation":"automatic","profile":"standard"}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, &v3).unwrap();
+        let loaded = store.open(saved.id).unwrap();
+        assert_eq!(loaded.stored.view.inputs[0].config, Default::default());
+        let v2_with_config = format!(r#"{{"format_version":2,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false,"config":{{}}}}],"watches":[]}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, v2_with_config).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
+        let bad = format!(r#"{{"format_version":3,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false,"config":{{"minimum":"10","maximum":"5","step":"0","anchor":{{"kind":"scalar"}}}}}}],"watches":[]}},"options":{{"calculation":"automatic","profile":"standard"}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, bad).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::InvalidDocument { .. })));
     }
 
     #[test]

@@ -141,6 +141,7 @@ struct InputSelection {
     id: LineId,
     name: String,
     unavailable: bool,
+    config: crate::calculation_pad::InputConfig,
     draft: Option<InputDraft>,
 }
 #[derive(Clone, PartialEq)]
@@ -1726,7 +1727,7 @@ impl CalculationPadDialog {
     fn persist_view_state_in_session(&mut self) {
         let view = crate::calculation_pad::PadViewMetadata {
             inputs: self.pad_view.inputs.iter().map(|input| crate::calculation_pad::PadInputReference {
-                id: input.id, name: input.name.clone(), unavailable: input.unavailable,
+                id: input.id, name: input.name.clone(), unavailable: input.unavailable, config: input.config.clone(),
             }).collect(),
             watches: self.pad_view.watches.clone(),
         };
@@ -1771,11 +1772,11 @@ impl CalculationPadDialog {
 
     fn refresh_related_view(&mut self) {
         let metadata = self.session.view_metadata().cloned().unwrap_or_default();
-        let same = self.pad_view.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable)).eq(metadata.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable)))
+        let same = self.pad_view.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable, &input.config)).eq(metadata.inputs.iter().map(|input| (&input.id, &input.name, input.unavailable, &input.config)))
             && self.pad_view.watches == metadata.watches;
         if same { return; }
         self.pad_view.inputs = metadata.inputs.into_iter().map(|input| InputSelection {
-            id: input.id, name: input.name, unavailable: input.unavailable, draft: None,
+            id: input.id, name: input.name, unavailable: input.unavailable, config: input.config, draft: None,
         }).collect();
         self.pad_view.watches = metadata.watches;
     }
@@ -1784,7 +1785,7 @@ impl CalculationPadDialog {
         let metadata = self.session.view_metadata().cloned().unwrap_or_default();
         self.pad_view = PadView {
             inputs: metadata.inputs.into_iter().map(|input| InputSelection {
-                id: input.id, name: input.name, unavailable: input.unavailable, draft: None,
+                id: input.id, name: input.name, unavailable: input.unavailable, config: input.config, draft: None,
             }).collect(),
             watches: metadata.watches,
             ..PadView::default()
@@ -2087,7 +2088,7 @@ impl CalculationPadDialog {
                         if ui.checkbox(&mut checked, format!("{} · line {}", input.name, input.line + 1)).changed() {
                             if let Some(index) = selected { view.inputs.remove(index); }
                             if checked && view.inputs.len() < 64 {
-                                view.inputs.push(InputSelection { id, name: input.name.clone(), unavailable: false, draft: None });
+                                view.inputs.push(InputSelection { id, name: input.name.clone(), unavailable: false, config: Default::default(), draft: None });
                             }
                         }
                     }
@@ -5782,7 +5783,7 @@ mod tests {
         dialog.session.set_document_options(DocumentOptions { calculation: CalculationPolicy::Manual, profile: DocumentProfile::Standard }).unwrap();
         dialog.test_replace_source("x = 2\nx + 1");
         let id = dialog.session.line_id(0).unwrap();
-        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, draft: None });
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None });
         dialog.pad_view.watches.push("x".into());
         dialog.persist_view_state_in_session();
         let mut discarded = dialog.empty_host_effects(egui::ViewportId::ROOT);
@@ -6097,7 +6098,7 @@ mod tests {
         let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host.pass_accepted = true;
         host.pad_view = Some(super::PadView {
-            inputs: vec![super::InputSelection { id, name: "x".into(), unavailable: false, draft: None }],
+            inputs: vec![super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None }],
             watches: vec!["x".into()], ..Default::default()
         });
         host.intent = Some(super::DialogIntent::SaveAs("view retained".into()));
@@ -6117,7 +6118,7 @@ mod tests {
         dialog.open();
         dialog.test_replace_source("x = 2\nx = 2");
         let id = dialog.session.line_id(0).unwrap();
-        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, draft: None });
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None });
         let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host.pass_accepted = true;
         host.edited_source = Some("x = 2".into());
@@ -6132,7 +6133,7 @@ mod tests {
         dialog.open();
         dialog.test_replace_source("x = 2\nx = 2\ny = 1");
         let id = dialog.session.line_id(0).unwrap();
-        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, draft: None });
+        dialog.pad_view.inputs.push(super::InputSelection { id, name: "x".into(), unavailable: false, config: Default::default(), draft: None });
         let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
         host.pass_accepted = true;
         host.edited_source = Some("x = 2\ny = 1\nx = 2".into());

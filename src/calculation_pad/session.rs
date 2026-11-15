@@ -707,6 +707,7 @@ impl CalculationPadSession {
 
     pub(crate) fn set_view_metadata(&mut self, view: PadViewMetadata) -> Result<(), &'static str> {
         if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
+        if self.current.as_ref().is_some_and(|document| document.view == view) { return Ok(()); }
         super::persistence::validate_view_metadata(&view)?;
         let document = self.current.as_mut().ok_or("No document is open.")?;
         if document.view.watches == view.watches {
@@ -961,18 +962,35 @@ impl CalculationPadSession {
         let descriptor = super::document::literal_inputs(source).into_iter()
             .find(|input| input.line == line && input.source_line == original)
             .ok_or("This input changed or is no longer a literal.")?;
-        let new_len = source.len().checked_sub(descriptor.value_range.len())
-            .and_then(|size| size.checked_add(value.len()))
-            .ok_or("Input is too large.")?;
-        if new_len > MAX_DOCUMENT_BYTES { return Err("Input is too large.".into()); }
-        let mut replacement = source.to_owned();
-        replacement.replace_range(descriptor.value_range.clone(), value);
-        let valid = super::document::literal_inputs(&replacement).into_iter()
-            .any(|input| input.line == line && input.name == descriptor.name
-                && input.value == value && input.value_range.start == descriptor.value_range.start);
-        if !valid { return Err("Enter a valid value for this input.".into()); }
+        let selected = self.current.as_ref().and_then(|current| current.view.inputs.iter().find(|input| input.id == line_id));
+        if selected.is_some_and(|input| input.unavailable || input.name != descriptor.name) { return Err("This selected input is unavailable or changed.".into()); }
+        let default = super::input::InputConfig::default();
+        let config = selected.map_or(&default, |input| &input.config);
+        let replacement = super::input::replace_literal(source, &descriptor, config, value)?;
         validate_source_size(&replacement).map_err(|error| error.to_string())?;
         Ok(replacement)
+    }
+
+    pub(crate) fn input_projection(&self, line_id: LineId) -> Result<super::input::InputProjection, String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let selection = current.view.inputs.iter().find(|input| input.id == line_id).ok_or("Input is not selected.")?;
+        if selection.unavailable { return Err("Input is unavailable.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == line_id).ok_or("Input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line && input.name == selection.name).ok_or("Input changed or is no longer a literal.")?;
+        super::input::project(descriptor, selection.config.clone())
+    }
+
+    pub(crate) fn configure_input(&mut self, line_id: LineId, mut config: super::input::InputConfig) -> Result<(), String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let selection = current.view.inputs.iter().find(|input| input.id == line_id).ok_or("Input is not selected.")?;
+        if selection.unavailable { return Err("Input is unavailable.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == line_id).ok_or("Input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line && input.name == selection.name).ok_or("Input changed or is no longer a literal.")?;
+        config.anchor = config.has_numeric_constraints().then(|| descriptor.kind.anchor());
+        super::input::validate_config(&descriptor.kind, &config)?;
+        let mut view = current.view.clone();
+        view.inputs.iter_mut().find(|input| input.id == line_id).ok_or("Input is not selected.")?.config = config;
+        self.set_view_metadata(view).map_err(str::to_owned)
     }
 
     pub fn replace_source(&mut self, source: impl Into<String>) -> Result<bool, SessionError> {
@@ -1743,7 +1761,7 @@ mod tests {
         session.replace_source("x = 2\nx + 1").unwrap();
         let line = session.line_id(0).unwrap();
         let view = super::PadViewMetadata {
-            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false }],
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
             watches: vec!["x".into(), "other".into()],
         };
         session.set_view_metadata(view).unwrap();
@@ -1778,7 +1796,7 @@ mod tests {
         let (_dir, root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
         let ids = session.line_ids().unwrap().to_vec();
-        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false }], watches: vec!["x".into()] };
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false, config: Default::default() }], watches: vec!["x".into()] };
         session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "y").unwrap();
         assert!(session.apply_rename(&preview).unwrap());
@@ -2166,6 +2184,56 @@ mod tests {
         assert!(session.source().unwrap().contains("x = u64(4)"));
         let quantity = session.input_replacement(session.revision().unwrap(), ids[2], &inputs[2].source_line, "7").unwrap();
         assert!(quantity.contains("distance = 7 m"));
+    }
+
+    #[test]
+    fn configured_input_survives_rename_save_reopen_and_rejects_unit_changes() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("distance = 5 m\ndistance * 2").unwrap();
+        let line = session.line_id(0).unwrap();
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: line, name: "distance".into(), unavailable: false, config: Default::default() }], ..Default::default() };
+        session.set_view_metadata(view).unwrap();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() };
+        session.set_document_options(options).unwrap();
+        session.configure_input(line, super::super::InputConfig { label: "Trip".into(), suffix: "display only".into(), minimum: Some("6".into()), maximum: Some("10".into()), step: Some("1".into()), control: super::super::InputControl::Slider, ..Default::default() }).unwrap();
+        let projection = session.input_projection(line).unwrap();
+        assert!(projection.current_error.is_some());
+        assert!(projection.slider_available);
+        assert_eq!(projection.config.suffix, "display only");
+        let descriptor = projection.descriptor;
+        let revision = session.revision().unwrap();
+        assert!(session.input_replacement(revision, line, &descriptor.source_line, "11").is_err());
+        let replacement = session.input_replacement(revision, line, &descriptor.source_line, "7").unwrap();
+        session.replace_source(replacement).unwrap();
+        assert_eq!(session.evaluation_attempts, 0);
+        let preview = session.preview_rename(0, "length").unwrap();
+        session.apply_rename(&preview).unwrap();
+        assert_eq!(session.input_projection(line).unwrap().config.label, "Trip");
+        assert!(session.undo());
+        assert_eq!(session.input_projection(line).unwrap().config.label, "Trip");
+        assert!(session.redo());
+        session.save_as("configured input").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.input_projection(line).unwrap().config.label, "Trip");
+        reopened.replace_source("length = 7 cm\nlength * 2").unwrap();
+        assert!(reopened.input_projection(line).unwrap_err().contains("type or unit changed"));
+    }
+
+    #[test]
+    fn decorative_input_settings_survive_type_and_unit_changes() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("size = 2 m").unwrap();
+        let id = session.line_id(0).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id, name: "size".into(), unavailable: false, config: Default::default() }], ..Default::default() }).unwrap();
+        session.configure_input(id, super::super::InputConfig { label: "Size".into(), suffix: "ore".into(), ..Default::default() }).unwrap();
+        session.replace_source("size = 3 cm").unwrap();
+        let projection = session.input_projection(id).unwrap();
+        assert_eq!(projection.config.label, "Size");
+        assert_eq!(projection.config.suffix, "ore");
+        assert!(projection.current_error.is_none());
+        assert!(session.input_replacement(session.revision().unwrap(), id, &projection.descriptor.source_line, "4").unwrap().contains("4 cm"));
     }
 
     #[test]
@@ -2951,7 +3019,7 @@ mod tests {
         let line = session.line_id(0).unwrap();
         let revision = session.revision();
         let view = super::super::persistence::PadViewMetadata {
-            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false }],
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
             watches: vec!["x".into(), "missing".into()],
         };
         session.set_view_metadata(view.clone()).unwrap();
