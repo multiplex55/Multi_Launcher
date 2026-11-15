@@ -100,6 +100,7 @@ impl FileSearchExecutor {
 
     pub fn plan_for_request(request: &SearchRequest, settings: &FileSearchSettings) -> BackendPlan {
         let candidates = match (&request.kind, &request.scope) {
+            (SearchKind::Content, SearchScope::Files { .. }) if request.metadata.active() => vec![SearchBackend::Native],
             (SearchKind::Content, _) => vec![SearchBackend::Ripgrep, SearchBackend::Native],
             (SearchKind::Filename, _) if request.metadata.active() => vec![SearchBackend::WalkDir],
             (SearchKind::Filename, SearchScope::Roots { roots })
@@ -162,6 +163,9 @@ impl SearchExecutor for FileSearchExecutor {
         events: SearchEventSender,
     ) {
         let plan = Self::plan_for_request(&request, &self.settings);
+        if request.kind == SearchKind::Content && request.metadata.active() && matches!(&request.scope, SearchScope::Files { .. }) {
+            let _ = events.send(SearchEvent::Diagnostic { id, diagnostic: crate::file_search::model::SearchDiagnostic::Warning("Metadata-filtered explicit files use native content search to enforce the reading size limit.".into()) });
+        }
         if request.kind == SearchKind::Filename && request.metadata.active() && self.settings.everything_enabled
             && request.filename_match_mode == FilenameMatchMode::RankedSubstring
             && (request.included_extensions.is_empty() || request.file_type_filter == FileTypeFilter::FilesOnly)

@@ -193,9 +193,10 @@ pub fn search_filenames_in_directory(
                 }
                 ranked_results.push(result);
                 summary.results_found += 1;
+                if !request.metadata.active() && summary.results_found >= request.max_results { break; }
             }
         }
-        if summary.global_truncated {
+        if summary.global_truncated || (!request.metadata.active() && summary.results_found >= request.max_results) {
             break;
         }
     }
@@ -610,6 +611,22 @@ mod tests {
         let extra = temp.path().join("match-extra.txt"); fs::write(&extra, "also large").unwrap();
         request.scope = SearchScope::Files { files: vec![large, extra] };
         assert!(run(request).0.global_truncated);
+    }
+
+    #[test]
+    fn unfiltered_cap_does_not_visit_remaining_explicit_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("match.txt"); let second = temp.path().join("other.txt");
+        fs::write(&first, "x").unwrap(); fs::write(&second, "x").unwrap();
+        let mut request = request(temp.path().into(), "match", 1);
+        request.scope = SearchScope::Files { files: vec![first, second] };
+        let (unfiltered, _) = run(request.clone());
+        assert_eq!(unfiltered.files_scanned, 1);
+        assert!(!unfiltered.global_truncated);
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::LargerThan(0));
+        let (filtered, _) = run(request);
+        assert_eq!(filtered.files_scanned, 2);
+        assert!(!filtered.global_truncated);
     }
 
     #[test]

@@ -287,10 +287,11 @@ fn run_cases(
             .clone()
             .unwrap_or_else(|_| format!("sample {}", index + 1));
         let projected = rendered.and_then(|value| {
+            let config = InputConfig { anchor: Some(request.descriptor.kind.anchor()), ..Default::default() };
             replace_literal(
                 &request.source,
                 &request.descriptor,
-                &InputConfig::default(),
+                &config,
                 &value,
             )
         });
@@ -421,6 +422,21 @@ mod tests {
         let markdown = export_table(&table, TableExport::Markdown);
         assert!(markdown.contains("1/3") && markdown.contains("\\|") && markdown.contains("<br>"), "{markdown}");
         assert!(export_table(&table, TableExport::Table).contains('\t'));
+    }
+
+    #[test]
+    fn sensitivity_preserves_radix_within_scalar_limit_and_reports_overflow() {
+        let request = make_request("x = 0x5\ny = x", "9007199254740992", "9007199254740993", Sampling::Count(2), &["y"]);
+        let config = InputConfig { anchor: Some(request.descriptor.kind.anchor()), ..Default::default() };
+        let projected = replace_literal(&request.source, &request.descriptor, &config, "9007199254740992").unwrap();
+        assert!(projected.starts_with("x = 0x20000000000000\n"));
+        let table = run_cases(&request, Arc::new(AtomicBool::new(false)), &|| {}).unwrap();
+        assert_eq!(table.rows.len(), 2);
+        assert!(table.rows[0].cells[0].is_ok());
+        assert!(table.rows[1].cells[0].is_err());
+        let csv = export_table(&table, TableExport::Csv);
+        assert!(csv.contains("9007199254740992,9007199254740992"), "{csv}");
+        assert!(csv.contains("9007199254740993,Error:"), "{csv}");
     }
 
     fn make_request(

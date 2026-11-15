@@ -6030,12 +6030,13 @@ impl LauncherApp {
         }
         let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
         let layer = self.calculation_chart_host.root_layer();
+        let popup = layer.and_then(|layer| self.calculation_chart_dialog.owned_popup_layer(ctx, layer));
         let owner = root_input
             && layer.is_some()
             && visible_top_middle_layer(ctx) == layer
-            && !egui::Popup::is_any_open(ctx)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
             && focused_response_layer(ctx)
-                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+                .is_none_or(|focus| Some(focus) == layer || Some(focus) == popup || focus.order == egui::Order::Background);
         let native_input = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()

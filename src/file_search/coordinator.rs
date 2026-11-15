@@ -346,6 +346,7 @@ impl SearchCoordinator {
                 .unwrap_or(SearchBackend::WalkDir)
         } else {
             match (&request.kind, &request.scope) {
+                (SearchKind::Content, SearchScope::Files { .. }) if request.metadata.active() => SearchBackend::Native,
                 (SearchKind::Filename, _) if request.metadata.active() => SearchBackend::WalkDir,
                 (SearchKind::Filename, SearchScope::Roots { .. })
                     if request.filename_match_mode

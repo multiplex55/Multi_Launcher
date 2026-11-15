@@ -28,6 +28,8 @@ pub(crate) struct CalculationChartDialog {
     pub(super) feedback: Option<String>,
     cache: std::cell::RefCell<Option<ChartCache>>,
     bound: Option<(DocumentId, DocumentIncarnation)>,
+    popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    popup_viewport: Option<egui::ViewportId>,
 }
 
 struct ChartCache {
@@ -50,16 +52,30 @@ pub(super) struct ChartActions {
     pub evaluation: Option<EvaluationBasis>,
     pub table: Option<SensitivityBasis>,
     pub basis: Option<EvaluationBasis>,
+    pub popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    pub viewport: Option<egui::ViewportId>,
+    #[cfg(test)]
+    pub controls: Vec<(String, egui::Rect)>,
 }
 
 impl CalculationChartDialog {
     pub(super) fn open(&mut self) { if !self.open { self.epoch = self.epoch.wrapping_add(1); self.open = true; self.close_requested = false; self.view.reset(); } }
-    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; *self.cache.borrow_mut() = None; }
+    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; *self.cache.borrow_mut() = None; }
     pub(super) fn request_close(&mut self) { self.close_requested = true; }
     pub(super) fn epoch(&self) -> u64 { self.epoch }
     pub(super) fn commit(&mut self, actions: &ChartActions) {
         if self.bound != actions.identity { self.view.reset(); self.bound = actions.identity; *self.cache.borrow_mut() = None; }
         if let Some(view) = actions.view { self.view = view; }
+        self.popup_anchors.clone_from(&actions.popup_anchors);
+        self.popup_viewport = actions.viewport;
+    }
+    pub(super) fn owned_popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        if self.popup_viewport != Some(ctx.viewport_id()) { return None; }
+        self.popup_anchors.iter().find_map(|(id, layer)| {
+            if *layer != base || !ctx.read_response(*id).is_some_and(|response| response.enabled() && response.layer_id == base) { return None; }
+            let popup = id.with("popup");
+            egui::Popup::is_id_open(ctx, popup).then_some(egui::LayerId::new(egui::Order::Foreground, popup))
+        })
     }
     pub(super) fn copy_with(&mut self, scene: &ChartScene, write: impl FnOnce(arboard::ImageData<'_>) -> Result<(), ()>) {
         self.feedback = Some(match scene.rasterize() {
@@ -72,7 +88,7 @@ impl CalculationChartDialog {
     }
 
     pub(super) fn render_host(&mut self, ctx: &egui::Context, runtime: &ChartRuntime, owner: bool, first: bool, child: Option<&mut egui::Ui>, presentation: UtilityPresentation) -> ChartActions {
-        let mut actions = ChartActions { identity: runtime.identity, pad_host: runtime.pad_host, base: runtime.definition.clone(), evaluation: runtime.evaluation.as_ref().map(|value| value.basis), table: runtime.table.as_ref().map(|value| value.basis.clone()), basis: runtime.basis, ..Default::default() };
+        let mut actions = ChartActions { identity: runtime.identity, pad_host: runtime.pad_host, base: runtime.definition.clone(), evaluation: runtime.evaluation.as_ref().map(|value| value.basis), table: runtime.table.as_ref().map(|value| value.basis.clone()), basis: runtime.basis, viewport: Some(ctx.viewport_id()), ..Default::default() };
         let mut window_open = self.open;
         let mut body = |ui: &mut egui::Ui| {
             let active = owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
@@ -103,13 +119,17 @@ impl CalculationChartDialog {
                 });
                 match &mut definition.source {
                     ChartSource::Vectors { x, y } => {
-                        egui::ComboBox::from_id_salt("chart-x").selected_text(x.and_then(|id| vectors.iter().find(|row| row.0 == id).map(|row| row.1.clone())).unwrap_or_else(|| "Positions 1…N".into())).show_ui(ui, |ui| {
+                        let response = egui::ComboBox::from_id_salt("chart-x").selected_text(x.and_then(|id| vectors.iter().find(|row| row.0 == id).map(|row| row.1.clone())).unwrap_or_else(|| "Positions 1…N".into())).show_ui(ui, |ui| {
                             ui.selectable_value(x, None, "Positions 1…N");
-                            for (id, name, _) in &vectors { ui.selectable_value(x, Some(*id), name); }
+                            for (id, name, _) in &vectors { let _response = ui.selectable_value(x, Some(*id), name); #[cfg(test)] actions.controls.push((format!("x/{name}"), _response.rect)); }
                         });
-                        ui.menu_button("Y vectors", |ui| for (id, name, _) in &vectors { let mut selected = y.contains(id); if ui.checkbox(&mut selected, name).changed() { if selected && y.len() < 8 { y.push(*id); } else if !selected { y.retain(|value| value != id); } } });
+                        #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
+                        actions.popup_anchors.push((response.response.id, response.response.layer_id));
+                        let response = ui.menu_button("Y vectors", |ui| for (id, name, _) in &vectors { let mut selected = y.contains(id); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("y/{name}"), response.rect)); if response.changed() { if selected && y.len() < 8 { y.push(*id); } else if !selected { y.retain(|value| value != id); } } });
+                        #[cfg(test)] actions.controls.push(("y-menu".into(), response.response.rect));
+                        actions.popup_anchors.push((response.response.id, response.response.layer_id));
                     }
-                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); if ui.checkbox(&mut selected, name).changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); },
+                    ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { let response = ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect)); if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect)); actions.popup_anchors.push((response.response.id, response.response.layer_id)); },
                 }
                 ui.horizontal(|ui| { ui.label("X label"); ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); ui.label("Y label"); ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); });
             });
@@ -216,7 +236,7 @@ pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -
     };
     if !definition.x_label.is_empty() { dataset.x_label = definition.x_label.clone(); }
     if !definition.y_label.is_empty() { dataset.y_label = definition.y_label.clone(); }
-    if !definition.bar_labels.is_empty() { dataset.bar_labels = definition.bar_labels.clone(); }
+    for (generated, saved) in dataset.bar_labels.iter_mut().zip(&definition.bar_labels) { generated.clone_from(saved); }
     for (index, series) in dataset.series.iter_mut().enumerate() { series.visible = !definition.hidden.contains(&index); }
     Ok((stamp, dataset))
 }
@@ -244,6 +264,74 @@ fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
 mod tests {
     use super::*;
 
+    fn chart_frame(ctx: &egui::Context, dialog: &mut CalculationChartDialog, runtime: &mut ChartRuntime, events: Vec<egui::Event>) -> ChartActions {
+        let base = dialog.popup_anchors.first().map(|(_, layer)| *layer);
+        let popup = base.and_then(|layer| dialog.owned_popup_layer(ctx, layer));
+        let owner = !egui::Popup::is_any_open(ctx) || popup.is_some();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 900.0))), focused: true, events, ..Default::default() };
+        let mut actions = None;
+        let output = ctx.run_ui(input, |ui| { actions = Some(dialog.render_host(ctx, runtime, owner, true, Some(ui), UtilityPresentation::Docked)); });
+        output.drop_without_applying_deltas();
+        let actions = actions.unwrap();
+        if owner {
+            dialog.commit(&actions);
+            if let Some(definition) = &actions.definition { runtime.definition = Some(definition.clone()); }
+        }
+        actions
+    }
+
+    fn chart_click(ctx: &egui::Context, dialog: &mut CalculationChartDialog, runtime: &mut ChartRuntime, point: egui::Pos2) -> ChartActions {
+        let mut result = None;
+        for pressed in [true, false] {
+            result = Some(chart_frame(ctx, dialog, runtime, vec![egui::Event::PointerMoved(point), egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]));
+        }
+        result.unwrap()
+    }
+
+    #[test]
+    fn chart_owned_popup_menus_accept_actual_selections_across_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]\nw = [3, 4]\nx = 1\ny = x\nz = x + 1").unwrap();
+        session.evaluation();
+        let evaluation = session.shared_evaluation().unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = tx.send(()); });
+        session.request_sensitivity(crate::calculation_pad::SensitivityDefinition { input: ids[2], start: "1".into(), end: "2".into(), sampling: crate::calculation_pad::Sampling::Count(2), outputs: vec!["y".into(), "z".into()] }).unwrap();
+        for _ in 0..20 { let _ = rx.recv_timeout(std::time::Duration::from_secs(5)); session.poll_sensitivity(); if session.sensitivity_table().is_some() { break; } }
+        let table = session.sensitivity_table().unwrap();
+        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: Some(table), definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "x-menu"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let base = dialog.popup_anchors[0].1;
+        assert!(dialog.owned_popup_layer(&ctx, base).is_some());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "x/w"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { x: Some(id), .. } if *id == ids[1]));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "y-menu"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "y/w"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { y, .. } if y.contains(&ids[1])));
+        egui::Popup::close_all(&ctx);
+        runtime.definition.as_mut().unwrap().source = ChartSource::Sensitivity { outputs: vec!["y".into()] };
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "output-menu"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "output/z"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Sensitivity { outputs } if outputs == &["y", "z"]));
+        egui::Popup::close_all(&ctx);
+        egui::Popup::open_id(&ctx, egui::Id::new("unrelated-popup"));
+        let base = dialog.popup_anchors[0].1;
+        assert!(dialog.owned_popup_layer(&ctx, base).is_none());
+    }
+
     #[test]
     fn chart_adapter_reports_length_errors_and_uses_only_current_snapshots() {
         let directory = tempfile::tempdir().unwrap();
@@ -253,8 +341,10 @@ mod tests {
         session.evaluation();
         let evaluation = session.shared_evaluation().unwrap();
         let ids = session.line_ids().unwrap().to_vec();
-        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: ids }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Bar, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: vec!["custom".into()] };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
+        assert_eq!(chart_data(&runtime, &definition).unwrap().1.bar_labels, vec!["custom", "2"]);
+        definition.source = ChartSource::Vectors { x: None, y: ids };
         assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
         session.replace_source("[1, 2]").unwrap();
         runtime.evaluation = session.shared_evaluation();

@@ -84,6 +84,22 @@ fn metadata_filtered_explicit_files_preserve_the_eligible_cap_slot() {
 }
 
 #[test]
+fn metadata_filtered_explicit_content_keeps_independent_reading_cap() {
+    use multi_launcher::file_search::predicate::SizePredicate;
+    let directory = tempfile::tempdir().unwrap();
+    let within = directory.path().join("within.txt"); let over = directory.path().join("over.txt");
+    write(&within, "hit"); write(&over, "hit more");
+    let mut request = req(SearchKind::Content, vec![], "hit");
+    request.scope = SearchScope::Files { files: vec![over, within.clone()] };
+    request.max_file_size_bytes = 4;
+    request.metadata.size = Some(SizePredicate::Between(0, 10));
+    assert_eq!(multi_launcher::file_search::executor::FileSearchExecutor::plan_for_request(&request, &FileSearchSettings::default()).candidates, vec![multi_launcher::file_search::model::SearchBackend::Native]);
+    let summary = search_content_native_summary(request, &FileSearchSettings::default(), &CancellationToken::new()).unwrap();
+    assert_eq!(summary.results.len(), 1);
+    assert_eq!(summary.results[0].path, within);
+}
+
+#[test]
 fn global_roots_resolve_and_search_only_configured_roots() {
     let d = tempfile::tempdir().unwrap();
     let configured = d.path().join("configured");

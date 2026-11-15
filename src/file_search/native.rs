@@ -137,6 +137,10 @@ pub fn search_content_native_summary(
             summary.cancelled = true;
             break;
         }
+        if !request.metadata.active() && summary.results.len() >= request.max_results {
+            summary.global_truncated = true;
+            break;
+        }
         if let Some(result) = search_file(
             &path,
             &request,
@@ -531,6 +535,23 @@ mod tests {
         let extra = d.path().join("extra.txt"); write(&extra, b"hit more too");
         request.scope = SearchScope::Files { files: vec![large, extra] };
         assert!(run(request).global_truncated);
+    }
+
+    #[test]
+    fn unfiltered_cap_stops_before_extra_file_but_filtered_checks_matching_extra() {
+        let d = tempdir().unwrap();
+        let first = d.path().join("first.txt"); let second = d.path().join("second.txt");
+        write(&first, b"hit"); write(&second, b"other");
+        let mut request = req(d.path().into(), "hit");
+        request.scope = SearchScope::Files { files: vec![first, second] };
+        request.max_results = 1;
+        let unfiltered = run(request.clone());
+        assert_eq!(unfiltered.files_scanned, 1);
+        assert!(unfiltered.global_truncated);
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::LargerThan(0));
+        let filtered = run(request);
+        assert_eq!(filtered.files_scanned, 2);
+        assert!(!filtered.global_truncated);
     }
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

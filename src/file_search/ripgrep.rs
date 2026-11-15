@@ -206,6 +206,9 @@ pub fn search_content_with_ripgrep(
             message: "ripgrep backend only supports content searches".to_owned(),
         });
     }
+    if request.metadata.active() && matches!(&request.scope, SearchScope::Files { .. }) {
+        return Err(FileSearchError::InvalidQuery { message: "Metadata-filtered explicit files require native search to enforce the content size limit.".into() });
+    }
     if request.text.is_empty() {
         return Err(FileSearchError::InvalidQuery {
             message: "content search query cannot be empty".to_owned(),
@@ -450,6 +453,11 @@ pub fn search_filenames_with_ripgrep(
                         }
                         results.push(result);
                         summary.results_found += 1;
+                        if !request.metadata.active() && results.len() >= request.max_results {
+                            summary.global_truncated = true;
+                            let _ = stop_tx.send(());
+                            break;
+                        }
                     }
                 }
             }
@@ -491,6 +499,7 @@ pub fn search_filenames_with_ripgrep(
         handle_exit_status(status, &executable, &stderr)?;
     }
     while let Ok(line) = line_rx.try_recv() {
+        if !request.metadata.active() && results.len() >= request.max_results { break; }
         summary.files_scanned = summary.files_scanned.saturating_add(1);
         if let Some(result) = filename_result_from_path(&line, &needle, &request, results.len(), &mut summary.metadata_unavailable) {
             let identity = crate::file_search::model::PathIdentity::from_path(&result.path);
@@ -1085,6 +1094,17 @@ mod tests {
         std::fs::remove_file(&small).unwrap();
         let summary = parse_ripgrep_json_reader_filtered(events.join("\n").as_bytes(), 25, 1, &filter).unwrap();
         assert_eq!(summary.metadata_unavailable, 1);
+    }
+
+    #[test]
+    fn direct_ripgrep_rejects_filtered_explicit_scope_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = req(dir.path().into());
+        request.text = "hit".into();
+        request.scope = SearchScope::Files { files: vec![dir.path().join("file.txt")] };
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::Between(0, 10));
+        let error = search_content_with_ripgrep(request, &FileSearchSettings::default(), &CancellationToken::new()).unwrap_err();
+        assert!(error.to_string().contains("native search"));
     }
 
     #[test]

@@ -3074,7 +3074,7 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
         &self,
         binding: NavigationViewportBinding,
         ctx: &egui::Context,
-        _: Option<egui::LayerId>,
+        popup: Option<egui::LayerId>,
     ) -> bool {
         ctx.viewport_id() == binding.viewport
             && ctx.input(|input| input.focused)
@@ -3082,11 +3082,11 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
             && super::jump_mode::ui::visible_top_middle_layer(ctx)
                 .is_none_or(|layer| layer == binding.base_layer)
             && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
-                layer == binding.base_layer || layer == egui::LayerId::background()
+                layer == binding.base_layer || Some(layer) == popup || layer == egui::LayerId::background()
             })
     }
-    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
-        None
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
     }
     fn confirmation_binding(
         &self,

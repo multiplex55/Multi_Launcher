@@ -144,11 +144,17 @@ impl AggregateWork {
     pub(crate) fn new(limit: usize) -> Self { Self { used: std::sync::atomic::AtomicUsize::new(0), exhausted: std::sync::atomic::AtomicBool::new(false), limit } }
     pub(crate) fn charge(&self, amount: usize) -> Result<(), DiagnosticKind> {
         use std::sync::atomic::Ordering;
-        if self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| used.checked_add(amount).filter(|next| *next <= self.limit)).is_err() {
-            self.exhausted.store(true, Ordering::Relaxed);
-            return Err(DiagnosticKind::WorkLimit);
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(amount).filter(|next| *next <= self.limit) else {
+                self.exhausted.store(true, Ordering::Relaxed);
+                return Err(DiagnosticKind::WorkLimit);
+            };
+            match self.used.compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Ok(()),
+                Err(actual) => used = actual,
+            }
         }
-        Ok(())
     }
     pub(crate) fn exhausted(&self) -> bool { self.exhausted.load(std::sync::atomic::Ordering::Relaxed) }
     pub(crate) fn used(&self) -> usize { self.used.load(std::sync::atomic::Ordering::Relaxed) }
