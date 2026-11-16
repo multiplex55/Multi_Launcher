@@ -92,9 +92,14 @@ impl CalculationChartDialog {
         let mut window_open = self.open;
         let mut body = |ui: &mut egui::Ui| {
             let active = owner && first && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
-            let (button, next) = super::utility_host::presentation_button(ui, presentation, active);
-            if active && button.clicked() { actions.host_request = Some(next); }
-            if ui.add_enabled(active && !runtime.pinned, egui::Button::new("Close")).clicked() { actions.close = true; }
+            ui.horizontal(|ui| {
+                let (button, next) = super::utility_host::presentation_button(ui, presentation, active);
+                if active && button.clicked() { actions.host_request = Some(next); }
+                let close = ui.add_enabled(active && !runtime.pinned, egui::Button::new("Close"));
+                if close.clicked() { actions.close = true; }
+                #[cfg(test)]
+                { actions.controls.push(("presentation".into(), button.rect)); actions.controls.push(("close".into(), close.rect)); }
+            });
             if let Some(feedback) = &self.feedback { ui.label(feedback); }
             let Some(identity) = runtime.identity else { ui.label("Open a Calculation Pad to view charts."); return; };
             let vectors = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis)
@@ -453,5 +458,19 @@ mod tests {
         let mut called = false;
         dialog.copy_with(&scene, |image| { called = true; assert_eq!((image.width, image.height), (400, 300)); Err(()) });
         assert!(called && dialog.feedback.as_deref().unwrap().contains("Could not copy"));
+    }
+
+    #[test]
+    fn chart_presentation_and_close_controls_share_a_row_and_respect_pin() {
+        let ctx = egui::Context::default();
+        let mut dialog = CalculationChartDialog::default();
+        dialog.open();
+        let mut runtime = ChartRuntime { identity: None, evaluation: None, table: None, definition: None, basis: None, pad_host: None, pinned: true };
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let presentation = actions.controls.iter().find(|(name, _)| name == "presentation").unwrap().1;
+        let close = actions.controls.iter().find(|(name, _)| name == "close").unwrap().1;
+        assert!(presentation.center().y >= close.top() && presentation.center().y <= close.bottom());
+        assert!(presentation.right() <= close.left());
+        assert!(!chart_click(&ctx, &mut dialog, &mut runtime, close.center()).close);
     }
 }

@@ -246,6 +246,10 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_display_controls: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
+    test_usage_control: Option<egui::Rect>,
+    #[cfg(test)]
+    test_usage_header: bool,
+    #[cfg(test)]
     test_config_menu: Option<egui::Rect>,
     #[cfg(test)]
     test_config_groups: Vec<(&'static str, egui::Rect)>,
@@ -775,6 +779,10 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_display_controls: None,
             #[cfg(test)]
+            test_usage_control: None,
+            #[cfg(test)]
+            test_usage_header: false,
+            #[cfg(test)]
             test_config_menu: None,
             #[cfg(test)]
             test_config_groups: Vec::new(),
@@ -1198,6 +1206,8 @@ impl CalculationPadDialog {
             self.test_save_rect = None;
             self.test_copy_all_rect = None;
             self.test_display_controls = None;
+            self.test_usage_control = None;
+            self.test_usage_header = false;
             self.test_config_menu = None;
             self.test_config_groups.clear();
             self.test_dependency_open = None;
@@ -1933,10 +1943,17 @@ impl CalculationPadDialog {
                 self.test_config_groups.push(("Tools", _tools.response.rect));
 
                 ui.add_enabled_ui(self.session.pending_transition().is_none(), |ui| {
-                    ui.menu_button("View", |ui| {
+                    let _view = ui.menu_button("View", |ui| {
                         ui.checkbox(&mut view.show_inputs, "Editable inputs");
                         ui.checkbox(&mut view.show_watches, "Output watches");
+                        let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
+                        let usage = ui.checkbox(&mut preferences.show_document_usage, "Document usage");
+                        #[cfg(test)]
+                        { self.test_usage_control = Some(usage.rect); }
+                        if usage.changed() { effects.display_preferences = Some(preferences); }
                     });
+                    #[cfg(test)]
+                    self.test_config_groups.push(("View", _view.response.rect));
                     ui.menu_button("Number format", |ui| {
                         use crate::settings::CalculationPadNumberMode as Mode;
                         let mut preferences = effects.display_preferences.unwrap_or(self.display_preferences);
@@ -2053,35 +2070,47 @@ impl CalculationPadDialog {
         if let (Some(source), Some(options)) = (self.session.source(), self.session.document_options()) {
             let limits = crate::calculation_pad::profile_limits(options.profile);
             let rows = self.session.line_ids().map_or(0, |ids| ids.len());
-            let status = |used: usize, limit: usize| if used > limit { " over limit" } else if used.saturating_mul(10) >= limit.saturating_mul(9) { " near limit" } else { "" };
-            let title = format!("Document Usage ({:?}) · {} / {} bytes{} · {} / {} rows{}", options.profile, source.len(), limits.bytes, status(source.len(), limits.bytes), rows, limits.lines, status(rows, limits.lines));
-            egui::CollapsingHeader::new(title).id_salt("calculation-pad-document-usage").default_open(false).show(ui, |ui| {
-                usage_line(ui, "Source bytes", source.len(), limits.bytes);
-                usage_line(ui, "Physical rows", rows, limits.lines);
-                if source.len() > limits.bytes || rows > limits.lines {
-                    if options.profile == crate::calculation_pad::DocumentProfile::Standard {
-                        ui.label("Reduce the source, or choose Extended document under Config Menu → Calculation. Source remains editable and saveable.");
-                    } else {
-                        ui.label("Reduce the source to evaluate it. Source remains editable and saveable within the absolute admission limit.");
+            if source.len() > limits.bytes || rows > limits.lines {
+                let message = if options.profile == crate::calculation_pad::DocumentProfile::Standard {
+                    "The source exceeds the selected document profile. Reduce it or select Extended document."
+                } else {
+                    "The source exceeds the selected document profile. Reduce it to calculate."
+                };
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            if effects.display_preferences.unwrap_or(self.display_preferences).show_document_usage {
+                #[cfg(test)]
+                { self.test_usage_header = true; }
+                let status = |used: usize, limit: usize| if used > limit { " over limit" } else if used.saturating_mul(10) >= limit.saturating_mul(9) { " near limit" } else { "" };
+                let title = format!("Document Usage ({:?}) · {} / {} bytes{} · {} / {} rows{}", options.profile, source.len(), limits.bytes, status(source.len(), limits.bytes), rows, limits.lines, status(rows, limits.lines));
+                egui::CollapsingHeader::new(title).id_salt("calculation-pad-document-usage").default_open(false).show(ui, |ui| {
+                    usage_line(ui, "Source bytes", source.len(), limits.bytes);
+                    usage_line(ui, "Physical rows", rows, limits.lines);
+                    if source.len() > limits.bytes || rows > limits.lines {
+                        if options.profile == crate::calculation_pad::DocumentProfile::Standard {
+                            ui.label("Reduce the source, or choose Extended document under Config Menu → Calculation. Source remains editable and saveable.");
+                        } else {
+                            ui.label("Reduce the source to evaluate it. Source remains editable and saveable within the absolute admission limit.");
+                        }
                     }
-                }
-                if let Some(evaluation) = self.session.displayed_evaluation().filter(|value| Some(value.basis) == self.session.evaluation_basis()) {
-                    if let Some(usage) = evaluation.usage {
-                        usage_line(ui, "Work units", usage.work_units, crate::calculation_pad::MAX_WORK);
-                        usage_line(ui, "Vector component work", usage.vector_component_work, crate::calculation_pad::MAX_VECTOR_COMPONENT_WORK);
-                        usage_line(ui, "Loop iterations", usage.loop_iterations, crate::calculation_pad::MAX_LOOP_ITERATIONS);
-                    } else { ui.label(format!("Evaluation counters unavailable for this source (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
-                } else { ui.label(format!("Evaluation counters unavailable until current calculation completes (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
-                ui.small(format!("Absolute source admission: {} bytes / {} rows", crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES, crate::calculation_pad::MAX_ADMITTED_SOURCE_LINES));
-                ui.small(format!("Saved document / recovery envelopes: {} / {} bytes", crate::calculation_pad::MAX_STORED_DOCUMENT_BYTES, crate::calculation_pad::MAX_STORED_RECOVERY_BYTES));
-                ui.small(format!("Undo history: {} bytes / {} entries", crate::calculation_pad::MAX_UNDO_BYTES, crate::calculation_pad::MAX_UNDO_ENTRIES));
-                ui.small(format!("Expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
-                ui.small(format!("Identifiers: {} per document / {} per expression; name: {} bytes", crate::calculation_pad::MAX_DEPENDENCIES, crate::calculation_pad::MAX_DEPENDENCIES_PER_LINE, crate::calculation_pad::MAX_NAME_BYTES));
-                ui.small(format!("Range / sequence elements: {}; vector components: {}; vector parse work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_PARSE_WORK));
-                ui.small(format!("Loop nesting: {}; control block nesting: {}", crate::calculation_pad::MAX_LOOP_DEPTH, crate::calculation_pad::MAX_BLOCK_DEPTH));
-                ui.small(format!("Exact number: {} bits / {} decimal places", crate::calculation_pad::MAX_EXACT_BITS, crate::calculation_pad::MAX_EXACT_SCALE));
-                ui.small("Functions: 64 definitions / 16 parameters / 16 call depth");
-            });
+                    if let Some(evaluation) = self.session.displayed_evaluation().filter(|value| Some(value.basis) == self.session.evaluation_basis()) {
+                        if let Some(usage) = evaluation.usage {
+                            usage_line(ui, "Work units", usage.work_units, crate::calculation_pad::MAX_WORK);
+                            usage_line(ui, "Vector component work", usage.vector_component_work, crate::calculation_pad::MAX_VECTOR_COMPONENT_WORK);
+                            usage_line(ui, "Loop iterations", usage.loop_iterations, crate::calculation_pad::MAX_LOOP_ITERATIONS);
+                        } else { ui.label(format!("Evaluation counters unavailable for this source (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
+                    } else { ui.label(format!("Evaluation counters unavailable until current calculation completes (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
+                    ui.small(format!("Absolute source admission: {} bytes / {} rows", crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES, crate::calculation_pad::MAX_ADMITTED_SOURCE_LINES));
+                    ui.small(format!("Saved document / recovery envelopes: {} / {} bytes", crate::calculation_pad::MAX_STORED_DOCUMENT_BYTES, crate::calculation_pad::MAX_STORED_RECOVERY_BYTES));
+                    ui.small(format!("Undo history: {} bytes / {} entries", crate::calculation_pad::MAX_UNDO_BYTES, crate::calculation_pad::MAX_UNDO_ENTRIES));
+                    ui.small(format!("Expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
+                    ui.small(format!("Identifiers: {} per document / {} per expression; name: {} bytes", crate::calculation_pad::MAX_DEPENDENCIES, crate::calculation_pad::MAX_DEPENDENCIES_PER_LINE, crate::calculation_pad::MAX_NAME_BYTES));
+                    ui.small(format!("Range / sequence elements: {}; vector components: {}; vector parse work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_PARSE_WORK));
+                    ui.small(format!("Loop nesting: {}; control block nesting: {}", crate::calculation_pad::MAX_LOOP_DEPTH, crate::calculation_pad::MAX_BLOCK_DEPTH));
+                    ui.small(format!("Exact number: {} bits / {} decimal places", crate::calculation_pad::MAX_EXACT_BITS, crate::calculation_pad::MAX_EXACT_SCALE));
+                    ui.small("Functions: 64 definitions / 16 parameters / 16 call depth");
+                });
+            }
         }
     }
 
@@ -7895,7 +7924,9 @@ mod tests {
         let (_directory, _root, mut dialog) = fixture();
         let ctx = egui::Context::default();
         dialog.open();
-        let changed = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, ..Default::default() };
+        dialog.test_replace_source("x = 1\nx + 1");
+        let before = (dialog.test_source().unwrap().to_owned(), dialog.session.evaluation_basis(), dialog.session.can_undo(), dialog.session.can_redo());
+        let changed = crate::settings::CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, show_document_usage: true, ..Default::default() };
         let mut rejected = dialog.empty_host_effects(egui::ViewportId::ROOT);
         rejected.display_preferences = Some(changed);
         assert!(complete_host_effects(&mut dialog, &ctx, rejected).is_empty());
@@ -7905,6 +7936,26 @@ mod tests {
         accepted.display_preferences = Some(changed);
         assert_eq!(complete_host_effects(&mut dialog, &ctx, accepted), vec![CalculationPadDialogEffect::SaveDisplayPreferences(changed)]);
         assert_eq!(dialog.display_preferences, changed);
+        assert_eq!((dialog.test_source().unwrap().to_owned(), dialog.session.evaluation_basis(), dialog.session.can_undo(), dialog.session.can_redo()), before);
+    }
+
+    #[test]
+    fn document_usage_view_checkbox_is_retained_and_source_neutral() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(1000.0, 700.0);
+        dialog.open();
+        dialog.test_replace_source("x = 1\nx + 1");
+        for _ in 0..3 { frame(&mut dialog, &ctx, size, Vec::new()); }
+        assert!(!dialog.display_preferences.show_document_usage);
+        assert!(!dialog.test_usage_header);
+        let before = (dialog.test_source().unwrap().to_owned(), dialog.session.evaluation_basis(), dialog.session.can_undo(), dialog.session.can_redo());
+        open_config_menu(&mut dialog, &ctx, size, Some("View"));
+        let usage = dialog.test_usage_control.expect("Document usage checkbox is visible");
+        assert!(matches!(click(&mut dialog, &ctx, size, usage.center()), Some(CalculationPadDialogEffect::SaveDisplayPreferences(preferences)) if preferences.show_document_usage));
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(dialog.test_usage_header);
+        assert_eq!((dialog.test_source().unwrap().to_owned(), dialog.session.evaluation_basis(), dialog.session.can_undo(), dialog.session.can_redo()), before);
     }
 
     #[test]
