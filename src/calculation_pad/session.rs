@@ -3417,6 +3417,36 @@ mod tests {
     }
 
     #[test]
+    fn collection_failure_retained_binding_survives_manual_history_and_reopen() {
+        let (_directory, root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions {
+            calculation: super::super::CalculationPolicy::Manual,
+            profile: super::super::DocumentProfile::Standard,
+        }).unwrap();
+        session.replace_source("v = [1]\nv = append(v, get([], 0))\nlen(v)").unwrap();
+        assert!(session.shared_evaluation().is_none());
+        session.request_calculate();
+        let old = session.shared_evaluation().unwrap();
+        assert_eq!(old.final_bindings["v"].line_index, 0);
+        assert!(matches!(&old.lines[2].outcome, LineOutcome::Value(CalculationValue::Scalar(1.0))));
+        let preview = session.preview_rename(0, "data").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Outdated);
+        assert!(session.shared_evaluation().is_none());
+        assert!(session.undo());
+        assert_eq!(old.final_bindings["v"].line_index, 0);
+        session.request_calculate();
+        assert_eq!(formatted(&mut session, 2), "1");
+        session.save_as("collection retention").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        reopened.request_calculate();
+        assert_eq!(formatted(&mut reopened, 2), "1");
+        assert_eq!(reopened.shared_evaluation().unwrap().final_bindings["v"].line_index, 0);
+    }
+
+    #[test]
     fn dimensional_quantities_survive_session_cache_edit_undo_and_redo() {
         let (_directory, _root, mut session) = fixture();
         session

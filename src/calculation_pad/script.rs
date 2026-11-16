@@ -135,6 +135,7 @@ pub(crate) struct WorkBudget {
     pub(super) runtime_definitions: Option<Arc<HashMap<String, Vec<usize>>>>,
     call_depth: usize,
     pub(super) called_definitions: Vec<usize>,
+    collection_failure: bool,
 }
 
 pub(crate) struct AggregateWork {
@@ -164,6 +165,8 @@ impl AggregateWork {
 impl WorkBudget {
     pub(crate) fn used(&self) -> usize { self.used }
     pub(crate) fn vector_used(&self) -> usize { self.vector_used }
+    pub(super) fn clear_collection_failure(&mut self) { self.collection_failure = false; }
+    pub(super) fn take_collection_failure(&mut self) -> bool { std::mem::take(&mut self.collection_failure) }
     // Vector components are tracked separately from scalar work. Sensitivity's
     // aggregate meter charges one unit for every 32 component operations.
     pub(crate) fn charge_vector(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
@@ -208,6 +211,7 @@ impl WorkBudget {
             runtime_definitions: None,
             call_depth: 0,
             called_definitions: Vec::new(),
+            collection_failure: false,
         }
     }
     pub(crate) fn with_analysis(cancellation: Arc<std::sync::atomic::AtomicBool>, aggregate: Arc<AggregateWork>) -> Self {
@@ -1411,11 +1415,19 @@ impl ScriptExpression {
                 Ok(CalculationValue::Boolean(result))
             }
             Self::Call(function, args) => {
-                let values = args
-                    .iter()
-                    .map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work))
-                    .collect::<Result<Vec<_>, _>>()?;
-                call(*function, &values, work)
+                let result = (|| {
+                    let values = args
+                        .iter()
+                        .map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    call(*function, &values, work)
+                })();
+                if matches!(function, Function::Collection(_))
+                    && result.as_ref().is_err_and(|kind| !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
+                {
+                    work.collection_failure = true;
+                }
+                result
             }
             Self::UserCall(function, args) => {
                 let arguments = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;

@@ -471,9 +471,15 @@ impl CalculationDocument {
             _ => script::WorkBudget::default(),
         };
         let mut terminal = false;
-        for (line_index, line) in prepared.iter().enumerate() {
+        let mut retained_origins = HashMap::new();
+        let mut final_bindings: HashMap<String, FinalBinding> = HashMap::new();
+        for (line_index, line) in prepared.iter_mut().enumerate() {
+            if !retained_origins.is_empty() {
+                resolve_one_line(line, line_index, source_line_count, &definitions, &retained_origins);
+            }
             let mut dependencies = line.dependencies.clone();
             work.called_definitions.clear();
+            work.clear_collection_failure();
             let original = &source[analysis.rows[line_index].range.clone()];
             let outcome = if let Some(owner) = analysis.rows[line_index].owner {
                 if original.trim().is_empty() { LineOutcome::Blank }
@@ -502,6 +508,7 @@ impl CalculationDocument {
             } else {
                 evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values, &mut work)
             };
+            let collection_failure = work.take_collection_failure();
             dependencies.extend(work.called_definitions.drain(..));
             if matches!(
                 outcome,
@@ -517,6 +524,19 @@ impl CalculationDocument {
             if let LineOutcome::Value(value) = &outcome {
                 values[line_index] = Some(value.clone());
             }
+            if let Some(name) = &line.assignment_name
+                && definitions.get(name).is_some_and(|lines| lines.binary_search(&line_index).is_ok())
+                && !matches!(outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted }))
+            {
+                let retain = collection_failure
+                    && matches!(&outcome, LineOutcome::Error(Diagnostic { kind }) if !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
+                    && final_bindings.get(name).is_some_and(|binding| matches!(binding.outcome, LineOutcome::Value(_)));
+                if retain {
+                    retained_origins.insert(line_index, final_bindings[name].line_index);
+                } else {
+                    final_bindings.insert(name.clone(), FinalBinding { line_index, outcome: outcome.clone() });
+                }
+            }
             outcomes.push(outcome.clone());
             results.push(CalculationLineResult {
                 line_index,
@@ -531,17 +551,7 @@ impl CalculationDocument {
         CalculationEvaluation {
             source,
             lines: results,
-            final_bindings: definitions
-                .into_iter()
-                .filter_map(|(name, lines)| {
-                    lines.into_iter().rev().find(|&line| {
-                        !matches!(
-                            outcomes[line],
-                            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })
-                        )
-                    }).map(|line| (name, FinalBinding { line_index: line, outcome: outcomes[line].clone() }))
-                })
-                .collect(),
+            final_bindings,
             diagnostic: None,
             usage: Some(EvaluationUsage { work_units: work.used(), vector_component_work: work.vector_used(), loop_iterations: 0 }),
         }
@@ -2592,37 +2602,49 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
 
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
+    let retained_origins = HashMap::new();
     for (line_index, line) in lines.iter_mut().enumerate() {
-        let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
-        let compound_name = compound_name.as_deref();
-        let prior = compound_name.and_then(|name| {
-            definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
-        });
-        if let Some(compound) = &mut line.compound {
-            compound.prior = prior;
-            if let Some(prior) = prior {
-                line.dependencies.push(prior);
-            } else if let Some(name) = compound_name {
-                set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
-                // The implicit target is evaluated first, so RHS edges cannot
-                // participate in a cycle until a prior binding exists.
-                continue;
-            }
-        }
-        let named_binding = |name: &str| {
-            if compound_name == Some(name) {
-                return prior;
-            }
-            definitions.get(name).and_then(|locations| {
-                locations.iter().rev().find(|&&location| location < line_index)
-                    .or_else(|| locations.first()).copied()
-            })
-        };
-        if let PreparedStatement::Script(expression) = &mut line.statement {
-            expression.resolve(line_index, row_count, named_binding);
-        }
-        resolve_line_references(line, row_count, named_binding);
+        resolve_one_line(line, line_index, row_count, definitions, &retained_origins);
     }
+}
+
+fn resolve_one_line(
+    line: &mut PreparedLine,
+    line_index: usize,
+    row_count: usize,
+    definitions: &HashMap<String, Vec<usize>>,
+    retained_origins: &HashMap<usize, usize>,
+) {
+    line.dependencies.clear();
+    let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
+    let compound_name = compound_name.as_deref();
+    let prior = compound_name.and_then(|name| {
+        definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
+    }).map(|line| retained_origins.get(&line).copied().unwrap_or(line));
+    if let Some(compound) = &mut line.compound {
+        compound.prior = prior;
+        if let Some(prior) = prior {
+            line.dependencies.push(prior);
+        } else if let Some(name) = compound_name {
+            set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
+            // The implicit target is evaluated first, so RHS edges cannot
+            // participate in a cycle until a prior binding exists.
+            return;
+        }
+    }
+    let named_binding = |name: &str| {
+        if compound_name == Some(name) {
+            return prior;
+        }
+        definitions.get(name).and_then(|locations| {
+            locations.iter().rev().find(|&&location| location < line_index)
+                .or_else(|| locations.first()).copied()
+        }).map(|line| retained_origins.get(&line).copied().unwrap_or(line))
+    };
+    if let PreparedStatement::Script(expression) = &mut line.statement {
+        expression.resolve(line_index, row_count, named_binding);
+    }
+    resolve_line_references(line, row_count, named_binding);
 }
 
 fn resolve_line_references(
@@ -4507,6 +4529,67 @@ mod tests {
         assert_eq!(scalar(&evaluation, 6), 3.0);
         assert_eq!(scalar(&evaluation, 7), 5.0);
         assert_eq!(scalar(&evaluation, 8), 30.0);
+    }
+
+    #[test]
+    fn collection_failure_preserves_current_binding_in_both_evaluator_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!("{}{}", concat!(
+                "v = [1]\nalias = v\nv = append(v, get([], 0))\n",
+                "a = v + alias\nphysical = r3\nsize = len(v)\n"
+            ), suffix);
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(formatted(&evaluation, 3), "[2]");
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 5), 1.0);
+            assert_eq!(evaluation.lines[3].dependency_indices, [0, 1]);
+            assert_eq!(evaluation.lines[4].dependency_indices, [2]);
+            assert_eq!(evaluation.final_bindings["v"].line_index, 0);
+            assert!(matches!(evaluation.final_bindings["v"].outcome, LineOutcome::Value(_)));
+        }
+    }
+
+    #[test]
+    fn collection_failure_provenance_is_structural_and_scoped_per_row() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!("{}{}", concat!(
+                "fn bad(v) = get(v, 9)\nx = 5\nx = bad([1])\na = x\n",
+                "x = if(false, get([], 0), 1 / 0)\nb = x\n",
+                "z = 1 / 0\nz = append([], 1 / 0)\nc = z\n",
+                "missing = append([], 1 / 0)\n",
+                "v = [1]\nv += append([], get([], 0))\nsize = len(v)\n"
+            ), suffix);
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 3), 5.0);
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[8].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.final_bindings["missing"].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[11].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 12), 1.0);
+            assert_eq!(evaluation.final_bindings["v"].line_index, 10);
+        }
+    }
+
+    #[test]
+    fn collection_failure_outside_loop_conditional_retains_but_loop_failure_poisons() {
+        let document = CalculationDocument::new(concat!(
+            "v = [1]\nif true:\n    v = append(v, get([], 0))\n",
+            "after = len(v)\nfor i in range(2):\n    v = append(v, get([], 0))\n",
+            "failed = len(v)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&evaluation, 3), 1.0);
+        assert_eq!(evaluation.lines[3].dependency_indices, [0]);
+        assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.lines[6].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.final_bindings["v"].outcome, LineOutcome::Error(_)));
     }
 
     #[test]

@@ -100,6 +100,14 @@ struct Fault {
     line: usize,
     kind: DiagnosticKind,
     iteration: Vec<usize>,
+    dependencies: Vec<usize>,
+    collection_failure: bool,
+}
+
+impl Fault {
+    fn new(line: usize, kind: DiagnosticKind, path: &[usize]) -> Self {
+        Self { line, kind, iteration: path.to_vec(), dependencies: Vec::new(), collection_failure: false }
+    }
 }
 
 fn affected_rows(statements: &[Statement], output: &mut Vec<usize>) {
@@ -360,54 +368,36 @@ impl Execution {
         line: usize,
         path: &[usize],
     ) -> Result<(CalculationValue, Vec<usize>), Fault> {
-        self.work.charge(1).map_err(|kind| Fault {
-            line,
-            kind,
-            iteration: path.to_vec(),
-        })?;
+        self.work.clear_collection_failure();
+        self.work.called_definitions.clear();
+        self.work.charge(1).map_err(|kind| Fault::new(line, kind, path))?;
         if let Some(kind) = &self.parse_errors[line] {
-            return Err(Fault {
-                line,
-                kind: kind.clone(),
-                iteration: path.to_vec(),
-            });
+            return Err(Fault::new(line, kind.clone(), path));
         }
         if let Some(name) = &self.compound_targets[line] {
             let Some(binding) = self.bindings.get(name) else {
-                return Err(Fault {
-                    line,
-                    kind: DiagnosticKind::UnknownName(name.clone()),
-                    iteration: path.to_vec(),
-                });
+                return Err(Fault::new(line, DiagnosticKind::UnknownName(name.clone()), path));
             };
             if !matches!(binding.outcome, LineOutcome::Value(_)) {
                 return Err(Fault {
                     line,
                     kind: DiagnosticKind::DependencyFailed { dependency_line: binding.line },
                     iteration: path.to_vec(),
+                    dependencies: vec![binding.line], collection_failure: false,
                 });
             }
         }
         if path.is_empty() && self.cyclic_candidates[line] {
-            return Err(Fault {
-                line,
-                kind: DiagnosticKind::CyclicDependency,
-                iteration: path.to_vec(),
-            });
+            return Err(Fault::new(line, DiagnosticKind::CyclicDependency, path));
         }
         let Some(expression) = self.expressions[line].as_ref() else {
             let kind = match &self.rows[line].outcome {
                 LineOutcome::Error(error) => error.kind.clone(),
                 _ => DiagnosticKind::InvalidExpression,
             };
-            return Err(Fault {
-                line,
-                kind,
-                iteration: path.to_vec(),
-            });
+            return Err(Fault::new(line, kind, path));
         };
         let mut dependencies = Vec::new();
-        self.work.called_definitions.clear();
         self.work.runtime_line = Some(line);
         let result = expression.evaluate(
             line,
@@ -417,7 +407,22 @@ impl Execution {
             &mut self.work,
         );
         self.work.runtime_line = None;
+        let collection_failure = self.work.take_collection_failure();
         dependencies.extend(self.work.called_definitions.drain(..));
+        dependencies = dependencies
+            .into_iter()
+            .filter_map(|dependency| {
+                if dependency >= SLOT_BASE {
+                    self.bindings
+                        .get(&self.slot_names[dependency - SLOT_BASE])
+                        .map(|binding| binding.line)
+                } else {
+                    Some(dependency)
+                }
+            })
+            .collect();
+        dependencies.sort_unstable();
+        dependencies.dedup();
         let result = result.map_err(|kind| {
             let kind = match kind {
                 DiagnosticKind::DependencyFailed { dependency_line }
@@ -435,22 +440,9 @@ impl Execution {
                 line,
                 kind,
                 iteration: path.to_vec(),
+                dependencies: dependencies.clone(), collection_failure,
             }
         })?;
-        dependencies = dependencies
-            .into_iter()
-            .filter_map(|dependency| {
-                if dependency >= SLOT_BASE {
-                    self.bindings
-                        .get(&self.slot_names[dependency - SLOT_BASE])
-                        .map(|binding| binding.line)
-                } else {
-                    Some(dependency)
-                }
-            })
-            .collect();
-        dependencies.sort_unstable();
-        dependencies.dedup();
         Ok((result, dependencies))
     }
 
@@ -461,16 +453,8 @@ impl Execution {
         dependencies: Vec<usize>,
         path: &[usize],
     ) {
-        let row = &mut self.rows[line];
-        row.outcome = outcome.clone();
-        row.dependency_indices = dependencies;
-        row.loop_iteration = (!path.is_empty()).then(|| path.to_vec());
-        self.execution_counts[line] += 1;
-        self.outcomes[line] = outcome.clone();
-        self.values[line] = match &outcome {
-            LineOutcome::Value(value) => Some(value.clone()),
-            _ => None,
-        };
+        self.publish_physical(line, outcome.clone(), dependencies, path);
+        let row = &self.rows[line];
         if let Some(name) = &row.assignment_name
             && self.binding_rows.contains(&line)
                 && self.slots.contains_key(name)
@@ -493,12 +477,31 @@ impl Execution {
         }
     }
 
+    fn publish_physical(
+        &mut self,
+        line: usize,
+        outcome: LineOutcome,
+        dependencies: Vec<usize>,
+        path: &[usize],
+    ) {
+        let row = &mut self.rows[line];
+        row.outcome = outcome.clone();
+        row.dependency_indices = dependencies;
+        row.loop_iteration = (!path.is_empty()).then(|| path.to_vec());
+        self.execution_counts[line] += 1;
+        self.outcomes[line] = outcome.clone();
+        self.values[line] = match &outcome {
+            LineOutcome::Value(value) => Some(value.clone()),
+            _ => None,
+        };
+    }
+
     fn execute(&mut self, statements: &[Statement], path: &mut Vec<usize>) -> Result<Flow, Fault> {
         for statement in statements {
             match statement {
                 Statement::Definition => {}
                 Statement::Flow { line, flow } => {
-                    self.work.charge(1).map_err(|kind| Fault { line: *line, kind, iteration: path.clone() })?;
+                    self.work.charge(1).map_err(|kind| Fault::new(*line, kind, path))?;
                     self.publish(*line, LineOutcome::Control, Vec::new(), path);
                     return Ok(*flow);
                 }
@@ -509,18 +512,14 @@ impl Execution {
                         affected_rows(&branch.body, &mut rows);
                     }
                     if let Some(&bad_line) = rows.iter().find(|&&row| self.parse_errors[row].is_some()) {
-                        let fault = Fault {
-                            line: bad_line,
-                            kind: self.parse_errors[bad_line].clone().unwrap_or(DiagnosticKind::InvalidExpression),
-                            iteration: path.clone(),
-                        };
+                        let fault = Fault::new(bad_line, self.parse_errors[bad_line].clone().unwrap_or(DiagnosticKind::InvalidExpression), path);
                         self.publish(bad_line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
                         if !path.is_empty() { return Err(fault); }
                         continue;
                     }
                     for branch in branches {
                         let selected = if branch.otherwise {
-                            self.work.charge(1).map_err(|kind| Fault { line: branch.line, kind, iteration: path.clone() })?;
+                            self.work.charge(1).map_err(|kind| Fault::new(branch.line, kind, path))?;
                             self.publish(branch.line, LineOutcome::Control, Vec::new(), path);
                             true
                         } else {
@@ -530,13 +529,13 @@ impl Execution {
                                     value
                                 }
                                 Ok(_) => {
-                                    let fault = Fault { line: branch.line, kind: DiagnosticKind::Script("conditional expression requires a Boolean value".into()), iteration: path.clone() };
+                                    let fault = Fault::new(branch.line, DiagnosticKind::Script("conditional expression requires a Boolean value".into()), path);
                                     self.publish(branch.line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
                                     if !path.is_empty() { return Err(fault); }
                                     break;
                                 }
                                 Err(fault) => {
-                                    self.publish(branch.line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), Vec::new(), path);
+                                    self.publish(branch.line, LineOutcome::Error(Diagnostic::new(fault.kind.clone())), fault.dependencies.clone(), path);
                                     if !path.is_empty() || matches!(fault.kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled) { return Err(fault); }
                                     break;
                                 }
@@ -558,12 +557,18 @@ impl Execution {
                             self.publish(*line, LineOutcome::Value(value), dependencies, path)
                         }
                         Err(fault) => {
-                            self.publish(
-                                *line,
-                                LineOutcome::Error(Diagnostic::new(fault.kind.clone())),
-                                Vec::new(),
-                                path,
-                            );
+                            let retain = path.is_empty() && fault.collection_failure
+                                && !matches!(fault.kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled)
+                                && self.binding_rows.contains(line)
+                                && self.rows[*line].assignment_name.as_ref()
+                                    .and_then(|name| self.bindings.get(name))
+                                    .is_some_and(|binding| matches!(binding.outcome, LineOutcome::Value(_)));
+                            let outcome = LineOutcome::Error(Diagnostic::new(fault.kind.clone()));
+                            if retain {
+                                self.publish_physical(*line, outcome, fault.dependencies.clone(), path);
+                            } else {
+                                self.publish(*line, outcome, fault.dependencies.clone(), path);
+                            }
                             if !path.is_empty()
                                 || matches!(
                                     fault.kind,
@@ -582,13 +587,8 @@ impl Execution {
                         .iter()
                         .find(|&&row| self.parse_errors[row].is_some())
                     {
-                        let fault = Fault {
-                            line: bad_line,
-                            kind: self.parse_errors[bad_line]
-                                .clone()
-                                .unwrap_or(DiagnosticKind::InvalidExpression),
-                            iteration: path.clone(),
-                        };
+                        let fault = Fault::new(bad_line, self.parse_errors[bad_line]
+                            .clone().unwrap_or(DiagnosticKind::InvalidExpression), path);
                         self.poison(*line, name, body, &fault, &[]);
                         if !path.is_empty() {
                             return Err(fault);
@@ -614,13 +614,9 @@ impl Execution {
                         CalculationValue::Vector(vector) => vector.components(),
                         CalculationValue::Sequence(sequence) => sequence.values(),
                         _ => {
-                            let fault = Fault {
-                                line: *line,
-                                kind: DiagnosticKind::Script(
-                                    "for iterable must be a scalar vector or sequence".into(),
-                                ),
-                                iteration: path.clone(),
-                            };
+                            let fault = Fault::new(*line, DiagnosticKind::Script(
+                                "for iterable must be a scalar vector or sequence".into(),
+                            ), path);
                             self.poison(*line, name, body, &fault, &[]);
                             if !path.is_empty() {
                                 return Err(fault);
@@ -631,11 +627,7 @@ impl Execution {
                     let mut affected = vec![*line];
                     affected_rows(body, &mut affected);
                     if let Err(kind) = self.work.charge(affected.len()) {
-                        let fault = Fault {
-                            line: *line,
-                            kind,
-                            iteration: path.clone(),
-                        };
+                        let fault = Fault::new(*line, kind, path);
                         self.poison(*line, name, body, &fault, &[]);
                         return Err(fault);
                     }
@@ -664,17 +656,9 @@ impl Execution {
                         self.iterations += 1;
                         path.push(index + 1);
                         let result = if self.iterations > self.iteration_limit {
-                            Err(Fault {
-                                line: *line,
-                                kind: DiagnosticKind::LoopIterationLimit,
-                                iteration: path.clone(),
-                            })
+                            Err(Fault::new(*line, DiagnosticKind::LoopIterationLimit, path))
                         } else if let Err(kind) = self.work.charge(affected.len()) {
-                            Err(Fault {
-                                line: *line,
-                                kind,
-                                iteration: path.clone(),
-                            })
+                            Err(Fault::new(*line, kind, path))
                         } else {
                             for &body_line in affected.iter().skip(1) {
                                 self.outcomes[body_line] = LineOutcome::Error(Diagnostic::new(
@@ -787,6 +771,7 @@ impl Execution {
         self.outcomes[fault.line] = self.rows[fault.line].outcome.clone();
         self.values[fault.line] = None;
         self.rows[fault.line].loop_iteration = Some(fault.iteration.clone());
+        self.rows[fault.line].dependency_indices = fault.dependencies.clone();
         self.rows[line].assignment_name = Some(name.to_owned());
         self.publish(
             line,
@@ -800,7 +785,8 @@ impl Execution {
             if self.binding_rows.contains(&affected_line) {
                 let outcome = LineOutcome::Error(Diagnostic::new(error.clone()));
                 if attempted.contains(&affected_line) {
-                    self.publish(affected_line, outcome, Vec::new(), &fault.iteration);
+                    let dependencies = if affected_line == fault.line { fault.dependencies.clone() } else { Vec::new() };
+                    self.publish(affected_line, outcome, dependencies, &fault.iteration);
                 } else if let Some(name) = self.rows[affected_line].assignment_name.clone() {
                     let slot = self.slots[&name];
                     self.outcomes[slot] = outcome.clone();
