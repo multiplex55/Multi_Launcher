@@ -6012,6 +6012,29 @@ mod tests {
     }
 
     #[test]
+    fn vector_result_copy_keeps_complete_value_and_formatted_copy_uses_preview() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.session.replace_source("[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]").unwrap();
+        let evaluation = dialog.session.evaluation().unwrap();
+        let basis = evaluation.basis;
+        let line_id = evaluation.lines[0].id;
+        let identity = dialog.empty_host_effects(egui::ViewportId::ROOT).identity;
+        let intent = |target| super::ResultCopyIntent {
+            host: identity,
+            viewport_id: egui::ViewportId::ROOT,
+            document_id: basis.document,
+            basis,
+            target,
+        };
+        let copied = dialog.resolve_result_copy(intent(super::ResultCopyTarget::Line(line_id))).unwrap();
+        assert_eq!(copied, CalculationPadDialogEffect::CopyText("[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]".into()));
+        let formatted = dialog.resolve_result_copy(intent(super::ResultCopyTarget::FormattedLine(line_id))).unwrap();
+        assert!(matches!(formatted, CalculationPadDialogEffect::CopyText(text) if text.contains('…') && text.contains("10 values")));
+        let all = dialog.resolve_result_copy(intent(super::ResultCopyTarget::All)).unwrap();
+        assert!(matches!(all, CalculationPadDialogEffect::CopyText(text) if text.contains("[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]")));
+    }
+
+    #[test]
     fn chart_open_requires_retained_current_pad_owner() {
         let (_directory, _root, mut dialog) = fixture();
         let ctx = egui::Context::default();

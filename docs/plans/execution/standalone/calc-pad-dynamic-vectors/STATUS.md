@@ -16,9 +16,9 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M0-B | Live owners and focused test names confirmed | Preparation |
 | M1-A | Accepted and pushed at `ab6fa52d4` | V1, V3 |
 | M1-B | Accepted and pushed at `0911e8000` | V2, V3 |
-| M2-A | Accepted | V4, V5 |
-| M2-B | Next | V5, V6 |
-| M3-A | Pending | C1, C2 |
+| M2-A | Accepted and pushed at `71075bbd6` | V4, V5 |
+| M2-B | Accepted | V5, V6 |
+| M3-A | Next | C1, C2 |
 | M3-B | Pending | C1, C2 |
 | M4-A | Pending | U1 |
 | M4-B | Pending | U2, U3 |
@@ -44,3 +44,9 @@ Library compilation exited 0 in 283.78 seconds, with cleanup and output drain ve
 Both evaluator routes preserve the immediate valid binding after an evaluated collection call or argument fails outside a running loop. The failed physical row and its diagnostic remain visible, while named dependencies use the retained origin. Nested/formula failure provenance stays private to evaluation. Loop rollback and poisoning and ordinary errors retain their existing behavior.
 
 The scoped library build exited 0 in 268.32 owned seconds with PIDs retired and output drained. The 11 listed Nextest cases passed in 1.42 owned seconds. Evidence covers both evaluator routes, dependency origins, compound assignments, loop transactions, Manual observation, rename/Undo/save and reopen, and worker retirement.
+
+## M2-B
+
+Vector rows format the first eight values and a count when longer. Canonical Copy uses full, bit-preserving scalar tokens and remains separate from explicitly formatted copying. The existing shared catalog drives highlighting, completion and nested hints.
+
+The scoped library build exited 0 in 161.64 owned seconds with output drained and cleanup verified. Six listed Nextest cases passed in 1.44 owned seconds, including exact 1,024-component round-trip, subnormal and finite extrema, signed zero, clipboard routing, and editor discovery.

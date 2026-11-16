@@ -940,6 +940,24 @@ mod tests {
     }
 
     #[test]
+    fn collection_functions_share_completion_highlighting_and_nested_hints() {
+        for name in ["append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse"] {
+            let fragment = &name[..name.len() - 1];
+            assert!(suggestions(fragment, fragment.len()).iter().any(|item| item.label == name), "{name}");
+            assert!(crate::calculation_pad::function_signature_help(name).is_some(), "{name}");
+            let source = format!("{name}([])");
+            assert!(syntax_spans(&source).iter().any(|span| span.kind == SyntaxKind::Call && &source[span.range.clone()] == name), "{name}");
+        }
+        let source = "append = 1\nresult = len(\n  append([1], ";
+        let hint = call_hint(source, source.len()).unwrap();
+        assert_eq!(hint.signature, "append(vector, value)");
+        assert_eq!(hint.argument, 1);
+        assert_eq!(hint.parameter.as_deref(), Some("value"));
+        let spans = syntax_spans(source);
+        assert!(!spans.iter().any(|span| span.kind == SyntaxKind::Call && span.range.start == 0));
+    }
+
+    #[test]
     fn calendar_hints_follow_nested_quoted_arguments() {
         let inner = "add_days(zoned_datetime(\"2026-11-01T01:30\", \"America/New_York\", ";
         let hint = call_hint(inner, inner.len()).unwrap();

@@ -692,6 +692,7 @@ impl CalculationValue {
         match self {
             Self::Calendar(value) => value.canonical(),
             Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
+            Self::Vector(value) => Some(value.canonical_result()),
             Self::Exact(value) => Some(value.canonical()),
             Self::ApproximateScalar(value) => format_number(*value),
             _ => self.formatted_result(),

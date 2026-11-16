@@ -25,12 +25,34 @@ impl CalculationVector {
         &self.0
     }
     pub(crate) fn formatted_result(&self) -> Option<String> {
+        const PREVIEW_COMPONENTS: usize = 8;
         let parts = self
             .0
             .iter()
+            .take(PREVIEW_COMPONENTS)
             .map(|value| format_number(*value))
             .collect::<Option<Vec<_>>>()?;
-        Some(format!("[{}]", parts.join(", ")))
+        if self.0.len() <= PREVIEW_COMPONENTS {
+            Some(format!("[{}]", parts.join(", ")))
+        } else {
+            Some(format!("[{}, …] ({} values)", parts.join(", "), self.0.len()))
+        }
+    }
+
+    pub(crate) fn canonical_result(&self) -> String {
+        let parts = self.0.iter().map(|value| {
+            // Reuse the readable display token only when it preserves every
+            // bit and remains within the ordinary exact-integer admission.
+            if let Some(text) = format_number(*value)
+                && text.parse::<f64>().is_ok_and(|parsed| parsed.to_bits() == value.to_bits())
+                && (text.contains(['.', 'e', 'E']) || value.abs() <= (1_u64 << 53) as f64)
+            {
+                text
+            } else {
+                format!("{value:e}")
+            }
+        }).collect::<Vec<_>>();
+        format!("[{}]", parts.join(", "))
     }
 }
 
@@ -380,6 +402,36 @@ mod tests {
         let mut work = WorkBudget::default();
         assert!(work.charge_vector(document::script::MAX_VECTOR_COMPONENT_WORK).is_ok());
         assert!(matches!(work.charge_vector(1), Err(DiagnosticKind::WorkLimit)));
+    }
+
+    #[test]
+    fn vector_preview_is_bounded_and_canonical_copy_round_trips_all_bits() {
+        let sample = [
+            0.0, -0.0, f64::from_bits(1), -f64::from_bits(1), f64::MIN_POSITIVE,
+            f64::MAX, -f64::MAX, 1.0 / 3.0, 9_007_199_254_740_994.0, -1.234_567_890_123_456_7e-200,
+        ];
+        let input = (0..MAX_VECTOR_COMPONENTS).map(|index| sample[index % sample.len()]).collect::<Vec<_>>();
+        let vector = CalculationVector::new(input.clone()).unwrap();
+        let preview = vector.formatted_result().unwrap();
+        assert!(preview.contains('…'));
+        assert!(preview.contains("1024 values"));
+        assert!(preview.len() < 200);
+        let canonical = CalculationValue::Vector(vector).canonical_result().unwrap();
+        assert!(!canonical.contains('…'));
+        assert!(!canonical.contains("values"));
+        assert!(canonical.len() <= document::MAX_VECTOR_EXPRESSION_BYTES);
+        let document = document::CalculationDocument::new(canonical);
+        let evaluation = document.evaluate();
+        let document::LineOutcome::Value(CalculationValue::Vector(output)) = &evaluation.lines[0].outcome else {
+            panic!("canonical vector did not evaluate: {:?}", evaluation.lines[0].outcome);
+        };
+        assert_eq!(output.components().len(), input.len());
+        for (index, (actual, expected)) in output.components().iter().zip(&input).enumerate() {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "component {index}");
+        }
+        let small = CalculationVector::new(vec![1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(small.formatted_result().as_deref(), Some("[1, 2, 3]"));
+        assert_eq!(small.canonical_result(), "[1, 2, 3]");
     }
 }
 
