@@ -34,9 +34,13 @@ result or diagnostic. Clearing search restores the ordinary groups.
   a binding. Likewise, `mod(` starts the modulo function while bare `mod`
   remains an assignable name.
 * Assigning a name again creates a new binding. The right-hand side reads the
-  latest preceding binding, and later lines use the new one. A failed
+  latest preceding binding, and later lines use the new one. An ordinary failed
   assignment becomes the latest binding and causes dependent lines to fail.
-  Earlier calculated lines retain their values after reassignment. For example,
+  An evaluated collection operation that fails during a top-level reassignment
+  keeps the immediately preceding valid binding from the current evaluation.
+  Its physical row and `rN` reference still report the error. An error in a loop
+  rolls back and poisons the loop's affected bindings. Earlier calculated lines
+  retain their values after reassignment. For example,
   `x = 10`, followed by `earlier = x * 2` and `x = 7`, leaves `earlier` as 20
   while later references to `x` use 7.
 * Compound assignments `+=`, `-=`, `*=`, `/=`, `%=`, and `^=`
@@ -95,8 +99,9 @@ Previously bound values retain their values and skipped body rows show
 `not executed`.
 
 Loops allow up to eight nesting levels and 10,000 iterations per evaluation.
-The shared evaluation budget is 50,000 work units. If a loop fails, its
-assignments do not publish partial results and later references report an error.
+Each evaluation has a 50,000-unit ordinary work budget and a separate 4,194,304-unit
+vector component budget. If a loop fails, its assignments do not publish partial
+results and later references report an error.
 
 ## Conditions and collections
 
@@ -242,16 +247,43 @@ the fold choice needed to reproduce the represented instant.
 
 ## Vectors
 
-Vectors contain one to 128 finite dimensionless scalar components, for example
-`v = [1, 2, sqrt(16)]`. Components may use scalar expressions and earlier named
-or physical-line references. Equal-length vectors support element-wise `+`,
+Vectors contain zero to 1,024 finite ordinary dimensionless scalar components,
+for example `v = [1, 2, sqrt(16)]`. The empty vector is `[]`. Components may use
+scalar expressions and earlier named or physical-line references. Nested vectors,
+strings, Booleans, quantities, exact numbers, typed integers and approximate
+scalars are rejected as components. Equal-length vectors support element-wise `+`,
 `-`, `*`, and `/`; either order of scalar multiplication and vector divided by
 a scalar are also supported. Scalar addition and subtraction are not broadcast.
 `dot(v, w)` or `v · w` gives a scalar; `cross(v, w)` or `v × w` gives a three-component vector
 and requires three components on each side. Vector `*` remains element-wise.
 Dimension mismatch, zero divisors, typed integers, quantities and non-finite
-intermediate values produce line-local errors. Results use the shared scalar
-display precision and can be pasted back as vector expressions.
+intermediate values produce line-local errors. Matching empty element-wise
+operations and valid scalar scaling return `[]`; `dot([], [])` is zero and
+`[] / 0` fails. `+` remains element-wise addition.
+
+Collection calls are case-insensitive and produce new values without changing
+their inputs or previous results. `range()` remains a sequence and can be used
+as a loop iterable, while these operations require vectors.
+
+* `append(v, x)` adds a scalar and `concat(a, b)` joins two vectors.
+* `insert(v, i, x)` inserts before index `i`, including at the end.
+* `set_at(v, i, x)` replaces an element and `remove_at(v, i)` removes one.
+* `pop(v)` returns the vector without its last element and fails when empty.
+* `get(v, i)`, `first(v)`, and `last(v)` return a scalar and fail when the
+  requested element is unavailable. `len(v)` returns the component count.
+* `slice(v, start, end)` uses a zero-based inclusive start and exclusive end.
+  Equal endpoints return `[]`. `reverse(v)` returns a reversed vector.
+
+Indexes must be finite, nonnegative integral ordinary scalars within the stated
+bounds. They are checked before conversion and are never clamped. Append,
+concat and insert reject a result over 1,024 components before allocation.
+`sum([])` is zero, while average, median, min, max and stdev reject empty input.
+Malformed literals such as `[1,]` remain errors.
+
+Large results show a bounded preview and component count. **Copy** produces the
+complete parseable vector with round-trip scalar precision, while **Copy
+formatted** uses the preview. A complete copied vector can be pasted into a
+document subject to the vector-expression and document limits.
 
 ## Exact integer expressions
 
@@ -387,6 +419,8 @@ and saved text remain intact. Ctrl+F opens Find, Ctrl+H opens Replace, and
 Ctrl+G goes to a physical line. Replace All is one undoable source edit.
 
 **Config Menu → View** independently shows **Editable inputs** and **Output watches**.
+It also controls **Document usage**, which starts hidden and is remembered
+across sessions without changing source or calculation state.
 For each selected input, **Configure…** sets an optional label, description,
 decorative suffix, minimum, maximum, step, and preferred field, step buttons,
 or slider. Save settings separately; editing a field or moving a slider changes
@@ -433,20 +467,27 @@ the same transaction; one Undo restores them and the source.
 
 ## Sensitivity Tables
 
-Expand **Config Menu → Sensitivity Tables** to select a source-backed literal,
+Open **Config Menu → Tools → Sensitivity Tables…** to select a source-backed literal,
 enter start/end and either step or sample count, and choose up to eight named
 outputs. **Generate** runs a separate bounded analysis, including in Manual
 mode; it does not edit the source or calculate the main Pad. A named document
 retains the definition, while computed rows remain transient. Cancel retires
 the active run. Copy Table, CSV, and Markdown require a current completed
 table; source, option, or definition changes make previous results outdated.
-Each table varies one input; two-input grids are not included.
+The companion can be docked or popped out. Closing it retains the definition
+and current table while the Pad stays open. Each table varies one input and is
+limited to 1,000 samples.
 
 ## Charts
 
 Open **Config Menu → Tools → Charts…** to plot current numeric vectors or a
 completed current Sensitivity Table. Choose line, bar, or scatter, select the
 series and optional X vector, and adjust labels, visibility, and the view.
+Choose a named X or Y vector to follow its current final binding, including
+values produced by a loop. Physical `rN` choices continue to refer to that
+specific result row. Automatic X positions are indexes 0 through N−1. Empty
+datasets show **No data**, and a one-point line shows a marker. The presentation
+and Close controls sit together at the top of the companion.
 Hover a point for its original value. **Copy Chart as Image** copies the chart
 itself when its data is current. Opening Charts never starts a calculation;
 calculate or generate again when the source data is outdated.
@@ -462,8 +503,9 @@ an evaluation diagnostic until it is reduced. The absolute edit and storage
 admission envelope is 256 KiB / 2,048 rows; undo history is bounded to 2 MiB
 and 64 entries. Extended uses the same evaluation budgets as Standard.
 
-Expand **Document Usage** to see current source bytes and rows, plus work units
-and loop iterations from the current completed evaluation. Counters are not
+Enable **Config Menu → View → Document usage**, then expand **Document Usage**
+to see current source bytes and rows, ordinary and vector work, and loop
+iterations from the current completed evaluation. Counters are not
 shown as current after an edit or profile change; viewing usage does not start a
 Manual calculation. Each counter warns independently at 90% and over its limit.
 
@@ -472,8 +514,12 @@ Manual calculation. Each counter warns independently at 90% and over its limit.
 | Source document | 64 KiB Standard; 128 KiB Extended |
 | Physical source lines | 256 Standard; 1,024 Extended |
 | Charged evaluation work | 50,000 units |
+| Vector component work | 4,194,304 units |
 | Loop iterations | 10,000 |
-| Expression or conversion line | 2,048 UTF-8 bytes |
+| Ordinary expression or conversion line | 2,048 UTF-8 bytes |
+| Vector-literal expression | 32 KiB, subject to independent source and work limits |
+| Vector components or points per chart series | 1,024 |
+| Sensitivity samples | 1,000 |
 | Normalized scalar expression | 8 KiB |
 | Parenthesis nesting | 32 levels |
 | Programmer or quantity expression tokens | 256 tokens |
@@ -485,6 +531,14 @@ Manual calculation. Each counter warns independently at 90% and over its limit.
 Lines that exceed a line-level bound receive a diagnostic; documents beyond
 the byte or line bound receive a document diagnostic without partial
 evaluation. For example, `range(1025)` reports the 1,024-element limit.
+Vector work accounts for component traversal and copying, including literal and
+arithmetic work. Sensitivity uses a separate 1,000,000-unit aggregate limit
+across samples, charging ordinary work plus one aggregate unit per 32 vector
+work units, rounded up over each evaluation.
+
+Named documents use format v4 for named and physical chart references. Existing
+v1, v2 and v3 named documents remain readable. The optional source-only recovery
+record uses v2.
 
 ## Dependency Explorer
 

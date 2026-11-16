@@ -19,6 +19,7 @@ enum ExampleExpectation {
     Scalar(f64),
     ApproximateScalar(f64),
     ScalarWithSkipped(f64),
+    ScalarWithDiagnostic { value: f64, line: usize, message: &'static str },
     Vector(&'static [f64]),
     Physical {
         value: f64,
@@ -52,6 +53,9 @@ impl CalculationExample {
         match self.expected {
             ExampleExpectation::Scalar(value) | ExampleExpectation::ScalarWithSkipped(value) => {
                 format_number(value).unwrap_or_default()
+            }
+            ExampleExpectation::ScalarWithDiagnostic { value, line, message } => {
+                format!("{} (line {}: {message})", format_number(value).unwrap_or_default(), line + 1)
             }
             ExampleExpectation::ApproximateScalar(value) => format!("≈ {}", format_number(value).unwrap_or_default()),
             ExampleExpectation::Vector(values) => format!(
@@ -311,6 +315,78 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
     CalculationExampleGroup {
         title: "Vectors",
         examples: &[
+            CalculationExample {
+                title: "Build two 1,024-point datasets",
+                source: "x_values = []\ny_values = []\n\nfor i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n\npoint_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)",
+                explanation: "The vectors each contain 1,024 values. The largest is 1046529 and the average is 349013.5. In Charts, choose x_values and y_values as named X and Y sources.",
+                expected: ExampleExpectation::Scalar(349013.5),
+            },
+            CalculationExample {
+                title: "Edit a vector with pure operations",
+                source: "values = [10, 20, 30]\nvalues = append(values, 40)\nvalues = insert(values, 1, 15)\nvalues = set_at(values, 0, 5)\nvalues = remove_at(values, 2)\nvalues = pop(values)\n\ncount = len(values)\nfirst_value = first(values)\nlast_value = last(values)",
+                explanation: "Each operation returns a new value. The final vector is [5, 15, 30], its count is 3, and its first and last values are 5 and 30.",
+                expected: ExampleExpectation::Scalar(30.0),
+            },
+            CalculationExample {
+                title: "Formula-generated vector dataset",
+                source: "starting_balance = 10000\nannual_growth = 0.07\n\nfn projected_value(base, growth, year) = (\n    base * (1 + growth) ^ year\n)\n\nyears = []\nbalances = []\n\nfor year in range(31):\n    years = append(years, year)\n    balances = append(\n        balances,\n        projected_value(starting_balance, annual_growth, year)\n    )\n\npoint_count = len(balances)",
+                explanation: "The result contains 31 balances. The formula receives all document values as parameters. Choose years and balances as named chart sources.",
+                expected: ExampleExpectation::Scalar(31.0),
+            },
+            CalculationExample {
+                title: "Build a vector through a formula",
+                source: "fn add_sample(v, x) = append(v, x)\nvalues = []\nfor i in range(1024):\n    values = add_sample(values, i)\nlen(values)",
+                explanation: "A vector-returning formula can build 1,024 values through a loop.",
+                expected: ExampleExpectation::Scalar(1024.0),
+            },
+            CalculationExample {
+                title: "Empty vectors and statistics",
+                source: "empty = []\nlen(empty) + sum(empty)",
+                explanation: "An empty vector has length zero and sum zero. Average, median, min, max and stdev require at least one value.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "Concatenate, slice and reverse",
+                source: "values = concat([1, 2], [3, 4])\nreverse(slice(values, 1, 4))",
+                explanation: "slice uses a zero-based inclusive start and exclusive end; reverse returns a new vector.",
+                expected: ExampleExpectation::Vector(&[4.0, 3.0, 2.0]),
+            },
+            CalculationExample {
+                title: "Append leaves the original unchanged",
+                source: "values = [1, 2]\nalias = values\nappend(values, 3)\nlen(alias)",
+                explanation: "A bare append returns a separate vector. The original binding and alias still contain two values.",
+                expected: ExampleExpectation::Scalar(2.0),
+            },
+            CalculationExample {
+                title: "Nest collection calls",
+                source: "values = [1, 2]\nlen(append(values, 5))",
+                explanation: "A returned vector can be passed directly to another collection function.",
+                expected: ExampleExpectation::Scalar(3.0),
+            },
+            CalculationExample {
+                title: "Failed collection reassignment retains the prior binding",
+                source: "values = [10, 20]\nvalues = remove_at(values, 9)\nlen(values)",
+                explanation: "Line 2 reports an index error. The named values binding still holds the previous vector, so the final length is 2; r2 remains an error.",
+                expected: ExampleExpectation::ScalarWithDiagnostic { value: 2.0, line: 1, message: "index is invalid or out of bounds" },
+            },
+            CalculationExample {
+                title: "A failed loop rolls back vector updates",
+                source: "values = []\nfor i in range(2):\n    values = append(values, get([10], i))",
+                explanation: "The second iteration fails its index check. Loop rollback prevents partial values from becoming the current binding.",
+                expected: ExampleExpectation::ErrorContains("iteration 2: index is invalid or out of bounds"),
+            },
+            CalculationExample {
+                title: "Vector indexes are zero-based",
+                source: "get([10, 20], 2)",
+                explanation: "The valid indexes are 0 and 1. Index 2 is out of bounds.",
+                expected: ExampleExpectation::ErrorContains("index is invalid or out of bounds"),
+            },
+            CalculationExample {
+                title: "Vector capacity is 1,024",
+                source: "values = []\nfor i in range(1024):\n    values = append(values, i)\nappend(values, 1024)",
+                explanation: "Appending to a full vector reports a capacity error before creating a 1,025th component.",
+                expected: ExampleExpectation::ErrorContains("vectors may contain at most 1024 components"),
+            },
             CalculationExample {
                 title: "Scale a vector",
                 source: "v = [1, 2, 3]\nv * 3",
@@ -803,6 +879,9 @@ mod tests {
                 let document = CalculationDocument::new(example.source);
                 let evaluation = document.evaluate();
                 if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
+                    if let ExampleExpectation::ScalarWithDiagnostic { line, message, .. } = example.expected {
+                        assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(diagnostic) if diagnostic.to_string().contains(message)), "{} must report its documented diagnostic", example.title);
+                    }
                     if matches!(example.expected, ExampleExpectation::ScalarWithSkipped(_)) {
                         assert!(
                             evaluation.lines.iter().any(|line| matches!(
@@ -815,14 +894,14 @@ mod tests {
                         );
                     }
                     assert!(
-                        evaluation.lines.iter().all(|line| match &line.outcome {
+                        evaluation.lines.iter().enumerate().all(|(index, line)| match &line.outcome {
                             LineOutcome::Error(diagnostic) => matches!(
                                 (example.expected, &diagnostic.kind),
                                 (
                                     ExampleExpectation::ScalarWithSkipped(_),
                                     DiagnosticKind::NotExecuted
                                 )
-                            ),
+                            ) || matches!(example.expected, ExampleExpectation::ScalarWithDiagnostic { line, message, .. } if index == line && diagnostic.to_string().contains(message)),
                             _ => true,
                         }),
                         "{} has an invalid source line",
@@ -840,7 +919,8 @@ mod tests {
                 match (example.expected, outcome) {
                     (
                         ExampleExpectation::Scalar(expected)
-                        | ExampleExpectation::ScalarWithSkipped(expected),
+                        | ExampleExpectation::ScalarWithSkipped(expected)
+                        | ExampleExpectation::ScalarWithDiagnostic { value: expected, .. },
                         LineOutcome::Value(CalculationValue::Scalar(actual)),
                     ) => {
                         let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
@@ -937,7 +1017,8 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 104);
+        assert_eq!(checked, EXAMPLE_GROUPS.iter().map(|group| group.examples.len()).sum::<usize>());
+        assert!(checked >= 116, "the executable reference should retain its documented coverage");
     }
 
     #[test]
@@ -984,6 +1065,7 @@ mod tests {
             "permutations",
             "map_range",
             "discounted_price",
+            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group
@@ -1011,5 +1093,25 @@ mod tests {
                 .iter()
                 .all(|example| example.matches(group.title, ""))
         }));
+    }
+
+    #[test]
+    fn documented_vector_workloads_keep_their_named_results() {
+        let vectors = EXAMPLE_GROUPS.iter().find(|group| group.title == "Vectors").unwrap();
+        for (title, scalars, lengths) in [
+            ("Build two 1,024-point datasets", &[("point_count", 1024.0), ("largest", 1046529.0), ("average_value", 349013.5)][..], &[("x_values", 1024), ("y_values", 1024)][..]),
+            ("Edit a vector with pure operations", &[("count", 3.0), ("first_value", 5.0), ("last_value", 30.0)][..], &[("values", 3)][..]),
+            ("Formula-generated vector dataset", &[("point_count", 31.0)][..], &[("years", 31), ("balances", 31)][..]),
+        ] {
+            let example = vectors.examples.iter().find(|example| example.title == title).unwrap();
+            let document = CalculationDocument::new(example.source);
+            let evaluation = document.evaluate();
+            for &(name, expected) in scalars {
+                assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Scalar(value)) if (*value - expected).abs() < 1e-6), "{title}: {name}");
+            }
+            for &(name, expected) in lengths {
+                assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == expected), "{title}: {name}");
+            }
+        }
     }
 }

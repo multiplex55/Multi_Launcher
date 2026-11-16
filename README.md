@@ -252,8 +252,9 @@ correction level; a fresh QR command starts a new draft.
 
 Search for `calc pad` to open **Calculation Pad** for reusable documents with assignments,
 conditions, bounded loops, input controls, and named output watches. The Pad
-also supports local formula functions, exact decimals and fractions, calendar
-values, Manual calculation, sensitivity tables, and a Charts companion. The
+  also supports local formula functions, exact decimals and fractions, calendar
+  values, Manual calculation, dynamic vectors of up to 1,024 values, and hosted
+  Sensitivity Tables and Charts companions. The
 [Calculation Pad guide](src/calculation_pad/README.md) covers the language,
 editor, limits, formatting, Programmer Inspector, and persistence.
 

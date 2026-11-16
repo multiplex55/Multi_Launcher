@@ -21,9 +21,9 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M3-A | Accepted and pushed at `05f5cfbe1` | C1, C2 |
 | M3-B | Accepted and pushed at `e680b1886` | C1, C2 |
 | M4-A | Accepted and pushed at `ad689dbbc` | U1 |
-| M4-B | Accepted | U2, U3 |
-| M5-A | Next | V6, C1, C2, U1–U3 |
-| M5-B | Pending | Integrated verification and delivery |
+| M4-B | Accepted and pushed at `8e09a6e01` | U2, U3 |
+| M5-A | Accepted | V6, C1, C2, U1–U3 |
+| M5-B | Next | Integrated verification and delivery |
 
 Automated work uses targeted library Nextest selectors and the `fast-dev` profile. Build and cached execution receipts go under `target/calc-pad-dynamic-vectors-evidence`.
 
@@ -74,3 +74,9 @@ The first library compile exited 101 due to the fixed-size panel inventory decla
 Config Menu → View → Document usage defaults off and saves through the retained application-wide display preference path. Over-profile diagnostics stay visible. Charts places Dock/Pop out and Close in one row, including the pinned Close behavior.
 
 Library compilation exited 0 in 207.39 owned seconds with cleanup and output drain verified. Four listed Nextest cases passed in 1.25 owned seconds, including actual retained menu interaction, source/evaluation/history neutrality, legacy and malformed preference handling, and the chart controls in both presentations.
+
+## M5-A
+
+The in-app catalog includes all three exact requested scripts, a full-capacity formula helper and deliberate boundary/failure examples. The linked guide and root README describe collections, current named charts, the Sensitivity Tables companion, usage visibility and persisted format compatibility.
+
+Library compilation exited 0 in 183.15 owned seconds with cleanup and drain verified. Four listed Nextest cases passed in 1.49 owned seconds, including execution of the complete example catalog and explicit assertions for the named results of all three requested scripts.
