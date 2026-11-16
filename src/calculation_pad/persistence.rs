@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
 pub(crate) const MAX_WATCHES: usize = 64;
 pub const MAX_STORED_DOCUMENT_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
-pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 4;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
 const DOCUMENTS_DIRECTORY: &str = "documents";
@@ -1238,7 +1238,14 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
             || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
             || chart.hidden.len() > 8 || chart.hidden.iter().any(|index| *index >= 8)
             || match &chart.source {
-                super::ChartSource::Vectors { x, y } => { let mut seen = HashSet::new(); x.is_some_and(|id| id.0 == 0) || y.len() > 8 || y.iter().any(|id| id.0 == 0 || !seen.insert(id)) },
+                super::ChartSource::Vectors { x, y } => {
+                    let valid = |reference: &super::ChartVectorReference| match reference {
+                        super::ChartVectorReference::Physical(id) => id.0 != 0,
+                        super::ChartVectorReference::Named { name } => valid_name(name),
+                    };
+                    x.as_ref().is_some_and(|reference| !valid(reference)) || y.len() > 8
+                        || y.iter().enumerate().any(|(index, reference)| !valid(reference) || y[..index].contains(reference))
+                },
                 super::ChartSource::Sensitivity { outputs } => { let mut seen = HashSet::new(); outputs.len() > 8 || outputs.iter().any(|name| !valid_name(name) || !seen.insert(name)) },
             } { return Err("invalid chart definition"); }
     }
@@ -1309,6 +1316,13 @@ fn decode_document(
     } else {
         serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?
     };
+    if version.format_version == 3
+        && let Some(super::ChartDefinition { source: super::ChartSource::Vectors { x, y }, .. }) = &stored.view.chart
+        && (x.as_ref().is_some_and(|reference| matches!(reference, super::ChartVectorReference::Named { .. }))
+            || y.iter().any(|reference| matches!(reference, super::ChartVectorReference::Named { .. })))
+    {
+        return Err(invalid_document(path, "version 3 chart references must be physical rows"));
+    }
     validate_stored_document(&stored, path)?;
     if expected_id.is_some_and(|id| id != stored.id) {
         return Err(invalid_document(
@@ -1429,7 +1443,7 @@ mod tests {
     fn chart_bar_label_admission_matches_vector_capacity() {
         let mut view = super::PadViewMetadata::default();
         view.chart = Some(super::super::ChartDefinition {
-            source: super::super::ChartSource::Vectors { x: None, y: vec![LineId(1)] },
+            source: super::super::ChartSource::Vectors { x: None, y: vec![super::super::ChartVectorReference::Physical(LineId(1))] },
             kind: super::super::ChartKind::Bar,
             x_label: String::new(), y_label: String::new(), hidden: Vec::new(),
             bar_labels: vec!["label".into(); 1024],
@@ -1437,6 +1451,34 @@ mod tests {
         assert!(super::validate_view_metadata(&view).is_ok());
         view.chart.as_mut().unwrap().bar_labels.push("overflow".into());
         assert!(super::validate_view_metadata(&view).is_err());
+    }
+
+    #[test]
+    fn chart_reference_versions_preserve_physical_rows_and_validate_named_wire() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let (_directory, store) = fixture();
+        let (mut stored, _) = store.save_as("chart refs", "[1]\n[2]".into(), vec![LineId(1), LineId(2)], 3).unwrap();
+        let path = store.document_path(stored.id);
+        stored.id = DocumentId(41);
+        stored.format_version = 3;
+        stored.view.chart = Some(ChartDefinition { source: ChartSource::Vectors {
+            x: Some(ChartVectorReference::Physical(LineId(1))), y: vec![ChartVectorReference::Physical(LineId(2))],
+        }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() });
+        let old = serde_json::to_vec(&stored).unwrap();
+        let decoded = super::decode_document(&path, &old, Some(stored.id)).unwrap();
+        assert_eq!(decoded.view.chart, stored.view.chart);
+        let chart = stored.view.chart.as_mut().unwrap();
+        chart.source = ChartSource::Vectors { x: Some(ChartVectorReference::Named { name: "x".into() }), y: vec![ChartVectorReference::Physical(LineId(2)), ChartVectorReference::Named { name: "y".into() }] };
+        assert!(super::decode_document(&path, &serde_json::to_vec(&stored).unwrap(), None).is_err());
+        stored.format_version = super::CURRENT_DOCUMENT_FORMAT_VERSION;
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let decoded = super::decode_document(&path, &bytes, Some(stored.id)).unwrap();
+        assert_eq!(decoded.view.chart, stored.view.chart);
+        let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        invalid["view"]["chart"]["source"]["x"]["extra"] = serde_json::json!(true);
+        assert!(super::decode_document(&path, &serde_json::to_vec(&invalid).unwrap(), None).is_err());
+        invalid["format_version"] = serde_json::json!(super::CURRENT_DOCUMENT_FORMAT_VERSION + 1);
+        assert!(matches!(super::decode_document(&path, &serde_json::to_vec(&invalid).unwrap(), None), Err(super::PadStoreError::UnsupportedVersion { .. })));
     }
 
     fn fixture() -> (tempfile::TempDir, PadDocumentStore) {

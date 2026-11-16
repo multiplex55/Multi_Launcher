@@ -1,7 +1,7 @@
 //! Read-only chart companion; actions are committed by its retained utility host.
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
-use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartView, DocumentId, DocumentIncarnation, EvaluationBasis, LineId, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
+use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
 use eframe::egui;
 use std::sync::Arc;
 
@@ -97,15 +97,9 @@ impl CalculationChartDialog {
             if ui.add_enabled(active && !runtime.pinned, egui::Button::new("Close")).clicked() { actions.close = true; }
             if let Some(feedback) = &self.feedback { ui.label(feedback); }
             let Some(identity) = runtime.identity else { ui.label("Open a Calculation Pad to view charts."); return; };
-            let vectors = runtime.evaluation.as_ref().map(|evaluation| evaluation.lines.iter().filter_map(|line| {
-                let values = match &line.outcome {
-                    LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) => vector.components(),
-                    LineOutcome::Value(crate::calculation_pad::CalculationValue::Sequence(sequence)) => sequence.values(),
-                    _ => return None,
-                };
-                Some((line.id, line.assignment_name.clone().unwrap_or_else(|| format!("r{}", line.line_index + 1)), values.to_vec()))
-            }).collect::<Vec<_>>()).unwrap_or_default();
-            let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() });
+            let vectors = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis)
+                .map(|evaluation| vector_choices(evaluation)).unwrap_or_default();
+            let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() });
             let original = definition.clone();
             ui.add_enabled_ui(active, |ui| {
                 ui.horizontal(|ui| {
@@ -114,18 +108,30 @@ impl CalculationChartDialog {
                     ui.selectable_value(&mut definition.kind, ChartKind::Scatter, "Scatter");
                 });
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(matches!(&definition.source, ChartSource::Vectors { .. }), "Vectors").clicked() { definition.source = ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0]).unwrap_or_default() }; }
+                    if ui.selectable_label(matches!(&definition.source, ChartSource::Vectors { .. }), "Vectors").clicked() { definition.source = ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }; }
                     if ui.selectable_label(matches!(&definition.source, ChartSource::Sensitivity { .. }), "Sensitivity").clicked() { definition.source = ChartSource::Sensitivity { outputs: runtime.table.as_ref().map(|table| table.basis.definition.outputs.clone()).unwrap_or_default() }; }
                 });
                 match &mut definition.source {
                     ChartSource::Vectors { x, y } => {
-                        let response = egui::ComboBox::from_id_salt("chart-x").selected_text(x.and_then(|id| vectors.iter().find(|row| row.0 == id).map(|row| row.1.clone())).unwrap_or_else(|| "Indexes 0…N−1".into())).show_ui(ui, |ui| {
+                        let selected = x.as_ref().map(|reference| vectors.iter().find(|row| &row.0 == reference).map(|row| row.1.clone()).unwrap_or_else(|| format!("{} (unavailable)", reference_label(reference)))).unwrap_or_else(|| "Indexes 0…N−1".into());
+                        let response = egui::ComboBox::from_id_salt("chart-x").selected_text(selected).show_ui(ui, |ui| {
                             ui.selectable_value(x, None, "Indexes 0…N−1");
-                            for (id, name, _) in &vectors { let _response = ui.selectable_value(x, Some(*id), name); #[cfg(test)] actions.controls.push((format!("x/{name}"), _response.rect)); }
+                            for (reference, label) in &vectors { let _response = ui.selectable_value(x, Some(reference.clone()), label); #[cfg(test)] actions.controls.push((format!("x/{label}"), _response.rect)); }
                         });
                         #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
-                        let response = ui.menu_button("Y vectors", |ui| for (id, name, _) in &vectors { let mut selected = y.contains(id); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("y/{name}"), response.rect)); if response.changed() { if selected && y.len() < 8 { y.push(*id); } else if !selected { y.retain(|value| value != id); } } });
+                        let response = ui.menu_button("Y vectors", |ui| {
+                            for (reference, label) in &vectors {
+                                let mut selected = y.contains(reference);
+                                let response = ui.checkbox(&mut selected, label);
+                                #[cfg(test)] actions.controls.push((format!("y/{label}"), response.rect));
+                                if response.changed() { if selected && y.len() < 8 { y.push(reference.clone()); } else if !selected { y.retain(|value| value != reference); } }
+                            }
+                            for reference in y.clone().into_iter().filter(|reference| !vectors.iter().any(|row| &row.0 == reference)) {
+                                let mut selected = true;
+                                if ui.checkbox(&mut selected, format!("{} (unavailable)", reference_label(&reference))).changed() && !selected { y.retain(|value| value != &reference); }
+                            }
+                        });
                         #[cfg(test)] actions.controls.push(("y-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                     }
@@ -203,7 +209,7 @@ impl CalculationChartDialog {
 }
 
 pub(super) fn chart_stamp(runtime: &ChartRuntime, definition: &ChartDefinition) -> Option<ChartStamp> {
-    match &definition.source { ChartSource::Vectors { .. } => runtime.evaluation.as_ref().map(|value| ChartStamp::Evaluation(value.basis)), ChartSource::Sensitivity { .. } => runtime.table.as_ref().map(|value| ChartStamp::Sensitivity(value.basis.clone())) }
+    match &definition.source { ChartSource::Vectors { .. } => runtime.evaluation.as_ref().filter(|value| Some(value.basis) == runtime.basis).map(|value| ChartStamp::Evaluation(value.basis)), ChartSource::Sensitivity { .. } => runtime.table.as_ref().map(|value| ChartStamp::Sensitivity(value.basis.clone())) }
 }
 
 pub(super) fn actions_current(actions: &ChartActions, runtime: &ChartRuntime) -> bool {
@@ -216,17 +222,9 @@ pub(super) fn actions_current(actions: &ChartActions, runtime: &ChartRuntime) ->
 pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -> Result<(ChartStamp, ChartDataset), String> {
     let (stamp, mut dataset) = match &definition.source {
         ChartSource::Vectors { x, y } => {
-            let evaluation = runtime.evaluation.as_ref().ok_or("Current vector results are unavailable.")?;
-            let find = |id: &LineId| evaluation.lines.iter().find(|row| row.id == *id).and_then(|row| {
-                let values = match &row.outcome {
-                    LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) => vector.components(),
-                    LineOutcome::Value(crate::calculation_pad::CalculationValue::Sequence(sequence)) => sequence.values(),
-                    _ => return None,
-                };
-                Some((row.assignment_name.as_deref().unwrap_or("vector"), values))
-            });
-            let x = x.as_ref().map(find).transpose_option().ok_or("The X vector is unavailable.")?.map(|(_, values)| values);
-            let vectors = y.iter().map(find).collect::<Option<Vec<_>>>().ok_or("A selected Y vector is unavailable.")?;
+            let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current vector results are unavailable or outdated.")?;
+            let x = x.as_ref().map(|reference| resolve_vector(evaluation, reference)).transpose().map_err(|error| format!("X vector: {error}"))?.map(|(_, values)| values);
+            let vectors = y.iter().map(|reference| resolve_vector(evaluation, reference)).collect::<Result<Vec<_>, _>>().map_err(|error| format!("Y vector: {error}"))?;
             (ChartStamp::Evaluation(evaluation.basis), ChartDataset::from_vectors(x, &vectors)?)
         }
         ChartSource::Sensitivity { outputs } => {
@@ -242,11 +240,53 @@ pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -
     Ok((stamp, dataset))
 }
 
-trait TransposeOption<T> { fn transpose_option(self) -> Option<Option<T>>; }
-impl<T> TransposeOption<T> for Option<Option<T>> { fn transpose_option(self) -> Option<Option<T>> { match self { Some(value) => Some(Some(value?)), None => Some(None) } } }
+fn vector_values(outcome: &LineOutcome) -> Option<&[f64]> {
+    match outcome {
+        LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) => Some(vector.components()),
+        LineOutcome::Value(crate::calculation_pad::CalculationValue::Sequence(sequence)) => Some(sequence.values()),
+        _ => None,
+    }
+}
+
+fn reference_label(reference: &ChartVectorReference) -> String {
+    match reference {
+        ChartVectorReference::Physical(id) => format!("row #{}", id.get()),
+        ChartVectorReference::Named { name } => name.clone(),
+    }
+}
+
+fn vector_choices(evaluation: &SessionEvaluation) -> Vec<(ChartVectorReference, String)> {
+    let mut named = evaluation.final_bindings.iter().filter_map(|(name, binding)| {
+        vector_values(&binding.outcome).map(|values| (ChartVectorReference::Named { name: name.clone() }, format!("{name} ({} values)", values.len())))
+    }).collect::<Vec<_>>();
+    named.sort_by(|a, b| a.1.cmp(&b.1));
+    named.extend(evaluation.lines.iter().filter_map(|line| vector_values(&line.outcome).map(|values| {
+        let name = line.assignment_name.as_ref().map_or(String::new(), |name| format!(" · {name}"));
+        (ChartVectorReference::Physical(line.id), format!("r{}{name} ({} values)", line.line_index + 1, values.len()))
+    })));
+    named
+}
+
+fn resolve_vector<'a>(evaluation: &'a SessionEvaluation, reference: &'a ChartVectorReference) -> Result<(&'a str, &'a [f64]), String> {
+    let (label, outcome) = match reference {
+        ChartVectorReference::Named { name } => {
+            let binding = evaluation.final_bindings.get(name).ok_or_else(|| format!("named source '{name}' is unavailable."))?;
+            (name.as_str(), &binding.outcome)
+        }
+        ChartVectorReference::Physical(id) => {
+            let line = evaluation.lines.iter().find(|line| line.id == *id).ok_or_else(|| format!("physical source #{} is unavailable.", id.get()))?;
+            (line.assignment_name.as_deref().unwrap_or("vector"), &line.outcome)
+        }
+    };
+    if matches!(outcome, LineOutcome::Error(_)) {
+        return Err(format!("{} failed.", reference_label(reference)));
+    }
+    let values = vector_values(outcome).ok_or_else(|| format!("{} is not a vector or sequence.", reference_label(reference)))?;
+    Ok((label, values))
+}
 
 fn series_keys(source: &ChartSource) -> Vec<String> {
-    match source { ChartSource::Vectors { y, .. } => y.iter().map(|id| format!("line:{}", id.get())).collect(), ChartSource::Sensitivity { outputs } => outputs.iter().map(|name| format!("output:{name}")).collect() }
+    match source { ChartSource::Vectors { y, .. } => y.iter().map(|reference| match reference { ChartVectorReference::Physical(id) => format!("line:{}", id.get()), ChartVectorReference::Named { name } => format!("name:{name}") }).collect(), ChartSource::Sensitivity { outputs } => outputs.iter().map(|name| format!("output:{name}")).collect() }
 }
 
 fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
@@ -303,7 +343,7 @@ mod tests {
         session.request_sensitivity(crate::calculation_pad::SensitivityDefinition { input: ids[2], start: "1".into(), end: "2".into(), sampling: crate::calculation_pad::Sampling::Count(2), outputs: vec!["y".into(), "z".into()] }).unwrap();
         for _ in 0..20 { let _ = rx.recv_timeout(std::time::Duration::from_secs(5)); session.poll_sensitivity(); if session.sensitivity_table().is_some() { break; } }
         let table = session.sensitivity_table().unwrap();
-        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[0])] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: Some(table), definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
         let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
         let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
@@ -313,13 +353,13 @@ mod tests {
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         let base = dialog.popup_anchors[0].1;
         assert!(dialog.owned_popup_layer(&ctx, base).is_some());
-        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "x/w"));
-        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { x: Some(id), .. } if *id == ids[1]));
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "x/w (2 values)"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { x: Some(ChartVectorReference::Named { name }), .. } if name == "w"));
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
         chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "y-menu"));
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
-        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "y/w"));
-        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { y, .. } if y.contains(&ids[1])));
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "y/w (2 values)"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { y, .. } if y.contains(&ChartVectorReference::Named { name: "w".into() })));
         egui::Popup::close_all(&ctx);
         runtime.definition.as_mut().unwrap().source = ChartSource::Sensitivity { outputs: vec!["y".into()] };
         actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
@@ -342,10 +382,10 @@ mod tests {
         session.evaluation();
         let evaluation = session.shared_evaluation().unwrap();
         let ids = session.line_ids().unwrap().to_vec();
-        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Bar, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: vec!["custom".into()] };
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[0])] }, kind: ChartKind::Bar, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: vec!["custom".into()] };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
         assert_eq!(chart_data(&runtime, &definition).unwrap().1.bar_labels, vec!["custom", "1"]);
-        definition.source = ChartSource::Vectors { x: None, y: ids };
+        definition.source = ChartSource::Vectors { x: None, y: ids.into_iter().map(ChartVectorReference::Physical).collect() };
         assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
         session.replace_source("[1, 2]").unwrap();
         runtime.evaluation = session.shared_evaluation();
@@ -360,7 +400,7 @@ mod tests {
         session.replace_source("[]\n[1]\n1 / 0").unwrap();
         session.evaluation();
         let ids = session.line_ids().unwrap().to_vec();
-        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[0])] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
         let dataset = chart_data(&runtime, &definition).unwrap().1;
         assert!(dataset.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap().is_none());
@@ -371,12 +411,38 @@ mod tests {
         definition.hidden.push(0);
         assert!(chart_data(&runtime, &definition).unwrap().1.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap_err().contains("at least one"));
         definition.hidden.clear();
-        definition.source = ChartSource::Vectors { x: Some(ids[1]), y: vec![ids[0]] };
+        definition.source = ChartSource::Vectors { x: Some(ChartVectorReference::Physical(ids[1])), y: vec![ChartVectorReference::Physical(ids[0])] };
         assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
-        definition.source = ChartSource::Vectors { x: Some(ids[2]), y: vec![ids[0]] };
-        assert!(chart_data(&runtime, &definition).unwrap_err().contains("X vector is unavailable"));
-        definition.source = ChartSource::Vectors { x: None, y: vec![ids[2]] };
-        assert!(chart_data(&runtime, &definition).unwrap_err().contains("Y vector is unavailable"));
+        definition.source = ChartSource::Vectors { x: Some(ChartVectorReference::Physical(ids[2])), y: vec![ChartVectorReference::Physical(ids[0])] };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("X vector:") && chart_data(&runtime, &definition).unwrap_err().contains("failed"));
+        definition.source = ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[2])] };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("Y vector:") && chart_data(&runtime, &definition).unwrap_err().contains("failed"));
+    }
+
+    #[test]
+    fn chart_named_source_follows_final_binding_and_current_basis() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("values = []\nfor i in range(3):\n    values = append(values, i)\nvalues = append(values, get([], 0))").unwrap();
+        session.evaluation();
+        let initial = session.shared_evaluation().unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "values".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(initial.clone()), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
+        let choices = vector_choices(&initial);
+        assert_eq!(choices.iter().filter(|(reference, _)| matches!(reference, ChartVectorReference::Named { name } if name == "values")).count(), 1);
+        assert_eq!(chart_data(&runtime, &definition).unwrap().1.series[0].points.len(), 3);
+        let physical = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Physical(ids[0])] }, ..definition.clone() };
+        assert_eq!(chart_data(&runtime, &physical).unwrap().1.series[0].points.len(), 0);
+        session.replace_source("values = []\nfor i in range(0):\n    values = append(values, i)\nvalues = append(values, get([], 0))").unwrap();
+        runtime.basis = session.evaluation_basis();
+        assert!(chart_stamp(&runtime, &definition).is_none());
+        assert!(chart_data(&runtime, &definition).is_err());
+        session.evaluation();
+        runtime.evaluation = session.shared_evaluation();
+        assert_eq!(chart_data(&runtime, &definition).unwrap().1.series[0].points.len(), 0);
+        assert_eq!(initial.final_bindings["values"].line_index, 2);
     }
 
     #[test]

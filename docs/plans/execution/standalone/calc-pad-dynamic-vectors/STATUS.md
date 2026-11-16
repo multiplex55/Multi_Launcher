@@ -18,9 +18,9 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M1-B | Accepted and pushed at `0911e8000` | V2, V3 |
 | M2-A | Accepted and pushed at `71075bbd6` | V4, V5 |
 | M2-B | Accepted and pushed at `6f1d2f89d` | V5, V6 |
-| M3-A | Accepted | C1, C2 |
-| M3-B | Next | C1, C2 |
-| M4-A | Pending | U1 |
+| M3-A | Accepted and pushed at `05f5cfbe1` | C1, C2 |
+| M3-B | Accepted | C1, C2 |
+| M4-A | Next | U1 |
 | M4-B | Pending | U2, U3 |
 | M5-A | Pending | V6, C1, C2, U1–U3 |
 | M5-B | Pending | Integrated verification and delivery |
@@ -56,3 +56,9 @@ The scoped library build exited 0 in 161.64 owned seconds with output drained an
 Vector charts accept 0–1,024 points and bar labels, use zero-based automatic X, and omit the scene and Copy action for matched empty data. Sensitivity remains at 1,000 samples. One-point line markers, exact length checks, distinct all-hidden errors and renderer limits remain enforced. Grouped bars use subpixel widths and a half-group inset at the plot ends.
 
 Library build exited 0 in 160.00 owned seconds. Ten listed Nextest cases passed in 1.84 owned seconds, with cleanup and drain verified. In Windows x64 fast-dev with Rust 1.99.1, all eight 1,024-point series produced 8,192 hits per chart. The 640 × 400 scene and raster took 57.23 ms for line (16,394 primitives), 337.83 ms for bar (8,210 primitives), and 67.07 ms for scatter (8,210 primitives). Existing render budgets were sufficient.
+
+## M3-B
+
+Charts select final named bindings or physical result rows using typed references. Selectors use the current values' lengths without copying their components. Named documents now write v4. v3 chart selections keep their numeric physical IDs, v1–v3 records remain readable, and recovery stays v2. Rename history follows named selections and preserves independent edits and visibility.
+
+The library build exited 0 in 299.42 owned seconds with cleanup and drain verified. Nextest passed all 18 chart and compatibility cases in the cached run. The substring selector also matched one unrelated diagram smoke case, which passed. Total owned execution was 5.73 seconds.

@@ -216,10 +216,11 @@ struct HistoryEntry {
     sensitivity_input_live: bool,
     sensitivity_outputs: Vec<WatchReplay>,
     chart_outputs: Vec<WatchReplay>,
+    chart_x_live: bool,
 }
 
 #[derive(Clone, Debug)]
-struct WatchReplay { id: Option<u64> }
+struct WatchReplay { id: Option<u64>, chart_was_hidden: bool }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RelatedReferenceEdits {
@@ -228,6 +229,7 @@ pub(crate) struct RelatedReferenceEdits {
     pub sensitivity_input: Option<RelatedInputRename>,
     pub sensitivity_outputs: Vec<RelatedWatchRename>,
     pub chart_outputs: Vec<RelatedWatchRename>,
+    pub chart_x: Option<RelatedWatchRename>,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +252,7 @@ impl RelatedReferenceEdits {
             .chain(self.sensitivity_input.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_outputs.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_x.iter().map(|item| item.before.len() + item.after.len()))
             .fold(0usize, usize::saturating_add)
     }
 
@@ -297,6 +300,20 @@ impl RelatedReferenceEdits {
                 if !outputs.contains(to) && let Some(output) = outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
             }
         }
+        if let Some(super::ChartDefinition { source: super::ChartSource::Vectors { x, y }, .. }) = result.chart.as_mut() {
+            if let Some(item) = &self.chart_x {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if matches!(x, Some(super::ChartVectorReference::Named { name }) if name == from) {
+                    *x = Some(super::ChartVectorReference::Named { name: to.clone() });
+                }
+            }
+            for item in &self.chart_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                let old = super::ChartVectorReference::Named { name: from.clone() };
+                let new = super::ChartVectorReference::Named { name: to.clone() };
+                if !y.contains(&new) && let Some(output) = y.iter_mut().find(|reference| **reference == old) { *output = new; }
+            }
+        }
         super::persistence::validate_view_metadata(&result)?;
         Ok(result)
     }
@@ -304,21 +321,36 @@ impl RelatedReferenceEdits {
 
 impl HistoryEntry {
     fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
-        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new() };
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live) };
         let mut result = inputs.apply(view, reverse, false)?;
         let mut sensitivity_ids = sensitivity_ids.to_vec();
         let mut sensitivity_hidden = sensitivity_hidden.clone();
         if let Some(settings) = result.sensitivity.as_mut() {
-            replay_names(&mut settings.definition.outputs, &mut sensitivity_ids, &mut sensitivity_hidden, &self.related.sensitivity_outputs, &mut self.sensitivity_outputs, 8, reverse);
+            replay_values(&mut settings.definition.outputs, &mut sensitivity_ids, &mut sensitivity_hidden, &self.related.sensitivity_outputs, &mut self.sensitivity_outputs, 8, reverse, str::to_owned);
         } else { self.sensitivity_input_live = false; for state in &mut self.sensitivity_outputs { state.id = None; } }
         let mut ids = ids.to_vec();
         let mut hidden = hidden.clone();
         let mut chart_ids = chart_ids.to_vec();
         let mut chart_hidden = chart_hidden.clone();
-        if let Some(super::ChartDefinition { source: super::ChartSource::Sensitivity { outputs }, .. }) = result.chart.as_mut() {
-            replay_names(outputs, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse);
-        } else { for state in &mut self.chart_outputs { state.id = None; } }
-        replay_names(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse);
+        if let Some(chart) = result.chart.as_mut() {
+            let mut visual_hidden = chart.hidden.iter().filter_map(|index| chart_ids.get(*index).copied()).collect::<HashSet<_>>();
+            for state in &mut self.chart_outputs {
+                if let Some(id) = state.id && chart_ids.contains(&id) {
+                    state.chart_was_hidden = visual_hidden.contains(&id);
+                }
+            }
+            match &mut chart.source {
+                super::ChartSource::Sensitivity { outputs } => replay_values(outputs, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, str::to_owned),
+                super::ChartSource::Vectors { y, .. } => replay_values(y, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, |name| super::ChartVectorReference::Named { name: name.to_owned() }),
+            }
+            for state in &self.chart_outputs {
+                if let Some(id) = state.id && state.chart_was_hidden { visual_hidden.insert(id); }
+            }
+            chart.hidden = chart_ids.iter().enumerate().filter_map(|(index, id)| visual_hidden.contains(id).then_some(index)).collect();
+        } else {
+            for state in &mut self.chart_outputs { state.id = None; }
+        }
+        replay_values(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse, str::to_owned);
         super::persistence::validate_view_metadata(&result)?;
         Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden))
     }
@@ -329,19 +361,19 @@ impl HistoryEntry {
     }
 }
 
-fn replay_names(names: &mut Vec<String>, ids: &mut Vec<u64>, hidden: &mut HashSet<u64>, edits: &[RelatedWatchRename], states: &mut [WatchReplay], cap: usize, reverse: bool) {
+fn replay_values<T: PartialEq>(names: &mut Vec<T>, ids: &mut Vec<u64>, hidden: &mut HashSet<u64>, edits: &[RelatedWatchRename], states: &mut [WatchReplay], cap: usize, reverse: bool, item: impl Fn(&str) -> T) {
         for (edit, state) in edits.iter().zip(states) {
             let Some(id) = state.id else { continue; };
-            let to = if reverse { &edit.before } else { &edit.after };
+            let to = item(if reverse { &edit.before } else { &edit.after });
             if !hidden.contains(&id) {
                 let Some(index) = ids.iter().position(|candidate| *candidate == id) else { state.id = None; continue; };
-                if names.contains(to) {
+                if names.contains(&to) {
                     names.remove(index);
                     ids.remove(index);
                     hidden.insert(id);
-                } else { names[index].clone_from(to); }
-            } else if !names.contains(to) && names.len() < cap {
-                names.push(to.clone());
+                } else { names[index] = to; }
+            } else if !names.contains(&to) && names.len() < cap {
+                names.push(to);
                 ids.push(id);
                 hidden.remove(&id);
             }
@@ -360,11 +392,12 @@ impl EditHistory {
             return;
         }
         self.redo.clear();
-        let watches = watch_ids.into_iter().map(|id| WatchReplay { id }).collect();
+        let watches = watch_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
         let sensitivity_input_live = related.sensitivity_input.is_some();
-        let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id }).collect();
-        let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id }).collect();
-        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs });
+        let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
+        let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
+        let chart_x_live = related.chart_x.is_some();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live });
         self.trim();
     }
 
@@ -404,10 +437,29 @@ struct DocumentBaseline {
     format_version: u32,
 }
 
-fn chart_output_names(view: &PadViewMetadata) -> &[String] {
+fn chart_output_names(view: &PadViewMetadata) -> Vec<String> {
     match view.chart.as_ref().map(|chart| &chart.source) {
-        Some(super::ChartSource::Sensitivity { outputs }) => outputs,
-        _ => &[],
+        Some(super::ChartSource::Sensitivity { outputs }) => outputs.clone(),
+        Some(super::ChartSource::Vectors { y, .. }) => y.iter().filter_map(|reference| match reference { super::ChartVectorReference::Named { name } => Some(name.clone()), _ => None }).collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum ChartOutputKey { Vector(super::ChartVectorReference), Sensitivity(String) }
+
+fn chart_output_keys(view: &PadViewMetadata) -> Vec<ChartOutputKey> {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Sensitivity { outputs }) => outputs.iter().cloned().map(ChartOutputKey::Sensitivity).collect(),
+        Some(super::ChartSource::Vectors { y, .. }) => y.iter().cloned().map(ChartOutputKey::Vector).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn chart_x(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Vectors { x, .. }) => x.as_ref(),
+        _ => None,
     }
 }
 
@@ -507,9 +559,9 @@ impl ActiveDocument {
             sensitivity_output_ids: (1..=stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64).collect(),
             hidden_sensitivity_output_ids: HashSet::new(),
             next_sensitivity_output_id: stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64 + 1,
-            chart_output_ids: (1..=chart_output_names(&stored.view).len() as u64).collect(),
+            chart_output_ids: (1..=chart_output_keys(&stored.view).len() as u64).collect(),
             hidden_chart_output_ids: HashSet::new(),
-            next_chart_output_id: chart_output_names(&stored.view).len() as u64 + 1,
+            next_chart_output_id: chart_output_keys(&stored.view).len() as u64 + 1,
             view: stored.view.clone(),
             options: stored.options,
             baseline: DocumentBaseline {
@@ -680,6 +732,9 @@ impl CalculationPadSession {
             }
             if chart_output_names(&current.view).contains(&preview.plan.old_name) {
                 related.chart_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if matches!(chart_x(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
+                related.chart_x = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
             }
         }
         let line_ids = current.line_ids.clone();
@@ -933,11 +988,11 @@ impl CalculationPadSession {
             self.retire_sensitivity();
         }
         let (chart_ids, chart_next) = if let Some(current) = self.current.as_ref() {
-            let old = chart_output_names(&current.view);
-            let new = chart_output_names(&view);
+            let old = chart_output_keys(&current.view);
+            let new = chart_output_keys(&view);
             let mut next = current.next_chart_output_id;
             let mut ids = Vec::with_capacity(new.len());
-            for name in new {
+            for name in &new {
                 let id = if let Some(index) = old.iter().position(|old| old == name) { current.chart_output_ids[index] }
                     else { let id = next; next = next.checked_add(1).ok_or("Chart output identity space exhausted.")?; id };
                 ids.push(id);
@@ -945,6 +1000,7 @@ impl CalculationPadSession {
             let removed: HashSet<_> = current.chart_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
             for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
                 for state in &mut entry.chart_outputs { if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; } }
+                if chart_x(&current.view) != chart_x(&view) { entry.chart_x_live = false; }
             }
             (ids, next)
         } else { return Err("No document is open."); };
@@ -1362,7 +1418,12 @@ impl CalculationPadSession {
         let before = current.editable_state();
         let watch_ids = related.watches.iter().map(|edit| current.view.watches.iter().position(|name| name == &edit.before).map(|index| current.watch_ids[index])).collect();
         let sensitivity_ids = related.sensitivity_outputs.iter().map(|edit| current.view.sensitivity.as_ref().and_then(|settings| settings.definition.outputs.iter().position(|name| name == &edit.before)).map(|index| current.sensitivity_output_ids[index])).collect();
-        let chart_ids = related.chart_outputs.iter().map(|edit| chart_output_names(&current.view).iter().position(|name| name == &edit.before).map(|index| current.chart_output_ids[index])).collect();
+        let keys = chart_output_keys(&current.view);
+        let chart_ids = related.chart_outputs.iter().map(|edit| keys.iter().position(|key| match key {
+            ChartOutputKey::Sensitivity(name) => name == &edit.before,
+            ChartOutputKey::Vector(super::ChartVectorReference::Named { name }) => name == &edit.before,
+            ChartOutputKey::Vector(_) => false,
+        }).map(|index| current.chart_output_ids[index])).collect();
         let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
@@ -2158,6 +2219,51 @@ mod tests {
         outputs.push("y".into()); reopened.set_view_metadata(view).unwrap();
         assert!(reopened.undo()); assert!(reopened.undo());
         assert!(matches!(&reopened.view_metadata().unwrap().chart.as_ref().unwrap().source, super::super::ChartSource::Sensitivity { outputs } if outputs == &["y"]));
+    }
+
+    #[test]
+    fn named_chart_references_follow_rename_history_and_independent_edits() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = [1]\ny = [2]").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new() });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Named { name }), y } if name == "z" && y[1] == named("z")));
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        chart.kind = ChartKind::Scatter;
+        chart.source = ChartSource::Vectors { x: Some(Ref::Physical(ids[1])), y: vec![named("y"), named("z"), Ref::Physical(ids[0])] };
+        chart.hidden = vec![1];
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.kind, ChartKind::Scatter);
+        assert_eq!(chart.hidden, [1]);
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Physical(id)), y } if *id == ids[1] && y == &[named("y"), named("x"), Ref::Physical(ids[0])]));
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        let ChartSource::Vectors { y, .. } = &mut chart.source else { panic!("vector chart"); };
+        y.push(named("x"));
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { y, .. } if y == &[named("y"), Ref::Physical(ids[0]), named("x")]));
+        assert!(chart.hidden.is_empty());
+        assert!(session.redo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Physical(id)), y } if *id == ids[1] && y == &[named("y"), Ref::Physical(ids[0]), named("x"), named("z")]));
+        assert_eq!(chart.hidden, [3]);
+        session.save_as("named chart").unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(session.current_id().unwrap()).unwrap();
+        assert_eq!(reopened.view_metadata().unwrap().chart, session.view_metadata().unwrap().chart);
     }
 
     #[test]

@@ -35,9 +35,16 @@ pub(crate) enum ChartKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum ChartVectorReference {
+    Physical(super::LineId),
+    Named { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ChartSource {
-    Vectors { x: Option<super::LineId>, y: Vec<super::LineId> },
+    Vectors { x: Option<ChartVectorReference>, y: Vec<ChartVectorReference> },
     Sensitivity { outputs: Vec<String> },
 }
 
