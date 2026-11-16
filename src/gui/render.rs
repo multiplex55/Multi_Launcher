@@ -2252,6 +2252,7 @@ impl LauncherApp {
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
             Panel::CalculationDependencyDialog => self.calculation_dependency_host.root_layer(),
             Panel::CalculationChartDialog => self.calculation_chart_host.root_layer(),
+            Panel::CalculationSensitivityDialog => self.calculation_sensitivity_host.root_layer(),
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer(),
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
@@ -4347,6 +4348,8 @@ impl LauncherApp {
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
     ) -> super::track_c_query_observer::GeometryCause {
+        let sensitivity_viewport = self.calculation_sensitivity_dialog.open.then(|| self.calculation_sensitivity_host.owner_viewport());
+        self.calculation_pad_dialog.tick_sensitivity(ctx, sensitivity_viewport);
         self.drain_settings_save(ctx);
         if let Err(error) = self.utility_dialog_size_manager.begin_frame(ctx) {
             tracing::warn!(%error, "could not publish utility window size acknowledgement");
@@ -4955,6 +4958,7 @@ impl LauncherApp {
         self.calculation_dependency_host
             .prepare_open(ctx, &self.calculation_dependency_dialog);
         self.calculation_chart_host.prepare_open(ctx, &self.calculation_chart_dialog);
+        self.calculation_sensitivity_host.prepare_open(ctx, &self.calculation_sensitivity_dialog);
         self.explorer_tabs_host
             .prepare_open(ctx, &self.explorer_tabs_dialog);
         let (visibility_request, visibility_invocation_id, should_be_visible, _) =
@@ -5052,6 +5056,7 @@ impl LauncherApp {
                     .calculation_dependency_host
                     .needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
+                || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
                     .needs_root_ui_when_hidden(self.file_search_dialog.preview_dialog.open)
@@ -6068,6 +6073,61 @@ impl LauncherApp {
             },
         );
     }
+
+    fn show_calculation_sensitivity(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+    ) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        if !self.calculation_sensitivity_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.calculation_sensitivity_host.root_layer();
+        let popup = layer.and_then(|layer| self.calculation_sensitivity_dialog.owned_popup_layer(ctx, layer));
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || Some(focus) == popup || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::CalculationSensitivityDialog);
+        let runtime = self.calculation_pad_dialog.sensitivity_runtime(pinned);
+        self.calculation_sensitivity_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.calculation_sensitivity_host.show(
+            ctx,
+            &mut self.calculation_sensitivity_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
+
 
     fn show_programmer_inspector(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use super::jump_mode::ui::{
@@ -10743,6 +10803,7 @@ impl LauncherApp {
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_calculation_charts(&ctx, first_ui_pass, false);
+            self.show_calculation_sensitivity(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -12610,6 +12671,7 @@ impl LauncherApp {
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_calculation_dependencies(&ctx, first_ui_pass, false);
             self.show_calculation_charts(&ctx, first_ui_pass, false);
+            self.show_calculation_sensitivity(&ctx, first_ui_pass, false);
             self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
@@ -13139,6 +13201,7 @@ impl LauncherApp {
         self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_dependencies(&ctx, first_ui_pass, frame_logic.should_be_visible);
             self.show_calculation_charts(&ctx, first_ui_pass, frame_logic.should_be_visible);
+            self.show_calculation_sensitivity(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
@@ -14415,6 +14478,7 @@ impl LauncherApp {
         let mut inspector_open = None;
         let mut dependency_open = None;
         let mut chart_open = None;
+        let mut sensitivity_open = None;
         for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
             match pad_effect {
                 super::CalculationPadDialogEffect::ShowRoot => {
@@ -14433,6 +14497,7 @@ impl LauncherApp {
                     dependency_open = Some(origin);
                 }
                 super::CalculationPadDialogEffect::OpenCharts(origin) => { chart_open = Some(origin); }
+                super::CalculationPadDialogEffect::OpenSensitivity(origin) => { sensitivity_open = Some(origin); }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
@@ -14441,6 +14506,46 @@ impl LauncherApp {
                 }
             }
         }
+        if !self.calculation_pad_dialog.open && self.calculation_sensitivity_dialog.open {
+            self.calculation_sensitivity_host.close_from_app(ctx);
+            self.calculation_sensitivity_dialog.close();
+            self.panel_stack.retain(|panel| *panel != super::Panel::CalculationSensitivityDialog);
+        }
+        if let Some(completion) = self.calculation_sensitivity_host.complete(ctx, &mut self.calculation_sensitivity_dialog) {
+            use super::utility_window_host::CalculationSensitivityHostCommand;
+            for command in completion.commands {
+                match command {
+                    CalculationSensitivityHostCommand::Closed => { self.calculation_sensitivity_dialog.close(); self.panel_stack.retain(|panel| *panel != super::Panel::CalculationSensitivityDialog); }
+                    CalculationSensitivityHostCommand::Apply(actions) => {
+                        let runtime = self.calculation_pad_dialog.sensitivity_runtime(false);
+                        if super::calculation_sensitivity_dialog::actions_current(&actions, &runtime)
+                            && !self.confirm_modal.is_open() && !self.action_sheet.is_open() {
+                            self.calculation_sensitivity_dialog.commit(&actions);
+                            let viewport = actions.viewport;
+                            let changed = actions.settings.is_some() || actions.command.is_some() || actions.draft.is_some();
+                            match self.calculation_pad_dialog.apply_sensitivity_actions(actions) {
+                                Ok(Some(text)) => { self.calculation_sensitivity_dialog.feedback = None; effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::CalculationPad, text }); },
+                                Ok(None) => { if changed { self.calculation_sensitivity_dialog.feedback = None; } },
+                                Err(error) => self.calculation_sensitivity_dialog.feedback = Some(error),
+                            }
+                            if changed && let Some(viewport) = viewport { ctx.request_repaint_of(viewport); }
+                        }
+                    }
+                }
+            }
+            if completion.show_root && !self.calculation_sensitivity_host.is_popped_out() { effects.push(RootDialogEffect::ShowRoot); }
+        }
+        if let Some(origin) = sensitivity_open && self.calculation_pad_dialog.accepts_inspector_origin(&origin)
+            && !self.confirm_modal.is_open() && !self.action_sheet.is_open() {
+            let was_open = self.calculation_sensitivity_dialog.open;
+            self.calculation_sensitivity_dialog.open();
+            let desired = self.calculation_sensitivity_host.open_from_origin(ctx, &self.calculation_sensitivity_dialog, was_open, &super::utility_host::ChildOpenOrigin::Parent(origin));
+            self.panel_stack.retain(|panel| *panel != super::Panel::CalculationSensitivityDialog);
+            self.panel_stack.push(super::Panel::CalculationSensitivityDialog);
+            if desired == Some(super::utility_host::UtilityPresentation::Docked) { effects.push(RootDialogEffect::ShowRoot); }
+        }
+        let sensitivity_viewport = self.calculation_sensitivity_dialog.open.then(|| self.calculation_sensitivity_host.owner_viewport());
+        self.calculation_pad_dialog.set_sensitivity_viewport(sensitivity_viewport);
         if !self.calculation_pad_dialog.open && self.calculation_chart_dialog.open {
             self.calculation_chart_host.close_from_app(ctx);
             self.calculation_chart_dialog.close();

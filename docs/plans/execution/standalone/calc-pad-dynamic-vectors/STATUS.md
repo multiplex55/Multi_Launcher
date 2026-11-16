@@ -19,9 +19,9 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M2-A | Accepted and pushed at `71075bbd6` | V4, V5 |
 | M2-B | Accepted and pushed at `6f1d2f89d` | V5, V6 |
 | M3-A | Accepted and pushed at `05f5cfbe1` | C1, C2 |
-| M3-B | Accepted | C1, C2 |
-| M4-A | Next | U1 |
-| M4-B | Pending | U2, U3 |
+| M3-B | Accepted and pushed at `e680b1886` | C1, C2 |
+| M4-A | Accepted | U1 |
+| M4-B | Next | U2, U3 |
 | M5-A | Pending | V6, C1, C2, U1–U3 |
 | M5-B | Pending | Integrated verification and delivery |
 
@@ -62,3 +62,9 @@ Library build exited 0 in 160.00 owned seconds. Ten listed Nextest cases passed 
 Charts select final named bindings or physical result rows using typed references. Selectors use the current values' lengths without copying their components. Named documents now write v4. v3 chart selections keep their numeric physical IDs, v1–v3 records remain readable, and recovery stays v2. Rename history follows named selections and preserves independent edits and visibility.
 
 The library build exited 0 in 299.42 owned seconds with cleanup and drain verified. Nextest passed all 18 chart and compatibility cases in the cached run. The substring selector also matched one unrelated diagram smoke case, which passed. Total owned execution was 5.73 seconds.
+
+## M4-A
+
+Sensitivity Tables is a retained companion under Config Menu → Tools. The Pad session owns the definition, run and table. Existing worker wakeups also target the active child viewport, and the root runtime polls independently of Pad painting. Closing the child retains the definition and table, and stale child actions fail current-owner checks.
+
+The first library compile exited 101 due to the fixed-size panel inventory declaration. The corrected compile exited 0 in 221.83 owned seconds with cleanup and output drain verified. Twelve listed Nextest cases passed in 2.24 owned seconds. They cover retained open/action ownership, Manual generation, current-only export, close and reopen, child wakeup, exact run retirement, hosted geometry and the related Chart and Dependencies host contracts.

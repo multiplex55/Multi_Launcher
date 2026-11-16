@@ -3134,6 +3134,108 @@ impl HostedUtilityDialog for super::calculation_chart_dialog::CalculationChartDi
     }
 }
 
+pub(super) type CalculationSensitivityWindowHost =
+    UtilityWindowHost<super::calculation_sensitivity_dialog::CalculationSensitivityDialog>;
+pub(super) enum CalculationSensitivityHostCommand {
+    Closed,
+    Apply(super::calculation_sensitivity_dialog::SensitivityActions),
+}
+impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationSensitivityDialog {
+    const KEY: &'static str = "calculation-pad-sensitivity";
+    const TITLE: &'static str = "Sensitivity Tables";
+    const SIZE: egui::Vec2 = egui::vec2(560.0, 500.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(320.0, 240.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = super::calculation_sensitivity_dialog::SensitivityRuntime;
+    type Actions = super::calculation_sensitivity_dialog::SensitivityActions;
+    type Checkpoint = ();
+    type Command = CalculationSensitivityHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("calculation-sensitivity-window"),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer || Some(layer) == popup || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, base)
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, parent, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        CalculationSensitivityHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, CalculationSensitivityHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![CalculationSensitivityHostCommand::Closed]
+        } else {
+            vec![CalculationSensitivityHostCommand::Apply(actions)]
+        }
+    }
+    #[cfg(test)]
+    fn test_button(_: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        None
+    }
+}
+
+
 pub(super) type QrWindowHost = UtilityWindowHost<super::qr_dialog::QrDialogState>;
 pub(super) enum QrHostCommand {
     Closed,
