@@ -10,7 +10,7 @@ use super::sensitivity::SensitivityTable;
 use crate::annotation::raster::{self, Color, Point, Rect};
 
 const MAX_SERIES: usize = 8;
-const MAX_POINTS: usize = 1000;
+const MAX_POINTS: usize = super::vector::MAX_VECTOR_COMPONENTS;
 const MAX_DIMENSION: u32 = 2048;
 const MAX_PIXELS: u64 = 4_194_304;
 const MAX_PRIMITIVES: usize = 20_000;
@@ -194,7 +194,7 @@ fn record_collision(seen: &mut HashMap<u64, BigRational>, value: &Numeric) -> bo
 }
 
 impl ChartDataset {
-    /// A missing X vector uses positions 1 through N. Every series shares X.
+    /// A missing X vector uses indexes 0 through N−1. Every series shares X.
     pub(crate) fn from_vectors(
         x: Option<&[f64]>,
         vectors: &[(&str, &[f64])],
@@ -203,8 +203,8 @@ impl ChartDataset {
             return Err("Choose between one and eight vector series.".into());
         }
         let count = vectors[0].1.len();
-        if count == 0 || count > MAX_POINTS {
-            return Err("Chart vectors must contain between 1 and 1000 points.".into());
+        if count > MAX_POINTS {
+            return Err("Chart vectors may contain at most 1024 points.".into());
         }
         if x.is_some_and(|values| values.len() != count)
             || vectors.iter().any(|(_, values)| values.len() != count)
@@ -215,7 +215,7 @@ impl ChartDataset {
         for (label, values) in vectors {
             let mut points = Vec::with_capacity(count);
             for (index, value) in values.iter().enumerate() {
-                let x = finite(x.map_or((index + 1) as f64, |values| values[index]))?;
+                let x = finite(x.map_or(index as f64, |values| values[index]))?;
                 let y = finite(*value)?;
                 points.push(Some(ChartPoint {
                     x,
@@ -241,7 +241,7 @@ impl ChartDataset {
             y_label: "Value".into(),
             x_unit: String::new(),
             y_unit: String::new(),
-            bar_labels: (1..=count).map(|index| index.to_string()).collect(),
+            bar_labels: (0..count).map(|index| index.to_string()).collect(),
             series,
             approximate: false,
             coordinate_collisions: false,
@@ -254,9 +254,9 @@ impl ChartDataset {
         columns: &[usize],
     ) -> Result<Self, String> {
         if table.rows.is_empty()
-            || table.rows.len() > MAX_POINTS
+            || table.rows.len() > super::sensitivity::MAX_CASES
             || columns.is_empty()
-            || columns.len() > MAX_SERIES
+            || columns.len() > super::sensitivity::MAX_OUTPUTS
         {
             return Err("Choose one to eight columns from a nonempty bounded table.".into());
         }
@@ -435,7 +435,7 @@ mod tests {
         assert!(view.set(f64::INFINITY, 1.0, 0.0, 0.0).is_err());
         view.set(10.0, 10.0, 0.1, -0.1).unwrap();
         for kind in [ChartKind::Line, ChartKind::Bar, ChartKind::Scatter] {
-            let scene = dataset.scene(kind, view, 640, 400).unwrap();
+            let scene = dataset.scene(kind, view, 640, 400).unwrap().unwrap();
             assert!(scene.rasterize().is_ok());
         }
         view.reset();
@@ -445,6 +445,7 @@ mod tests {
         assert!(
             singleton
                 .scene(ChartKind::Line, view, 320, 200)
+                .unwrap()
                 .unwrap()
                 .rasterize()
                 .is_ok()
@@ -460,7 +461,7 @@ mod tests {
         let legend = ChartDataset::from_vectors(None, &series)
             .unwrap()
             .scene(ChartKind::Line, view, 320, 240)
-            .unwrap();
+            .unwrap().unwrap();
         let positions = legend
             .primitives
             .iter()
@@ -473,6 +474,55 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(positions.len(), 8);
         assert!(legend.rasterize().is_ok());
+    }
+
+    #[test]
+    fn chart_vector_capacity_empty_and_singleton_states_are_distinct() {
+        let empty = ChartDataset::from_vectors(Some(&[]), &[("empty", &[])]).unwrap();
+        for kind in [ChartKind::Line, ChartKind::Bar, ChartKind::Scatter] {
+            assert!(empty.scene(kind, ChartView::default(), 640, 400).unwrap().is_none());
+        }
+        let mut hidden = empty.clone();
+        hidden.series[0].visible = false;
+        assert!(hidden.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap_err().contains("at least one"));
+        assert!(ChartDataset::from_vectors(Some(&[1.0]), &[("empty", &[])]).unwrap_err().contains("matching"));
+        assert!(ChartDataset::from_vectors(Some(&[]), &[("nonempty", &[1.0])]).unwrap_err().contains("matching"));
+        let singleton = ChartDataset::from_vectors(None, &[("one", &[5.0])]).unwrap();
+        assert_eq!(singleton.series[0].points[0].as_ref().unwrap().raw_x, "0");
+        assert_eq!(singleton.bar_labels, ["0"]);
+        let scene = singleton.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|primitive| matches!(primitive, ScenePrimitive::Circle { color, .. } if *color == COLORS[0])));
+        assert_eq!(scene.hits.len(), 1);
+        assert!(ChartDataset::from_vectors(None, &[("too large", &vec![0.0; MAX_POINTS + 1])]).is_err());
+    }
+
+    #[test]
+    fn chart_all_kinds_render_eight_complete_1024_point_series() {
+        let values = (0..MAX_POINTS).map(|value| value as f64 + 1.0).collect::<Vec<_>>();
+        let series = (0..8).map(|_| ("series", values.as_slice())).collect::<Vec<_>>();
+        let dataset = ChartDataset::from_vectors(None, &series).unwrap();
+        assert_eq!(dataset.series[0].points.last().unwrap().as_ref().unwrap().raw_x, "1023");
+        assert_eq!(dataset.bar_labels.last().unwrap(), "1023");
+        for kind in [ChartKind::Line, ChartKind::Bar, ChartKind::Scatter] {
+            let started = std::time::Instant::now();
+            let scene = dataset.scene(kind, ChartView::default(), 640, 400).unwrap().unwrap();
+            assert_eq!(scene.hits.len(), 8 * MAX_POINTS, "{kind:?}");
+            if kind == ChartKind::Bar {
+                let bars = scene.primitives.iter().filter(|primitive| matches!(primitive, ScenePrimitive::Rect { color, .. } if COLORS.contains(color))).count();
+                assert_eq!(bars, 8 * MAX_POINTS);
+            }
+            let image = scene.rasterize().unwrap();
+            assert_eq!((image.width(), image.height()), (640, 400));
+            eprintln!("{kind:?}: {} primitives, {} hits, {:?}", scene.primitives.len(), scene.hits.len(), started.elapsed());
+        }
+    }
+
+    #[test]
+    fn chart_sensitivity_capacity_stays_at_1000_samples() {
+        let full = table((0..1000).map(|index| row(index, Ok(CalculationValue::Scalar(1.0)))).collect());
+        assert_eq!(ChartDataset::from_sensitivity(&full, &[0]).unwrap().series[0].points.len(), 1000);
+        let oversized = table((0..1001).map(|index| row(index, Ok(CalculationValue::Scalar(1.0)))).collect());
+        assert!(ChartDataset::from_sensitivity(&oversized, &[0]).is_err());
     }
 
     #[test]
@@ -503,7 +553,7 @@ mod tests {
         );
         let scene = chart
             .scene(ChartKind::Line, ChartView::default(), 640, 400)
-            .unwrap();
+            .unwrap().unwrap();
         assert!(
             !scene
                 .primitives
@@ -549,7 +599,7 @@ mod tests {
         let chart = ChartDataset::from_sensitivity(&data, &[0]).unwrap();
         let scene = chart
             .scene(ChartKind::Line, ChartView::default(), 640, 400)
-            .unwrap();
+            .unwrap().unwrap();
         assert_eq!(scene.hits.len(), 4);
         let gap_x = (scene.hits[1].position[0] + scene.hits[2].position[0]) * 0.5;
         let segments = scene
@@ -944,7 +994,7 @@ impl ChartDataset {
         view: ChartView,
         width: u32,
         height: u32,
-    ) -> Result<ChartScene, String> {
+    ) -> Result<Option<ChartScene>, String> {
         validate_dimensions(width, height)?;
         let mut checked = ChartView::default();
         checked.set(view.zoom_x, view.zoom_y, view.pan_x, view.pan_y)?;
@@ -963,6 +1013,9 @@ impl ChartDataset {
                 || series.points.len() != expected
         }) {
             return Err("Chart data exceeds its bounded shape.".into());
+        }
+        if expected == 0 {
+            return Ok(None);
         }
         let points = visible
             .iter()
@@ -995,9 +1048,13 @@ impl ChartDataset {
         if bounds[3] - bounds[1] < 24.0 {
             return Err("Increase chart height to show the legend and plot.".into());
         }
+        let plot_width = bounds[2] - bounds[0];
+        let bar_width = (plot_width / expected.max(1) as f32 * 0.75 / visible.len() as f32).min(32.0);
+        let inset = if kind == ChartKind::Bar { f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width)) } else { 0.0 };
         let map = |point: &ChartPoint| -> [f32; 2] {
-            let x =
-                (unit_position(point.x, xmin, xmax) - 0.5) * checked.zoom_x + 0.5 + checked.pan_x;
+            let position = unit_position(point.x, xmin, xmax);
+            let position = inset + position * (1.0 - 2.0 * inset);
+            let x = (position - 0.5) * checked.zoom_x + 0.5 + checked.pan_x;
             let y =
                 (unit_position(point.y, ymin, ymax) - 0.5) * checked.zoom_y + 0.5 + checked.pan_y;
             [
@@ -1149,10 +1206,7 @@ impl ChartDataset {
                             + checked.pan_y)
                             .clamp(0.0, 1.0);
                         let zero = bounds[3] - (bounds[3] - bounds[1]) * baseline as f32;
-                        let width = ((bounds[2] - bounds[0])
-                            / (series.points.len().max(1) * visible.len()) as f32
-                            * 0.75)
-                            .clamp(1.0, 32.0);
+                        let width = bar_width;
                         let center = position[0]
                             + (visible_index as f32 - (visible.len() - 1) as f32 * 0.5) * width;
                         hit_position[0] = center;
@@ -1209,13 +1263,13 @@ impl ChartDataset {
         if primitives.len() > MAX_PRIMITIVES {
             return Err("Chart has too many drawing commands.".into());
         }
-        Ok(ChartScene {
+        Ok(Some(ChartScene {
             width,
             height,
             primitives,
             hits,
             approximate: self.approximate,
             coordinate_collisions: self.coordinate_collisions,
-        })
+        }))
     }
 }

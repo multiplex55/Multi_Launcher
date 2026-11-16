@@ -1234,7 +1234,7 @@ pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'sta
         { return Err("invalid sensitivity definition"); }
     }
     if let Some(chart) = &view.chart {
-        if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > 1000 || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
+        if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > super::vector::MAX_VECTOR_COMPONENTS || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
             || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
             || chart.hidden.len() > 8 || chart.hidden.iter().any(|index| *index >= 8)
             || match &chart.source {
@@ -1424,6 +1424,20 @@ mod tests {
     use crate::platform::app_data::AppDataRoot;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn chart_bar_label_admission_matches_vector_capacity() {
+        let mut view = super::PadViewMetadata::default();
+        view.chart = Some(super::super::ChartDefinition {
+            source: super::super::ChartSource::Vectors { x: None, y: vec![LineId(1)] },
+            kind: super::super::ChartKind::Bar,
+            x_label: String::new(), y_label: String::new(), hidden: Vec::new(),
+            bar_labels: vec!["label".into(); 1024],
+        });
+        assert!(super::validate_view_metadata(&view).is_ok());
+        view.chart.as_mut().unwrap().bar_labels.push("overflow".into());
+        assert!(super::validate_view_metadata(&view).is_err());
+    }
 
     fn fixture() -> (tempfile::TempDir, PadDocumentStore) {
         let directory = tempfile::tempdir().unwrap();

@@ -17,9 +17,9 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M1-A | Accepted and pushed at `ab6fa52d4` | V1, V3 |
 | M1-B | Accepted and pushed at `0911e8000` | V2, V3 |
 | M2-A | Accepted and pushed at `71075bbd6` | V4, V5 |
-| M2-B | Accepted | V5, V6 |
-| M3-A | Next | C1, C2 |
-| M3-B | Pending | C1, C2 |
+| M2-B | Accepted and pushed at `6f1d2f89d` | V5, V6 |
+| M3-A | Accepted | C1, C2 |
+| M3-B | Next | C1, C2 |
 | M4-A | Pending | U1 |
 | M4-B | Pending | U2, U3 |
 | M5-A | Pending | V6, C1, C2, U1–U3 |
@@ -50,3 +50,9 @@ The scoped library build exited 0 in 268.32 owned seconds with PIDs retired and 
 Vector rows format the first eight values and a count when longer. Canonical Copy uses full, bit-preserving scalar tokens and remains separate from explicitly formatted copying. The existing shared catalog drives highlighting, completion and nested hints.
 
 The scoped library build exited 0 in 161.64 owned seconds with output drained and cleanup verified. Six listed Nextest cases passed in 1.44 owned seconds, including exact 1,024-component round-trip, subnormal and finite extrema, signed zero, clipboard routing, and editor discovery.
+
+## M3-A
+
+Vector charts accept 0–1,024 points and bar labels, use zero-based automatic X, and omit the scene and Copy action for matched empty data. Sensitivity remains at 1,000 samples. One-point line markers, exact length checks, distinct all-hidden errors and renderer limits remain enforced. Grouped bars use subpixel widths and a half-group inset at the plot ends.
+
+Library build exited 0 in 160.00 owned seconds. Ten listed Nextest cases passed in 1.84 owned seconds, with cleanup and drain verified. In Windows x64 fast-dev with Rust 1.99.1, all eight 1,024-point series produced 8,192 hits per chart. The 640 × 400 scene and raster took 57.23 ms for line (16,394 primitives), 337.83 ms for bar (8,210 primitives), and 67.07 ms for scatter (8,210 primitives). Existing render budgets were sufficient.

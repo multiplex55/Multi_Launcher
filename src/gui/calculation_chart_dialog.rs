@@ -119,8 +119,8 @@ impl CalculationChartDialog {
                 });
                 match &mut definition.source {
                     ChartSource::Vectors { x, y } => {
-                        let response = egui::ComboBox::from_id_salt("chart-x").selected_text(x.and_then(|id| vectors.iter().find(|row| row.0 == id).map(|row| row.1.clone())).unwrap_or_else(|| "Positions 1…N".into())).show_ui(ui, |ui| {
-                            ui.selectable_value(x, None, "Positions 1…N");
+                        let response = egui::ComboBox::from_id_salt("chart-x").selected_text(x.and_then(|id| vectors.iter().find(|row| row.0 == id).map(|row| row.1.clone())).unwrap_or_else(|| "Indexes 0…N−1".into())).show_ui(ui, |ui| {
+                            ui.selectable_value(x, None, "Indexes 0…N−1");
                             for (id, name, _) in &vectors { let _response = ui.selectable_value(x, Some(*id), name); #[cfg(test)] actions.controls.push((format!("x/{name}"), _response.rect)); }
                         });
                         #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
@@ -156,7 +156,7 @@ impl CalculationChartDialog {
                     egui::ScrollArea::vertical().max_height(120.0).id_salt("chart-bar-labels").show_rows(ui, 24.0, dataset.bar_labels.len(), |ui, range| {
                         for index in range {
                             let mut label = definition.bar_labels.get(index).cloned().unwrap_or_else(|| dataset.bar_labels[index].clone());
-                            ui.horizontal(|ui| { ui.label(format!("{}", index + 1));
+                            ui.horizontal(|ui| { ui.label(format!("{}", index + usize::from(matches!(&definition.source, ChartSource::Sensitivity { .. }))));
                                 if ui.add_enabled(active, egui::TextEdit::singleline(&mut label).char_limit(129)).changed() {
                                     if definition.bar_labels.len() < dataset.bar_labels.len() { definition.bar_labels = dataset.bar_labels.clone(); }
                                     definition.bar_labels[index] = label; actions.definition = Some(definition.clone());
@@ -177,10 +177,10 @@ impl CalculationChartDialog {
             let scene = {
                 let mut cache = self.cache.borrow_mut();
                 let cached = cache.as_ref().and_then(|cache| cache.scene.as_ref()).filter(|(old, w, h, _)| *old == view && *w == width && *h == height).map(|(_, _, _, scene)| Arc::clone(scene));
-                if let Some(scene) = cached { Ok(scene) } else { dataset.scene(definition.kind, view, width, height).map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene }) }
+                if let Some(scene) = cached { Ok(Some(scene)) } else { dataset.scene(definition.kind, view, width, height).map(|scene| scene.map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene })) }
             };
             match scene {
-                Ok(scene) => {
+                Ok(Some(scene)) => {
                     let (rect, response) = ui.allocate_exact_size(egui::vec2(width as f32, height as f32), egui::Sense::click_and_drag());
                     ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
                     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect.intersect(ui.clip_rect())); paint_scene(ui, rect.min, &scene); });
@@ -189,6 +189,7 @@ impl CalculationChartDialog {
                     if scene.approximate || scene.coordinate_collisions { ui.label("Plot coordinates are approximate; exact values remain in tooltips."); }
                     if ui.add_enabled(active && actions.definition.is_none(), egui::Button::new("Copy Chart as Image")).clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
                 }
+                Ok(None) => { ui.label("No data"); }
                 Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); }
             }
             if view != self.view && active { actions.view = Some(view); }
@@ -343,7 +344,7 @@ mod tests {
         let ids = session.line_ids().unwrap().to_vec();
         let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Bar, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: vec!["custom".into()] };
         let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: Some(evaluation), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
-        assert_eq!(chart_data(&runtime, &definition).unwrap().1.bar_labels, vec!["custom", "2"]);
+        assert_eq!(chart_data(&runtime, &definition).unwrap().1.bar_labels, vec!["custom", "1"]);
         definition.source = ChartSource::Vectors { x: None, y: ids };
         assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
         session.replace_source("[1, 2]").unwrap();
@@ -352,9 +353,36 @@ mod tests {
     }
 
     #[test]
+    fn chart_empty_adapter_keeps_missing_mismatch_and_hidden_states_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("[]\n[1]\n1 / 0").unwrap();
+        session.evaluation();
+        let ids = session.line_ids().unwrap().to_vec();
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ids[0]] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let dataset = chart_data(&runtime, &definition).unwrap().1;
+        assert!(dataset.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap().is_none());
+        let ctx = egui::Context::default();
+        let mut dialog = CalculationChartDialog::default();
+        dialog.open();
+        assert!(chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new()).copy.is_none());
+        definition.hidden.push(0);
+        assert!(chart_data(&runtime, &definition).unwrap().1.scene(ChartKind::Line, ChartView::default(), 640, 400).unwrap_err().contains("at least one"));
+        definition.hidden.clear();
+        definition.source = ChartSource::Vectors { x: Some(ids[1]), y: vec![ids[0]] };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
+        definition.source = ChartSource::Vectors { x: Some(ids[2]), y: vec![ids[0]] };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("X vector is unavailable"));
+        definition.source = ChartSource::Vectors { x: None, y: vec![ids[2]] };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("Y vector is unavailable"));
+    }
+
+    #[test]
     fn chart_copy_uses_scene_and_surfaces_clipboard_failure() {
         let dataset = ChartDataset::from_vectors(None, &[("series", &[1.0, 2.0])]).unwrap();
-        let scene = dataset.scene(ChartKind::Line, ChartView::default(), 400, 300).unwrap();
+        let scene = dataset.scene(ChartKind::Line, ChartView::default(), 400, 300).unwrap().unwrap();
         let mut dialog = CalculationChartDialog::default();
         let mut called = false;
         dialog.copy_with(&scene, |image| { called = true; assert_eq!((image.width, image.height), (400, 300)); Err(()) });
