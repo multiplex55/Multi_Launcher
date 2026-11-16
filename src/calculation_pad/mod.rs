@@ -27,7 +27,7 @@ mod worker;
 pub use worker::EvaluationBasis;
 pub use limits::{ABSOLUTE_BYTES as MAX_ADMITTED_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_ADMITTED_SOURCE_LINES};
 pub(crate) use limits::profile_limits;
-pub(crate) use document::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
+pub(crate) use document::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH, MAX_VECTOR_COMPONENT_WORK};
 pub(crate) use vector::{MAX_VECTOR_COMPONENTS, MAX_VECTOR_PARSE_WORK};
 pub(crate) use exact::{MAX_BITS as MAX_EXACT_BITS, MAX_SCALE as MAX_EXACT_SCALE};
 pub(crate) use session::{MAX_UNDO_BYTES, MAX_UNDO_ENTRIES};

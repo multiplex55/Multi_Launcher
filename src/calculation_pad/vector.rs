@@ -5,12 +5,13 @@ use super::document::{
 };
 use crate::common::number_format::format_number;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub const MAX_VECTOR_COMPONENTS: usize = 1024;
 pub(crate) const MAX_VECTOR_PARSE_WORK: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CalculationVector(Vec<f64>);
+pub struct CalculationVector(Arc<Vec<f64>>);
 
 impl CalculationVector {
     fn new(values: Vec<f64>) -> Result<Self, DiagnosticKind> {
@@ -18,7 +19,7 @@ impl CalculationVector {
         if values.iter().any(|value| !value.is_finite()) {
             return Err(error("vector components must be finite"));
         }
-        Ok(Self(values))
+        Ok(Self(Arc::new(values)))
     }
     pub fn components(&self) -> &[f64] {
         &self.0
@@ -30,6 +31,113 @@ impl CalculationVector {
             .map(|value| format_number(*value))
             .collect::<Option<Vec<_>>>()?;
         Some(format!("[{}]", parts.join(", ")))
+    }
+}
+
+/// Collection operations construct new vectors and never alter an input snapshot.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CollectionOperation {
+    Append, Concat, Insert, SetAt, RemoveAt, Pop, Get, First, Last, Len, Slice, Reverse,
+}
+
+impl CollectionOperation {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "append" => Self::Append, "concat" => Self::Concat, "insert" => Self::Insert,
+            "set_at" => Self::SetAt, "remove_at" => Self::RemoveAt, "pop" => Self::Pop,
+            "get" => Self::Get, "first" => Self::First, "last" => Self::Last,
+            "len" => Self::Len, "slice" => Self::Slice, "reverse" => Self::Reverse,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn call(self, arguments: &[CalculationValue], work: &mut WorkBudget) -> Result<CalculationValue, DiagnosticKind> {
+        use CalculationValue::{Scalar, Vector};
+        let Some(Vector(vector)) = arguments.first() else {
+            return Err(error("collection operation requires a vector"));
+        };
+        let values = vector.components();
+        let scalar = |value: &CalculationValue| match value {
+            Scalar(value) if value.is_finite() => Ok(*value),
+            _ => Err(error("vector element must be a finite dimensionless scalar")),
+        };
+        let index = |value: &CalculationValue, limit: usize, inclusive: bool| {
+            let Scalar(value) = value else { return Err(error("index must be a nonnegative integral scalar")); };
+            if !value.is_finite() || *value < 0.0 || value.fract() != 0.0
+                || if inclusive { *value > limit as f64 } else { *value >= limit as f64 }
+            {
+                return Err(error("index is invalid or out of bounds"));
+            }
+            Ok(*value as usize)
+        };
+        let result = match (self, arguments) {
+            (Self::Len, [_]) => return Ok(Scalar(values.len() as f64)),
+            (Self::Get, [_, position]) => {
+                let position = index(position, values.len(), false)?;
+                return values.get(position).copied().map(Scalar).ok_or_else(|| error("index is out of bounds"));
+            }
+            (Self::First, [_]) => return values.first().copied().map(Scalar).ok_or_else(|| error("vector is empty")),
+            (Self::Last, [_]) => return values.last().copied().map(Scalar).ok_or_else(|| error("vector is empty")),
+            (Self::Append, [_, value]) => {
+                let value = scalar(value)?;
+                check_component_count(values.len() + 1)?;
+                work.charge_vector(values.len() + 1)?;
+                let mut result = Vec::with_capacity(values.len() + 1);
+                result.extend_from_slice(values);
+                result.push(value);
+                result
+            }
+            (Self::Concat, [_, Vector(other)]) => {
+                let length = values.len() + other.components().len();
+                check_component_count(length)?;
+                work.charge_vector(length)?;
+                let mut result = Vec::with_capacity(length);
+                result.extend_from_slice(values);
+                result.extend_from_slice(other.components());
+                result
+            }
+            (Self::Insert, [_, position, value]) | (Self::SetAt, [_, position, value]) => {
+                let insert = matches!(self, Self::Insert);
+                let position = index(position, values.len(), insert)?;
+                let value = scalar(value)?;
+                let length = values.len() + usize::from(insert);
+                check_component_count(length)?;
+                work.charge_vector(length)?;
+                let mut result = Vec::with_capacity(length);
+                result.extend_from_slice(&values[..position]);
+                result.push(value);
+                result.extend_from_slice(&values[position + usize::from(!insert)..]);
+                result
+            }
+            (Self::RemoveAt, [_, position]) => {
+                let position = index(position, values.len(), false)?;
+                work.charge_vector(values.len() - 1)?;
+                let mut result = Vec::with_capacity(values.len() - 1);
+                result.extend_from_slice(&values[..position]);
+                result.extend_from_slice(&values[position + 1..]);
+                result
+            }
+            (Self::Pop, [_]) => {
+                if values.is_empty() { return Err(error("vector is empty")); }
+                work.charge_vector(values.len() - 1)?;
+                values[..values.len() - 1].to_vec()
+            }
+            (Self::Slice, [_, start, end]) => {
+                let start = index(start, values.len(), true)?;
+                let end = index(end, values.len(), true)?;
+                if start > end { return Err(error("slice start must not exceed end")); }
+                work.charge_vector(end - start)?;
+                values[start..end].to_vec()
+            }
+            (Self::Reverse, [_]) => {
+                work.charge_vector(values.len())?;
+                values.iter().rev().copied().collect()
+            }
+            _ => return Err(error("invalid collection operation arguments")),
+        };
+        // Inputs and inserted scalars were already validated, so no second
+        // component scan is needed after these pure copying transformations.
+        Ok(Vector(CalculationVector(Arc::new(result))))
     }
 }
 
@@ -48,6 +156,7 @@ fn check_component_count(count: usize) -> Result<(), DiagnosticKind> {
 pub(super) struct VectorExpression {
     root: Node,
     references: Vec<String>,
+    source_bytes: usize,
 }
 #[derive(Debug)]
 struct Node {
@@ -124,7 +233,7 @@ pub(super) fn prepare(
     root.collect_references(&mut references);
     references.sort();
     references.dedup();
-    Ok(VectorExpression { root, references })
+    Ok(VectorExpression { root, references, source_bytes: source.len() })
 }
 impl VectorExpression {
     pub(super) fn references(&self) -> &[String] {
@@ -135,6 +244,7 @@ impl VectorExpression {
         values: &HashMap<String, CalculationValue>,
         work: &mut WorkBudget,
     ) -> Result<CalculationValue, DiagnosticKind> {
+        work.charge_vector(self.source_bytes)?;
         self.root.evaluate(values, work)
     }
 }
@@ -257,6 +367,19 @@ mod tests {
         canceled.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut work = WorkBudget::with_cancellation(canceled);
         assert!(matches!(expression.evaluate(&HashMap::new(), &mut work), Err(DiagnosticKind::Canceled)));
+    }
+
+    #[test]
+    fn vector_component_budget_is_bounded_and_weighted_for_analysis() {
+        let aggregate = Arc::new(document::script::AggregateWork::new(2));
+        let mut work = WorkBudget::with_analysis(Arc::new(AtomicBool::new(false)), aggregate.clone());
+        assert!(work.charge_vector(32).is_ok());
+        assert!(work.charge_vector(32).is_ok());
+        assert!(matches!(work.charge_vector(1), Err(DiagnosticKind::WorkLimit)));
+        assert!(aggregate.exhausted());
+        let mut work = WorkBudget::default();
+        assert!(work.charge_vector(document::script::MAX_VECTOR_COMPONENT_WORK).is_ok());
+        assert!(matches!(work.charge_vector(1), Err(DiagnosticKind::WorkLimit)));
     }
 }
 
@@ -456,13 +579,12 @@ impl Node {
                 if let Some(CalculationValue::Vector(vector)) =
                     bare.as_ref().and_then(|name| values.get(name))
                 {
-                    work.charge(vector.0.len())?;
                     return Ok(CalculationValue::Vector(vector.clone()));
                 }
                 scalar_value(scalar, values).map(CalculationValue::Scalar)
             }
             Kind::Literal(components) => {
-                work.charge(components.len())?;
+                work.charge_vector(components.len().saturating_mul(2))?;
                 let mut result = Vec::with_capacity(components.len());
                 for component in components {
                     match component.evaluate(values, work)? {
@@ -518,7 +640,7 @@ fn apply(
     use CalculationValue::{Scalar, Vector};
     match (op, left, right) {
         (Op::Multiply, Scalar(a), Vector(b)) | (Op::Multiply, Vector(b), Scalar(a)) => {
-            work.charge(b.0.len())?;
+            work.charge_vector(b.0.len().saturating_mul(2))?;
             Ok(Vector(CalculationVector::new(
                 b.0.iter()
                     .map(|v| checked(v * a))
@@ -529,7 +651,7 @@ fn apply(
             if b == 0.0 {
                 return Err(DiagnosticKind::InvalidArithmetic);
             }
-            work.charge(a.0.len())?;
+            work.charge_vector(a.0.len().saturating_mul(2))?;
             Ok(Vector(CalculationVector::new(
                 a.0.iter()
                     .map(|v| checked(v / b))
@@ -543,7 +665,7 @@ fn apply(
             if matches!(op, Op::Unsupported) {
                 return Err(error("invalid vector operation"));
             }
-            work.charge(a.0.len())?;
+            work.charge_vector(a.0.len().saturating_mul(2))?;
             if matches!(op, Op::Cross) {
                 if a.0.len() != 3 {
                     return Err(error("cross product requires three-component vectors"));
@@ -558,14 +680,14 @@ fn apply(
             }
             if matches!(op, Op::Dot) {
                 let mut sum = 0.0;
-                for (x, y) in a.0.iter().zip(&b.0) {
+                for (x, y) in a.0.iter().zip(b.0.iter()) {
                     sum = checked(sum + checked(x * y)?)?;
                 }
                 return Ok(Scalar(sum));
             }
             let result =
                 a.0.iter()
-                    .zip(&b.0)
+                    .zip(b.0.iter())
                     .map(|(x, y)| match op {
                         Op::Add => checked(x + y),
                         Op::Subtract => checked(x - y),

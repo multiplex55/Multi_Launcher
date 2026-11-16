@@ -610,9 +610,9 @@ impl Execution {
                             continue;
                         }
                     };
-                    let values = match iterable {
-                        CalculationValue::Vector(vector) => vector.components().to_vec(),
-                        CalculationValue::Sequence(sequence) => sequence.values().to_vec(),
+                    let values = match &iterable {
+                        CalculationValue::Vector(vector) => vector.components(),
+                        CalculationValue::Sequence(sequence) => sequence.values(),
                         _ => {
                             let fault = Fault {
                                 line: *line,
@@ -660,7 +660,7 @@ impl Execution {
                                 .map(|name| (name.clone(), self.bindings.get(name).cloned()))
                         })
                         .collect::<Vec<_>>();
-                    for (index, value) in values.into_iter().enumerate() {
+                    for (index, &value) in values.iter().enumerate() {
                         self.iterations += 1;
                         path.push(index + 1);
                         let result = if self.iterations > self.iteration_limit {
@@ -1116,7 +1116,7 @@ fn evaluate_analyzed<'a>(
         lines: execution.rows,
         final_bindings,
         diagnostic: None,
-        usage: Some(EvaluationUsage { work_units: execution.work.used(), loop_iterations: execution.iterations }),
+        usage: Some(EvaluationUsage { work_units: execution.work.used(), vector_component_work: execution.work.vector_used(), loop_iterations: execution.iterations }),
     }
 }
 

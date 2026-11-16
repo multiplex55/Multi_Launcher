@@ -586,4 +586,12 @@ mod tests {
                 .contains("aggregate")
         );
     }
+
+    #[test]
+    fn vector_component_work_stops_sensitivity_without_a_partial_table() {
+        let literal = vec!["1"; 1024].join(",");
+        let source = format!("x = 1\nv = [{literal}]\nfor i in range(1024):\n    v = v * 1\ny = sum(v)");
+        let request = make_request(&source, "0", "19", Sampling::Count(20), &["y"]);
+        assert!(run_cases(&request, Arc::new(AtomicBool::new(false)), &|| {}).unwrap_err().contains("aggregate"));
+    }
 }

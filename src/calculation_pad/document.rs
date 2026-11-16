@@ -36,7 +36,7 @@ pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
     loops::editor_control_keyword(source)
 }
 pub(crate) use script::{FUNCTIONS, function_signature_help};
-pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS};
+pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_VECTOR_COMPONENT_WORK};
 pub(crate) use loops::{MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
 
 #[derive(Clone, Debug)]
@@ -543,7 +543,7 @@ impl CalculationDocument {
                 })
                 .collect(),
             diagnostic: None,
-            usage: Some(EvaluationUsage { work_units: work.used(), loop_iterations: 0 }),
+            usage: Some(EvaluationUsage { work_units: work.used(), vector_component_work: work.vector_used(), loop_iterations: 0 }),
         }
     }
 }
@@ -597,6 +597,7 @@ pub struct CalculationEvaluation<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvaluationUsage {
     pub work_units: usize,
+    pub vector_component_work: usize,
     pub loop_iterations: usize,
 }
 
@@ -4364,7 +4365,7 @@ mod tests {
         assert!(
             matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 1024)
         );
-        assert!(matches!(&evaluation.lines[1].outcome, LineOutcome::Error(diagnostic) if diagnostic.kind == DiagnosticKind::WorkLimit), "{:?}", evaluation.lines[1].outcome);
+        assert!(matches!(&evaluation.lines[1].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 1024), "{:?}", evaluation.lines[1].outcome);
 
         let document =
             CalculationDocument::new("v = [1, 2]\nv * 6 % 4\nv * 6 mod 4\nv * 6 min 4\n");
@@ -4408,6 +4409,112 @@ mod tests {
         assert_eq!(super::expression_size_limit(&format!("\"[\" + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
         assert_eq!(super::expression_size_limit(&format!("{{name[0]}} + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
         assert_eq!(super::expression_size_limit(&format!("[] + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+    }
+
+    #[test]
+    fn vector_collection_operations_are_pure_and_compose() {
+        let document = CalculationDocument::new(concat!(
+            "v = [10, 20, 30]\nalias = v\nAPPEND(v, 40)\n",
+            "insert(v, 1, 15)\nset_at(v, 0, 5)\nremove_at(v, 1)\npop(v)\n",
+            "get(v, 1)\nfirst(v)\nlast(v)\nlen(v)\n",
+            "slice(v, 1, 3)\nreverse(v)\nconcat(v, [40])\n",
+            "len(append(v, 5))\n[ get(v, 0), len(v) ]\n",
+            "dot(append([1], 2), [3, 4])\n",
+            "fn add_sample(input, x) = append(input, x)\nadd_sample(v, 5)\n",
+            "append = 7\nappend + 1\nlen([])\nsum([])\nconcat([], [])\nslice([], 0, 0)\nreverse([])\n"
+        ));
+        let evaluation = document.evaluate();
+        for (line, expected) in [(0, "[10, 20, 30]"), (1, "[10, 20, 30]"), (2, "[10, 20, 30, 40]"),
+            (3, "[10, 15, 20, 30]"), (4, "[5, 20, 30]"), (5, "[10, 30]"), (6, "[10, 20]"),
+            (11, "[20, 30]"), (12, "[30, 20, 10]"), (13, "[10, 20, 30, 40]"),
+            (15, "[10, 3]"), (18, "[10, 20, 30, 5]"), (23, "[]"), (24, "[]"), (25, "[]")] {
+            assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+        }
+        for (line, expected) in [(7, 20.0), (8, 10.0), (9, 30.0), (10, 3.0), (14, 4.0),
+            (16, 11.0), (20, 8.0), (21, 0.0), (22, 0.0)] {
+            assert_eq!(scalar(&evaluation, line), expected, "line {}", line + 1);
+        }
+    }
+
+    #[test]
+    fn vector_collection_indices_types_and_capacity_are_checked() {
+        let full = format!("[{}]", vec!["1"; 1024].join(","));
+        let source = format!(concat!(
+            "v = {}\nappend(v, 2)\ninsert(v, 1024, 2)\nconcat(v, [1])\n",
+            "insert([1], 1, 2)\nremove_at([1], 0)\nslice([1], 1, 1)\n",
+            "get([], 0)\nfirst([])\nlast([])\npop([])\n",
+            "get([1], -1)\nget([1], 0.5)\nget([1], 1e100)\n",
+            "set_at([1], 1, 2)\nremove_at([1], 1)\nslice([1], 1, 0)\n",
+            "append([], u8(1))\nappend([], fraction(1,2))\nappend([], true)\n",
+            "concat([], range(1))\nget([1], u8(0))\n"
+        ), full);
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] {
+            assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}: {:?}", line + 1, evaluation.lines[line].outcome);
+        }
+        assert_eq!(formatted(&evaluation, 4), "[1, 2]");
+        assert_eq!(formatted(&evaluation, 5), "[]");
+        assert_eq!(formatted(&evaluation, 6), "[]");
+    }
+
+    #[test]
+    fn vector_collection_loop_builds_two_full_datasets_with_bounded_work() {
+        let document = CalculationDocument::new(concat!(
+            "x_values = []\ny_values = []\n",
+            "for i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n",
+            "point_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)\n"
+        ));
+        let started = std::time::Instant::now();
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 5), 1024.0);
+        assert_eq!(scalar(&evaluation, 6), 1046529.0);
+        assert!((scalar(&evaluation, 7) - 349013.5).abs() < 1e-6);
+        for (name, last) in [("x_values", 1023.0), ("y_values", 1046529.0)] {
+            assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024 && v.components()[0] == 0.0 && v.components()[1023] == last));
+        }
+        let usage = evaluation.usage.unwrap();
+        assert!(usage.vector_component_work > 1_000_000);
+        assert!(usage.vector_component_work <= super::MAX_VECTOR_COMPONENT_WORK);
+        eprintln!("two 1024-point vectors: {:?}, {} scalar work, {} component work", started.elapsed(), usage.work_units, usage.vector_component_work);
+    }
+
+    #[test]
+    fn vector_collection_formula_builds_a_dataset() {
+        let document = CalculationDocument::new(concat!(
+            "starting_balance = 10000\nannual_growth = 0.07\n",
+            "fn projected_value(base, growth, year) = (\n    base * (1 + growth) ^ year\n)\n",
+            "years = []\nbalances = []\nfor year in range(31):\n",
+            "    years = append(years, year)\n    balances = append(\n        balances,\n",
+            "        projected_value(starting_balance, annual_growth, year)\n    )\n",
+            "point_count = len(balances)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 13), 31.0);
+        assert!(matches!(&evaluation.final_bindings["balances"].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 31));
+    }
+
+    #[test]
+    fn vector_collection_edit_script_matches_expected_values() {
+        let document = CalculationDocument::new(concat!(
+            "values = [10, 20, 30]\nvalues = append(values, 40)\n",
+            "values = insert(values, 1, 15)\nvalues = set_at(values, 0, 5)\n",
+            "values = remove_at(values, 2)\nvalues = pop(values)\n",
+            "count = len(values)\nfirst_value = first(values)\nlast_value = last(values)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 5), "[5, 15, 30]");
+        assert_eq!(scalar(&evaluation, 6), 3.0);
+        assert_eq!(scalar(&evaluation, 7), 5.0);
+        assert_eq!(scalar(&evaluation, 8), 30.0);
+    }
+
+    #[test]
+    fn vector_component_work_limit_terminates_the_loop() {
+        let full = vec!["1"; 1024].join(",");
+        let document = CalculationDocument::new(format!("v = [{full}]\nfor i in range(1024):\n    v = v * 1\n    v = v * 1\n"));
+        let evaluation = document.evaluate();
+        assert!(evaluation.lines.iter().any(|line| matches!(&line.outcome, LineOutcome::Error(diagnostic) if diagnostic.kind == DiagnosticKind::WorkLimit || matches!(&diagnostic.kind, DiagnosticKind::LoopError { cause, .. } if **cause == DiagnosticKind::WorkLimit))), "{:?}", evaluation.lines);
     }
 
     #[test]

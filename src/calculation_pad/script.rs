@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub(crate) const MAX_SEQUENCE_ELEMENTS: usize = 1024;
 pub(crate) const MAX_WORK: usize = 50_000;
+pub(crate) const MAX_VECTOR_COMPONENT_WORK: usize = 4_194_304;
 
 pub(super) fn validate_source(source: &str) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
@@ -127,6 +128,7 @@ impl CalculationSequence {
 #[derive(Default)]
 pub(crate) struct WorkBudget {
     used: usize,
+    vector_used: usize,
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     aggregate: Option<Arc<AggregateWork>>,
     pub(super) runtime_line: Option<usize>,
@@ -161,6 +163,22 @@ impl AggregateWork {
 }
 impl WorkBudget {
     pub(crate) fn used(&self) -> usize { self.used }
+    pub(crate) fn vector_used(&self) -> usize { self.vector_used }
+    // Vector components are tracked separately from scalar work. Sensitivity's
+    // aggregate meter charges one unit for every 32 component operations.
+    pub(crate) fn charge_vector(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
+        if self.cancellation.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(DiagnosticKind::Canceled);
+        }
+        let next = self.vector_used.checked_add(amount).ok_or(DiagnosticKind::WorkLimit)?;
+        if next > MAX_VECTOR_COMPONENT_WORK { return Err(DiagnosticKind::WorkLimit); }
+        if let Some(aggregate) = &self.aggregate {
+            let previous_units = self.vector_used.div_ceil(32);
+            aggregate.charge(next.div_ceil(32) - previous_units)?;
+        }
+        self.vector_used = next;
+        Ok(())
+    }
     pub(crate) fn charge(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
         if self
             .cancellation
@@ -183,6 +201,7 @@ impl WorkBudget {
     pub(crate) fn with_cancellation(cancellation: Arc<std::sync::atomic::AtomicBool>) -> Self {
         Self {
             used: 0,
+            vector_used: 0,
             cancellation: Some(cancellation),
             aggregate: None,
             runtime_line: None,
@@ -387,6 +406,7 @@ pub(super) enum Compare {
 }
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Function {
+    Collection(super::super::vector::CollectionOperation),
     Range,
     Sum,
     Average,
@@ -418,6 +438,18 @@ pub(crate) struct FunctionSignature {
     insensitive: bool,
 }
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "append", help: "append(vector, value)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "concat", help: "concat(left, right)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "insert", help: "insert(vector, index, value)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "set_at", help: "set_at(vector, index, value)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "remove_at", help: "remove_at(vector, index)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "pop", help: "pop(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "get", help: "get(vector, index)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "first", help: "first(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "last", help: "last(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "len", help: "len(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "slice", help: "slice(vector, start, end)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "reverse", help: "reverse(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "date", help: "date(\"YYYY-MM-DD\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "time", help: "time(\"HH:MM[:SS]\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "datetime", help: "datetime(\"RFC3339 timestamp\")", arities: &[1], insensitive: true },
@@ -523,6 +555,9 @@ mod signature_catalog_tests {
 }
 
 fn special(name: &str, arity: usize) -> Option<Function> {
+    if let Some(operation) = super::super::vector::CollectionOperation::from_name(name) {
+        return Some(Function::Collection(operation));
+    }
     match name.to_ascii_lowercase().as_str() {
         "round_to" => Some(Function::RoundTo),
         "floor_to" => Some(Function::FloorTo),
@@ -609,12 +644,12 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
             return true;
         }
         if source[end..].trim_start().starts_with('(')
-            && matches!(
+            && (super::super::vector::CollectionOperation::from_name(name).is_some() || matches!(
                 name.to_ascii_lowercase().as_str(),
                 "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
                 "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
                 | "date" | "time" | "datetime" | "zoned_datetime" | "add_days" | "add_months" | "add_years" | "days_between" | "weekday" | "elapsed_between" | "add_duration"
-            )
+            ))
         {
             return true;
         }
@@ -1247,7 +1282,12 @@ impl ScriptExpression {
                 Ok(CalculationValue::Boolean(name == "true"))
             }
             Self::Legacy { line, slots, alias } => {
-                work.charge(line.source_range.len().max(1))?;
+                let bytes = line.source_range.len().max(1);
+                if matches!(&line.statement, PreparedStatement::Expression(expression) if expression.explicit_vector) {
+                    work.charge_vector(bytes)?;
+                } else {
+                    work.charge(bytes)?;
+                }
                 if let Some(diagnostic) = &line.diagnostic {
                     return Err(diagnostic.kind.clone());
                 }
@@ -1505,6 +1545,9 @@ fn call(
     work: &mut WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     use super::super::exact::{EverydayFunction, ExactNumber};
+    if let Function::Collection(operation) = function {
+        return operation.call(arguments, work);
+    }
     let everyday = match function {
         Function::RoundTo => Some(EverydayFunction::RoundTo),
         Function::FloorTo => Some(EverydayFunction::FloorTo),
@@ -1654,7 +1697,8 @@ fn call(
             ));
         }
     };
-    work.charge(values.len())?;
+    let vector = matches!(arguments, [CalculationValue::Vector(_)]);
+    if vector { work.charge_vector(values.len())?; } else { work.charge(values.len())?; }
     if values.is_empty() {
         return if matches!(function, Function::Sum) {
             Ok(CalculationValue::Scalar(0.0))
@@ -1677,7 +1721,7 @@ fn call(
             let sort_work = values
                 .len()
                 .saturating_mul((usize::BITS - values.len().leading_zeros()) as usize);
-            work.charge(sort_work)?;
+            if vector { work.charge_vector(sort_work + values.len())?; } else { work.charge(sort_work)?; }
             let mut sorted = values.to_vec();
             sorted.sort_by(f64::total_cmp);
             let middle = sorted.len() / 2;
@@ -1690,6 +1734,7 @@ fn call(
         Function::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
         Function::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         Function::Stdev => {
+            if vector { work.charge_vector(values.len())?; }
             let mut mean = 0.0;
             let mut variance_sum = 0.0;
             for (index, value) in values.iter().enumerate() {
@@ -1699,7 +1744,7 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
+        Function::Collection(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
         | Function::RoundTo | Function::FloorTo | Function::CeilTo | Function::Clamp
         | Function::PercentChange | Function::PercentOf | Function::Choose | Function::Permutations
         | Function::Lerp | Function::MapRange => unreachable!(),

@@ -2073,6 +2073,7 @@ impl CalculationPadDialog {
                 if let Some(evaluation) = self.session.displayed_evaluation().filter(|value| Some(value.basis) == self.session.evaluation_basis()) {
                     if let Some(usage) = evaluation.usage {
                         usage_line(ui, "Work units", usage.work_units, crate::calculation_pad::MAX_WORK);
+                        usage_line(ui, "Vector component work", usage.vector_component_work, crate::calculation_pad::MAX_VECTOR_COMPONENT_WORK);
                         usage_line(ui, "Loop iterations", usage.loop_iterations, crate::calculation_pad::MAX_LOOP_ITERATIONS);
                     } else { ui.label(format!("Evaluation counters unavailable for this source (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
                 } else { ui.label(format!("Evaluation counters unavailable until current calculation completes (limits: {} work units, {} loop iterations).", crate::calculation_pad::MAX_WORK, crate::calculation_pad::MAX_LOOP_ITERATIONS)); }
