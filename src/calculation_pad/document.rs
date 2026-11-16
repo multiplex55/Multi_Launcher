@@ -269,11 +269,47 @@ pub const MAX_DOCUMENT_BYTES: usize = super::limits::STANDARD_BYTES;
 pub const MAX_SOURCE_LINES: usize = super::limits::STANDARD_LINES;
 const SLOT_BASE: usize = super::limits::SLOT_BASE;
 pub const MAX_EXPRESSION_BYTES: usize = 2048;
+pub(super) const MAX_VECTOR_EXPRESSION_BYTES: usize = 32 * 1024;
 pub const MAX_EXPRESSION_NESTING: usize = 32;
 pub const MAX_DEPENDENCIES: usize = 512;
 pub const MAX_DEPENDENCIES_PER_LINE: usize = 64;
 pub const MAX_NAME_BYTES: usize = 128;
 const MAX_PREPARED_EXPRESSION_BYTES: usize = MAX_EXPRESSION_BYTES * 4;
+
+// A vector literal may contain many independent scalar expressions. Keep the
+// ordinary limit on everything outside literals, including quoted names.
+pub(super) fn expression_size_limit(source: &str, internal_template: bool) -> usize {
+    let ordinary = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    let mut outside = 0usize;
+    let mut depth = 0usize;
+    let mut braced = false;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut has_literal = false;
+    for ch in source.chars() {
+        if depth == 0 { outside += ch.len_utf8(); }
+        if quoted {
+            if escaped { escaped = false; }
+            else if ch == '\\' { escaped = true; }
+            else if ch == '"' { quoted = false; }
+        } else if braced {
+            if ch == '}' { braced = false; }
+        } else {
+            match ch {
+                '"' => quoted = true,
+                '{' => braced = true,
+                '[' => { depth += 1; has_literal = true; }
+                ']' if depth > 0 => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    if has_literal && outside <= ordinary {
+        if internal_template { MAX_VECTOR_EXPRESSION_BYTES * 4 } else { MAX_VECTOR_EXPRESSION_BYTES }
+    } else {
+        ordinary
+    }
+}
 
 type CheckedExpression = FlatEx<f64, CheckedOperators>;
 type ModuloExpression = FlatEx<f64, ModuloOperators>;
@@ -1132,7 +1168,7 @@ fn prepare_line_internal(
             DiagnosticKind::InvalidExpression,
         );
     }
-    let expression_limit = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    let expression_limit = expression_size_limit(expression, internal_template);
     if expression.len() > expression_limit {
         return PreparedLine::invalid(
             source_range,
@@ -3033,7 +3069,7 @@ fn evaluate_prepared_expression(
             .as_ref()
             .ok_or_else(|| DiagnosticKind::Vector("unsupported vector expression".into()))?;
         let vector = vector.as_ref().map_err(Clone::clone)?;
-        return vector.evaluate(&quantity_bindings(line, values));
+        return vector.evaluate(&quantity_bindings(line, values), work);
     }
     let has_quantity_reference = line.references.iter().any(|reference| {
         reference
@@ -4300,7 +4336,8 @@ mod tests {
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();
-        for line in 0..14 {
+        assert!(matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().is_empty()));
+        for line in 1..14 {
             if line == 10 || line == 12 {
                 continue;
             }
@@ -4311,7 +4348,7 @@ mod tests {
             );
         }
         assert_eq!(scalar(&evaluation, 14), 7.0);
-        let too_long = format!("[{}]", vec!["1"; 129].join(","));
+        let too_long = format!("[{}]", vec!["1"; 1025].join(","));
         let document = CalculationDocument::new(too_long);
         assert!(matches!(
             document.evaluate().lines[0].outcome,
@@ -4319,15 +4356,15 @@ mod tests {
         ));
         let source = format!(
             "v = [{}]\n{}",
-            vec!["1"; 128].join(","),
-            vec!["v"; 10].join(" * ")
+            vec!["1"; 1024].join(","),
+            vec!["v"; 30].join(" * ")
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();
         assert!(
-            matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 128)
+            matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 1024)
         );
-        assert!(matches!(evaluation.lines[1].outcome, LineOutcome::Error(_)));
+        assert!(matches!(&evaluation.lines[1].outcome, LineOutcome::Error(diagnostic) if diagnostic.kind == DiagnosticKind::WorkLimit), "{:?}", evaluation.lines[1].outcome);
 
         let document =
             CalculationDocument::new("v = [1, 2]\nv * 6 % 4\nv * 6 mod 4\nv * 6 min 4\n");
@@ -4339,6 +4376,38 @@ mod tests {
                 line + 1
             );
         }
+    }
+
+    #[test]
+    fn vector_empty_and_capacity_boundaries_share_the_document_budget() {
+        let source = "[]\n[] + []\n[] * 2\ndot([], [])\n[] / 0\n[] % []\n[1]\n";
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [0, 1, 2] {
+            assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().is_empty()));
+        }
+        assert_eq!(scalar(&evaluation, 3), 0.0);
+        assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(matches!(&evaluation.lines[6].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components() == [1.0]));
+    }
+
+    #[test]
+    fn vector_large_literals_have_bounded_expression_admission() {
+        let literal = format!("[{}]", vec!["1.2345678901234567e-100"; 1024].join(", "));
+        assert!(literal.len() > MAX_EXPRESSION_BYTES);
+        let direct_document = CalculationDocument::new(literal.clone());
+        let direct = direct_document.evaluate();
+        assert!(matches!(&direct.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024));
+        let source = format!("fn sample() = (\n    {literal}\n)\nsample()\n");
+        let function_document = CalculationDocument::new(source);
+        let function = function_document.evaluate();
+        assert!(matches!(&function.lines[3].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024), "{:?}", function.lines[3].outcome);
+        let scalar = format!("1 + {}", "1".repeat(MAX_EXPRESSION_BYTES));
+        assert!(matches!(CalculationDocument::new(scalar).evaluate().lines[0].outcome, LineOutcome::Error(_)));
+        assert_eq!(super::expression_size_limit(&format!("\"[\" + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+        assert_eq!(super::expression_size_limit(&format!("{{name[0]}} + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+        assert_eq!(super::expression_size_limit(&format!("[] + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
     }
 
     #[test]

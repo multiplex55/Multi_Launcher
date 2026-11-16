@@ -2081,7 +2081,7 @@ impl CalculationPadDialog {
                 ui.small(format!("Undo history: {} bytes / {} entries", crate::calculation_pad::MAX_UNDO_BYTES, crate::calculation_pad::MAX_UNDO_ENTRIES));
                 ui.small(format!("Expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
                 ui.small(format!("Identifiers: {} per document / {} per expression; name: {} bytes", crate::calculation_pad::MAX_DEPENDENCIES, crate::calculation_pad::MAX_DEPENDENCIES_PER_LINE, crate::calculation_pad::MAX_NAME_BYTES));
-                ui.small(format!("Range / sequence elements: {}; vector components: {}; vector work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_WORK));
+                ui.small(format!("Range / sequence elements: {}; vector components: {}; vector parse work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_PARSE_WORK));
                 ui.small(format!("Loop nesting: {}; control block nesting: {}", crate::calculation_pad::MAX_LOOP_DEPTH, crate::calculation_pad::MAX_BLOCK_DEPTH));
                 ui.small(format!("Exact number: {} bits / {} decimal places", crate::calculation_pad::MAX_EXACT_BITS, crate::calculation_pad::MAX_EXACT_SCALE));
                 ui.small("Functions: 64 definitions / 16 parameters / 16 call depth");

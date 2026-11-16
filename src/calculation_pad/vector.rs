@@ -1,21 +1,20 @@
 //! Bounded vector expressions composed with the ordinary scalar evaluator.
 use super::document::{
-    self, CalculationValue, DiagnosticKind, MAX_EXPRESSION_NESTING, PreparedScalar,
+    self, CalculationValue, DiagnosticKind, MAX_EXPRESSION_BYTES, MAX_EXPRESSION_NESTING,
+    PreparedScalar, script::WorkBudget,
 };
 use crate::common::number_format::format_number;
 use std::collections::{HashMap, HashSet};
 
-pub const MAX_VECTOR_COMPONENTS: usize = 128;
-pub(crate) const MAX_VECTOR_WORK: usize = 1024;
+pub const MAX_VECTOR_COMPONENTS: usize = 1024;
+pub(crate) const MAX_VECTOR_PARSE_WORK: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalculationVector(Vec<f64>);
 
 impl CalculationVector {
     fn new(values: Vec<f64>) -> Result<Self, DiagnosticKind> {
-        if values.is_empty() || values.len() > MAX_VECTOR_COMPONENTS {
-            return Err(error("vectors must contain 1 to 128 components"));
-        }
+        check_component_count(values.len())?;
         if values.iter().any(|value| !value.is_finite()) {
             return Err(error("vector components must be finite"));
         }
@@ -36,6 +35,13 @@ impl CalculationVector {
 
 fn error(message: &str) -> DiagnosticKind {
     DiagnosticKind::Vector(message.to_owned())
+}
+
+fn check_component_count(count: usize) -> Result<(), DiagnosticKind> {
+    if count > MAX_VECTOR_COMPONENTS {
+        return Err(error("vectors may contain at most 1024 components"));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -127,9 +133,9 @@ impl VectorExpression {
     pub(super) fn evaluate(
         &self,
         values: &HashMap<String, CalculationValue>,
+        work: &mut WorkBudget,
     ) -> Result<CalculationValue, DiagnosticKind> {
-        let mut work = 0;
-        self.root.evaluate(values, &mut work)
+        self.root.evaluate(values, work)
     }
 }
 
@@ -137,7 +143,7 @@ fn bump(work: &mut usize, amount: usize) -> Result<(), DiagnosticKind> {
     *work = work
         .checked_add(amount)
         .ok_or_else(|| error("vector expression exceeds its work limit"))?;
-    if *work > MAX_VECTOR_WORK {
+    if *work > MAX_VECTOR_PARSE_WORK {
         return Err(error("vector expression exceeds its work limit"));
     }
     Ok(())
@@ -180,10 +186,7 @@ fn parse(
             return Err(error("invalid vector literal"));
         }
         let inner = &source[1..source.len() - 1];
-        let parts = split_arguments(inner)?;
-        if parts.is_empty() || parts.len() > MAX_VECTOR_COMPONENTS {
-            return Err(error("vectors must contain 1 to 128 components"));
-        }
+        let parts = split_arguments(inner, true)?;
         bump(work, parts.len())?;
         let mut components = Vec::with_capacity(parts.len());
         for part in parts {
@@ -200,7 +203,7 @@ fn parse(
         });
     }
     if let Some((name, body)) = product_call(source) {
-        let arguments = split_arguments(body)?;
+        let arguments = split_arguments(body, false)?;
         if arguments.len() != 2 {
             return Err(error("dot and cross require exactly two vectors"));
         }
@@ -215,6 +218,9 @@ fn parse(
             kind: Kind::Product(op, Box::new(left), Box::new(right)),
             scalar: None,
         });
+    }
+    if source.len() > MAX_EXPRESSION_BYTES {
+        return Err(DiagnosticKind::ExpressionTooLong { max_bytes: MAX_EXPRESSION_BYTES });
     }
     let scalar = document::prepare_vector_scalar(source, declared)?;
     let bare = if scalar.var_names().len() == 1 {
@@ -235,6 +241,25 @@ fn parse(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn vector_work_uses_aggregate_budget_and_cancellation() {
+        let expression = prepare("[1, 2, 3]", &HashSet::new()).unwrap();
+        let aggregate = Arc::new(document::script::AggregateWork::new(2));
+        let canceled = Arc::new(AtomicBool::new(false));
+        let mut work = WorkBudget::with_analysis(canceled.clone(), aggregate.clone());
+        assert!(matches!(expression.evaluate(&HashMap::new(), &mut work), Err(DiagnosticKind::WorkLimit)));
+        assert!(aggregate.exhausted());
+        canceled.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut work = WorkBudget::with_cancellation(canceled);
+        assert!(matches!(expression.evaluate(&HashMap::new(), &mut work), Err(DiagnosticKind::Canceled)));
+    }
+}
+
 fn product_call(source: &str) -> Option<(&str, &str)> {
     let open = source.find('(')?;
     let name = source[..open].trim();
@@ -246,7 +271,7 @@ fn product_call(source: &str) -> Option<(&str, &str)> {
     Some((name, &source[open + 1..source.len() - 1]))
 }
 
-fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
+fn split_arguments(source: &str, vector_literal: bool) -> Result<Vec<&str>, DiagnosticKind> {
     if source.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -276,6 +301,7 @@ fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
             }
             ',' if stack.is_empty() => {
                 result.push(&source[start..index]);
+                if vector_literal { check_component_count(result.len() + 1)?; }
                 start = index + 1;
             }
             _ => {}
@@ -414,9 +440,9 @@ impl Node {
     fn evaluate(
         &self,
         values: &HashMap<String, CalculationValue>,
-        work: &mut usize,
+        work: &mut WorkBudget,
     ) -> Result<CalculationValue, DiagnosticKind> {
-        bump(work, 1)?;
+        work.charge(1)?;
         if let Some(scalar) = &self.scalar
             && scalar
                 .var_names()
@@ -430,12 +456,13 @@ impl Node {
                 if let Some(CalculationValue::Vector(vector)) =
                     bare.as_ref().and_then(|name| values.get(name))
                 {
+                    work.charge(vector.0.len())?;
                     return Ok(CalculationValue::Vector(vector.clone()));
                 }
                 scalar_value(scalar, values).map(CalculationValue::Scalar)
             }
             Kind::Literal(components) => {
-                bump(work, components.len())?;
+                work.charge(components.len())?;
                 let mut result = Vec::with_capacity(components.len());
                 for component in components {
                     match component.evaluate(values, work)? {
@@ -486,12 +513,12 @@ fn apply(
     op: Op,
     left: CalculationValue,
     right: CalculationValue,
-    work: &mut usize,
+    work: &mut WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     use CalculationValue::{Scalar, Vector};
     match (op, left, right) {
         (Op::Multiply, Scalar(a), Vector(b)) | (Op::Multiply, Vector(b), Scalar(a)) => {
-            bump(work, b.0.len())?;
+            work.charge(b.0.len())?;
             Ok(Vector(CalculationVector::new(
                 b.0.iter()
                     .map(|v| checked(v * a))
@@ -502,7 +529,7 @@ fn apply(
             if b == 0.0 {
                 return Err(DiagnosticKind::InvalidArithmetic);
             }
-            bump(work, a.0.len())?;
+            work.charge(a.0.len())?;
             Ok(Vector(CalculationVector::new(
                 a.0.iter()
                     .map(|v| checked(v / b))
@@ -513,7 +540,10 @@ fn apply(
             if a.0.len() != b.0.len() {
                 return Err(error("vector dimensions must match"));
             }
-            bump(work, a.0.len())?;
+            if matches!(op, Op::Unsupported) {
+                return Err(error("invalid vector operation"));
+            }
+            work.charge(a.0.len())?;
             if matches!(op, Op::Cross) {
                 if a.0.len() != 3 {
                     return Err(error("cross product requires three-component vectors"));

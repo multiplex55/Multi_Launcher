@@ -335,7 +335,8 @@ pub(super) fn declaration(source: &str) -> Option<Result<(DeclarationHeader, &st
         if find_assignment_delimiter(body).is_some() {
             return Err(error("function body must be an expression without assignments"));
         }
-        if body.len() > MAX_EXPRESSION_BYTES { return Err(DiagnosticKind::ExpressionTooLong { max_bytes: MAX_EXPRESSION_BYTES }); }
+        let limit = expression_size_limit(body, false);
+        if body.len() > limit { return Err(DiagnosticKind::ExpressionTooLong { max_bytes: limit }); }
         Ok((header, body))
     }))
 }
