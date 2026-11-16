@@ -37,6 +37,8 @@ pub(super) struct SensitivityActions {
     pub close: bool,
     pub viewport: Option<egui::ViewportId>,
     pub popup_anchors: Vec<(egui::Id, egui::LayerId)>,
+    #[cfg(test)]
+    pub generate_control: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
 #[derive(Default)]
@@ -49,6 +51,8 @@ pub(crate) struct CalculationSensitivityDialog {
     pub(super) feedback: Option<String>,
     popup_anchors: Vec<(egui::Id, egui::LayerId)>,
     popup_viewport: Option<egui::ViewportId>,
+    #[cfg(test)]
+    pub(super) generate_control: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
 impl CalculationSensitivityDialog {
@@ -61,6 +65,8 @@ impl CalculationSensitivityDialog {
         if let Some(draft) = &actions.draft { self.output_draft.clone_from(draft); }
         self.popup_anchors.clone_from(&actions.popup_anchors);
         self.popup_viewport = actions.viewport;
+        #[cfg(test)]
+        { self.generate_control = actions.generate_control; }
     }
     pub(super) fn owned_popup_layer(&self, ctx: &egui::Context, base: egui::LayerId) -> Option<egui::LayerId> {
         if self.popup_viewport != Some(ctx.viewport_id()) { return None; }
@@ -125,7 +131,10 @@ impl CalculationSensitivityDialog {
                 actions.popup_anchors.push((response.response.id, response.response.layer_id));
                 let current = runtime.table.as_ref().filter(|table| table.basis.definition == current_settings.definition && table.basis.input_name == current_settings.input_name);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(selected.is_some(), egui::Button::new("Generate")).clicked() { actions.command = Some(SensitivityCommand::Generate(current_settings.clone())); }
+                    let generate = ui.add_enabled(selected.is_some(), egui::Button::new("Generate"));
+                    #[cfg(test)]
+                    { actions.generate_control = Some((generate.rect, ui.clip_rect(), generate.enabled())); }
+                    if generate.clicked() { actions.command = Some(SensitivityCommand::Generate(current_settings.clone())); }
                     if let Some(basis) = &runtime.active && matches!(runtime.status, SensitivityStatus::Pending { .. }) && ui.button("Cancel").clicked() { actions.command = Some(SensitivityCommand::Cancel(basis.clone())); }
                     for (label, format) in [("Copy Table", TableExport::Table), ("Copy CSV", TableExport::Csv), ("Copy Markdown", TableExport::Markdown)] {
                         if ui.add_enabled(current.is_some(), egui::Button::new(label)).clicked() && let Some(table) = current { actions.command = Some(SensitivityCommand::Copy(table.basis.clone(), format)); }

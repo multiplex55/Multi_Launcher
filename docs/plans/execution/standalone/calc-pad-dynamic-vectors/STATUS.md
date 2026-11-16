@@ -22,8 +22,8 @@ M0-A passed. The only later commit on the predecessor branch archived documents 
 | M3-B | Accepted and pushed at `e680b1886` | C1, C2 |
 | M4-A | Accepted and pushed at `ad689dbbc` | U1 |
 | M4-B | Accepted and pushed at `8e09a6e01` | U2, U3 |
-| M5-A | Accepted | V6, C1, C2, U1–U3 |
-| M5-B | Next | Integrated verification and delivery |
+| M5-A | Accepted and pushed at `a720d26bf` | V6, C1, C2, U1–U3 |
+| M5-B | Automated verification accepted. Native checks in progress. | Integrated verification and delivery |
 
 Automated work uses targeted library Nextest selectors and the `fast-dev` profile. Build and cached execution receipts go under `target/calc-pad-dynamic-vectors-evidence`.
 
@@ -80,3 +80,9 @@ Library compilation exited 0 in 207.39 owned seconds with cleanup and output dra
 The in-app catalog includes all three exact requested scripts, a full-capacity formula helper and deliberate boundary/failure examples. The linked guide and root README describe collections, current named charts, the Sensitivity Tables companion, usage visibility and persisted format compatibility.
 
 Library compilation exited 0 in 183.15 owned seconds with cleanup and drain verified. Four listed Nextest cases passed in 1.49 owned seconds, including execution of the complete example catalog and explicit assertions for the named results of all three requested scripts.
+
+## M5-B
+
+Independent cumulative review identified inclusive thin-bar raster work accounting, X tick alignment under the bar inset, the need to scroll through long Y selectors, and companion-lifecycle and usage evidence gaps. The corrections address all findings. One scoped `cargo clippy -p multi_launcher --lib --bin multi_launcher --no-deps --profile fast-dev --locked` pass exited 0 in 117.83 owned seconds. It reported 121 library and three binary warnings. The new large Sensitivity command warning was corrected by boxing its retained action. The existing application and vendored warnings were outside this correction.
+
+The corrected source library build exited 0 in 187.37 owned seconds. The consolidated run passed 69 cases, then stopped when the new hosted test captured the root viewport before child bootstrap. The fixture now waits for a native child owner and tests actual retained Tools open and Generate, table retention after close and reopen, and parent retirement. The 89.97-second test-only rebuild and the focused rerun passed the corrected test and two previously unrun settings checks. All 72 selected acceptance cases are accounted for. Cleanup and output drain were verified throughout.

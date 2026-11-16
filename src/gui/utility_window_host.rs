@@ -3138,7 +3138,7 @@ pub(super) type CalculationSensitivityWindowHost =
     UtilityWindowHost<super::calculation_sensitivity_dialog::CalculationSensitivityDialog>;
 pub(super) enum CalculationSensitivityHostCommand {
     Closed,
-    Apply(super::calculation_sensitivity_dialog::SensitivityActions),
+    Apply(Box<super::calculation_sensitivity_dialog::SensitivityActions>),
 }
 impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationSensitivityDialog {
     const KEY: &'static str = "calculation-pad-sensitivity";
@@ -3226,7 +3226,7 @@ impl HostedUtilityDialog for super::calculation_sensitivity_dialog::CalculationS
         if actions.close {
             vec![CalculationSensitivityHostCommand::Closed]
         } else {
-            vec![CalculationSensitivityHostCommand::Apply(actions)]
+            vec![CalculationSensitivityHostCommand::Apply(Box::new(actions))]
         }
     }
     #[cfg(test)]

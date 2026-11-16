@@ -791,7 +791,6 @@ impl CalculationPadSession {
         self.sensitivity_failure = None;
         self.sensitivity_canceled = false;
     }
-    pub(crate) fn invalidate_sensitivity(&mut self) { self.retire_sensitivity(); }
 
     fn invalidate_stale_sensitivity(&mut self) {
         if self.sensitivity_active.as_ref().is_some_and(|basis| !self.sensitivity_matches(basis)) { self.retire_sensitivity(); }

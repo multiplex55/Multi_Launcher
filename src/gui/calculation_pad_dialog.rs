@@ -280,6 +280,8 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_dependency_open: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
+    test_sensitivity_open: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
@@ -813,6 +815,8 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_dependency_open: None,
             #[cfg(test)]
+            test_sensitivity_open: None,
+            #[cfg(test)]
             test_inspector_reopen: None,
             #[cfg(test)]
             test_window_rect: None,
@@ -1211,6 +1215,7 @@ impl CalculationPadDialog {
             self.test_config_menu = None;
             self.test_config_groups.clear();
             self.test_dependency_open = None;
+            self.test_sensitivity_open = None;
             self.test_inspector_reopen = None;
             self.test_editor_id = None;
             self.test_editor_rect = None;
@@ -1930,7 +1935,10 @@ impl CalculationPadDialog {
                         ui.close();
                     }
                     if ui.button("Charts…").clicked() { effects.open_charts = true; ui.close(); }
-                    if ui.button("Sensitivity Tables…").clicked() { effects.open_sensitivity = true; ui.close(); }
+                    let sensitivity = ui.button("Sensitivity Tables…");
+                    #[cfg(test)]
+                    { self.test_sensitivity_open = Some((sensitivity.rect, ui.clip_rect(), sensitivity.enabled())); }
+                    if sensitivity.clicked() { effects.open_sensitivity = true; ui.close(); }
                     let inspector = ui.button("Programmer Inspector…");
                     #[cfg(test)]
                     { self.test_inspector_reopen = Some((inspector.rect, ui.clip_rect(), inspector.enabled())); }
@@ -2103,7 +2111,7 @@ impl CalculationPadDialog {
                     ui.small(format!("Absolute source admission: {} bytes / {} rows", crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES, crate::calculation_pad::MAX_ADMITTED_SOURCE_LINES));
                     ui.small(format!("Saved document / recovery envelopes: {} / {} bytes", crate::calculation_pad::MAX_STORED_DOCUMENT_BYTES, crate::calculation_pad::MAX_STORED_RECOVERY_BYTES));
                     ui.small(format!("Undo history: {} bytes / {} entries", crate::calculation_pad::MAX_UNDO_BYTES, crate::calculation_pad::MAX_UNDO_ENTRIES));
-                    ui.small(format!("Expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
+                    ui.small(format!("Ordinary expression: {} bytes; vector literal expression: {} bytes; nesting: {}", crate::calculation_pad::MAX_EXPRESSION_BYTES, crate::calculation_pad::MAX_VECTOR_EXPRESSION_BYTES, crate::calculation_pad::MAX_EXPRESSION_NESTING));
                     ui.small(format!("Identifiers: {} per document / {} per expression; name: {} bytes", crate::calculation_pad::MAX_DEPENDENCIES, crate::calculation_pad::MAX_DEPENDENCIES_PER_LINE, crate::calculation_pad::MAX_NAME_BYTES));
                     ui.small(format!("Range / sequence elements: {}; vector components: {}; vector parse work: {}", crate::calculation_pad::MAX_SEQUENCE_ELEMENTS, crate::calculation_pad::MAX_VECTOR_COMPONENTS, crate::calculation_pad::MAX_VECTOR_PARSE_WORK));
                     ui.small(format!("Loop nesting: {}; control block nesting: {}", crate::calculation_pad::MAX_LOOP_DEPTH, crate::calculation_pad::MAX_BLOCK_DEPTH));
@@ -5811,6 +5819,24 @@ impl CalculationPadDialog {
 
     #[cfg(test)]
     pub(crate) fn test_dependency_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_dependency_open }
+
+    #[cfg(test)]
+    pub(crate) fn test_sensitivity_open(&self) -> Option<(egui::Rect, egui::Rect, bool)> { self.test_sensitivity_open }
+
+    #[cfg(test)]
+    pub(crate) fn test_line_id(&self, line: usize) -> Option<LineId> { self.session.line_id(line) }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_sensitivity(&mut self, settings: crate::calculation_pad::SensitivitySettings) {
+        let mut view = self.session.view_metadata().cloned().unwrap();
+        view.sensitivity = Some(settings);
+        self.session.set_view_metadata(view).unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_sensitivity_table(&self) -> Option<std::sync::Arc<crate::calculation_pad::SensitivityTable>> {
+        self.session.sensitivity_table()
+    }
 
     #[cfg(test)]
     pub(crate) fn test_inspector_reopen(&self) -> Option<(egui::Rect, egui::Rect, bool)> {

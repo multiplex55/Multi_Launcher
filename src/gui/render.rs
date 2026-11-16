@@ -14517,6 +14517,7 @@ impl LauncherApp {
                 match command {
                     CalculationSensitivityHostCommand::Closed => { self.calculation_sensitivity_dialog.close(); self.panel_stack.retain(|panel| *panel != super::Panel::CalculationSensitivityDialog); }
                     CalculationSensitivityHostCommand::Apply(actions) => {
+                        let actions = *actions;
                         let runtime = self.calculation_pad_dialog.sensitivity_runtime(false);
                         if super::calculation_sensitivity_dialog::actions_current(&actions, &runtime)
                             && !self.confirm_modal.is_open() && !self.action_sheet.is_open() {
@@ -23072,6 +23073,70 @@ mod tests {
         assert!(app.query.contains('λ'));
         assert!(app.calculation_pad_dialog.open && app.calculation_dependency_dialog.open);
         workers.join_all();
+    }
+
+    #[test]
+    fn native_pad_sensitivity_companion_reopens_current_table_and_retires_with_parent() {
+        #[inline(never)]
+        fn boxed_app(ctx: &egui::Context) -> (crate::performance::workloads::IsolatedWorkspace, Box<LauncherApp>) {
+            let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+            let app = Box::new(root_list_app_at(ctx, Vec::new(), workspace.root()));
+            (workspace, app)
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        ctx.set_request_repaint_callback(move |info| { let _ = wake_tx.send(info.viewport_id); });
+        let (_workspace, mut app) = boxed_app(&ctx);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("x = 1\ny = x + 1");
+        let input = app.calculation_pad_dialog.test_line_id(0).unwrap();
+        app.calculation_pad_dialog.test_set_sensitivity(crate::calculation_pad::SensitivitySettings {
+            input_name: "x".into(), definition: crate::calculation_pad::SensitivityDefinition {
+                input, start: "1".into(), end: "3".into(), sampling: crate::calculation_pad::Sampling::Count(3), outputs: vec!["y".into()],
+            },
+        });
+        app.calculation_pad_dialog.test_apply_save_as("hosted sensitivity");
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        app.request_launcher_visibility(false);
+        let pad = egui::ViewportId::from_hash_of("calculation_pad_native_viewport");
+        for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false); }
+        open_pad_config_menu(&ctx, &mut app, pad, Some("Tools"));
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_sensitivity_open().unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, pad, tool_dialog_pointer_events(button, pressed), false, false); }
+        assert!(app.calculation_sensitivity_dialog.open && app.calculation_sensitivity_host.is_popped_out());
+        for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false); }
+        let child = app.calculation_sensitivity_host.owner_viewport();
+        assert_ne!(child, egui::ViewportId::ROOT, "the sensitivity native viewport must finish bootstrapping");
+        for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false); }
+        let (generate, clip, enabled) = app.calculation_sensitivity_dialog.generate_control.unwrap();
+        assert!(enabled && clip.contains_rect(generate), "Generate control {generate:?}, clip {clip:?}, enabled {enabled}");
+        for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, child, tool_dialog_pointer_events(generate, pressed), false, false); }
+        for _ in 0..20 {
+            run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false);
+            if app.calculation_pad_dialog.test_sensitivity_table().is_some() { break; }
+            let _ = wake_rx.recv_timeout(std::time::Duration::from_secs(2));
+        }
+        let table = app.calculation_pad_dialog.test_sensitivity_table().expect("hosted Generate completes");
+        assert_eq!(table.rows.len(), 3);
+        app.calculation_sensitivity_dialog.request_close();
+        for _ in 0..3 { run_host_viewport_frame(&ctx, &mut app, child, Vec::new(), false, false); }
+        assert!(!app.calculation_sensitivity_dialog.open);
+        for _ in 0..3 { run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false); }
+        open_pad_config_menu(&ctx, &mut app, pad, Some("Tools"));
+        let (button, clip, enabled) = app.calculation_pad_dialog.test_sensitivity_open().unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] { run_host_viewport_frame(&ctx, &mut app, pad, tool_dialog_pointer_events(button, pressed), false, false); }
+        assert!(app.calculation_sensitivity_dialog.open);
+        assert!(std::sync::Arc::ptr_eq(&table, &app.calculation_pad_dialog.test_sensitivity_table().unwrap()));
+        app.calculation_pad_dialog.request_close();
+        for _ in 0..4 { run_host_viewport_frame(&ctx, &mut app, pad, Vec::new(), false, false); }
+        assert!(!app.calculation_pad_dialog.open);
+        assert!(!app.calculation_sensitivity_dialog.open);
     }
 
     #[test]

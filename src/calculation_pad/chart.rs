@@ -525,6 +525,27 @@ mod tests {
     }
 
     #[test]
+    fn chart_raster_work_counts_inclusive_thin_rectangles() {
+        let scene = ChartScene {
+            width: 2048, height: 2048,
+            primitives: vec![ScenePrimitive::Rect { min: [1.1, 0.0], max: [1.2, 2047.0], color: COLORS[0] }; 7000],
+            hits: Vec::new(), approximate: false, coordinate_collisions: false,
+        };
+        assert!(scene.rasterize().unwrap_err().contains("work limit"));
+    }
+
+    #[test]
+    fn chart_bar_ticks_include_the_group_inset() {
+        let dataset = ChartDataset::from_vectors(Some(&[0.0, 100.0]), &[("series", &[2.0, 4.0])]).unwrap();
+        let scene = dataset.scene(ChartKind::Bar, ChartView::default(), 640, 400).unwrap().unwrap();
+        let plot_width = 640.0_f32 - 20.0 - 66.0;
+        let inset = f64::from(32.0_f32 / (2.0 * plot_width));
+        let expected = visible_tick(0.0, 100.0, 1.0 - 2.0 * inset, 0.0, 1.0);
+        assert!(scene.primitives.iter().any(|primitive| matches!(primitive, ScenePrimitive::Text { text, .. } if text == &expected)));
+        assert_ne!(expected, visible_tick(0.0, 100.0, 1.0, 0.0, 1.0));
+    }
+
+    #[test]
     fn chart_sensitivity_capacity_stays_at_1000_samples() {
         let full = table((0..1000).map(|index| row(index, Ok(CalculationValue::Scalar(1.0)))).collect());
         assert_eq!(ChartDataset::from_sensitivity(&full, &[0]).unwrap().series[0].points.len(), 1000);
@@ -807,8 +828,13 @@ impl ChartScene {
                     steps.saturating_mul((width.ceil().max(1.0) as u64 + 2).saturating_pow(2))
                 }
                 ScenePrimitive::Rect { min, max, .. } if in_image(min) && in_image(max) => {
-                    ((max[0] - min[0]).abs().ceil() as u64)
-                        .saturating_mul((max[1] - min[1]).abs().ceil() as u64)
+                    // Match draw_rect_fill's inclusive, clipped pixel bounds.
+                    let span = |axis: usize, limit: u32| {
+                        let first = min[axis].min(max[axis]).floor().max(0.0) as i64;
+                        let last = min[axis].max(max[axis]).ceil().min((limit - 1) as f32) as i64;
+                        (last - first + 1).max(0) as u64
+                    };
+                    span(0, self.width).saturating_mul(span(1, self.height))
                 }
                 ScenePrimitive::Circle { center, radius, .. }
                     if in_image(center)
@@ -1076,7 +1102,8 @@ impl ChartDataset {
                 && point[1] <= bounds[3]
         };
         let black = [45, 50, 58, 255];
-        let right_tick = visible_tick(xmin, xmax, checked.zoom_x, checked.pan_x, 1.0);
+        let x_zoom = checked.zoom_x * (1.0 - 2.0 * inset);
+        let right_tick = visible_tick(xmin, xmax, x_zoom, checked.pan_x, 1.0);
         let mut primitives = vec![
             ScenePrimitive::Line {
                 start: [bounds[0], bounds[3]],
@@ -1128,7 +1155,7 @@ impl ChartDataset {
             },
             ScenePrimitive::Text {
                 position: [bounds[0], bounds[3] + 4.0],
-                text: visible_tick(xmin, xmax, checked.zoom_x, checked.pan_x, 0.0),
+                text: visible_tick(xmin, xmax, x_zoom, checked.pan_x, 0.0),
                 color: black,
                 size: 11.0,
             },

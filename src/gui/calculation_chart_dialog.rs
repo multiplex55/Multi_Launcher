@@ -126,16 +126,19 @@ impl CalculationChartDialog {
                         #[cfg(test)] actions.controls.push(("x-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
                         let response = ui.menu_button("Y vectors", |ui| {
-                            for (reference, label) in &vectors {
-                                let mut selected = y.contains(reference);
-                                let response = ui.checkbox(&mut selected, label);
-                                #[cfg(test)] actions.controls.push((format!("y/{label}"), response.rect));
-                                if response.changed() { if selected && y.len() < 8 { y.push(reference.clone()); } else if !selected { y.retain(|value| value != reference); } }
-                            }
-                            for reference in y.clone().into_iter().filter(|reference| !vectors.iter().any(|row| &row.0 == reference)) {
-                                let mut selected = true;
-                                if ui.checkbox(&mut selected, format!("{} (unavailable)", reference_label(&reference))).changed() && !selected { y.retain(|value| value != &reference); }
-                            }
+                            let _scroll = egui::ScrollArea::vertical().id_salt("chart-y-sources").max_height(240.0).show(ui, |ui| {
+                                for (reference, label) in &vectors {
+                                    let mut selected = y.contains(reference);
+                                    let response = ui.checkbox(&mut selected, label);
+                                    #[cfg(test)] actions.controls.push((format!("y/{label}"), response.rect));
+                                    if response.changed() { if selected && y.len() < 8 { y.push(reference.clone()); } else if !selected { y.retain(|value| value != reference); } }
+                                }
+                                for reference in y.clone().into_iter().filter(|reference| !vectors.iter().any(|row| &row.0 == reference)) {
+                                    let mut selected = true;
+                                    if ui.checkbox(&mut selected, format!("{} (unavailable)", reference_label(&reference))).changed() && !selected { y.retain(|value| value != &reference); }
+                                }
+                            });
+                            #[cfg(test)] actions.controls.push(("y-scroll".into(), _scroll.inner_rect));
                         });
                         #[cfg(test)] actions.controls.push(("y-menu".into(), response.response.rect));
                         actions.popup_anchors.push((response.response.id, response.response.layer_id));
@@ -376,6 +379,36 @@ mod tests {
         egui::Popup::open_id(&ctx, egui::Id::new("unrelated-popup"));
         let base = dialog.popup_anchors[0].1;
         assert!(dialog.owned_popup_layer(&ctx, base).is_none());
+    }
+
+    #[test]
+    fn chart_y_menu_scrolls_to_tail_physical_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        let source = (0..40).map(|index| format!("v{index} = [1]")).collect::<Vec<_>>().join("\n");
+        session.replace_source(source).unwrap();
+        session.evaluation();
+        let ids = session.line_ids().unwrap().to_vec();
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v0".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() }), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default();
+        let mut dialog = CalculationChartDialog::default();
+        dialog.open();
+        let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        let menu = actions.controls.iter().find(|(name, _)| name == "y-menu").unwrap().1.center();
+        chart_click(&ctx, &mut dialog, &mut runtime, menu);
+        for _ in 0..12 {
+            actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+            let scroll = actions.controls.iter().find(|(name, _)| name == "y-scroll").unwrap().1;
+            let tail = actions.controls.iter().find(|(name, _)| name == "y/r40 · v39 (1 values)").unwrap().1;
+            if scroll.contains_rect(tail) {
+                chart_click(&ctx, &mut dialog, &mut runtime, tail.center());
+                assert!(matches!(&runtime.definition.as_ref().unwrap().source, ChartSource::Vectors { y, .. } if y.contains(&ChartVectorReference::Physical(ids[39]))));
+                return;
+            }
+            chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::PointerMoved(scroll.center()), egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -800.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move }]);
+        }
+        panic!("last physical vector did not become visible in the Y menu");
     }
 
     #[test]
