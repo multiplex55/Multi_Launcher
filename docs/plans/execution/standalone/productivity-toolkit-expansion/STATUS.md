@@ -22,7 +22,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M3-C | complete, with interactive smoke pending |
 | M4-A | complete |
 | M4-B1 | complete |
-| M4-B2, M4-B3, M4-C | pending |
+| M4-B2A | complete |
+| M4-B2B, M4-B3, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -136,3 +137,16 @@ cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P prod
 M4-A was pushed at 2b4e3398525ea0bf3dee21eef0d6148290327ad0. M4-B is split into the persisted model, shared rendering, and runtime reference/rename integration. The typed additive chart options use finite numeric admission, stable monotonic reference-line IDs, and styles keyed to typed series identities. Default options are absent from serialized legacy charts and retain the previous configuration. Rendering and runtime option behavior are the next two parts.
 
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E with test(chart_options_roundtrip_with_legacy_defaults_and_reject_invalid_wires) | test(chart_reference_versions_preserve_physical_rows_and_validate_named_wire) | test(chart_bar_label_admission_matches_vector_capacity) | test(chart_definition_roundtrip_and_rename_history_keeps_independent_selection) | test(named_chart_references_follow_rename_history_and_independent_edits) | test(legacy_recovery_defaults_options_and_future_record_is_preserved) passed 6 of 6. Independent review found no substantive model or compatibility issue. Staged diff whitespace verification passed.
+
+
+## M4-B2A axes in the shared scene
+
+M4-B1 was pushed at a69e133993004461e0d358ba1920a2bc301b27d6. One implementer could not start the original combined slice. A fresh implementer supplied and verified the axis transform foundation, then the orchestrator integrated it in the existing definition-aware scene. Fixed/log axes, bounded ticks and gridlines use the same scene for paint and raster. The legacy default path produces identical raster output. The exact fallback clips rare extreme crossings before conversion to display coordinates, with a 256-crossing cap per scene. Tick labels preserve adjacent values, omit colliding labels, and identify underflowed log positions as outside the representable range. Review noted custom Y-label fit as a presentation follow-up for B2B.
+
+Initial integrated frozen-source run passed 9 of 9 in 0.348s after a 3m29s build.
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(axis_transform_) | test(chart_options_route_log_axes_and_reject_nonpositive_data) | test(chart_options_clip_extreme_crossings_without_dropping_raw_points) | test(chart_options_bound_ticks_and_preserve_legacy_rendering) | test(vector_validation_and_extreme_transforms_stay_bounded) | test(chart_bar_ticks_include_the_group_inset) | test(chart_adapter_reports_length_errors_and_uses_only_current_snapshots) | test(chart_copy_uses_scene_and_surfaces_clipboard_failure)'
+
+Final focused rerun passed 5 of 5 in 0.223s after a 1m53s build.
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(chart_options_route_log_axes_and_reject_nonpositive_data) | test(chart_options_clip_extreme_crossings_without_dropping_raw_points) | test(chart_options_bound_ticks_and_preserve_legacy_rendering) | test(chart_options_ticks_distinguish_close_bounds_and_hide_overlapping_labels) | test(chart_options_zoom_does_not_label_underflowed_log_tick_zero)'
+
+Independent review confirmed the tick corrections. Existing test-build warnings remain in vendored and unrelated source. The shared appearance and reference-line work remains M4-B2B; runtime resolution, identities and freshness remain M4-B3.

@@ -4,8 +4,11 @@ use num_rational::BigRational;
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
+mod axes;
 pub(crate) mod distribution;
 pub(crate) mod options;
+
+use axes::{AxisTransform, PlotAxes};
 
 use super::document::CalculationValue;
 use super::input::{InputKind, SampleNumber};
@@ -433,6 +436,131 @@ mod tests {
             intended: SampleNumber::Exact(BigRational::from_integer(index.into())),
             cells: vec![cell],
         }
+    }
+
+    fn chart_definition_for(kind: ChartKind) -> ChartDefinition {
+        ChartDefinition {
+            source: ChartSource::Vectors {
+                x: None,
+                y: vec![ChartVectorReference::Named { name: "values".into() }],
+            },
+            kind,
+            x_label: String::new(),
+            y_label: String::new(),
+            hidden: Vec::new(),
+            bar_labels: Vec::new(),
+            options: options::ChartOptions::default(),
+        }
+    }
+
+    fn fixed_bounds(min: f64, max: f64) -> options::AxisBounds {
+        options::AxisBounds::Fixed {
+            min: options::FiniteValue::try_from(min).unwrap(),
+            max: options::FiniteValue::try_from(max).unwrap(),
+        }
+    }
+
+    #[test]
+    fn chart_options_route_log_axes_and_reject_nonpositive_data() {
+        let dataset = ChartDataset::from_vectors(Some(&[1.0, 10.0, 100.0]), &[("values", &[2.0, 4.0, 8.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Scatter);
+        definition.options.x.scale = options::AxisScale::Log10;
+        definition.options.x.bounds = fixed_bounds(1.0, 100.0);
+        definition.options.x.ticks = options::AxisTicks::LogDecades;
+        definition.options.grid = true;
+        let view = ChartView::default();
+        let scene = dataset.scene_for_definition(&definition, view, 640, 400).unwrap().unwrap();
+        assert_eq!(scene.hits.len(), 3);
+        assert_eq!(scene.hits[1].position[0], (scene.hits[0].position[0] + scene.hits[2].position[0]) * 0.5);
+        assert!(scene.primitives.iter().any(|primitive| matches!(primitive, ScenePrimitive::Text { text, .. } if text == "10")));
+        assert!(scene.rasterize().is_ok());
+
+        let indexed = ChartDataset::from_vectors(None, &[("values", &[1.0, 2.0, 3.0])]).unwrap();
+        assert!(indexed.scene_for_definition(&definition, view, 640, 400).unwrap_err().contains("positive"));
+        definition.kind = ChartKind::Bar;
+        definition.options.y.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition(&definition, view, 640, 400).unwrap_err().contains("zero baseline"));
+    }
+
+    #[test]
+    fn chart_options_clip_extreme_crossings_without_dropping_raw_points() {
+        let dataset = ChartDataset::from_vectors(Some(&[-1e308, 1e308]), &[("values", &[0.0, 1.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.x.bounds = fixed_bounds(0.0, 1e-310);
+        let scene = dataset
+            .scene_for_definition(&definition, ChartView::default(), 640, 400)
+            .unwrap().unwrap();
+        assert!(scene.hits.is_empty());
+        assert!(scene.primitives.iter().any(|primitive| matches!(
+            primitive, ScenePrimitive::Line { start, end, color, .. }
+                if *color == COLORS[0] && start[0] == 66.0 && end[0] == 620.0 && start[1] == end[1]
+        )));
+        assert_eq!(dataset.series[0].points[0].as_ref().unwrap().x, -1e308);
+        assert_eq!(dataset.series[0].points[1].as_ref().unwrap().x, 1e308);
+        assert!(scene.rasterize().is_ok());
+    }
+
+    #[test]
+    fn chart_options_ticks_distinguish_close_bounds_and_hide_overlapping_labels() {
+        let dataset = ChartDataset::from_vectors(Some(&[1.0, 1.0_f64.next_up()]), &[("values", &[2.0, 4.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.x.bounds = fixed_bounds(1.0, 1.0_f64.next_up());
+        let view = ChartView::default();
+        let scene = dataset.scene_for_definition(&definition, view, 640, 400).unwrap().unwrap();
+        for expected in ["1", "1.0000000000000002"] {
+            assert!(scene.primitives.iter().any(|primitive| matches!(
+                primitive, ScenePrimitive::Text { position, text, .. } if position[1] == 352.0 && text == expected
+            )));
+        }
+
+        definition.options.x.bounds = fixed_bounds(0.0, 20.0);
+        definition.options.x.ticks = options::AxisTicks::Density { count: 20 };
+        definition.options.grid = true;
+        let scene = dataset.scene_for_definition(&definition, view, 160, 400).unwrap().unwrap();
+        let labels = scene.primitives.iter().filter(|primitive| matches!(
+            primitive, ScenePrimitive::Text { position, .. } if position[1] == 352.0
+        )).count();
+        let vertical_grid = scene.primitives.iter().filter(|primitive| matches!(
+            primitive, ScenePrimitive::Line { start, end, color, .. }
+                if start[0] == end[0] && *color == [205, 211, 219, 255]
+        )).count();
+        assert!((1..20).contains(&labels));
+        assert_eq!(vertical_grid, 20);
+    }
+
+    #[test]
+    fn chart_options_zoom_does_not_label_underflowed_log_tick_zero() {
+        let dataset = ChartDataset::from_vectors(Some(&[1e-300, 1e300]), &[("values", &[2.0, 4.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.x.scale = options::AxisScale::Log10;
+        definition.options.x.bounds = fixed_bounds(1e-300, 1e300);
+        let mut view = ChartView::default();
+        view.set(0.5, 1.0, 0.0, 0.0).unwrap();
+        let scene = dataset.scene_for_definition(&definition, view, 640, 400).unwrap().unwrap();
+        assert_eq!(scene.hits.len(), 2);
+        let labels = scene.primitives.iter().filter_map(|primitive| match primitive {
+            ScenePrimitive::Text { position, text, .. } if position[1] == 352.0 => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(labels.contains(&"out of range"));
+        assert!(!labels.contains(&"0"));
+    }
+
+    #[test]
+    fn chart_options_bound_ticks_and_preserve_legacy_rendering() {
+        let dataset = ChartDataset::from_vectors(None, &[("values", &[2.0, 4.0, 8.0])]).unwrap();
+        let view = ChartView::default();
+        for kind in [ChartKind::Line, ChartKind::Bar, ChartKind::Scatter] {
+            let definition = chart_definition_for(kind);
+            let legacy = dataset.scene(kind, view, 640, 400).unwrap().unwrap();
+            let current = dataset.scene_for_definition(&definition, view, 640, 400).unwrap().unwrap();
+            assert_eq!(legacy.rasterize().unwrap(), current.rasterize().unwrap());
+        }
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.x.ticks = options::AxisTicks::LinearStep {
+            step: options::FiniteValue::try_from(f64::MIN_POSITIVE).unwrap(),
+        };
+        assert!(dataset.scene_for_definition(&definition, view, 640, 400).unwrap_err().contains("too small"));
     }
 
     #[test]
@@ -1012,23 +1140,60 @@ fn visible_tick(minimum: f64, maximum: f64, zoom: f64, pan: f64, edge: f64) -> S
     }
 }
 
-fn right_aligned_x(right: f32, left: f32, text: &str, size: f32) -> f32 {
+fn text_ink_right(text: &str, size: f32) -> f32 {
     static FONT: std::sync::OnceLock<Option<(ab_glyph::FontArc, eframe::egui::FontTweak)>> =
         std::sync::OnceLock::new();
-    let ink_right = FONT
+    FONT
         .get_or_init(raster::default_font_arc)
         .as_ref()
         .and_then(|(font, tweak)| raster::measure_text_ink_bounds(font, tweak, text, size))
         .map_or(text.chars().count() as f32 * size * 0.65, |bounds| {
             bounds.max.x
-        });
-    (right - ink_right).max(left)
+        })
+}
+
+fn right_aligned_x(right: f32, left: f32, text: &str, size: f32) -> f32 {
+    (right - text_ink_right(text, size)).max(left)
+}
+
+fn option_tick_label(value: f64, scale: options::AxisScale) -> String {
+    if !value.is_finite() || (scale == options::AxisScale::Log10 && value <= 0.0) {
+        "out of range".into()
+    } else if value != 0.0 && (value.abs() >= 1e6 || value.abs() < 1e-4) {
+        format!("{value:e}")
+    } else if value == 0.0 {
+        "0".into()
+    } else {
+        value.to_string()
+    }
 }
 
 impl ChartDataset {
     pub(crate) fn scene(
         &self,
         kind: ChartKind,
+        view: ChartView,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<ChartScene>, String> {
+        self.scene_inner(kind, None, view, width, height)
+    }
+
+    pub(crate) fn scene_for_definition(
+        &self,
+        definition: &ChartDefinition,
+        view: ChartView,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<ChartScene>, String> {
+        definition.options.validate(&definition.source)?;
+        self.scene_inner(definition.kind, Some(&definition.options), view, width, height)
+    }
+
+    fn scene_inner(
+        &self,
+        kind: ChartKind,
+        options: Option<&options::ChartOptions>,
         view: ChartView,
         width: u32,
         height: u32,
@@ -1088,8 +1253,39 @@ impl ChartDataset {
         }
         let plot_width = bounds[2] - bounds[0];
         let bar_width = (plot_width / expected.max(1) as f32 * 0.75 / visible.len() as f32).min(32.0);
-        let inset = if kind == ChartKind::Bar { f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width)) } else { 0.0 };
+        let default_axis = options::AxisOptions::default();
+        let custom_axes = options.filter(|options| options.x != default_axis || options.y != default_axis || options.grid);
+        let inset = if kind == ChartKind::Bar && custom_axes.is_none_or(|options| matches!(options.x.bounds, options::AxisBounds::Auto)) {
+            f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width))
+        } else {
+            0.0
+        };
+        let axes = custom_axes.map(|options| -> Result<PlotAxes, &'static str> {
+            if kind == ChartKind::Bar && options.y.scale == options::AxisScale::Log10 {
+                return Err("Bar charts require a linear Y axis for the zero baseline.");
+            }
+            let x = AxisTransform::new(&options.x, points.iter().map(|point| point.x))?;
+            let y = AxisTransform::new(
+                &options.y,
+                points.iter().map(|point| point.y).chain((kind == ChartKind::Bar).then_some(0.0)),
+            )?;
+            Ok(PlotAxes::new([x, y], checked, inset))
+        }).transpose()?;
+        let pixels = |[x, y]: [f64; 2]| {
+            [
+                bounds[0] + (bounds[2] - bounds[0]) * x as f32,
+                bounds[3] - (bounds[3] - bounds[1]) * y as f32,
+            ]
+        };
         let map = |point: &ChartPoint| -> [f32; 2] {
+            if let Some(axes) = axes {
+                // Keep offscreen selection/bar geometry finite. Lines clip
+                // from the original coordinates, independent of this limit.
+                return pixels([
+                    axes.position(0, point.x).clamp(-2.0, 3.0),
+                    axes.position(1, point.y).clamp(-2.0, 3.0),
+                ]);
+            }
             let position = unit_position(point.x, xmin, xmax);
             let position = inset + position * (1.0 - 2.0 * inset);
             let x = (position - 0.5) * checked.zoom_x + 0.5 + checked.pan_x;
@@ -1174,6 +1370,70 @@ impl ChartDataset {
                 size: 11.0,
             },
         ];
+        if let (Some(axes), Some(options)) = (axes, custom_axes) {
+            primitives.truncate(6); // replace the legacy endpoint labels
+            for (axis, options) in [&options.x, &options.y].into_iter().enumerate() {
+                let mut previous_label_edge = if axis == 0 { 0.0 } else { f32::INFINITY };
+                for (position, value) in axes.ticks(axis, options.ticks)? {
+                    if !(0.0..=1.0).contains(&position) {
+                        continue;
+                    }
+                    let label = option_tick_label(value, options.scale);
+                    let label_width = text_ink_right(&label, 11.0);
+                    let (start, end, text_position) = if axis == 0 {
+                        let x = pixels([position, 0.0])[0];
+                        let left = (x - label_width * 0.5)
+                            .clamp(4.0, (width as f32 - 4.0 - label_width).max(4.0));
+                        ([x, bounds[3]], [x, bounds[1]], [left, bounds[3] + 4.0])
+                    } else {
+                        let y = pixels([0.0, position])[1];
+                        ([bounds[0], y], [bounds[2], y], [4.0, (y - 6.0).min(bounds[3] - 12.0)])
+                    };
+                    if custom_axes.is_some_and(|options| options.grid) {
+                        primitives.push(ScenePrimitive::Line {
+                            start,
+                            end,
+                            color: [205, 211, 219, 255],
+                            width: 1.0,
+                        });
+                    }
+                    let tick_end = if axis == 0 {
+                        [start[0], start[1] + 3.0]
+                    } else {
+                        [start[0] - 3.0, start[1]]
+                    };
+                    primitives.push(ScenePrimitive::Line {
+                        start,
+                        end: tick_end,
+                        color: black,
+                        width: 1.0,
+                    });
+                    let fits = if axis == 0 {
+                        let left = text_position[0];
+                        let fits = left >= previous_label_edge + 4.0;
+                        if fits {
+                            previous_label_edge = left + label_width;
+                        }
+                        fits
+                    } else {
+                        let top = text_position[1];
+                        let fits = top + 14.0 <= previous_label_edge;
+                        if fits {
+                            previous_label_edge = top;
+                        }
+                        fits
+                    };
+                    if fits {
+                        primitives.push(ScenePrimitive::Text {
+                            position: text_position,
+                            text: label,
+                            color: black,
+                            size: 11.0,
+                        });
+                    }
+                }
+            }
+        }
         if self.approximate {
             primitives.push(ScenePrimitive::Text {
                 position: [8.0, 22.0 + legend_rows as f32 * 16.0],
@@ -1191,6 +1451,7 @@ impl ChartDataset {
             }
         }
         let mut hits = Vec::new();
+        let mut exact_crossings = 256;
         for (visible_index, (series_index, series)) in self
             .series
             .iter()
@@ -1212,15 +1473,18 @@ impl ChartDataset {
                 let mut hit_position = position;
                 match kind {
                     ChartKind::Line => {
-                        if let Some(before) = previous
-                            && let Some((start, end)) = clip_line(before, position, bounds)
-                        {
-                            primitives.push(ScenePrimitive::Line {
-                                start,
-                                end,
-                                color,
-                                width: 2.0,
-                            });
+                        if let Some((before, raw)) = previous {
+                            let clipped = if let Some(axes) = axes {
+                                axes.clip_segment(raw, [point.x, point.y], &mut exact_crossings)?
+                                    .map(|(start, end)| (pixels(start), pixels(end)))
+                            } else {
+                                clip_line(before, position, bounds)
+                            };
+                            if let Some((start, end)) = clipped {
+                                primitives.push(ScenePrimitive::Line {
+                                    start, end, color, width: 2.0,
+                                });
+                            }
                         }
                         if inside(position) {
                             primitives.push(ScenePrimitive::Circle {
@@ -1240,10 +1504,10 @@ impl ChartDataset {
                         }
                     }
                     ChartKind::Bar => {
-                        let baseline = ((unit_position(0.0, ymin, ymax) - 0.5) * checked.zoom_y
-                            + 0.5
-                            + checked.pan_y)
-                            .clamp(0.0, 1.0);
+                        let baseline = axes.map_or_else(
+                            || (unit_position(0.0, ymin, ymax) - 0.5) * checked.zoom_y + 0.5 + checked.pan_y,
+                            |axes| axes.position(1, 0.0),
+                        ).clamp(0.0, 1.0);
                         let zero = bounds[3] - (bounds[3] - bounds[1]) * baseline as f32;
                         let width = bar_width;
                         let center = position[0]
@@ -1283,7 +1547,7 @@ impl ChartDataset {
                         size: 10.0,
                     });
                 }
-                previous = Some(position);
+                previous = Some((position, [point.x, point.y]));
             }
             let slot_width = (width as f32 - 16.0) / legend_columns as f32;
             primitives.push(ScenePrimitive::Text {

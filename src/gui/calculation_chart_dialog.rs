@@ -191,7 +191,7 @@ impl CalculationChartDialog {
             let scene = {
                 let mut cache = self.cache.borrow_mut();
                 let cached = cache.as_ref().and_then(|cache| cache.scene.as_ref()).filter(|(old, w, h, _)| *old == view && *w == width && *h == height).map(|(_, _, _, scene)| Arc::clone(scene));
-                if let Some(scene) = cached { Ok(Some(scene)) } else { dataset.scene(definition.kind, view, width, height).map(|scene| scene.map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene })) }
+                if let Some(scene) = cached { Ok(Some(scene)) } else { dataset.scene_for_definition(&definition, view, width, height).map(|scene| scene.map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene })) }
             };
             match scene {
                 Ok(Some(scene)) => {
