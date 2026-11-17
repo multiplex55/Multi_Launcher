@@ -4,6 +4,8 @@ use num_rational::BigRational;
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
+pub(crate) mod distribution;
+
 use super::document::CalculationValue;
 use super::input::{InputKind, SampleNumber};
 use super::sensitivity::SensitivityTable;

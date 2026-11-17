@@ -20,7 +20,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M3-A | complete |
 | M3-B | complete |
 | M3-C | complete, with interactive smoke pending |
-| M4-A, M4-B, M4-C | pending |
+| M4-A | complete |
+| M4-B, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -120,3 +121,10 @@ cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P prod
 M3-B was pushed at 73facc2ce65dcaddde19f52540df3e4f6236eb12. Paired statistics use bounded centered/scaled moments. Compensated means and an exact fallback for lost or subnormal normalized cross terms preserve significant values for extreme data. Existing rational arithmetic combines factors before rounding an ordinary scalar output. Intercept and prediction retain precise raw means and are independent of rounded or overflowing public slope. Constant Y can yield valid slope, intercept and predictions while leaving correlation and R-squared undefined.
 
 The initial and final frozen-source cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 invocations each passed 7 of 7. The -E expression was test(paired_statistics_) | test(univariate_statistics_) | test(shared_examples_evaluate_to_their_documented_results). The final run covered review fixes for a materially inaccurate subnormal covariance and lost intercept from extreme cancellation. Diff whitespace verification passed.
+
+
+## M4-A histogram and empirical distribution data
+
+M3-C was pushed at 785af3f491d612cec827fac592cc6c61d63c4185. Chart distribution data retains exact rational intervals, including a complete final requested-width bin even when its upper edge exceeds the finite scalar range. Count and automatic bins span the observed minimum and maximum. Each observation belongs to one bin. ECDF steps group duplicate observations and signed zero. Both accessible summaries and the future scene use the same counts and boundaries. UI integration remains M4-C.
+
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E with test(distribution_) | test(chart_empty_adapter_keeps_missing_mismatch_and_hidden_states_distinct) passed 5 of 5 on frozen source. Independent review found no substantive issue. Staged diff whitespace verification passed.
