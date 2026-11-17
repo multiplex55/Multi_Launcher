@@ -17,13 +17,17 @@ pub(crate) struct CalculationExampleGroup {
 #[derive(Clone, Copy, Debug)]
 enum ExampleExpectation {
     Scalar(f64),
+    ApproximateScalar(f64),
     ScalarWithSkipped(f64),
+    ScalarWithDiagnostic { value: f64, line: usize, message: &'static str },
     Vector(&'static [f64]),
     Physical {
         value: f64,
         unit: Unit,
     },
     ExactBase(&'static str),
+    Exact(&'static str),
+    Calendar(&'static str),
     ExactInteger {
         mode: &'static str,
         value: &'static str,
@@ -50,6 +54,10 @@ impl CalculationExample {
             ExampleExpectation::Scalar(value) | ExampleExpectation::ScalarWithSkipped(value) => {
                 format_number(value).unwrap_or_default()
             }
+            ExampleExpectation::ScalarWithDiagnostic { value, line, message } => {
+                format!("{} (line {}: {message})", format_number(value).unwrap_or_default(), line + 1)
+            }
+            ExampleExpectation::ApproximateScalar(value) => format!("≈ {}", format_number(value).unwrap_or_default()),
             ExampleExpectation::Vector(values) => format!(
                 "[{}]",
                 values
@@ -64,6 +72,8 @@ impl CalculationExample {
                 unit.symbol()
             ),
             ExampleExpectation::ExactBase(digits) => digits.into(),
+            ExampleExpectation::Exact(value) => value.into(),
+            ExampleExpectation::Calendar(value) => value.into(),
             ExampleExpectation::ExactInteger { value, .. } => value.into(),
             ExampleExpectation::Dimensional {
                 formatted_result, ..
@@ -94,6 +104,106 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
                 source: "{顧客 名} = 4\n{顧客 名} * 2",
                 explanation: "Braced names can contain spaces and Unicode.",
                 expected: ExampleExpectation::Scalar(8.0),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Dates and times",
+        examples: &[
+            CalculationExample {
+                title: "Shift a calendar date",
+                source: "add_days(date(\"2026-11-15\"), 45)",
+                explanation: "Calendar day shifts preserve the date type.",
+                expected: ExampleExpectation::Calendar("2026-12-30"),
+            },
+            CalculationExample {
+                title: "Count signed calendar days",
+                source: "days_between(date(\"2026-12-30\"), date(\"2026-11-15\"))",
+                explanation: "Days between follows start-to-end order and may be negative.",
+                expected: ExampleExpectation::Scalar(-45.0),
+            },
+            CalculationExample {
+                title: "Clamp a month-end shift",
+                source: "add_months(date(\"2024-01-31\"), 1)",
+                explanation: "A month shift clamps to the last valid day in the target month.",
+                expected: ExampleExpectation::Calendar("2024-02-29"),
+            },
+            CalculationExample {
+                title: "Name a weekday",
+                source: "weekday(date(\"2026-11-15\"))",
+                explanation: "Weekday results display their names.",
+                expected: ExampleExpectation::Calendar("Sunday"),
+            },
+            CalculationExample {
+                title: "Keep an explicit offset and fractional seconds",
+                source: "datetime(\"2026-11-15T12:34:56.125-05:00\")",
+                explanation: "Offset timestamps retain their instant and subsecond precision.",
+                expected: ExampleExpectation::Calendar("2026-11-15T12:34:56.125-05:00"),
+            },
+            CalculationExample {
+                title: "Choose a daylight-saving fold",
+                source: "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\", \"later\")",
+                explanation: "Ambiguous named-zone wall times need an explicit earlier or later choice.",
+                expected: ExampleExpectation::Calendar("2026-11-01T01:30:00 UTC-05:00 America/New_York"),
+            },
+            CalculationExample {
+                title: "Measure elapsed time",
+                source: "elapsed_between(time(\"08:00\"), time(\"09:30\"))",
+                explanation: "Elapsed differences produce a physical time quantity in seconds.",
+                expected: ExampleExpectation::Physical { value: 5400.0, unit: Unit::Second },
+            },
+            CalculationExample {
+                title: "Reject time-only date rollover",
+                source: "add_duration(time(\"23:30\"), 1 h)",
+                explanation: "Use a timestamp when adding a duration crosses a date boundary.",
+                expected: ExampleExpectation::ErrorContains("use a timestamp"),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Exact decimals and fractions",
+        examples: &[
+            CalculationExample {
+                title: "Add exact decimals",
+                source: "decimal(\"0.1\") + decimal(\"0.2\")",
+                explanation: "Quoted decimal literals preserve their base-10 values.",
+                expected: ExampleExpectation::Exact("0.3"),
+            },
+            CalculationExample {
+                title: "Add fractions",
+                source: "fraction(1,3) + fraction(1,6)",
+                explanation: "Fractions reduce to lowest terms.",
+                expected: ExampleExpectation::Exact("1/2"),
+            },
+            CalculationExample {
+                title: "Combine a large integer and fraction",
+                source: "u64(9007199254740993) + fraction(1,2)",
+                explanation: "Fixed-width integers promote losslessly when combined with an exact number.",
+                expected: ExampleExpectation::Exact("18014398509481987/2"),
+            },
+            CalculationExample {
+                title: "Round a decimal division",
+                source: "decimal_div(decimal(\"1\"), decimal(\"8\"), 2)",
+                explanation: "Decimal division rounds ties to even and identifies a rounded result.",
+                expected: ExampleExpectation::Exact("≈ 0.12"),
+            },
+            CalculationExample {
+                title: "Convert explicitly to floating point",
+                source: "to_float(fraction(1,2))",
+                explanation: "Explicit conversion permits floating-point operations and marks the result approximate.",
+                expected: ExampleExpectation::ApproximateScalar(0.5),
+            },
+            CalculationExample {
+                title: "Reject a zero denominator",
+                source: "fraction(1,0)",
+                explanation: "A fraction must have a nonzero denominator.",
+                expected: ExampleExpectation::ErrorContains("denominator"),
+            },
+            CalculationExample {
+                title: "Reject unrounded repeating division",
+                source: "decimal(\"1\") / decimal(\"3\")",
+                explanation: "Use decimal_div with an explicit precision for repeating decimal results.",
+                expected: ExampleExpectation::ErrorContains("nonterminating"),
             },
         ],
     },
@@ -205,6 +315,78 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
     CalculationExampleGroup {
         title: "Vectors",
         examples: &[
+            CalculationExample {
+                title: "Build two 1,024-point datasets",
+                source: "x_values = []\ny_values = []\n\nfor i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n\npoint_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)",
+                explanation: "The vectors each contain 1,024 values. The largest is 1046529 and the average is 349013.5. In Charts, choose x_values and y_values as named X and Y sources.",
+                expected: ExampleExpectation::Scalar(349013.5),
+            },
+            CalculationExample {
+                title: "Edit a vector with pure operations",
+                source: "values = [10, 20, 30]\nvalues = append(values, 40)\nvalues = insert(values, 1, 15)\nvalues = set_at(values, 0, 5)\nvalues = remove_at(values, 2)\nvalues = pop(values)\n\ncount = len(values)\nfirst_value = first(values)\nlast_value = last(values)",
+                explanation: "Each operation returns a new value. The final vector is [5, 15, 30], its count is 3, and its first and last values are 5 and 30.",
+                expected: ExampleExpectation::Scalar(30.0),
+            },
+            CalculationExample {
+                title: "Formula-generated vector dataset",
+                source: "starting_balance = 10000\nannual_growth = 0.07\n\nfn projected_value(base, growth, year) = (\n    base * (1 + growth) ^ year\n)\n\nyears = []\nbalances = []\n\nfor year in range(31):\n    years = append(years, year)\n    balances = append(\n        balances,\n        projected_value(starting_balance, annual_growth, year)\n    )\n\npoint_count = len(balances)",
+                explanation: "The result contains 31 balances. The formula receives all document values as parameters. Choose years and balances as named chart sources.",
+                expected: ExampleExpectation::Scalar(31.0),
+            },
+            CalculationExample {
+                title: "Build a vector through a formula",
+                source: "fn add_sample(v, x) = append(v, x)\nvalues = []\nfor i in range(1024):\n    values = add_sample(values, i)\nlen(values)",
+                explanation: "A vector-returning formula can build 1,024 values through a loop.",
+                expected: ExampleExpectation::Scalar(1024.0),
+            },
+            CalculationExample {
+                title: "Empty vectors and statistics",
+                source: "empty = []\nlen(empty) + sum(empty)",
+                explanation: "An empty vector has length zero and sum zero. Average, median, min, max and stdev require at least one value.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "Concatenate, slice and reverse",
+                source: "values = concat([1, 2], [3, 4])\nreverse(slice(values, 1, 4))",
+                explanation: "slice uses a zero-based inclusive start and exclusive end; reverse returns a new vector.",
+                expected: ExampleExpectation::Vector(&[4.0, 3.0, 2.0]),
+            },
+            CalculationExample {
+                title: "Append leaves the original unchanged",
+                source: "values = [1, 2]\nalias = values\nappend(values, 3)\nlen(alias)",
+                explanation: "A bare append returns a separate vector. The original binding and alias still contain two values.",
+                expected: ExampleExpectation::Scalar(2.0),
+            },
+            CalculationExample {
+                title: "Nest collection calls",
+                source: "values = [1, 2]\nlen(append(values, 5))",
+                explanation: "A returned vector can be passed directly to another collection function.",
+                expected: ExampleExpectation::Scalar(3.0),
+            },
+            CalculationExample {
+                title: "Failed collection reassignment retains the prior binding",
+                source: "values = [10, 20]\nvalues = remove_at(values, 9)\nlen(values)",
+                explanation: "Line 2 reports an index error. The named values binding still holds the previous vector, so the final length is 2; r2 remains an error.",
+                expected: ExampleExpectation::ScalarWithDiagnostic { value: 2.0, line: 1, message: "index is invalid or out of bounds" },
+            },
+            CalculationExample {
+                title: "A failed loop rolls back vector updates",
+                source: "values = []\nfor i in range(2):\n    values = append(values, get([10], i))",
+                explanation: "The second iteration fails its index check. Loop rollback prevents partial values from becoming the current binding.",
+                expected: ExampleExpectation::ErrorContains("iteration 2: index is invalid or out of bounds"),
+            },
+            CalculationExample {
+                title: "Vector indexes are zero-based",
+                source: "get([10, 20], 2)",
+                explanation: "The valid indexes are 0 and 1. Index 2 is out of bounds.",
+                expected: ExampleExpectation::ErrorContains("index is invalid or out of bounds"),
+            },
+            CalculationExample {
+                title: "Vector capacity is 1,024",
+                source: "values = []\nfor i in range(1024):\n    values = append(values, i)\nappend(values, 1024)",
+                explanation: "Appending to a full vector reports a capacity error before creating a 1,025th component.",
+                expected: ExampleExpectation::ErrorContains("vectors may contain at most 1024 components"),
+            },
             CalculationExample {
                 title: "Scale a vector",
                 source: "v = [1, 2, 3]\nv * 3",
@@ -628,6 +810,56 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
         ],
     },
+    CalculationExampleGroup {
+        title: "Formula functions",
+        examples: &[
+            CalculationExample {
+                title: "Calculate a discounted price",
+                source: "fn discounted_price(price, discount) = price * (1 - discount)\ndiscounted_price(100, 0.10)",
+                explanation: "Parameters are local to each call and the definition has no result row.",
+                expected: ExampleExpectation::Scalar(90.0),
+            },
+            CalculationExample {
+                title: "Use an earlier formula function",
+                source: "fn double(value) = value * 2\nfn add_one(value) = double(value) + 1\nadd_one(4)",
+                explanation: "A function may call another function declared earlier in the document.",
+                expected: ExampleExpectation::Scalar(9.0),
+            },
+            CalculationExample {
+                title: "Use a lazy condition in a function",
+                source: "fn safe_inverse(value) = if(value == 0, 0, 1 / value)\nsafe_inverse(0)",
+                explanation: "The unused branch is not evaluated.",
+                expected: ExampleExpectation::Scalar(0.0),
+            },
+            CalculationExample {
+                title: "Pass document values explicitly",
+                source: "tax = 0.2\nfn total(price) = price * (1 + tax)",
+                explanation: "Function bodies cannot capture document variables. Pass them as parameters.",
+                expected: ExampleExpectation::ErrorContains("parameters and constants"),
+            },
+            CalculationExample {
+                title: "Multiline formula in a conditional loop",
+                source: "fn double(value) = (\n    value * 2\n)\ntotal = 0\nfor i in range(6):\n    if i mod 2 == 0:\n        total += double(i)\ntotal",
+                explanation: "A multiline pure formula is called only for even loop values; the final total is 12.",
+                expected: ExampleExpectation::Scalar(12.0),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Everyday numeric helpers",
+        examples: &[
+            CalculationExample { title: "Round to an increment", source: "round_to(137, 25)", explanation: "Round to the nearest positive increment, with ties away from zero.", expected: ExampleExpectation::Scalar(125.0) },
+            CalculationExample { title: "Floor to an increment", source: "floor_to(137, 25)", explanation: "Round down to the next increment.", expected: ExampleExpectation::Scalar(125.0) },
+            CalculationExample { title: "Ceil to an increment", source: "ceil_to(137, 25)", explanation: "Round up to the next increment.", expected: ExampleExpectation::Scalar(150.0) },
+            CalculationExample { title: "Clamp to bounds", source: "clamp(125, 0, 100)", explanation: "Limit a value to inclusive bounds.", expected: ExampleExpectation::Scalar(100.0) },
+            CalculationExample { title: "Percentage change", source: "percent_change(120, 100)", explanation: "The result is a ratio, so 0.2 represents a 20% increase.", expected: ExampleExpectation::Scalar(0.2) },
+            CalculationExample { title: "Part of a total", source: "percent_of(25, 100)", explanation: "Divide the part by the total to obtain a ratio.", expected: ExampleExpectation::Scalar(0.25) },
+            CalculationExample { title: "Combinations", source: "choose(10, 2)", explanation: "Count unordered selections without computing factorials.", expected: ExampleExpectation::Scalar(45.0) },
+            CalculationExample { title: "Permutations", source: "permutations(5, 2)", explanation: "Count ordered selections.", expected: ExampleExpectation::Scalar(20.0) },
+            CalculationExample { title: "Interpolate", source: "lerp(10, 20, 0.5)", explanation: "Interpolate or extrapolate between two values.", expected: ExampleExpectation::Scalar(15.0) },
+            CalculationExample { title: "Map between ranges", source: "map_range(50, 0, 100, 0, 10)", explanation: "Map a value between ranges, including reversed ranges.", expected: ExampleExpectation::Scalar(5.0) },
+        ],
+    },
 ];
 
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
@@ -647,6 +879,9 @@ mod tests {
                 let document = CalculationDocument::new(example.source);
                 let evaluation = document.evaluate();
                 if !matches!(example.expected, ExampleExpectation::ErrorContains(_)) {
+                    if let ExampleExpectation::ScalarWithDiagnostic { line, message, .. } = example.expected {
+                        assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(diagnostic) if diagnostic.to_string().contains(message)), "{} must report its documented diagnostic", example.title);
+                    }
                     if matches!(example.expected, ExampleExpectation::ScalarWithSkipped(_)) {
                         assert!(
                             evaluation.lines.iter().any(|line| matches!(
@@ -659,14 +894,14 @@ mod tests {
                         );
                     }
                     assert!(
-                        evaluation.lines.iter().all(|line| match &line.outcome {
+                        evaluation.lines.iter().enumerate().all(|(index, line)| match &line.outcome {
                             LineOutcome::Error(diagnostic) => matches!(
                                 (example.expected, &diagnostic.kind),
                                 (
                                     ExampleExpectation::ScalarWithSkipped(_),
                                     DiagnosticKind::NotExecuted
                                 )
-                            ),
+                            ) || matches!(example.expected, ExampleExpectation::ScalarWithDiagnostic { line, message, .. } if index == line && diagnostic.to_string().contains(message)),
                             _ => true,
                         }),
                         "{} has an invalid source line",
@@ -684,11 +919,21 @@ mod tests {
                 match (example.expected, outcome) {
                     (
                         ExampleExpectation::Scalar(expected)
-                        | ExampleExpectation::ScalarWithSkipped(expected),
+                        | ExampleExpectation::ScalarWithSkipped(expected)
+                        | ExampleExpectation::ScalarWithDiagnostic { value: expected, .. },
                         LineOutcome::Value(CalculationValue::Scalar(actual)),
                     ) => {
                         let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
                         assert!((actual - expected).abs() <= tolerance, "{}", example.title);
+                    }
+                    (ExampleExpectation::ApproximateScalar(expected), LineOutcome::Value(CalculationValue::ApproximateScalar(actual))) => {
+                        assert_eq!(*actual, expected, "{}", example.title);
+                    }
+                    (ExampleExpectation::Exact(expected), LineOutcome::Value(actual @ CalculationValue::Exact(_))) => {
+                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
+                    }
+                    (ExampleExpectation::Calendar(expected), LineOutcome::Value(actual @ CalculationValue::Calendar(_))) => {
+                        assert_eq!(actual.formatted_result().as_deref(), Some(expected), "{}", example.title);
                     }
                     (
                         ExampleExpectation::Vector(expected),
@@ -772,7 +1017,8 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 74);
+        assert_eq!(checked, EXAMPLE_GROUPS.iter().map(|group| group.examples.len()).sum::<usize>());
+        assert!(checked >= 116, "the executable reference should retain its documented coverage");
     }
 
     #[test]
@@ -814,6 +1060,12 @@ mod tests {
             "+=",
             "median",
             "iteration",
+            "round_to",
+            "percent_change",
+            "permutations",
+            "map_range",
+            "discounted_price",
+            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group
@@ -841,5 +1093,25 @@ mod tests {
                 .iter()
                 .all(|example| example.matches(group.title, ""))
         }));
+    }
+
+    #[test]
+    fn documented_vector_workloads_keep_their_named_results() {
+        let vectors = EXAMPLE_GROUPS.iter().find(|group| group.title == "Vectors").unwrap();
+        for (title, scalars, lengths) in [
+            ("Build two 1,024-point datasets", &[("point_count", 1024.0), ("largest", 1046529.0), ("average_value", 349013.5)][..], &[("x_values", 1024), ("y_values", 1024)][..]),
+            ("Edit a vector with pure operations", &[("count", 3.0), ("first_value", 5.0), ("last_value", 30.0)][..], &[("values", 3)][..]),
+            ("Formula-generated vector dataset", &[("point_count", 31.0)][..], &[("years", 31), ("balances", 31)][..]),
+        ] {
+            let example = vectors.examples.iter().find(|example| example.title == title).unwrap();
+            let document = CalculationDocument::new(example.source);
+            let evaluation = document.evaluate();
+            for &(name, expected) in scalars {
+                assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Scalar(value)) if (*value - expected).abs() < 1e-6), "{title}: {name}");
+            }
+            for &(name, expected) in lengths {
+                assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == expected), "{title}: {name}");
+            }
+        }
     }
 }

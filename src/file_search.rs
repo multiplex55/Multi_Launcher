@@ -9,6 +9,7 @@ pub mod matching;
 pub mod model;
 pub mod native;
 pub mod path_identity;
+pub mod predicate;
 pub mod preview;
 pub mod query;
 pub mod ripgrep;

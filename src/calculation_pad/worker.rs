@@ -8,16 +8,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct EvaluationStamp {
+pub struct EvaluationBasis {
     pub document: DocumentId,
     pub incarnation: DocumentIncarnation,
     pub revision: u64,
+    pub generation: u64,
 }
+
+pub(super) type EvaluationStamp = EvaluationBasis;
 
 pub(super) struct Request {
     pub stamp: EvaluationStamp,
     pub source: String,
     pub line_ids: Vec<LineId>,
+    pub profile: super::persistence::DocumentProfile,
 }
 
 pub(super) struct Completion {
@@ -25,36 +29,31 @@ pub(super) struct Completion {
     pub result: Result<SessionEvaluation, String>,
 }
 
-#[derive(Default)]
-struct Queue {
-    pending: Option<Request>,
+struct Queue<R, C> {
+    pending: Option<R>,
     active: Option<Arc<AtomicBool>>,
-    completion: Option<Completion>,
+    completion: Option<C>,
     stopped: bool,
 }
+impl<R, C> Default for Queue<R, C> {
+    fn default() -> Self { Self { pending: None, active: None, completion: None, stopped: false } }
+}
 
-struct Shared {
-    queue: Mutex<Queue>,
+struct Shared<R, C> {
+    queue: Mutex<Queue<R, C>>,
     ready: Condvar,
     wake: Arc<dyn Fn() + Send + Sync>,
-    evaluate:
-        Arc<dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync>,
+    evaluate: Arc<dyn Fn(R, Arc<AtomicBool>) -> C + Send + Sync>,
 }
 
-pub(super) struct EvaluationWorker {
-    shared: Arc<Shared>,
+pub(super) struct CoalescingWorker<R, C> {
+    shared: Arc<Shared<R, C>>,
 }
-
-impl EvaluationWorker {
-    pub fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
-        Self::start_with(wake, Arc::new(evaluate))
-    }
-
-    fn start_with(
+impl<R: Send + 'static, C: Send + 'static> CoalescingWorker<R, C> {
+    pub fn start(
+        name: &str,
         wake: Arc<dyn Fn() + Send + Sync>,
-        evaluate: Arc<
-            dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync,
-        >,
+        evaluate: Arc<dyn Fn(R, Arc<AtomicBool>) -> C + Send + Sync>,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue::default()),
@@ -64,13 +63,13 @@ impl EvaluationWorker {
         });
         let worker = Arc::clone(&shared);
         std::thread::Builder::new()
-            .name("calculation-pad-evaluator".into())
+            .name(name.into())
             .spawn(move || run(worker))
             .map_err(|error| format!("Could not start calculation worker: {error}"))?;
         Ok(Self { shared })
     }
 
-    pub fn submit(&self, request: Request) {
+    pub fn submit(&self, request: R) {
         let mut queue = self
             .shared
             .queue
@@ -97,7 +96,7 @@ impl EvaluationWorker {
         queue.completion = None;
     }
 
-    pub fn take(&self) -> Option<Completion> {
+    pub fn take(&self) -> Option<C> {
         self.shared
             .queue
             .lock()
@@ -107,7 +106,7 @@ impl EvaluationWorker {
     }
 }
 
-impl Drop for EvaluationWorker {
+impl<R, C> Drop for CoalescingWorker<R, C> {
     fn drop(&mut self) {
         let mut queue = self
             .shared
@@ -123,7 +122,7 @@ impl Drop for EvaluationWorker {
     }
 }
 
-fn run(shared: Arc<Shared>) {
+fn run<R: Send + 'static, C: Send + 'static>(shared: Arc<Shared<R, C>>) {
     loop {
         let (request, cancellation) = {
             let mut queue = shared
@@ -146,13 +145,7 @@ fn run(shared: Arc<Shared>) {
             queue.active = Some(Arc::clone(&cancellation));
             (request, cancellation)
         };
-        let stamp = request.stamp;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (shared.evaluate)(request, Arc::clone(&cancellation))
-        }))
-        .unwrap_or_else(|_| {
-            Err("Calculation worker failed while evaluating this revision.".to_owned())
-        });
+        let result = (shared.evaluate)(request, Arc::clone(&cancellation));
         let should_wake = {
             let mut queue = shared
                 .queue
@@ -160,7 +153,7 @@ fn run(shared: Arc<Shared>) {
                 .unwrap_or_else(|error| error.into_inner());
             queue.active = None;
             if !queue.stopped && !cancellation.load(Ordering::Relaxed) && queue.pending.is_none() {
-                queue.completion = Some(Completion { stamp, result });
+                queue.completion = Some(result);
                 true
             } else {
                 false
@@ -172,10 +165,27 @@ fn run(shared: Arc<Shared>) {
     }
 }
 
+pub(super) struct EvaluationWorker { inner: CoalescingWorker<Request, Completion> }
+impl EvaluationWorker {
+    pub fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> { Self::start_with(wake, Arc::new(evaluate)) }
+    pub(super) fn start_with(wake: Arc<dyn Fn() + Send + Sync>, evaluate: Arc<dyn Fn(Request, Arc<AtomicBool>) -> Result<SessionEvaluation, String> + Send + Sync>) -> Result<Self, String> {
+        let task = Arc::new(move |request: Request, cancellation: Arc<AtomicBool>| {
+            let stamp = request.stamp;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluate(request, cancellation)))
+                .unwrap_or_else(|_| Err("Calculation worker failed while evaluating this revision.".to_owned()));
+            Completion { stamp, result }
+        });
+        Ok(Self { inner: CoalescingWorker::start("calculation-pad-evaluator", wake, task)? })
+    }
+    pub fn submit(&self, request: Request) { self.inner.submit(request); }
+    pub fn retire(&self) { self.inner.retire(); }
+    pub fn take(&self) -> Option<Completion> { self.inner.take() }
+}
+
 fn evaluate(request: Request, cancellation: Arc<AtomicBool>) -> Result<SessionEvaluation, String> {
-    let document = CalculationDocument::new(request.source);
+    let document = CalculationDocument::with_profile(request.source, request.profile);
     let evaluation = document.evaluate_with_cancellation(cancellation);
-    project_evaluation(evaluation, &request.line_ids, request.stamp.revision)
+    project_evaluation(evaluation, &request.line_ids, request.stamp)
 }
 
 #[cfg(test)]
@@ -183,6 +193,21 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn extended_request_uses_profile_for_large_source() {
+        let source = format!("{}2\nr257", "# note\n".repeat(256));
+        let document = DocumentId::fresh();
+        let request = Request {
+            stamp: EvaluationStamp { document, incarnation: DocumentIncarnation(DocumentId::fresh()), revision: 0, generation: 0 },
+            line_ids: (1..=258).map(LineId).collect(),
+            source,
+            profile: super::super::persistence::DocumentProfile::Extended,
+        };
+        let result = super::evaluate(request, Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(result.diagnostic.is_none());
+        assert!(matches!(result.lines[257].outcome, super::super::document::LineOutcome::Value(_)));
+    }
 
     #[test]
     fn worker_cancels_old_work_and_coalesces_latest_pending_revision() {
@@ -210,9 +235,11 @@ mod tests {
                 document: id,
                 incarnation,
                 revision,
+                generation: revision,
             },
             source: format!("{revision}"),
             line_ids: vec![LineId(1)],
+            profile: Default::default(),
         };
         worker.submit(request(1));
         assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
@@ -248,9 +275,11 @@ mod tests {
                 document,
                 incarnation,
                 revision,
+                generation: revision,
             },
             source: "1".into(),
             line_ids: vec![LineId(1)],
+            profile: Default::default(),
         };
         worker.submit(request(1));
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -258,5 +287,39 @@ mod tests {
         worker.submit(request(2));
         wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(worker.take().unwrap().result.is_ok());
+    }
+
+    #[test]
+    fn worker_retires_old_generation_at_same_revision() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake = Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluate = Arc::new(move |request: Request, cancellation: Arc<AtomicBool>| {
+            started_tx.send(request.stamp.generation).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            super::evaluate(request, cancellation)
+        });
+        let worker = EvaluationWorker::start_with(wake, evaluate).unwrap();
+        let document = DocumentId::fresh();
+        let incarnation = DocumentIncarnation(DocumentId::fresh());
+        let request = |generation| Request {
+            stamp: EvaluationStamp { document, incarnation, revision: 7, generation },
+            source: "1".into(),
+            line_ids: vec![LineId(1)],
+            profile: Default::default(),
+        };
+        worker.submit(request(1));
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
+        worker.submit(request(2));
+        continue_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 2);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let result = worker.take().unwrap();
+        assert_eq!(result.stamp.generation, 2);
+        assert_eq!(result.result.unwrap().basis, result.stamp);
+        assert!(worker.take().is_none());
     }
 }

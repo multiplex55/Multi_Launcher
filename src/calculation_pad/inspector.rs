@@ -14,6 +14,7 @@ pub enum InspectorSourceOrigin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InspectorSourceSnapshot {
+    pub basis: super::EvaluationBasis,
     pub incarnation: DocumentIncarnation,
     pub document_id: DocumentId,
     pub revision: u64,

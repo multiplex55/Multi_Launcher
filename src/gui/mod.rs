@@ -8,6 +8,8 @@ mod batch_rename_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_dependency_dialog;
+mod calculation_chart_dialog;
+mod calculation_sensitivity_dialog;
 mod calculation_pad_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
@@ -776,6 +778,8 @@ pub enum Panel {
     CalculationPadDialog,
     ProgrammerInspectorDialog,
     CalculationDependencyDialog,
+    CalculationChartDialog,
+    CalculationSensitivityDialog,
     ExplorerTabsDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
@@ -852,6 +856,8 @@ impl Panel {
             Self::CalculationPadDialog => "Calculation Pad",
             Self::ProgrammerInspectorDialog => "Programmer Inspector",
             Self::CalculationDependencyDialog => "Dependency Explorer",
+            Self::CalculationChartDialog => "Charts",
+            Self::CalculationSensitivityDialog => "Sensitivity Tables",
             Self::ExplorerTabsDialog => "Explorer Tabs",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
@@ -929,6 +935,8 @@ struct PanelStates {
     calculation_pad_dialog: bool,
     programmer_inspector_dialog: bool,
     calculation_dependency_dialog: bool,
+    calculation_chart_dialog: bool,
+    calculation_sensitivity_dialog: bool,
     explorer_tabs_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
@@ -1367,6 +1375,10 @@ pub struct LauncherApp {
     programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
     calculation_dependency_dialog: calculation_dependency_dialog::CalculationDependencyDialog,
     calculation_dependency_host: utility_window_host::CalculationDependencyWindowHost,
+    calculation_chart_dialog: calculation_chart_dialog::CalculationChartDialog,
+    calculation_chart_host: utility_window_host::CalculationChartWindowHost,
+    calculation_sensitivity_dialog: calculation_sensitivity_dialog::CalculationSensitivityDialog,
+    calculation_sensitivity_host: utility_window_host::CalculationSensitivityWindowHost,
     explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog,
     explorer_tabs_host: explorer_tabs_dialog::ExplorerTabsWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
@@ -4250,6 +4262,10 @@ impl LauncherApp {
             programmer_inspector_host: Default::default(),
             calculation_dependency_dialog: Default::default(),
             calculation_dependency_host: Default::default(),
+            calculation_chart_dialog: Default::default(),
+            calculation_chart_host: Default::default(),
+            calculation_sensitivity_dialog: Default::default(),
+            calculation_sensitivity_host: Default::default(),
             explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog::new(data_root.clone()),
             explorer_tabs_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
@@ -4991,7 +5007,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 71] = [
+    const TRACKED_PANELS: [Panel; 73] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -5033,6 +5049,8 @@ impl LauncherApp {
         Panel::CalculationPadDialog,
         Panel::ProgrammerInspectorDialog,
         Panel::CalculationDependencyDialog,
+        Panel::CalculationChartDialog,
+        Panel::CalculationSensitivityDialog,
         Panel::ExplorerTabsDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
@@ -5108,6 +5126,8 @@ impl LauncherApp {
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open,
             Panel::CalculationDependencyDialog => self.calculation_dependency_dialog.open,
+            Panel::CalculationChartDialog => self.calculation_chart_dialog.open,
+            Panel::CalculationSensitivityDialog => self.calculation_sensitivity_dialog.open,
             Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
@@ -5179,6 +5199,8 @@ impl LauncherApp {
             Panel::CalculationDependencyDialog => {
                 self.calculation_dependency_host.root_layer().is_some()
             }
+            Panel::CalculationChartDialog => self.calculation_chart_host.root_layer().is_some(),
+            Panel::CalculationSensitivityDialog => self.calculation_sensitivity_host.root_layer().is_some(),
             Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
@@ -5370,6 +5392,8 @@ impl LauncherApp {
                             | Panel::JsonUtilityDialog
                             | Panel::ProgrammerInspectorDialog
                             | Panel::CalculationDependencyDialog
+                            | Panel::CalculationChartDialog
+                            | Panel::CalculationSensitivityDialog
                             | Panel::ExplorerTabsDialog
                             | Panel::XmlToolkitDialog
                             | Panel::RegexTesterDialog
@@ -5753,6 +5777,8 @@ impl LauncherApp {
             Panel::CalculationDependencyDialog => {
                 self.calculation_dependency_dialog.request_close();
             }
+            Panel::CalculationChartDialog => { self.calculation_chart_dialog.request_close(); }
+            Panel::CalculationSensitivityDialog => { self.calculation_sensitivity_dialog.request_close(); }
             Panel::ExplorerTabsDialog => {
                 self.explorer_tabs_dialog.request_close();
             }
@@ -6123,6 +6149,8 @@ impl LauncherApp {
             Panel::CalculationDependencyDialog => {
                 self.calculation_dependency_dialog.request_close();
             }
+            Panel::CalculationChartDialog => { self.calculation_chart_dialog.request_close(); }
+            Panel::CalculationSensitivityDialog => { self.calculation_sensitivity_dialog.request_close(); }
             Panel::ExplorerTabsDialog => {
                 self.explorer_tabs_dialog.request_close();
             }
@@ -6308,6 +6336,8 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open(),
             Panel::CalculationDependencyDialog => self.calculation_dependency_dialog.open(None),
+            Panel::CalculationChartDialog => self.calculation_chart_dialog.open(),
+            Panel::CalculationSensitivityDialog => {},
             Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
@@ -6761,6 +6791,18 @@ impl LauncherApp {
             if desired == Some(utility_host::UtilityPresentation::Docked) {
                 self.request_launcher_visibility(true);
             }
+        } else if panel == Panel::CalculationChartDialog {
+            let was_open = self.calculation_chart_dialog.open;
+            self.calculation_chart_dialog.open();
+            let desired = self.calculation_chart_host.open_from_origin(
+                &self.egui_ctx,
+                &self.calculation_chart_dialog,
+                was_open,
+                &utility_host::ChildOpenOrigin::<()>::Root,
+            );
+            if desired == Some(utility_host::UtilityPresentation::Docked) {
+                self.request_launcher_visibility(true);
+            }
         } else if panel == Panel::ExplorerTabsDialog {
             self.explorer_tabs_dialog.open();
             self.explorer_tabs_host
@@ -6938,6 +6980,8 @@ impl LauncherApp {
             calculation_dependency_dialog,
             Panel::CalculationDependencyDialog
         );
+        check!(calculation_chart_dialog, Panel::CalculationChartDialog);
+        check!(calculation_sensitivity_dialog, Panel::CalculationSensitivityDialog);
         check!(explorer_tabs_dialog, Panel::ExplorerTabsDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);

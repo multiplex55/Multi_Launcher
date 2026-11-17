@@ -22,6 +22,7 @@ pub struct DependencyRow {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DependencySnapshot {
+    pub basis: super::EvaluationBasis,
     pub document_id: DocumentId,
     pub incarnation: DocumentIncarnation,
     pub revision: u64,
@@ -84,9 +85,10 @@ impl DependencySnapshot {
             }
         }
         Some(Self {
+            basis: evaluation.basis,
             document_id,
             incarnation,
-            revision: evaluation.revision,
+            revision: evaluation.basis.revision,
             rows,
             diagnostic: evaluation.diagnostic.clone(),
         })
@@ -150,7 +152,9 @@ mod tests {
             kind: DiagnosticKind::CyclicDependency,
         });
         let evaluation = SessionEvaluation {
-            revision: 7,
+            usage: None,
+            basis: super::super::EvaluationBasis { document: DocumentId(1), incarnation: DocumentIncarnation(DocumentId(2)), revision: 7, generation: 3 },
+            source: std::sync::Arc::from("a\nb\nc\nd"),
             final_bindings: Default::default(),
             lines: vec![
                 SessionLineResult {

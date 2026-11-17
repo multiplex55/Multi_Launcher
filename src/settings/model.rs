@@ -16,6 +16,14 @@ pub enum CalculationPadNumberMode {
     Scientific,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CalculationPadExactMode {
+    #[default]
+    Exact,
+    Decimal,
+    MixedNumber,
+}
+
 /// Application-wide Calculation Pad source display preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CalculationPadDisplayPreferences {
@@ -24,7 +32,9 @@ pub struct CalculationPadDisplayPreferences {
     pub completion: bool,
     pub parameter_hints: bool,
     pub auto_close_delimiters: bool,
+    pub show_document_usage: bool,
     pub number_mode: CalculationPadNumberMode,
+    pub exact_mode: CalculationPadExactMode,
     pub decimal_places: u8,
     pub group_digits: bool,
     pub percent: bool,
@@ -34,7 +44,7 @@ pub struct CalculationPadDisplayPreferences {
 
 impl Default for CalculationPadDisplayPreferences {
     fn default() -> Self {
-        Self { line_numbers: true, word_wrap: false, completion: true, parameter_hints: true, auto_close_delimiters: false, number_mode: CalculationPadNumberMode::Auto, decimal_places: 2, group_digits: false, percent: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
+        Self { line_numbers: true, word_wrap: false, completion: true, parameter_hints: true, auto_close_delimiters: false, show_document_usage: false, number_mode: CalculationPadNumberMode::Auto, exact_mode: CalculationPadExactMode::Exact, decimal_places: 2, group_digits: false, percent: false, wide_source_ratio: 0.5, stacked_source_ratio: 0.48 }
     }
 }
 
@@ -48,7 +58,9 @@ impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
             preferences.completion = map.get("completion").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.parameter_hints = map.get("parameter_hints").and_then(|v| v.as_bool()).unwrap_or(true);
             preferences.auto_close_delimiters = map.get("auto_close_delimiters").and_then(|v| v.as_bool()).unwrap_or(false);
+            preferences.show_document_usage = map.get("show_document_usage").and_then(|v| v.as_bool()).unwrap_or(false);
             preferences.number_mode = map.get("number_mode").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            preferences.exact_mode = map.get("exact_mode").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
             preferences.decimal_places = map.get("decimal_places").and_then(|v| v.as_u64()).filter(|v| *v <= 15).unwrap_or(2) as u8;
             preferences.group_digits = map.get("group_digits").and_then(|v| v.as_bool()).unwrap_or(false);
             preferences.percent = map.get("percent").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -61,6 +73,26 @@ impl<'de> Deserialize<'de> for CalculationPadDisplayPreferences {
             preferences.stacked_source_ratio = ratio("stacked_source_ratio", 0.48);
         }
         Ok(preferences)
+    }
+}
+
+#[cfg(test)]
+mod calculation_pad_exact_preferences_tests {
+    use super::{CalculationPadDisplayPreferences, CalculationPadExactMode};
+
+    #[test]
+    fn exact_mode_defaults_and_round_trips() {
+        let legacy: CalculationPadDisplayPreferences = serde_json::from_str(r#"{"number_mode":"Fixed"}"#).unwrap();
+        assert_eq!(legacy.exact_mode, CalculationPadExactMode::Exact);
+        let preferences = CalculationPadDisplayPreferences {
+            exact_mode: CalculationPadExactMode::MixedNumber,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_vec(&preferences).unwrap();
+        let decoded: CalculationPadDisplayPreferences = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, preferences);
+        let future: CalculationPadDisplayPreferences = serde_json::from_str(r#"{"exact_mode":"Unknown"}"#).unwrap();
+        assert_eq!(future.exact_mode, CalculationPadExactMode::Exact);
     }
 }
 
@@ -106,7 +138,7 @@ mod display_preference_tests {
         legacy.as_object_mut().unwrap().remove("calculation_pad_display");
         let old: Settings = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(old.calculation_pad_display, CalculationPadDisplayPreferences::default());
-        legacy["calculation_pad_display"] = serde_json::json!({"line_numbers":"no", "word_wrap":true});
+        legacy["calculation_pad_display"] = serde_json::json!({"line_numbers":"no", "word_wrap":true, "show_document_usage":"yes"});
         let malformed: Settings = serde_json::from_value(legacy).unwrap();
         assert_eq!(malformed.calculation_pad_display, CalculationPadDisplayPreferences { word_wrap: true, ..Default::default() });
         let invalid: CalculationPadDisplayPreferences = serde_json::from_value(serde_json::json!({"wide_source_ratio": 1.2, "stacked_source_ratio": "invalid"})).unwrap();
@@ -117,7 +149,7 @@ mod display_preference_tests {
         assert_eq!(invalid.decimal_places, 2);
         assert!(!invalid.group_digits);
         let mut settings = Settings::default();
-        settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, auto_close_delimiters: true, ..Default::default() };
+        settings.calculation_pad_display = CalculationPadDisplayPreferences { line_numbers: false, word_wrap: true, auto_close_delimiters: true, show_document_usage: true, ..Default::default() };
         let decoded: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
         assert_eq!(decoded.calculation_pad_display, settings.calculation_pad_display);
     }

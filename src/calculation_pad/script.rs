@@ -4,8 +4,9 @@ use super::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-const MAX_SEQUENCE_ELEMENTS: usize = 1024;
-const MAX_WORK: usize = 50_000;
+pub(crate) const MAX_SEQUENCE_ELEMENTS: usize = 1024;
+pub(crate) const MAX_WORK: usize = 50_000;
+pub(crate) const MAX_VECTOR_COMPONENT_WORK: usize = 4_194_304;
 
 pub(super) fn validate_source(source: &str) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
@@ -13,6 +14,16 @@ pub(super) fn validate_source(source: &str) -> Result<usize, DiagnosticKind> {
     let mut chars = source.char_indices().peekable();
     while let Some((start, ch)) = chars.next() {
         match ch {
+            '"' => {
+                let mut escaped = false;
+                let mut closed = false;
+                for (_, character) in chars.by_ref() {
+                    if escaped { escaped = false; }
+                    else if character == '\\' { escaped = true; }
+                    else if character == '"' { closed = true; break; }
+                }
+                if !closed { return Err(DiagnosticKind::InvalidExpression); }
+            }
             '{' => {
                 let mut length = 0;
                 loop {
@@ -117,11 +128,60 @@ impl CalculationSequence {
 #[derive(Default)]
 pub(crate) struct WorkBudget {
     used: usize,
+    vector_used: usize,
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    aggregate: Option<Arc<AggregateWork>>,
     pub(super) runtime_line: Option<usize>,
     pub(super) runtime_definitions: Option<Arc<HashMap<String, Vec<usize>>>>,
+    call_depth: usize,
+    pub(super) called_definitions: Vec<usize>,
+    collection_failure: bool,
+}
+
+pub(crate) struct AggregateWork {
+    used: std::sync::atomic::AtomicUsize,
+    exhausted: std::sync::atomic::AtomicBool,
+    limit: usize,
+}
+impl AggregateWork {
+    pub(crate) fn new(limit: usize) -> Self { Self { used: std::sync::atomic::AtomicUsize::new(0), exhausted: std::sync::atomic::AtomicBool::new(false), limit } }
+    pub(crate) fn charge(&self, amount: usize) -> Result<(), DiagnosticKind> {
+        use std::sync::atomic::Ordering;
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(amount).filter(|next| *next <= self.limit) else {
+                self.exhausted.store(true, Ordering::Relaxed);
+                return Err(DiagnosticKind::WorkLimit);
+            };
+            match self.used.compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Ok(()),
+                Err(actual) => used = actual,
+            }
+        }
+    }
+    pub(crate) fn exhausted(&self) -> bool { self.exhausted.load(std::sync::atomic::Ordering::Relaxed) }
+    pub(crate) fn used(&self) -> usize { self.used.load(std::sync::atomic::Ordering::Relaxed) }
 }
 impl WorkBudget {
+    pub(crate) fn used(&self) -> usize { self.used }
+    pub(crate) fn vector_used(&self) -> usize { self.vector_used }
+    pub(super) fn clear_collection_failure(&mut self) { self.collection_failure = false; }
+    pub(super) fn take_collection_failure(&mut self) -> bool { std::mem::take(&mut self.collection_failure) }
+    // Vector components are tracked separately from scalar work. Sensitivity's
+    // aggregate meter charges one unit for every 32 component operations.
+    pub(crate) fn charge_vector(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
+        if self.cancellation.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(DiagnosticKind::Canceled);
+        }
+        let next = self.vector_used.checked_add(amount).ok_or(DiagnosticKind::WorkLimit)?;
+        if next > MAX_VECTOR_COMPONENT_WORK { return Err(DiagnosticKind::WorkLimit); }
+        if let Some(aggregate) = &self.aggregate {
+            let previous_units = self.vector_used.div_ceil(32);
+            aggregate.charge(next.div_ceil(32) - previous_units)?;
+        }
+        self.vector_used = next;
+        Ok(())
+    }
     pub(crate) fn charge(&mut self, amount: usize) -> Result<(), DiagnosticKind> {
         if self
             .cancellation
@@ -130,6 +190,7 @@ impl WorkBudget {
         {
             return Err(DiagnosticKind::Canceled);
         }
+        if let Some(aggregate) = &self.aggregate { aggregate.charge(amount)?; }
         self.used = self
             .used
             .checked_add(amount)
@@ -143,10 +204,20 @@ impl WorkBudget {
     pub(crate) fn with_cancellation(cancellation: Arc<std::sync::atomic::AtomicBool>) -> Self {
         Self {
             used: 0,
+            vector_used: 0,
             cancellation: Some(cancellation),
+            aggregate: None,
             runtime_line: None,
             runtime_definitions: None,
+            call_depth: 0,
+            called_definitions: Vec::new(),
+            collection_failure: false,
         }
+    }
+    pub(crate) fn with_analysis(cancellation: Arc<std::sync::atomic::AtomicBool>, aggregate: Arc<AggregateWork>) -> Self {
+        let mut result = Self::with_cancellation(cancellation);
+        result.aggregate = Some(aggregate);
+        result
     }
 }
 fn error(message: &str) -> DiagnosticKind {
@@ -170,6 +241,162 @@ pub(super) enum ScriptExpression {
     Not(Box<Self>),
     Compare(Compare, Box<Self>, Box<Self>),
     Call(Function, Vec<Self>),
+    Decimal(String),
+    CalendarLiteral(String, Vec<String>),
+    CalendarCall(String, Vec<Self>, Option<String>),
+    ExactInteger(String),
+    UserCall(Arc<UserFunction>, Vec<Self>),
+}
+
+#[derive(Debug)]
+pub(super) struct UserFunction {
+    pub(super) name: String,
+    pub(super) line: usize,
+    parameters: Vec<String>,
+    body: ScriptExpression,
+}
+
+pub(super) type UserFunctions = Vec<Arc<UserFunction>>;
+
+pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) -> bool {
+    let mut index = 0;
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        if ch == '{' {
+            index += source[index..].find('}').map_or(source.len() - index, |end| end + 1);
+            continue;
+        }
+        if ch == '"' {
+            index += 1;
+            let mut escaped = false;
+            while index < source.len() {
+                let ch = source[index..].chars().next().unwrap();
+                index += ch.len_utf8();
+                if escaped { escaped = false; }
+                else if ch == '\\' { escaped = true; }
+                else if ch == '"' { break; }
+            }
+            continue;
+        }
+        if is_identifier_start(ch) {
+            let start = index;
+            index += ch.len_utf8();
+            while index < source.len() {
+                let next = source[index..].chars().next().unwrap();
+                if !is_identifier_continue(next) { break; }
+                index += next.len_utf8();
+            }
+            if source[index..].trim_start().starts_with('(')
+                && functions.iter().any(|function| function.name == source[start..index])
+            { return true; }
+        } else {
+            index += ch.len_utf8();
+        }
+    }
+    false
+}
+
+#[derive(Debug)]
+pub(super) struct DeclarationParameter {
+    pub(super) canonical: String,
+    pub(super) range: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+pub(super) struct DeclarationHeader {
+    pub(super) name: String,
+    pub(super) keyword_range: std::ops::Range<usize>,
+    pub(super) name_range: std::ops::Range<usize>,
+    pub(super) parameters: Vec<DeclarationParameter>,
+    pub(super) body_start: Option<usize>,
+}
+
+/// Parse the callable header even while its expression body is incomplete.
+pub(super) fn declaration_header(source: &str) -> Option<Result<DeclarationHeader, DiagnosticKind>> {
+    let leading = source.len() - source.trim_start().len();
+    let trimmed = &source[leading..];
+    let rest = trimmed.strip_prefix("fn")?;
+    if !rest.starts_with(char::is_whitespace) { return None; }
+    let rest = rest.trim_start();
+    let name_start = source.len() - rest.len();
+    let end = rest.char_indices().find_map(|(index, ch)| (!is_identifier_continue(ch)).then_some(index)).unwrap_or(rest.len());
+    let name = &rest[..end];
+    if !is_bare_identifier(name) { return None; }
+    let after_name = rest[end..].trim_start();
+    if !after_name.starts_with('(') { return None; }
+    Some((|| {
+        let close = matching(after_name, 0)?;
+        let parameters = split_arguments(&after_name[1..close])?;
+        if parameters.len() > 16 { return Err(error("function exceeds the 16-parameter limit")); }
+        let mut result: Vec<DeclarationParameter> = Vec::with_capacity(parameters.len());
+        let args_start = source.len() - after_name.len() + 1;
+        let mut search_start = args_start;
+        for parameter in parameters {
+            let parsed = parse_assignment_name(parameter)?;
+            if is_row_reference_name(&parsed.canonical)
+                || (!parsed.braced && is_reserved_name(&parsed.canonical))
+                || result.iter().any(|item| item.canonical == parsed.canonical)
+            { return Err(error("function parameters must be unique valid names")); }
+            let start = search_start + source[search_start..].find(parameter).ok_or(DiagnosticKind::InvalidExpression)?;
+            let end = start + parameter.len();
+            search_start = end;
+            result.push(DeclarationParameter { canonical: parsed.canonical, range: start..end });
+        }
+        let after_close = after_name[close + 1..].trim_start();
+        let body_start = after_close.strip_prefix('=').map(|body| source.len() - body.len());
+        Ok(DeclarationHeader { name: name.to_owned(), keyword_range: leading..leading + 2,
+            name_range: name_start..name_start + end, parameters: result, body_start })
+    })())
+}
+
+/// Recognize only the full callable prefix so existing uses of `fn` remain valid.
+pub(super) fn declaration(source: &str) -> Option<Result<(DeclarationHeader, &str), DiagnosticKind>> {
+    declaration_header(source).map(|header| header.and_then(|header| {
+        let body_start = header.body_start.ok_or_else(|| error("function declaration requires an expression body"))?;
+        let body = source[body_start..].trim();
+        if body.is_empty() { return Err(error("function declaration requires an expression body")); }
+        if find_assignment_delimiter(body).is_some() {
+            return Err(error("function body must be an expression without assignments"));
+        }
+        let limit = expression_size_limit(body, false);
+        if body.len() > limit { return Err(DiagnosticKind::ExpressionTooLong { max_bytes: limit }); }
+        Ok((header, body))
+    }))
+}
+
+pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctions, Vec<Option<Result<(), DiagnosticKind>>>, usize) {
+    let mut functions = Vec::new();
+    let mut rows = vec![None; analysis.rows.len()];
+    let mut identifiers = 0usize;
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() { continue; }
+        let Some(declaration) = declaration(&row.text) else { continue; };
+        let result = declaration.and_then(|(header, body)| {
+            let name = header.name;
+            let parameters = header.parameters.into_iter().map(|parameter| parameter.canonical).collect::<Vec<_>>();
+            if let Some(diagnostic) = &row.diagnostic { return Err(diagnostic.clone()); }
+            if row.text.len() != row.text.trim_start().len() {
+                return Err(error("function declarations must be top-level"));
+            }
+            if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
+            if signature(&name).is_some() || functions.iter().any(|function: &Arc<UserFunction>| function.name == name) {
+                return Err(error("function name collides with an existing function"));
+            }
+            let count = validate_source(body)?;
+            if identifiers.saturating_add(count) > MAX_DEPENDENCIES {
+                return Err(DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
+            }
+            identifiers += count;
+            let declared: HashSet<_> = parameters.iter().cloned().collect();
+            let mut expression = prepare_with_functions(body, &declared, &functions)?;
+            expression.validate_parameters(&declared)?;
+            expression.resolve(SLOT_BASE, 0, |name| parameters.iter().position(|parameter| parameter == name));
+            functions.push(Arc::new(UserFunction { name, line, parameters, body: expression }));
+            Ok(())
+        });
+        rows[line] = Some(result);
+    }
+    (functions, rows, identifiers)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,6 +410,7 @@ pub(super) enum Compare {
 }
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Function {
+    Collection(super::super::vector::CollectionOperation),
     Range,
     Sum,
     Average,
@@ -190,6 +418,19 @@ pub(super) enum Function {
     Min,
     Max,
     Stdev,
+    Fraction,
+    DecimalDivide,
+    ToFloat,
+    RoundTo,
+    FloorTo,
+    CeilTo,
+    Clamp,
+    PercentChange,
+    PercentOf,
+    Choose,
+    Permutations,
+    Lerp,
+    MapRange,
 }
 
 /// Runtime arity and editor presentation share one function catalog.
@@ -201,6 +442,43 @@ pub(crate) struct FunctionSignature {
     insensitive: bool,
 }
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
+    FunctionSignature { name: "append", help: "append(vector, value)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "concat", help: "concat(left, right)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "insert", help: "insert(vector, index, value)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "set_at", help: "set_at(vector, index, value)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "remove_at", help: "remove_at(vector, index)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "pop", help: "pop(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "get", help: "get(vector, index)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "first", help: "first(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "last", help: "last(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "len", help: "len(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "slice", help: "slice(vector, start, end)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "reverse", help: "reverse(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "date", help: "date(\"YYYY-MM-DD\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "time", help: "time(\"HH:MM[:SS]\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "datetime", help: "datetime(\"RFC3339 timestamp\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "zoned_datetime", help: "zoned_datetime(\"local\", \"zone\"[, \"earlier\" or \"later\"])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_days", help: "add_days(value, days[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_months", help: "add_months(value, months[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "add_years", help: "add_years(value, years[, fold])", arities: &[2, 3], insensitive: true },
+    FunctionSignature { name: "days_between", help: "days_between(start, end)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "weekday", help: "weekday(date)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "elapsed_between", help: "elapsed_between(start, end)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "add_duration", help: "add_duration(time, duration)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "round_to", help: "round_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "floor_to", help: "floor_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "ceil_to", help: "ceil_to(value, step)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "clamp", help: "clamp(value, min, max)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "percent_change", help: "percent_change(new, old)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "percent_of", help: "percent_of(part, total)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "choose", help: "choose(n, k)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "permutations", help: "permutations(n, k)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "lerp", help: "lerp(start, end, t)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "map_range", help: "map_range(value, a, b, c, d)", arities: &[5], insensitive: true },
+    FunctionSignature { name: "decimal", help: "decimal(\"value\")", arities: &[1], insensitive: true },
+    FunctionSignature { name: "fraction", help: "fraction(numerator, denominator)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "decimal_div", help: "decimal_div(numerator, denominator, places)", arities: &[3], insensitive: true },
+    FunctionSignature { name: "to_float", help: "to_float(value)", arities: &[1], insensitive: true },
     FunctionSignature { name: "if", help: "if(condition, when_true, when_false)", arities: &[3], insensitive: true },
     FunctionSignature { name: "range", help: "range(stop)  ·  range(start, stop[, step])", arities: &[1, 2, 3], insensitive: true },
     FunctionSignature { name: "sum", help: "sum(values)", arities: &[1], insensitive: true },
@@ -281,7 +559,23 @@ mod signature_catalog_tests {
 }
 
 fn special(name: &str, arity: usize) -> Option<Function> {
+    if let Some(operation) = super::super::vector::CollectionOperation::from_name(name) {
+        return Some(Function::Collection(operation));
+    }
     match name.to_ascii_lowercase().as_str() {
+        "round_to" => Some(Function::RoundTo),
+        "floor_to" => Some(Function::FloorTo),
+        "ceil_to" => Some(Function::CeilTo),
+        "clamp" => Some(Function::Clamp),
+        "percent_change" => Some(Function::PercentChange),
+        "percent_of" => Some(Function::PercentOf),
+        "choose" => Some(Function::Choose),
+        "permutations" => Some(Function::Permutations),
+        "lerp" => Some(Function::Lerp),
+        "map_range" => Some(Function::MapRange),
+        "fraction" => Some(Function::Fraction),
+        "decimal_div" => Some(Function::DecimalDivide),
+        "to_float" => Some(Function::ToFloat),
         "range" => Some(Function::Range),
         "sum" => Some(Function::Sum),
         "average" => Some(Function::Average),
@@ -354,10 +648,12 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
             return true;
         }
         if source[end..].trim_start().starts_with('(')
-            && matches!(
+            && (super::super::vector::CollectionOperation::from_name(name).is_some() || matches!(
                 name.to_ascii_lowercase().as_str(),
-                "if" | "range" | "sum" | "average" | "median" | "stdev"
-            )
+                "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
+                "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
+                | "date" | "time" | "datetime" | "zoned_datetime" | "add_days" | "add_months" | "add_years" | "days_between" | "weekday" | "elapsed_between" | "add_duration"
+            ))
         {
             return true;
         }
@@ -380,13 +676,29 @@ pub(super) fn prepare(
     source: &str,
     declared: &HashSet<String>,
 ) -> Result<ScriptExpression, DiagnosticKind> {
-    parse(source.trim(), declared, 0)
+    prepare_with_functions(source, declared, &[])
 }
 
-fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
+pub(super) fn prepare_with_functions(
+    source: &str,
+    declared: &HashSet<String>,
+    functions: &[Arc<UserFunction>],
+) -> Result<ScriptExpression, DiagnosticKind> {
+    parse(source.trim(), declared, functions, 0)
+}
+
+pub(super) fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
     let mut stack = Vec::new();
     let mut braces = false;
+    let mut quoted = false;
+    let mut escaped = false;
     for (offset, ch) in source[open..].char_indices() {
+        if quoted {
+            if escaped { escaped = false; }
+            else if ch == '\\' { escaped = true; }
+            else if ch == '"' { quoted = false; }
+            continue;
+        }
         if braces {
             if ch == '}' {
                 braces = false;
@@ -397,6 +709,7 @@ fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
             braces = true;
             continue;
         }
+        if ch == '"' { quoted = true; continue; }
         match ch {
             '(' | '[' => stack.push(ch),
             ')' | ']' => {
@@ -414,7 +727,7 @@ fn matching(source: &str, open: usize) -> Result<usize, DiagnosticKind> {
     Err(DiagnosticKind::InvalidExpression)
 }
 
-fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
+pub(super) fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
     if source.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -426,6 +739,17 @@ fn split_arguments(source: &str) -> Result<Vec<&str>, DiagnosticKind> {
             .chars()
             .next()
             .ok_or(DiagnosticKind::InvalidExpression)?;
+        if ch == '"' {
+            let mut escaped = false;
+            let mut end = None;
+            for (offset, character) in source[index + 1..].char_indices() {
+                if escaped { escaped = false; }
+                else if character == '\\' { escaped = true; }
+                else if character == '"' { end = Some(index + offset + 2); break; }
+            }
+            index = end.ok_or(DiagnosticKind::InvalidExpression)?;
+            continue;
+        }
         if matches!(ch, '(' | '[') {
             index = matching(source, index)? + 1;
             continue;
@@ -499,6 +823,7 @@ fn top_operator(
 fn parse(
     source: &str,
     declared: &HashSet<String>,
+    functions: &[Arc<UserFunction>],
     depth: usize,
 ) -> Result<ScriptExpression, DiagnosticKind> {
     if depth > MAX_EXPRESSION_NESTING {
@@ -511,7 +836,7 @@ fn parse(
         return Err(DiagnosticKind::InvalidExpression);
     }
     if source.starts_with('(') && matching(source, 0)? == source.len() - 1 {
-        return parse(&source[1..source.len() - 1], declared, depth + 1);
+        return parse(&source[1..source.len() - 1], declared, functions, depth + 1);
     }
     for operators in [
         &["||"][..],
@@ -519,10 +844,11 @@ fn parse(
         &["==", "!=", "<=", ">=", "<", ">"][..],
     ] {
         if let Some((at, which)) = top_operator(source, operators)? {
-            let left = Box::new(parse(&source[..at], declared, depth + 1)?);
+            let left = Box::new(parse(&source[..at], declared, functions, depth + 1)?);
             let right = Box::new(parse(
                 &source[at + operators[which].len()..],
                 declared,
+                functions,
                 depth + 1,
             )?);
             return Ok(match operators[which] {
@@ -542,6 +868,7 @@ fn parse(
         return Ok(ScriptExpression::Not(Box::new(parse(
             rest,
             declared,
+            functions,
             depth + 1,
         )?)));
     }
@@ -572,8 +899,8 @@ fn parse(
         if ch == '(' {
             let close = matching(source, index)?;
             let inner = &source[index + 1..close];
-            if uses_script_syntax(inner) {
-                let node = parse(inner, declared, depth + 1)?;
+            if uses_script_syntax(inner) || contains_user_call(inner, functions) {
+                let node = parse(inner, declared, functions, depth + 1)?;
                 add_slot(&mut template, &mut slots, node, source, declared);
             } else {
                 template.push_str(&source[index..=close]);
@@ -620,15 +947,69 @@ fn parse(
             if source[open..].starts_with('(') {
                 let close = matching(source, open)?;
                 let args = split_arguments(&source[open + 1..close])?;
+                if let Some(function) = functions.iter().find(|function| function.name == name) {
+                    if function.parameters.len() != args.len() {
+                        return Err(error("incorrect number of function arguments"));
+                    }
+                    let children = args.into_iter().map(|arg| parse(arg, declared, functions, depth + 1)).collect::<Result<Vec<_>, _>>()?;
+                    let node = ScriptExpression::UserCall(Arc::clone(function), children);
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 let allowed = signature(name).ok_or(DiagnosticKind::InvalidExpression)?;
                 if !allowed.contains(&args.len()) {
                     return Err(DiagnosticKind::InvalidExpression);
                 }
                 let is_if = name.eq_ignore_ascii_case("if");
+                let lower = name.to_ascii_lowercase();
+                let constructor = matches!(lower.as_str(), "date" | "time" | "datetime" | "zoned_datetime");
+                let calendar_call = matches!(lower.as_str(), "add_days" | "add_months" | "add_years" | "days_between" | "weekday" | "elapsed_between" | "add_duration");
+                if constructor || calendar_call {
+                    let literal = |arg: &str| -> Result<String, DiagnosticKind> {
+                        let value = arg.trim().strip_prefix('"').and_then(|s| s.strip_suffix('"')).ok_or_else(|| error("calendar literal must be quoted"))?;
+                        if value.len() > 128 || value.contains(['"', '\\']) { return Err(error("invalid calendar literal")); }
+                        Ok(value.to_owned())
+                    };
+                    let node = if constructor {
+                        ScriptExpression::CalendarLiteral(lower, args.iter().map(|arg| literal(arg)).collect::<Result<Vec<_>, _>>()?)
+                    } else {
+                        let has_fold = matches!(lower.as_str(), "add_days" | "add_months" | "add_years") && args.len() == 3;
+                        let fold = if has_fold { Some(literal(args[2])?) } else { None };
+                        let count = args.len() - usize::from(has_fold);
+                        let children = args[..count].iter().map(|arg| parse(arg, declared, functions, depth + 1)).collect::<Result<Vec<_>, _>>()?;
+                        ScriptExpression::CalendarCall(lower, children, fold)
+                    };
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
+                if name.eq_ignore_ascii_case("decimal") {
+                    let literal = args[0].trim();
+                    let Some(literal) = literal.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
+                        return Err(error("decimal requires a quoted decimal literal"));
+                    };
+                    let node = ScriptExpression::Decimal(literal.to_owned());
+                    if index == 0 && close + 1 == source.len() { return Ok(node); }
+                    add_slot(&mut template, &mut slots, node, source, declared);
+                    index = close + 1;
+                    continue;
+                }
                 if is_if || special(name, args.len()).is_some() {
                     let children = args
                         .into_iter()
-                        .map(|arg| parse(arg, declared, depth + 1))
+                        .map(|arg| {
+                            let digits = arg.trim().trim_start_matches(['+', '-']);
+                            if name.eq_ignore_ascii_case("fraction") && !digits.is_empty()
+                                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                            {
+                                Ok(ScriptExpression::ExactInteger(arg.trim().to_owned()))
+                            } else {
+                                parse(arg, declared, functions, depth + 1)
+                            }
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     let node = if is_if {
                         let [first, second, third]: [ScriptExpression; 3] = children
@@ -650,12 +1031,12 @@ fn parse(
                 template.push_str(&source[index..=open]);
                 let mut rendered = Vec::new();
                 for arg in args {
-                    if uses_script_syntax(arg) {
+                    if uses_script_syntax(arg) || contains_user_call(arg, functions) {
                         let mut slot = String::new();
                         add_slot(
                             &mut slot,
                             &mut slots,
-                            parse(arg, declared, depth + 1)?,
+                            parse(arg, declared, functions, depth + 1)?,
                             source,
                             declared,
                         );
@@ -687,6 +1068,7 @@ fn parse(
         &mut count,
         &all_declared,
         true,
+        functions,
     );
     if let Some(diagnostic) = &line.diagnostic {
         if !matches!(
@@ -790,6 +1172,36 @@ fn validate_calls(source: &str) -> Result<(), DiagnosticKind> {
 }
 
 impl ScriptExpression {
+    fn validate_parameters(&self, parameters: &HashSet<String>) -> Result<(), DiagnosticKind> {
+        match self {
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::Boolean { .. } | Self::CalendarLiteral(_, _) => Ok(()),
+            Self::Legacy { line, slots, .. } => {
+                for reference in &line.references {
+                    if slots.iter().any(|(name, _)| *name == reference.name) { continue; }
+                    if !matches!(reference.kind, ReferenceKind::Named) || !parameters.contains(&reference.name) {
+                        return Err(error("function bodies may only reference parameters and constants"));
+                    }
+                }
+                for (_, child) in slots { child.validate_parameters(parameters)?; }
+                Ok(())
+            }
+            Self::If(a, b, c) => {
+                a.validate_parameters(parameters)?;
+                b.validate_parameters(parameters)?;
+                c.validate_parameters(parameters)
+            }
+            Self::And(a, b) | Self::Or(a, b) | Self::Compare(_, a, b) => {
+                a.validate_parameters(parameters)?;
+                b.validate_parameters(parameters)
+            }
+            Self::Not(child) => child.validate_parameters(parameters),
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
+                for child in args { child.validate_parameters(parameters)?; }
+                Ok(())
+            }
+        }
+    }
+
     pub(super) fn resolve(
         &mut self,
         line_index: usize,
@@ -806,9 +1218,10 @@ impl ScriptExpression {
         named_binding: &mut impl FnMut(&str) -> Option<usize>,
     ) {
         match self {
+            Self::Decimal(_) | Self::ExactInteger(_) | Self::CalendarLiteral(_, _) => {}
             Self::Boolean { name, target } => {
                 *target = named_binding(name)
-                    .filter(|target| *target < line_index || *target >= super::MAX_SOURCE_LINES);
+                    .filter(|target| *target < line_index || *target >= SLOT_BASE);
             }
             Self::Legacy { line, slots, .. } => {
                 for (_, child) in slots.iter_mut() {
@@ -837,7 +1250,7 @@ impl ScriptExpression {
                 b.resolve_inner(line_index, row_count, named_binding);
             }
             Self::Not(child) => child.resolve_inner(line_index, row_count, named_binding),
-            Self::Call(_, args) => {
+            Self::Call(_, args) | Self::UserCall(_, args) | Self::CalendarCall(_, args, _) => {
                 for arg in args {
                     arg.resolve_inner(line_index, row_count, named_binding);
                 }
@@ -855,6 +1268,16 @@ impl ScriptExpression {
     ) -> Result<CalculationValue, DiagnosticKind> {
         work.charge(1)?;
         match self {
+            Self::CalendarLiteral(name, args) => super::super::calendar::construct(name, args),
+            Self::CalendarCall(name, args, fold) => {
+                let values = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
+                super::super::calendar::call(name, &values, fold.as_deref())
+            }
+            Self::Decimal(value) => Ok(CalculationValue::Exact(super::super::exact::ExactNumber::decimal(value, work)?)),
+            Self::ExactInteger(value) => {
+                let value = super::super::exact::ExactNumber::from_integer_text(value, work)?;
+                Ok(CalculationValue::Exact(super::super::exact::ExactNumber::fraction(value, 1.into(), work)?))
+            }
             Self::Boolean { name, target } => {
                 if let Some(target) = target {
                     dependencies.push(*target);
@@ -863,7 +1286,12 @@ impl ScriptExpression {
                 Ok(CalculationValue::Boolean(name == "true"))
             }
             Self::Legacy { line, slots, alias } => {
-                work.charge(line.source_range.len().max(1))?;
+                let bytes = line.source_range.len().max(1);
+                if matches!(&line.statement, PreparedStatement::Expression(expression) if expression.explicit_vector) {
+                    work.charge_vector(bytes)?;
+                } else {
+                    work.charge(bytes)?;
+                }
                 if let Some(diagnostic) = &line.diagnostic {
                     return Err(diagnostic.kind.clone());
                 }
@@ -907,7 +1335,7 @@ impl ScriptExpression {
                         .and_then(Option::as_ref)
                     && matches!(
                         value,
-                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_)
+                        CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_) | CalculationValue::Calendar(_)
                     )
                 {
                     return Ok(value.clone());
@@ -921,7 +1349,7 @@ impl ScriptExpression {
                     dependencies: Vec::new(),
                     diagnostic: None,
                 };
-                evaluate_prepared_statement(&line.statement, &surrogate, &all_values)
+                evaluate_prepared_statement(&line.statement, &surrogate, &all_values, work)
             }
             Self::If(condition, yes, no) => {
                 let condition = boolean(condition.evaluate(
@@ -975,7 +1403,7 @@ impl ScriptExpression {
             Self::Compare(operator, left, right) => {
                 let left = left.evaluate(line_index, outcomes, values, dependencies, work)?;
                 let right = right.evaluate(line_index, outcomes, values, dependencies, work)?;
-                let ordering = compare_values(&left, &right)?;
+                let ordering = compare_values(&left, &right, work)?;
                 let result = match operator {
                     Compare::Equal => ordering == Ordering::Equal,
                     Compare::NotEqual => ordering != Ordering::Equal,
@@ -987,11 +1415,35 @@ impl ScriptExpression {
                 Ok(CalculationValue::Boolean(result))
             }
             Self::Call(function, args) => {
-                let values = args
-                    .iter()
-                    .map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work))
-                    .collect::<Result<Vec<_>, _>>()?;
-                call(*function, &values, work)
+                let result = (|| {
+                    let values = args
+                        .iter()
+                        .map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    call(*function, &values, work)
+                })();
+                if matches!(function, Function::Collection(_))
+                    && result.as_ref().is_err_and(|kind| !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
+                {
+                    work.collection_failure = true;
+                }
+                result
+            }
+            Self::UserCall(function, args) => {
+                let arguments = args.iter().map(|arg| arg.evaluate(line_index, outcomes, values, dependencies, work)).collect::<Result<Vec<_>, _>>()?;
+                if work.call_depth >= 16 { return Err(error("function call depth exceeds 16")); }
+                work.charge(1)?;
+                work.call_depth += 1;
+                work.called_definitions.push(function.line);
+                let local_outcomes = arguments.iter().cloned().map(LineOutcome::Value).collect::<Vec<_>>();
+                let local_values = arguments.into_iter().map(Some).collect::<Vec<_>>();
+                let runtime_line = work.runtime_line.take();
+                let runtime_definitions = work.runtime_definitions.take();
+                let result = function.body.evaluate(SLOT_BASE, &local_outcomes, &local_values, &mut Vec::new(), work);
+                work.runtime_line = runtime_line;
+                work.runtime_definitions = runtime_definitions;
+                work.call_depth -= 1;
+                result
             }
         }
     }
@@ -1007,7 +1459,7 @@ fn value_at(
     boolean_literal: bool,
 ) -> Result<CalculationValue, DiagnosticKind> {
     let physical_line = work.runtime_line.unwrap_or(line_index);
-    let runtime_binding = work.runtime_line.is_some() && target >= super::MAX_SOURCE_LINES;
+    let runtime_binding = work.runtime_line.is_some() && target >= SLOT_BASE;
     if runtime_binding && matches!(
         outcomes.get(target),
         Some(LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted }))
@@ -1047,6 +1499,11 @@ fn value_at(
         Some(LineOutcome::Blank | LineOutcome::Comment) => {
             Err(DiagnosticKind::UnknownRowReference(name.to_owned()))
         }
+        Some(LineOutcome::Definition) => Err(DiagnosticKind::DefinitionReference(name.to_owned())),
+        Some(LineOutcome::Control) => Err(DiagnosticKind::ControlReference(name.to_owned())),
+        Some(LineOutcome::Continuation { owner_line }) => Err(DiagnosticKind::ContinuationReference {
+            reference: name.to_owned(), owner_line: *owner_line,
+        }),
         _ => Err(DiagnosticKind::DependencyFailed {
             dependency_line: target,
         }),
@@ -1062,10 +1519,17 @@ fn boolean(value: CalculationValue) -> Result<bool, DiagnosticKind> {
 fn compare_values(
     left: &CalculationValue,
     right: &CalculationValue,
+    work: &mut WorkBudget,
 ) -> Result<Ordering, DiagnosticKind> {
     match (left, right) {
+        (CalculationValue::Calendar(a), CalculationValue::Calendar(b)) => a.compare(b),
+        (CalculationValue::Exact(_), _) | (_, CalculationValue::Exact(_)) => super::super::exact::ExactNumber::compare(left, right, work),
         (CalculationValue::Boolean(a), CalculationValue::Boolean(b)) => Ok(a.cmp(b)),
         (CalculationValue::Scalar(a), CalculationValue::Scalar(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| error("values cannot be compared")),
+        (CalculationValue::Scalar(a) | CalculationValue::ApproximateScalar(a),
+         CalculationValue::Scalar(b) | CalculationValue::ApproximateScalar(b)) => a
             .partial_cmp(b)
             .ok_or_else(|| error("values cannot be compared")),
         (CalculationValue::Integer(a), CalculationValue::Integer(b)) if a.mode() == b.mode() => {
@@ -1092,6 +1556,85 @@ fn call(
     arguments: &[CalculationValue],
     work: &mut WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
+    use super::super::exact::{EverydayFunction, ExactNumber};
+    if let Function::Collection(operation) = function {
+        return operation.call(arguments, work);
+    }
+    let everyday = match function {
+        Function::RoundTo => Some(EverydayFunction::RoundTo),
+        Function::FloorTo => Some(EverydayFunction::FloorTo),
+        Function::CeilTo => Some(EverydayFunction::CeilTo),
+        Function::Clamp => Some(EverydayFunction::Clamp),
+        Function::PercentChange => Some(EverydayFunction::PercentChange),
+        Function::PercentOf => Some(EverydayFunction::PercentOf),
+        Function::Choose => Some(EverydayFunction::Choose),
+        Function::Permutations => Some(EverydayFunction::Permutations),
+        Function::Lerp => Some(EverydayFunction::Lerp),
+        Function::MapRange => Some(EverydayFunction::MapRange),
+        _ => None,
+    };
+    if let Some(helper) = everyday {
+        if matches!(helper, EverydayFunction::Choose | EverydayFunction::Permutations) {
+            return ExactNumber::combinatorial(helper, arguments, work);
+        }
+        if arguments.iter().any(|argument| matches!(argument, CalculationValue::Exact(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. })) {
+            return ExactNumber::everyday(helper, arguments, work);
+        }
+        let mut approximate = false;
+        let values = arguments.iter().map(|argument| match argument {
+            CalculationValue::Scalar(value) if value.is_finite() => Ok(*value),
+            CalculationValue::ApproximateScalar(value) if value.is_finite() => { approximate = true; Ok(*value) }
+            _ => Err(error("numeric helper requires finite numeric arguments")),
+        }).collect::<Result<Vec<_>, _>>()?;
+        work.charge(values.len())?;
+        let result = match (helper, values.as_slice()) {
+            (EverydayFunction::RoundTo | EverydayFunction::FloorTo | EverydayFunction::CeilTo, [value, step]) => {
+                if *step <= 0.0 { return Err(error("step must be positive")); }
+                let ratio = finite(value / step)?;
+                let rounded = match helper {
+                    EverydayFunction::RoundTo => ratio.round(),
+                    EverydayFunction::FloorTo => ratio.floor(),
+                    _ => ratio.ceil(),
+                };
+                finite(rounded * step)?
+            }
+            (EverydayFunction::Clamp, [value, min, max]) => {
+                if min > max { return Err(error("clamp minimum must not exceed maximum")); }
+                value.clamp(*min, *max)
+            }
+            (EverydayFunction::PercentChange, [new, old]) => {
+                if *old == 0.0 { return Err(error("old value must not be zero")); }
+                finite(finite(new - old)? / old)?
+            }
+            (EverydayFunction::PercentOf, [part, total]) => {
+                if *total == 0.0 { return Err(error("total must not be zero")); }
+                finite(part / total)?
+            }
+            (EverydayFunction::Lerp, [start, end, t]) => finite(start + finite(finite(end - start)? * t)?)?,
+            (EverydayFunction::MapRange, [value, a, b, c, d]) => {
+                if a == b { return Err(error("input range endpoints must differ")); }
+                let offset = finite(value - a)?;
+                let width = finite(b - a)?;
+                let output = finite(d - c)?;
+                finite(c + finite(finite(offset / width)? * output)?)?
+            }
+            _ => return Err(DiagnosticKind::InvalidExpression),
+        };
+        return Ok(if approximate { CalculationValue::ApproximateScalar(result) } else { CalculationValue::Scalar(result) });
+    }
+    match (function, arguments) {
+        (Function::Fraction, [numerator, denominator]) => {
+            return Ok(CalculationValue::Exact(ExactNumber::fraction(ExactNumber::integer(numerator)?, ExactNumber::integer(denominator)?, work)?));
+        }
+        (Function::DecimalDivide, [left, right, places]) => {
+            use num_traits::ToPrimitive;
+            let places = ExactNumber::integer(places)?.to_u32().ok_or_else(|| error("decimal precision must be a nonnegative integer"))?;
+            return Ok(CalculationValue::Exact(ExactNumber::rounded_divide(left, right, places, work)?));
+        }
+        (Function::ToFloat, [CalculationValue::Exact(value)]) => return Ok(CalculationValue::ApproximateScalar(value.approximate()?)),
+        (Function::ToFloat, _) => return Err(error("to_float requires an exact value")),
+        _ => {}
+    }
     if matches!(function, Function::Range) {
         let numbers = arguments
             .iter()
@@ -1166,7 +1709,8 @@ fn call(
             ));
         }
     };
-    work.charge(values.len())?;
+    let vector = matches!(arguments, [CalculationValue::Vector(_)]);
+    if vector { work.charge_vector(values.len())?; } else { work.charge(values.len())?; }
     if values.is_empty() {
         return if matches!(function, Function::Sum) {
             Ok(CalculationValue::Scalar(0.0))
@@ -1189,7 +1733,7 @@ fn call(
             let sort_work = values
                 .len()
                 .saturating_mul((usize::BITS - values.len().leading_zeros()) as usize);
-            work.charge(sort_work)?;
+            if vector { work.charge_vector(sort_work + values.len())?; } else { work.charge(sort_work)?; }
             let mut sorted = values.to_vec();
             sorted.sort_by(f64::total_cmp);
             let middle = sorted.len() / 2;
@@ -1202,6 +1746,7 @@ fn call(
         Function::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
         Function::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         Function::Stdev => {
+            if vector { work.charge_vector(values.len())?; }
             let mut mean = 0.0;
             let mut variance_sum = 0.0;
             for (index, value) in values.iter().enumerate() {
@@ -1211,7 +1756,10 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Range => unreachable!(),
+        Function::Collection(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
+        | Function::RoundTo | Function::FloorTo | Function::CeilTo | Function::Clamp
+        | Function::PercentChange | Function::PercentOf | Function::Choose | Function::Permutations
+        | Function::Lerp | Function::MapRange => unreachable!(),
     };
     Ok(CalculationValue::Scalar(finite(result)?))
 }
@@ -1245,6 +1793,146 @@ mod tests {
         match value {
             LineOutcome::Value(CalculationValue::Boolean(value)) => *value,
             other => panic!("expected Boolean: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calendar_dates_aliases_functions_and_clamping() {
+        let rows = evaluated(concat!(
+            "start = date(\"2026-11-15\")\n",
+            "finish = add_days(start, 45)\n",
+            "days_between(start, finish)\n",
+            "weekday(start)\n",
+            "add_months(date(\"2024-01-31\"), 1)\n",
+            "add_years(date(\"2024-02-29\"), 1)\n",
+            "alias = finish\n",
+            "fn move_date(d) = add_days(d, 1)\n",
+            "move_date(alias)\n",
+            "date(\"2026-11-15\") < finish"
+        ));
+        for (index, expected) in [(1, "2026-12-30"), (3, "Sunday"), (4, "2024-02-29"), (5, "2025-02-28"), (6, "2026-12-30"), (8, "2026-12-31")] {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{index}: {:?}", rows[index]); };
+            assert_eq!(value.formatted_result().as_deref(), Some(expected));
+        }
+        assert_eq!(scalar(&rows[2]), 45.0);
+        assert!(boolean_value(&rows[9]));
+    }
+
+    #[test]
+    fn calendar_dst_duration_fold_gap_and_canonical_replay() {
+        let rows = evaluated(concat!(
+            "start = zoned_datetime(\"2026-03-07T12:00:00\", \"America/New_York\")\n",
+            "calendar = add_days(start, 1)\n",
+            "elapsed = add_duration(start, 24 h)\n",
+            "elapsed_between(start, calendar)\n",
+            "elapsed_between(start, elapsed)\n",
+            "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\")\n",
+            "zoned_datetime(\"2026-03-08T02:30:00\", \"America/New_York\")\n",
+            "zoned_datetime(\"2026-11-01T01:30:00\", \"America/New_York\", \"later\")\n",
+            "add_duration(time(\"23:30\"), 1 h)\n",
+            "add_duration(start, 1 m)\n",
+            "days_between(start, date(\"2026-03-07\"))\n",
+            "datetime(\"2026-11-15T12:34:56.125-05:00\")\n",
+            "add_duration(datetime(\"2000-01-01T00:00:00Z\"), 9460800000 s)\n",
+            "add_days(date(\"9999-12-31\"), 1)\n",
+            "add_days(date(\"2026-01-01\"), 1, \"later\")"
+        ));
+        for (index, expected) in [(3, 82800.0), (4, 86400.0)] {
+            assert!(matches!(&rows[index], LineOutcome::Value(CalculationValue::PhysicalQuantity { value, .. }) if *value == expected), "{:?}", rows[index]);
+        }
+        for index in [5, 6, 8, 9, 10, 13, 14] { assert!(matches!(rows[index], LineOutcome::Error(_)), "{:?}", rows[index]); }
+        for index in [1, 2, 7, 11, 12] {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{:?}", rows[index]); };
+            let replay = evaluated(&value.canonical_result().unwrap());
+            assert_eq!(replay[0], rows[index]);
+        }
+    }
+
+    #[test]
+    fn calendar_duration_float_tolerance_and_clock_precision() {
+        let rows = evaluated(concat!(
+            "add_duration(time(\"00:00\"), 1000.123 s)\n",
+            "time(\"12:00:00.123456789\")\n",
+            "datetime(\"2026-11-15T12:00:00.123456789Z\")\n",
+            "zoned_datetime(\"2026-11-15T12:00:00.123456789\", \"America/New_York\")\n",
+            "time(\"12:00:00.1234567891\")\n",
+            "datetime(\"2026-11-15T12:00:00.1234567891Z\")\n",
+            "zoned_datetime(\"2026-11-15T12:00:00.1234567891\", \"America/New_York\")\n",
+            "add_duration(time(\"00:00\"), 0.0000000001 s)"
+        ));
+        let LineOutcome::Value(value) = &rows[0] else { panic!("{:?}", rows[0]); };
+        assert_eq!(value.formatted_result().as_deref(), Some("00:16:40.123"));
+        for index in 1..=3 {
+            let LineOutcome::Value(value) = &rows[index] else { panic!("{:?}", rows[index]); };
+            let replay = evaluated(&value.canonical_result().unwrap());
+            assert_eq!(replay[0], rows[index]);
+        }
+        for index in 4..=7 { assert!(matches!(rows[index], LineOutcome::Error(_)), "{:?}", rows[index]); }
+    }
+
+    #[test]
+    fn everyday_helpers_evaluate_all_scalar_contracts_and_boundaries() {
+        let source = concat!(
+            "round_to(137,25)\nfloor_to(137,25)\nceil_to(137,25)\n",
+            "clamp(125,0,100)\npercent_change(120,100)\npercent_of(25,100)\n",
+            "choose(10,2)\npermutations(5,2)\nlerp(10,20,0.5)\nmap_range(50,0,100,0,10)\n",
+            "round_to(-12.5,25)\nfloor_to(-1,25)\nceil_to(-1,25)\nlerp(10,20,2)\nmap_range(50,100,0,0,10)\n",
+            "round_to(1,0)\nclamp(1,2,0)\npercent_change(1,0)\npercent_of(1,0)\n",
+            "choose(3,4)\npermutations(5,1.5)\nmap_range(1,2,2,0,1)\nround_to(1 m, 1)"
+        );
+        let values = evaluated(source);
+        let expected = [125.0, 125.0, 150.0, 100.0, 0.2, 0.25, 45.0, 20.0, 15.0, 5.0, -25.0, -25.0, 0.0, 30.0, 5.0];
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert!((scalar(&values[index]) - expected).abs() < 1e-12, "line {index}");
+        }
+        assert!(values[15..].iter().all(|outcome| matches!(outcome, LineOutcome::Error(_))));
+    }
+
+    #[test]
+    fn everyday_helpers_preserve_exactness_approximation_and_large_counts() {
+        let source = concat!(
+            "round_to(decimal(\"-0.15\"), decimal(\"0.1\"))\n",
+            "round_to(decimal(\"1\"), decimal(\"0.3\"))\n",
+            "map_range(decimal(\"1\"), decimal(\"0\"), decimal(\"3\"), decimal(\"0\"), decimal(\"3\"))\n",
+            "percent_of(fraction(1,3), fraction(2,3))\n",
+            "choose(60,30)\n",
+            "lerp(to_float(fraction(1,2)), 1, 0.5)\n",
+            "percent_of(decimal(\"1\"), decimal(\"3\"))\n",
+            "lerp(decimal(\"1\"), decimal(\"2\"), 0.5)\n",
+            "permutations(10000,10000)"
+        );
+        let values = evaluated(source);
+        for (index, expected) in [(0, "decimal(\"-0.2\")"), (1, "decimal(\"0.9\")"), (2, "decimal(\"1\")"), (3, "fraction(1,2)"), (4, "fraction(118264581564861424,1)")] {
+            let LineOutcome::Value(value) = &values[index] else { panic!("expected exact value at {index}: {:?}", values[index]); };
+            assert_eq!(value.canonical_result().as_deref(), Some(expected));
+        }
+        assert!(matches!(values[5], LineOutcome::Value(CalculationValue::ApproximateScalar(value)) if value == 0.75));
+        assert!(values[6..].iter().all(|outcome| matches!(outcome, LineOutcome::Error(_))));
+    }
+
+    #[test]
+    fn everyday_helpers_work_in_loops_and_leave_names_assignable() {
+        let source = "round_to = 9\ntotal = 0\nfor x in range(1,4):\n    total += clamp(x, 0, 2)\ntotal + round_to";
+        let values = evaluated(source);
+        assert_eq!(scalar(&values[4]), 14.0);
+        assert_eq!(super::signature("MAP_RANGE"), Some(&[5][..]));
+    }
+
+    #[test]
+    fn everyday_helpers_keep_fraction_and_decimal_types_through_each_operation() {
+        let source = concat!(
+            "floor_to(fraction(-7,4),fraction(1,2))\n",
+            "ceil_to(fraction(-7,4),fraction(1,2))\n",
+            "clamp(decimal(\"4\"),decimal(\"0\"),decimal(\"3\"))\n",
+            "percent_change(decimal(\"120\"),decimal(\"100\"))\n",
+            "lerp(decimal(\"10\"),decimal(\"20\"),decimal(\"0.5\"))\n",
+            "permutations(u64(5),u64(2))"
+        );
+        let values = evaluated(source);
+        let expected = ["fraction(-2,1)", "fraction(-3,2)", "decimal(\"3\")", "decimal(\"0.2\")", "decimal(\"15\")", "fraction(20,1)"];
+        for (outcome, expected) in values.iter().zip(expected) {
+            let LineOutcome::Value(value) = outcome else { panic!("expected exact value: {outcome:?}"); };
+            assert_eq!(value.canonical_result().as_deref(), Some(expected));
         }
     }
 

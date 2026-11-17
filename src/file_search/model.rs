@@ -56,6 +56,21 @@ pub struct SearchRequest {
     pub content_match_mode: ContentMatchMode,
     pub whole_word: bool,
     pub file_type_filter: FileTypeFilter,
+    pub metadata_preferences: super::predicate::MetadataPreferences,
+    pub metadata: super::predicate::ResolvedMetadata,
+}
+
+impl SearchRequest {
+    /// Compare authored criteria without comparing the captured submission clock.
+    pub fn same_criteria(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.metadata = Default::default();
+        right.metadata = Default::default();
+        left.metadata_preferences = left.metadata_preferences.semantic();
+        right.metadata_preferences = right.metadata_preferences.semantic();
+        left == right
+    }
 }
 
 /// User-adjustable options that can be applied to a search request.
@@ -309,13 +324,17 @@ pub struct ContentFileResultBuilder {
 
 impl ContentFileResultBuilder {
     pub fn new(path: PathBuf, display_limit: usize) -> Self {
+        let modified = path.metadata().and_then(|m| m.modified()).ok();
+        Self::with_modified(path, display_limit, modified)
+    }
+    pub(crate) fn with_modified(path: PathBuf, display_limit: usize, modified: Option<SystemTime>) -> Self {
         Self {
             result: ContentFileResult {
                 file_name: path
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.to_string_lossy().to_string()),
-                modified: path.metadata().and_then(|m| m.modified()).ok(),
+                modified,
                 path,
                 filename_relevance: None,
                 arrival_index: 0,

@@ -612,7 +612,7 @@ pub fn apply_offset_request(
     apply_offset(anchor, request.amount, request.unit, &expression)
 }
 
-fn shift_calendar_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {
+pub(crate) fn shift_calendar_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {
     let current_month = i64::from(date.year())
         .checked_mul(12)?
         .checked_add(i64::from(date.month0()))?;

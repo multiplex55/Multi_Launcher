@@ -63,6 +63,7 @@ impl std::error::Error for ProgrammerError {}
 #[derive(Debug, Clone)]
 pub(crate) struct ProgrammerExpression {
     root: Expr,
+    source: String,
 }
 
 impl ProgrammerExpression {
@@ -78,6 +79,14 @@ impl ProgrammerExpression {
     ) -> Result<TypedInteger, ProgrammerError> {
         let mode = infer_mode(&self.root, references)?.unwrap_or(DEFAULT_INTEGER_MODE);
         evaluate_as(&self.root, mode, references)
+    }
+
+    pub(crate) fn evaluate_exact(
+        &self,
+        references: &HashMap<String, CalculationValue>,
+        work: &mut super::document::script::WorkBudget,
+    ) -> Result<CalculationValue, super::document::DiagnosticKind> {
+        self.root.evaluate_exact(&self.source, references, work)
     }
 }
 
@@ -107,7 +116,7 @@ pub(crate) fn parse(source: &str) -> ParseOutcome {
     uses_programmer_syntax |= parser.uses_programmer_syntax;
     match parsed {
         Ok(root) => ParseOutcome {
-            expression: Some(ProgrammerExpression { root }),
+            expression: Some(ProgrammerExpression { root, source: source.to_owned() }),
             error: None,
             uses_programmer_syntax,
             identifier_count,
@@ -151,6 +160,45 @@ enum ExprKind {
 }
 
 impl Expr {
+    fn has_exact(&self, references: &HashMap<String, CalculationValue>) -> bool {
+        let mut names = Vec::new();
+        self.collect_references(&mut names);
+        names.iter().any(|(name, _)| matches!(references.get(name), Some(CalculationValue::Exact(_))))
+    }
+
+    fn evaluate_exact(
+        &self,
+        source: &str,
+        references: &HashMap<String, CalculationValue>,
+        work: &mut super::document::script::WorkBudget,
+    ) -> Result<CalculationValue, super::document::DiagnosticKind> {
+        use super::document::DiagnosticKind;
+        if !self.has_exact(references) {
+            return super::document::evaluate_legacy_fragment(&source[self.span.clone()], references, work);
+        }
+        match &self.kind {
+            ExprKind::Name { name, .. } => references.get(name).cloned().ok_or_else(|| DiagnosticKind::UnknownName(name.clone())),
+            ExprKind::Unary { op: UnaryOp::Plus, operand } => operand.evaluate_exact(source, references, work),
+            ExprKind::Unary { op: UnaryOp::Negate, operand } => {
+                let value = operand.evaluate_exact(source, references, work)?;
+                super::exact::ExactNumber::arithmetic(&CalculationValue::Scalar(0.0), &value, '-', work)
+            }
+            ExprKind::Binary { op, left, right } => {
+                let operator = match op {
+                    BinaryOp::Add => '+',
+                    BinaryOp::Subtract => '-',
+                    BinaryOp::Multiply => '*',
+                    BinaryOp::Divide => '/',
+                    _ => return Err(DiagnosticKind::Script("operation is unsupported for exact values".into())),
+                };
+                let left = left.evaluate_exact(source, references, work)?;
+                let right = right.evaluate_exact(source, references, work)?;
+                super::exact::ExactNumber::arithmetic(&left, &right, operator, work)
+            }
+            _ => Err(DiagnosticKind::Script("function requires an explicit to_float conversion".into())),
+        }
+    }
+
     fn collect_references(&self, references: &mut Vec<(String, bool)>) {
         match &self.kind {
             ExprKind::Number(_) => {}
@@ -878,7 +926,10 @@ fn evaluate_as(
                     Err(ProgrammerError::Integer(IntegerError::ModeMismatch))
                 }
             }
-            Some(CalculationValue::Scalar(_))
+            Some(CalculationValue::Exact(_))
+            | Some(CalculationValue::Calendar(_))
+            | Some(CalculationValue::ApproximateScalar(_))
+            | Some(CalculationValue::Scalar(_))
             | Some(CalculationValue::Boolean(_))
             | Some(CalculationValue::Sequence(_))
             | Some(CalculationValue::Vector(_))
@@ -1002,7 +1053,10 @@ fn evaluate_constructor(
                     .map_err(ProgrammerError::Integer);
             }
             Some(CalculationValue::Scalar(value)) => return scalar_to_integer(*value, target_mode),
-            Some(CalculationValue::PhysicalQuantity { .. })
+            Some(CalculationValue::Exact(_))
+            | Some(CalculationValue::Calendar(_))
+            | Some(CalculationValue::ApproximateScalar(_))
+            | Some(CalculationValue::PhysicalQuantity { .. })
             | Some(CalculationValue::Boolean(_))
             | Some(CalculationValue::Sequence(_))
             | Some(CalculationValue::Vector(_))

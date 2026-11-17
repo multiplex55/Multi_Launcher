@@ -370,6 +370,7 @@ pub(crate) struct ParseAttempt {
     pub error: Option<QuantityError>,
     pub references: Vec<String>,
     pub unit_evidence: UnitParseEvidence,
+    pub unit_ranges: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,6 +482,7 @@ pub(crate) fn parse_expression(source: &str) -> ParseAttempt {
         error,
         references: parser.references,
         unit_evidence: parser.unit_evidence,
+        unit_ranges: parser.unit_ranges,
     }
 }
 
@@ -543,6 +545,7 @@ struct Parser<'a> {
     recursion: usize,
     references: Vec<String>,
     unit_evidence: UnitParseEvidence,
+    unit_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl<'a> Parser<'a> {
@@ -554,6 +557,7 @@ impl<'a> Parser<'a> {
             recursion: 0,
             references: Vec::new(),
             unit_evidence: UnitParseEvidence::None,
+            unit_ranges: Vec::new(),
         }
     }
 
@@ -697,6 +701,7 @@ impl<'a> Parser<'a> {
         };
         self.bump_token()?;
         self.cursor += consumed;
+        self.unit_ranges.push(alias_start..self.cursor);
         let alias = self.source[alias_start..self.cursor].trim();
         let plain_minute_alias = unit == Unit::Minute && alias == "min";
         self.unit_evidence.include(if plain_minute_alias {
@@ -729,6 +734,7 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
             self.bump_token()?;
             self.cursor += consumed;
+            self.unit_ranges.push(unit_start..self.cursor);
             let power = self.parse_attached_unit_power()?.unwrap_or(1);
             product.add(
                 denominator,
@@ -1350,6 +1356,22 @@ fn comparable_quantities(
     let right = normalized(right)?;
     if left.dimension != right.dimension { return Err(QuantityError::IncompatibleDimensions); }
     Ok(ComparableQuantities::Linear(left, right))
+}
+
+/// Convert a chart coordinate into the reference quantity's display unit (or
+/// a canonical unit for nonlinear quantities), preserving dimensional checks.
+pub(super) fn chart_coordinate(reference: &CalculationValue, value: &CalculationValue) -> Result<(f64, String, bool), QuantityError> {
+    match comparable_quantities(reference, value)? {
+        ComparableQuantities::Linear(left, right) => {
+            let converted_units = left.display_units != right.display_units;
+            let converted = convert_to_target(&right, &left.display_units)?;
+            let (number, unit) = converted.display_parts().ok_or(QuantityError::OutOfRange)?;
+            Ok((number, unit, converted_units || converted.is_approximate()))
+        }
+        ComparableQuantities::Nonlinear { right, unit, approximate, .. } => {
+            Ok((right, unit.symbol().to_owned(), approximate || reference != value))
+        }
+    }
 }
 
 /// Compare quantities without computing an otherwise unnecessary difference.

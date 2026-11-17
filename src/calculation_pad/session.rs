@@ -2,24 +2,24 @@
 
 use super::document::{
     CalculationDocument, CalculationEvaluation, CalculationValue, DocumentDiagnostic, EditError, FinalBinding, LineOutcome,
-    MAX_DOCUMENT_BYTES, MAX_SOURCE_LINES,
 };
+use super::limits::{ABSOLUTE_BYTES as MAX_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_SOURCE_LINES, physical_rows};
 use super::inspector::{
     DocumentIncarnation, InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot,
 };
 use super::persistence::{
     DocumentId, LineId, LoadedDocument, PadDocumentStore, PadDocumentSummary, PadStoreError,
-    StoredDocument, PadViewMetadata,
+    StoredDocument, PadViewMetadata, DocumentOptions,
 };
 use super::{IntegerMode, IntegerWidth, TypedInteger};
 use super::worker::{EvaluationStamp, EvaluationWorker, Request as EvaluationRequest};
 use crate::platform::app_data::AppDataRoot;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-const MAX_UNDO_ENTRIES: usize = 64;
-const MAX_UNDO_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_UNDO_ENTRIES: usize = 64;
+pub(crate) const MAX_UNDO_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionLineResult {
@@ -34,18 +34,21 @@ pub struct SessionLineResult {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionEvaluation {
-    pub revision: u64,
+    pub basis: super::EvaluationBasis,
+    pub source: Arc<str>,
     pub lines: Vec<SessionLineResult>,
     /// Physical rows holding the final bindings in this evaluation.
     pub(crate) final_bindings: Arc<HashMap<String, FinalBinding>>,
     pub diagnostic: Option<DocumentDiagnostic>,
+    pub usage: Option<super::document::EvaluationUsage>,
 }
 
 pub(super) fn project_evaluation(
     evaluation: CalculationEvaluation<'_>,
     line_ids: &[LineId],
-    revision: u64,
+    basis: super::EvaluationBasis,
 ) -> Result<SessionEvaluation, String> {
+    let source: Arc<str> = Arc::from(evaluation.source);
     if evaluation.diagnostic.is_none() && evaluation.lines.len() != line_ids.len() {
         return Err("Calculation results do not match the current source lines.".into());
     }
@@ -69,10 +72,12 @@ pub(super) fn project_evaluation(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(SessionEvaluation {
-        revision,
+        basis,
+        source,
         lines,
         final_bindings: Arc::new(evaluation.final_bindings),
         diagnostic: evaluation.diagnostic,
+        usage: evaluation.usage,
     })
 }
 
@@ -120,6 +125,8 @@ pub enum SessionError {
     LineIdStateMismatch,
     LineIdExhausted,
     RevisionExhausted,
+    StaleRelatedEdit,
+    InvalidRelatedMetadata(&'static str),
 }
 
 impl std::fmt::Display for SessionError {
@@ -156,6 +163,8 @@ impl std::fmt::Display for SessionError {
             }
             Self::LineIdExhausted => formatter.write_str("no more stable line IDs are available"),
             Self::RevisionExhausted => formatter.write_str("document revision limit was reached"),
+            Self::StaleRelatedEdit => formatter.write_str("the document changed before the edit was applied"),
+            Self::InvalidRelatedMetadata(message) => formatter.write_str(message),
         }
     }
 }
@@ -202,14 +211,173 @@ impl EditableState {
 struct HistoryEntry {
     before: EditableState,
     after: EditableState,
+    related: RelatedReferenceEdits,
+    watches: Vec<WatchReplay>,
+    sensitivity_input_live: bool,
+    sensitivity_outputs: Vec<WatchReplay>,
+    chart_outputs: Vec<WatchReplay>,
+    chart_x_live: bool,
+}
+
+#[derive(Clone, Debug)]
+struct WatchReplay { id: Option<u64>, chart_was_hidden: bool }
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RelatedReferenceEdits {
+    pub inputs: Vec<RelatedInputRename>,
+    pub watches: Vec<RelatedWatchRename>,
+    pub sensitivity_input: Option<RelatedInputRename>,
+    pub sensitivity_outputs: Vec<RelatedWatchRename>,
+    pub chart_outputs: Vec<RelatedWatchRename>,
+    pub chart_x: Option<RelatedWatchRename>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RelatedInputRename {
+    pub id: LineId,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RelatedWatchRename {
+    pub before: String,
+    pub after: String,
+}
+
+impl RelatedReferenceEdits {
+    fn byte_size(&self) -> usize {
+        self.inputs.iter().map(|item| std::mem::size_of::<LineId>() + item.before.len() + item.after.len())
+            .chain(self.watches.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.sensitivity_input.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_outputs.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_x.iter().map(|item| item.before.len() + item.after.len()))
+            .fold(0usize, usize::saturating_add)
+    }
+
+    fn apply(&self, view: &PadViewMetadata, reverse: bool, strict: bool) -> Result<PadViewMetadata, &'static str> {
+        let mut result = view.clone();
+        for (index, item) in self.inputs.iter().enumerate() {
+            if self.inputs[..index].iter().any(|previous| previous.id == item.id) {
+                return Err("Duplicate input reference edit.");
+            }
+            let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+            if let Some(input) = result.inputs.iter_mut().find(|input| input.id == item.id && input.name.as_str() == from.as_str()) {
+                input.name.clone_from(to);
+            } else if strict {
+                return Err("An input reference changed before the edit was applied.");
+            }
+        }
+        for (index, item) in self.watches.iter().enumerate() {
+            let (from, _) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+            if self.watches[..index].iter().any(|previous| if reverse { &previous.after == from } else { &previous.before == from }) {
+                return Err("Duplicate watch reference edit.");
+            }
+            if strict && !view.watches.contains(from) {
+                return Err("A watch reference changed before the edit was applied.");
+            }
+        }
+        for watch in &mut result.watches {
+            if let Some(item) = self.watches.iter().find(|item| if reverse { item.after.as_str() == watch.as_str() } else { item.before.as_str() == watch.as_str() }) {
+                watch.clone_from(if reverse { &item.before } else { &item.after });
+            }
+        }
+        if let Some(settings) = result.sensitivity.as_mut() {
+            if let Some(item) = &self.sensitivity_input {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if settings.definition.input == item.id && settings.input_name == *from { settings.input_name.clone_from(to); }
+            }
+            for item in &self.sensitivity_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if !settings.definition.outputs.contains(to)
+                    && let Some(output) = settings.definition.outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
+            }
+        }
+        if let Some(super::ChartDefinition { source: super::ChartSource::Sensitivity { outputs }, .. }) = result.chart.as_mut() {
+            for item in &self.chart_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if !outputs.contains(to) && let Some(output) = outputs.iter_mut().find(|name| *name == from) { output.clone_from(to); }
+            }
+        }
+        if let Some(super::ChartDefinition { source: super::ChartSource::Vectors { x, y }, .. }) = result.chart.as_mut() {
+            if let Some(item) = &self.chart_x {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if matches!(x, Some(super::ChartVectorReference::Named { name }) if name == from) {
+                    *x = Some(super::ChartVectorReference::Named { name: to.clone() });
+                }
+            }
+            for item in &self.chart_outputs {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                let old = super::ChartVectorReference::Named { name: from.clone() };
+                let new = super::ChartVectorReference::Named { name: to.clone() };
+                if !y.contains(&new) && let Some(output) = y.iter_mut().find(|reference| **reference == old) { *output = new; }
+            }
+        }
+        super::persistence::validate_view_metadata(&result)?;
+        Ok(result)
+    }
 }
 
 impl HistoryEntry {
-    fn byte_size(&self) -> usize {
-        self.before
-            .byte_size()
-            .saturating_add(self.after.byte_size())
+    fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>), &'static str> {
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live) };
+        let mut result = inputs.apply(view, reverse, false)?;
+        let mut sensitivity_ids = sensitivity_ids.to_vec();
+        let mut sensitivity_hidden = sensitivity_hidden.clone();
+        if let Some(settings) = result.sensitivity.as_mut() {
+            replay_values(&mut settings.definition.outputs, &mut sensitivity_ids, &mut sensitivity_hidden, &self.related.sensitivity_outputs, &mut self.sensitivity_outputs, 8, reverse, str::to_owned);
+        } else { self.sensitivity_input_live = false; for state in &mut self.sensitivity_outputs { state.id = None; } }
+        let mut ids = ids.to_vec();
+        let mut hidden = hidden.clone();
+        let mut chart_ids = chart_ids.to_vec();
+        let mut chart_hidden = chart_hidden.clone();
+        if let Some(chart) = result.chart.as_mut() {
+            let mut visual_hidden = chart.hidden.iter().filter_map(|index| chart_ids.get(*index).copied()).collect::<HashSet<_>>();
+            for state in &mut self.chart_outputs {
+                if let Some(id) = state.id && chart_ids.contains(&id) {
+                    state.chart_was_hidden = visual_hidden.contains(&id);
+                }
+            }
+            match &mut chart.source {
+                super::ChartSource::Sensitivity { outputs } => replay_values(outputs, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, str::to_owned),
+                super::ChartSource::Vectors { y, .. } => replay_values(y, &mut chart_ids, &mut chart_hidden, &self.related.chart_outputs, &mut self.chart_outputs, 8, reverse, |name| super::ChartVectorReference::Named { name: name.to_owned() }),
+            }
+            for state in &self.chart_outputs {
+                if let Some(id) = state.id && state.chart_was_hidden { visual_hidden.insert(id); }
+            }
+            chart.hidden = chart_ids.iter().enumerate().filter_map(|(index, id)| visual_hidden.contains(id).then_some(index)).collect();
+        } else {
+            for state in &mut self.chart_outputs { state.id = None; }
+        }
+        replay_values(&mut result.watches, &mut ids, &mut hidden, &self.related.watches, &mut self.watches, super::persistence::MAX_WATCHES, reverse, str::to_owned);
+        super::persistence::validate_view_metadata(&result)?;
+        Ok((result, ids, hidden, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden))
     }
+
+    fn byte_size(&self) -> usize {
+        self.before.byte_size().saturating_add(self.after.byte_size()).saturating_add(self.related.byte_size())
+            .saturating_add((self.watches.len() + self.sensitivity_outputs.len() + self.chart_outputs.len()).saturating_mul(std::mem::size_of::<WatchReplay>()))
+    }
+}
+
+fn replay_values<T: PartialEq>(names: &mut Vec<T>, ids: &mut Vec<u64>, hidden: &mut HashSet<u64>, edits: &[RelatedWatchRename], states: &mut [WatchReplay], cap: usize, reverse: bool, item: impl Fn(&str) -> T) {
+        for (edit, state) in edits.iter().zip(states) {
+            let Some(id) = state.id else { continue; };
+            let to = item(if reverse { &edit.before } else { &edit.after });
+            if !hidden.contains(&id) {
+                let Some(index) = ids.iter().position(|candidate| *candidate == id) else { state.id = None; continue; };
+                if names.contains(&to) {
+                    names.remove(index);
+                    ids.remove(index);
+                    hidden.insert(id);
+                } else { names[index] = to; }
+            } else if !names.contains(&to) && names.len() < cap {
+                names.push(to);
+                ids.push(id);
+                hidden.remove(&id);
+            }
+        }
 }
 
 #[derive(Default)]
@@ -219,12 +387,17 @@ struct EditHistory {
 }
 
 impl EditHistory {
-    fn record(&mut self, before: EditableState, after: EditableState) {
+    fn record(&mut self, before: EditableState, after: EditableState, related: RelatedReferenceEdits, watch_ids: Vec<Option<u64>>, sensitivity_ids: Vec<Option<u64>>, chart_ids: Vec<Option<u64>>) {
         if before == after {
             return;
         }
         self.redo.clear();
-        self.undo.push_back(HistoryEntry { before, after });
+        let watches = watch_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
+        let sensitivity_input_live = related.sensitivity_input.is_some();
+        let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
+        let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
+        let chart_x_live = related.chart_x.is_some();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live });
         self.trim();
     }
 
@@ -260,7 +433,34 @@ struct DocumentBaseline {
     disk_sha256: Option<[u8; 32]>,
     next_line_id: u64,
     view: PadViewMetadata,
+    options: DocumentOptions,
     format_version: u32,
+}
+
+fn chart_output_names(view: &PadViewMetadata) -> Vec<String> {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Sensitivity { outputs }) => outputs.clone(),
+        Some(super::ChartSource::Vectors { y, .. }) => y.iter().filter_map(|reference| match reference { super::ChartVectorReference::Named { name } => Some(name.clone()), _ => None }).collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum ChartOutputKey { Vector(super::ChartVectorReference), Sensitivity(String) }
+
+fn chart_output_keys(view: &PadViewMetadata) -> Vec<ChartOutputKey> {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Sensitivity { outputs }) => outputs.iter().cloned().map(ChartOutputKey::Sensitivity).collect(),
+        Some(super::ChartSource::Vectors { y, .. }) => y.iter().cloned().map(ChartOutputKey::Vector).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn chart_x(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
+    match view.chart.as_ref().map(|chart| &chart.source) {
+        Some(super::ChartSource::Vectors { x, .. }) => x.as_ref(),
+        _ => None,
+    }
 }
 
 struct ActiveDocument {
@@ -271,7 +471,18 @@ struct ActiveDocument {
     line_ids: Vec<LineId>,
     next_line_id: u64,
     revision: u64,
+    generation: u64,
     view: PadViewMetadata,
+    watch_ids: Vec<u64>,
+    hidden_watch_ids: HashSet<u64>,
+    next_watch_id: u64,
+    sensitivity_output_ids: Vec<u64>,
+    hidden_sensitivity_output_ids: HashSet<u64>,
+    next_sensitivity_output_id: u64,
+    chart_output_ids: Vec<u64>,
+    hidden_chart_output_ids: HashSet<u64>,
+    next_chart_output_id: u64,
+    options: DocumentOptions,
     baseline: DocumentBaseline,
     cached_evaluation: Option<Arc<SessionEvaluation>>,
     dependency_snapshot: Option<Arc<super::dependencies::DependencySnapshot>>,
@@ -292,7 +503,18 @@ impl ActiveDocument {
             line_ids: vec![LineId(1)],
             next_line_id: 2,
             revision: 0,
+            generation: 0,
             view: PadViewMetadata::default(),
+            watch_ids: Vec::new(),
+            hidden_watch_ids: HashSet::new(),
+            next_watch_id: 1,
+            sensitivity_output_ids: Vec::new(),
+            hidden_sensitivity_output_ids: HashSet::new(),
+            next_sensitivity_output_id: 1,
+            chart_output_ids: Vec::new(),
+            hidden_chart_output_ids: HashSet::new(),
+            next_chart_output_id: 1,
+            options: DocumentOptions::default(),
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -303,6 +525,7 @@ impl ActiveDocument {
                 disk_sha256: None,
                 next_line_id: 2,
                 view: PadViewMetadata::default(),
+                options: DocumentOptions::default(),
                 format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
             },
             cached_evaluation: None,
@@ -329,7 +552,18 @@ impl ActiveDocument {
             line_ids: stored.line_ids,
             next_line_id: stored.next_line_id,
             revision: 0,
+            generation: 0,
+            watch_ids: (1..=stored.view.watches.len() as u64).collect(),
+            hidden_watch_ids: HashSet::new(),
+            next_watch_id: stored.view.watches.len() as u64 + 1,
+            sensitivity_output_ids: (1..=stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64).collect(),
+            hidden_sensitivity_output_ids: HashSet::new(),
+            next_sensitivity_output_id: stored.view.sensitivity.as_ref().map_or(0, |settings| settings.definition.outputs.len()) as u64 + 1,
+            chart_output_ids: (1..=chart_output_keys(&stored.view).len() as u64).collect(),
+            hidden_chart_output_ids: HashSet::new(),
+            next_chart_output_id: chart_output_keys(&stored.view).len() as u64 + 1,
             view: stored.view.clone(),
+            options: stored.options,
             baseline: DocumentBaseline {
                 state: EditableState {
                     source: String::new(),
@@ -340,6 +574,7 @@ impl ActiveDocument {
                 disk_sha256: Some(loaded.disk_sha256),
                 next_line_id: saved_next_line_id,
                 view: stored.view,
+                options: stored.options,
                 format_version: stored.format_version,
             },
             cached_evaluation: None,
@@ -367,12 +602,14 @@ impl ActiveDocument {
             || self.name != self.baseline.name
             || self.next_line_id != self.baseline.next_line_id
             || self.view != self.baseline.view
+            || self.options != self.baseline.options
     }
 
     fn stored_document(&self) -> Result<StoredDocument, SessionError> {
         let name = self.name.clone().ok_or(SessionError::SaveAsRequired)?;
         let mut stored = StoredDocument::new(self.id, name, self.source.clone(), self.line_ids.clone(), self.next_line_id);
         stored.view = self.view.clone();
+        stored.options = self.options;
         Ok(stored)
     }
 }
@@ -405,17 +642,105 @@ pub struct CalculationPadSession {
     evaluation_worker: Option<EvaluationWorker>,
     scheduled_evaluation: Option<EvaluationStamp>,
     evaluation_failure: Option<(EvaluationStamp, String)>,
+    canceled_evaluation: Option<EvaluationStamp>,
+    sensitivity_worker: Option<super::sensitivity::SensitivityWorker>,
+    sensitivity_active: Option<super::SensitivityBasis>,
+    sensitivity_progress: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+    sensitivity_table: Option<Arc<super::SensitivityTable>>,
+    sensitivity_failure: Option<String>,
+    sensitivity_canceled: bool,
+    sensitivity_generation: u64,
+    #[cfg(test)]
+    evaluation_attempts: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvaluationStatus {
     Ready,
     Pending,
+    NotCalculated,
+    Outdated,
+    Canceled,
     Failed(String),
     Inactive,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RenamePreview {
+    pub basis: super::EvaluationBasis,
+    pub plan: super::RenamePlan,
+    caret: usize,
+    replacement: String,
+    view: PadViewMetadata,
+}
+
 impl CalculationPadSession {
+    pub(crate) fn rename_target(&self, caret: usize) -> Result<(String, super::RenameScope), String> {
+        if self.pending.is_some() { return Err("Resolve the pending document transition first.".into()); }
+        let source = self.source().ok_or("No document is open.")?;
+        super::document::rename::target(source, caret)
+    }
+    pub(crate) fn rename_preview_is_current(&self, preview: &RenamePreview) -> bool {
+        self.pending.is_none() && self.evaluation_basis() == Some(preview.basis)
+            && self.current.as_ref().is_some_and(|current| current.view == preview.view)
+    }
+    pub(crate) fn preview_rename(&self, caret: usize, replacement: &str) -> Result<RenamePreview, String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if self.pending.is_some() { return Err("Resolve the pending document transition first.".into()); }
+        let basis = self.evaluation_basis().ok_or("No document is open.")?;
+        let plan = super::document::rename::plan(&current.source, caret, replacement)?;
+        validate_source_size(&plan.source).map_err(|error| error.to_string())?;
+        if matches!(plan.scope, super::RenameScope::Document)
+            && current.view.watches.contains(&plan.old_name) && current.view.watches.contains(&plan.new_name) {
+            return Err("The new name is already pinned as a watch.".into());
+        }
+        if matches!(plan.scope, super::RenameScope::Document)
+            && current.view.sensitivity.as_ref().is_some_and(|settings| settings.definition.outputs.contains(&plan.old_name) && settings.definition.outputs.contains(&plan.new_name)) {
+            return Err("The new name is already a sensitivity output.".into());
+        }
+        if matches!(plan.scope, super::RenameScope::Document) && chart_output_names(&current.view).contains(&plan.old_name) && chart_output_names(&current.view).contains(&plan.new_name) {
+            return Err("The new name is already a chart output.".into());
+        }
+        Ok(RenamePreview { basis, plan, caret, replacement: replacement.to_owned(), view: current.view.clone() })
+    }
+
+    pub(crate) fn apply_rename(&mut self, preview: &RenamePreview) -> Result<bool, String> {
+        self.ensure_editable().map_err(|error| error.to_string())?;
+        if self.evaluation_basis() != Some(preview.basis) { return Err("The document changed; preview the rename again.".into()); }
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if current.view != preview.view || super::document::rename::plan(&current.source, preview.caret, &preview.replacement)? != preview.plan {
+            return Err("The document or related references changed; preview the rename again.".into());
+        }
+        validate_source_size(&preview.plan.source).map_err(|error| error.to_string())?;
+        let mut related = RelatedReferenceEdits::default();
+        if matches!(preview.plan.scope, super::RenameScope::Document) {
+            for input in &current.view.inputs {
+                if input.name == preview.plan.old_name {
+                    related.inputs.push(RelatedInputRename { id: input.id, before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
+            }
+            if current.view.watches.contains(&preview.plan.old_name) {
+                related.watches.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if let Some(settings) = &current.view.sensitivity {
+                if settings.input_name == preview.plan.old_name {
+                    related.sensitivity_input = Some(RelatedInputRename { id: settings.definition.input, before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
+                if settings.definition.outputs.contains(&preview.plan.old_name) {
+                    related.sensitivity_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+                }
+            }
+            if chart_output_names(&current.view).contains(&preview.plan.old_name) {
+                related.chart_outputs.push(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if matches!(chart_x(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
+                related.chart_x = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+        }
+        let line_ids = current.line_ids.clone();
+        let next_id = current.next_line_id;
+        self.commit_source_edit(preview.plan.source.clone(), line_ids, next_id, related).map_err(|error| error.to_string())
+    }
     /// Creates an immediately usable blank session without touching the filesystem.
     pub fn new(root: &AppDataRoot) -> Self {
         Self::with_store(PadDocumentStore::new(root))
@@ -431,6 +756,16 @@ impl CalculationPadSession {
             evaluation_worker: None,
             scheduled_evaluation: None,
             evaluation_failure: None,
+            canceled_evaluation: None,
+            sensitivity_worker: None,
+            sensitivity_active: None,
+            sensitivity_progress: None,
+            sensitivity_table: None,
+            sensitivity_failure: None,
+            sensitivity_canceled: false,
+            sensitivity_generation: 0,
+            #[cfg(test)]
+            evaluation_attempts: 0,
         }
     }
 
@@ -441,11 +776,108 @@ impl CalculationPadSession {
         }
     }
 
+    fn sensitivity_matches(&self, basis: &super::SensitivityBasis) -> bool {
+        self.pending.is_none() && self.current.as_ref().is_some_and(|current| {
+            current.id == basis.document && current.incarnation == basis.incarnation
+                && current.revision == basis.revision && current.options == basis.options
+                && current.line_ids.contains(&basis.definition.input)
+        })
+    }
+
+    fn retire_sensitivity(&mut self) {
+        if let Some(worker) = &self.sensitivity_worker { worker.retire(); }
+        self.sensitivity_active = None;
+        self.sensitivity_progress = None;
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = false;
+    }
+
+    fn invalidate_stale_sensitivity(&mut self) {
+        if self.sensitivity_active.as_ref().is_some_and(|basis| !self.sensitivity_matches(basis)) { self.retire_sensitivity(); }
+    }
+
+    pub(crate) fn request_sensitivity(&mut self, definition: super::SensitivityDefinition) -> Result<super::SensitivityBasis, String> {
+        self.ensure_editable().map_err(|error| error.to_string())?;
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let limits = super::limits::profile_limits(current.options.profile);
+        if current.source.len() > limits.bytes || physical_rows(&current.source) > limits.lines { return Err("The source exceeds the selected document profile.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == definition.input).ok_or("The selected input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line).ok_or("The selected input is not an eligible literal.")?;
+        let generation = self.sensitivity_generation.checked_add(1).ok_or("Sensitivity generation exhausted.")?;
+        let basis = super::SensitivityBasis { document: current.id, incarnation: current.incarnation, revision: current.revision, options: current.options,
+            input_name: descriptor.name.clone(), definition, generation };
+        let request = super::sensitivity::Request::new(basis.clone(), current.source.clone(), descriptor)?;
+        let progress = Arc::clone(&request.progress);
+        let count = request.count();
+        if self.sensitivity_worker.is_none() {
+            let wake = self.evaluation_wake.clone().unwrap_or_else(|| Arc::new(|| {}));
+            self.sensitivity_worker = Some(super::sensitivity::SensitivityWorker::start(wake)?);
+        }
+        self.sensitivity_generation = generation;
+        self.sensitivity_active = Some(basis.clone());
+        self.sensitivity_progress = Some((progress, count));
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = false;
+        if let Some(worker) = &self.sensitivity_worker { worker.submit(request); }
+        Ok(basis)
+    }
+
+    pub(crate) fn poll_sensitivity(&mut self) {
+        self.invalidate_stale_sensitivity();
+        let completion = self.sensitivity_worker.as_ref().and_then(|worker| worker.take());
+        if let Some((basis, result)) = completion
+            && self.sensitivity_active.as_ref() == Some(&basis) && self.sensitivity_matches(&basis) {
+            self.sensitivity_progress = None;
+            match result { Ok(table) if table.basis == basis => self.sensitivity_table = Some(Arc::new(table)),
+                Ok(_) => self.sensitivity_failure = Some("Sensitivity result identity is invalid.".into()),
+                Err(message) => self.sensitivity_failure = Some(message), }
+        }
+    }
+
+    pub(crate) fn cancel_sensitivity(&mut self, basis: &super::SensitivityBasis) -> bool {
+        if self.sensitivity_active.as_ref() != Some(basis) || self.sensitivity_progress.is_none() { return false; }
+        if let Some(worker) = &self.sensitivity_worker { worker.retire(); }
+        self.sensitivity_active = None;
+        self.sensitivity_progress = None;
+        self.sensitivity_failure = None;
+        self.sensitivity_canceled = true;
+        true
+    }
+
+    pub(crate) fn sensitivity_definition_changed(&mut self, definition: &super::SensitivityDefinition) {
+        if self.sensitivity_active.as_ref().is_some_and(|basis| &basis.definition != definition) {
+            self.retire_sensitivity();
+        }
+    }
+
+    pub(crate) fn sensitivity_status(&self) -> super::SensitivityStatus {
+        if self.sensitivity_canceled { return super::SensitivityStatus::Canceled; }
+        if let Some(basis) = &self.sensitivity_active {
+            if !self.sensitivity_matches(basis) { return super::SensitivityStatus::Outdated; }
+            if let Some((progress, total)) = &self.sensitivity_progress { return super::SensitivityStatus::Pending { completed: progress.load(std::sync::atomic::Ordering::Relaxed), total: *total }; }
+            if let Some(error) = &self.sensitivity_failure { return super::SensitivityStatus::Failed(error.clone()); }
+            if self.sensitivity_table.as_ref().is_some_and(|table| table.basis == *basis) { return super::SensitivityStatus::Ready; }
+        }
+        if self.sensitivity_table.is_some() { super::SensitivityStatus::Outdated } else { super::SensitivityStatus::Idle }
+    }
+
+    pub(crate) fn active_sensitivity_basis(&self) -> Option<super::SensitivityBasis> {
+        self.sensitivity_active.clone()
+    }
+
+    pub(crate) fn sensitivity_table(&self) -> Option<Arc<super::SensitivityTable>> {
+        let basis = self.sensitivity_active.as_ref()?;
+        if !self.sensitivity_matches(basis) || self.sensitivity_progress.is_some() || self.sensitivity_failure.is_some() { return None; }
+        if self.current.as_ref().and_then(|current| current.view.sensitivity.as_ref()).is_some_and(|settings| settings.definition != basis.definition || settings.input_name != basis.input_name) { return None; }
+        self.sensitivity_table.as_ref().filter(|table| table.basis == *basis).cloned()
+    }
+
     fn evaluation_stamp(&self) -> Option<EvaluationStamp> {
         self.current.as_ref().map(|current| EvaluationStamp {
             document: current.id,
             incarnation: current.incarnation,
             revision: current.revision,
+            generation: current.generation,
         })
     }
 
@@ -455,6 +887,15 @@ impl CalculationPadSession {
         }
         self.scheduled_evaluation = None;
         self.evaluation_failure = None;
+        self.canceled_evaluation = None;
+        if let Some(current) = self.current.as_mut() {
+            if let Some(next) = current.generation.checked_add(1) {
+                current.generation = next;
+            } else {
+                current.incarnation = DocumentIncarnation(DocumentId::fresh());
+                current.generation = 0;
+            }
+        }
     }
 
     pub fn evaluation_status(&self) -> EvaluationStatus {
@@ -466,20 +907,47 @@ impl CalculationPadSession {
         {
             return EvaluationStatus::Failed(message.clone());
         }
+        if self.canceled_evaluation == Some(stamp) {
+            return EvaluationStatus::Canceled;
+        }
+        if self.scheduled_evaluation == Some(stamp) {
+            return EvaluationStatus::Pending;
+        }
         if self
             .current
             .as_ref()
             .and_then(|current| current.cached_evaluation.as_ref())
-            .is_some_and(|evaluation| evaluation.revision == stamp.revision)
+            .is_some_and(|evaluation| evaluation.basis == stamp)
         {
             EvaluationStatus::Ready
+        } else if self.current.as_ref().is_some_and(|current| current.cached_evaluation.is_some()) {
+            EvaluationStatus::Outdated
         } else {
-            EvaluationStatus::Pending
+            EvaluationStatus::NotCalculated
         }
     }
 
     pub(crate) fn view_metadata(&self) -> Option<&PadViewMetadata> {
         self.current.as_ref().map(|document| &document.view)
+    }
+
+    pub fn document_options(&self) -> Option<DocumentOptions> {
+        self.current.as_ref().map(|document| document.options)
+    }
+
+    pub fn set_document_options(&mut self, options: DocumentOptions) -> Result<bool, SessionError> {
+        self.ensure_editable()?;
+        if self.current.as_ref().is_some_and(|document| document.options == options) { return Ok(false); }
+        self.retire_sensitivity();
+        self.retire_background_evaluation();
+        let document = self.current.as_mut().ok_or(SessionError::NoActiveDocument)?;
+        document.options = options;
+        document.dependency_snapshot = None;
+        Ok(true)
+    }
+
+    pub fn evaluation_basis(&self) -> Option<super::EvaluationBasis> {
+        self.evaluation_stamp()
     }
 
     pub(crate) fn is_view_dirty(&self) -> bool {
@@ -488,10 +956,99 @@ impl CalculationPadSession {
 
     pub(crate) fn set_view_metadata(&mut self, view: PadViewMetadata) -> Result<(), &'static str> {
         if self.pending.is_some() { return Err("Resolve the pending document transition first."); }
+        if self.current.as_ref().is_some_and(|document| document.view == view) { return Ok(()); }
         super::persistence::validate_view_metadata(&view)?;
+        let (sensitivity_ids, sensitivity_next) = if let Some(current) = self.current.as_ref() {
+            let old = current.view.sensitivity.as_ref();
+            let new = view.sensitivity.as_ref();
+            let old_names = old.map(|settings| settings.definition.outputs.as_slice()).unwrap_or_default();
+            let new_names = new.map(|settings| settings.definition.outputs.as_slice()).unwrap_or_default();
+            let mut next = current.next_sensitivity_output_id;
+            let mut ids = Vec::with_capacity(new_names.len());
+            for name in new_names {
+                let id = if let Some(index) = old_names.iter().position(|old| old == name) { current.sensitivity_output_ids[index] }
+                    else { let id = next; next = next.checked_add(1).ok_or("Sensitivity output identity space exhausted.")?; id };
+                ids.push(id);
+            }
+            let removed: HashSet<_> = current.sensitivity_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+                for state in &mut entry.sensitivity_outputs {
+                    if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; }
+                }
+                if let Some(item) = &entry.related.sensitivity_input
+                    && old.is_some_and(|settings| settings.definition.input == item.id)
+                    && old.map(|settings| (settings.definition.input, &settings.input_name)) != new.map(|settings| (settings.definition.input, &settings.input_name))
+                { entry.sensitivity_input_live = false; }
+            }
+            (ids, next)
+        } else { return Err("No document is open."); };
+        if self.current.as_ref().is_some_and(|current| current.view.sensitivity != view.sensitivity)
+            && self.sensitivity_active.as_ref().is_some_and(|basis| view.sensitivity.as_ref().is_none_or(|settings| settings.definition != basis.definition || settings.input_name != basis.input_name)) {
+            self.retire_sensitivity();
+        }
+        let (chart_ids, chart_next) = if let Some(current) = self.current.as_ref() {
+            let old = chart_output_keys(&current.view);
+            let new = chart_output_keys(&view);
+            let mut next = current.next_chart_output_id;
+            let mut ids = Vec::with_capacity(new.len());
+            for name in &new {
+                let id = if let Some(index) = old.iter().position(|old| old == name) { current.chart_output_ids[index] }
+                    else { let id = next; next = next.checked_add(1).ok_or("Chart output identity space exhausted.")?; id };
+                ids.push(id);
+            }
+            let removed: HashSet<_> = current.chart_output_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+            for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+                for state in &mut entry.chart_outputs { if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; } }
+                if chart_x(&current.view) != chart_x(&view) { entry.chart_x_live = false; }
+            }
+            (ids, next)
+        } else { return Err("No document is open."); };
         let document = self.current.as_mut().ok_or("No document is open.")?;
+        document.sensitivity_output_ids = sensitivity_ids;
+        document.next_sensitivity_output_id = sensitivity_next;
+        document.chart_output_ids = chart_ids;
+        document.next_chart_output_id = chart_next;
+        if document.view.watches == view.watches {
+            document.view = view;
+            self.prune_hidden_watch_ids();
+            return Ok(());
+        }
+        let mut next_id = document.next_watch_id;
+        let mut ids = Vec::with_capacity(view.watches.len());
+        for name in &view.watches {
+            let id = if let Some(index) = document.view.watches.iter().position(|old| old == name) {
+                document.watch_ids[index]
+            } else {
+                let id = next_id;
+                next_id = next_id.checked_add(1).ok_or("Watch identity space exhausted.")?;
+                id
+            };
+            ids.push(id);
+        }
+        let removed: HashSet<_> = document.watch_ids.iter().copied().filter(|id| !ids.contains(id)).collect();
+        for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
+            for state in &mut entry.watches {
+                if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; }
+            }
+        }
         document.view = view;
+        document.watch_ids = ids;
+        document.next_watch_id = next_id;
+        self.prune_hidden_watch_ids();
         Ok(())
+    }
+
+    fn prune_hidden_watch_ids(&mut self) {
+        let retained = self.history.undo.iter().chain(&self.history.redo)
+            .flat_map(|entry| entry.watches.iter().filter_map(|watch| watch.id))
+            .collect::<HashSet<_>>();
+        if let Some(current) = self.current.as_mut() {
+            current.hidden_watch_ids.retain(|id| retained.contains(id));
+            let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.sensitivity_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
+            current.hidden_sensitivity_output_ids.retain(|id| retained.contains(id));
+            let retained = self.history.undo.iter().chain(&self.history.redo).flat_map(|entry| entry.chart_outputs.iter().filter_map(|state| state.id)).collect::<HashSet<_>>();
+            current.hidden_chart_output_ids.retain(|id| retained.contains(id));
+        }
     }
 
     pub fn current_id(&self) -> Option<DocumentId> {
@@ -557,7 +1114,7 @@ impl CalculationPadSession {
     pub fn comparison_context(&self) -> Option<super::comparison::ComparisonContext> {
         let document = self.current.as_ref()?;
         let evaluation = document.cached_evaluation.as_ref()?;
-        if evaluation.revision != document.revision || evaluation.diagnostic.is_some() {
+        if Some(evaluation.basis) != self.evaluation_stamp() || evaluation.diagnostic.is_some() {
             return None;
         }
         let rows = evaluation
@@ -570,6 +1127,7 @@ impl CalculationPadSession {
             })
             .collect::<Vec<_>>();
         Some(super::comparison::ComparisonContext {
+            basis: evaluation.basis,
             incarnation: document.incarnation,
             document_id: document.id,
             revision: document.revision,
@@ -582,13 +1140,11 @@ impl CalculationPadSession {
     pub fn dependency_snapshot(&mut self) -> Option<Arc<super::DependencySnapshot>> {
         let current = self.current.as_mut()?;
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if evaluation.basis != (EvaluationStamp { document: current.id, incarnation: current.incarnation, revision: current.revision, generation: current.generation }) {
             return None;
         }
         if let Some(snapshot) = current.dependency_snapshot.as_ref()
-            && snapshot.document_id == current.id
-            && snapshot.incarnation == current.incarnation
-            && snapshot.revision == current.revision
+            && snapshot.basis == evaluation.basis
         {
             return Some(Arc::clone(snapshot));
         }
@@ -618,7 +1174,7 @@ impl CalculationPadSession {
             return None;
         }
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if Some(evaluation.basis) != self.evaluation_stamp() {
             return None;
         }
         let row = evaluation.lines.iter().find(|row| row.id == id)?;
@@ -633,7 +1189,7 @@ impl CalculationPadSession {
     pub fn inspector_source(&self, line_id: LineId) -> Option<InspectorSourceSnapshot> {
         let current = self.current.as_ref()?;
         let evaluation = current.cached_evaluation.as_ref()?;
-        if evaluation.revision != current.revision {
+        if Some(evaluation.basis) != self.evaluation_stamp() {
             return None;
         }
         let line = evaluation.lines.iter().find(|line| line.id == line_id)?;
@@ -658,6 +1214,7 @@ impl CalculationPadSession {
             incarnation: current.incarnation,
             document_id: current.id,
             revision: current.revision,
+            basis: evaluation.basis,
             line_id,
             source_range: line.source_range.clone(),
             source_text: std::sync::Arc::from(current.source.get(line.source_range.clone())?),
@@ -708,23 +1265,63 @@ impl CalculationPadSession {
         let descriptor = super::document::literal_inputs(source).into_iter()
             .find(|input| input.line == line && input.source_line == original)
             .ok_or("This input changed or is no longer a literal.")?;
-        let new_len = source.len().checked_sub(descriptor.value_range.len())
-            .and_then(|size| size.checked_add(value.len()))
-            .ok_or("Input is too large.")?;
-        if new_len > super::document::MAX_DOCUMENT_BYTES { return Err("Input is too large.".into()); }
-        let mut replacement = source.to_owned();
-        replacement.replace_range(descriptor.value_range.clone(), value);
-        let valid = super::document::literal_inputs(&replacement).into_iter()
-            .any(|input| input.line == line && input.name == descriptor.name
-                && input.value == value && input.value_range.start == descriptor.value_range.start);
-        if !valid { return Err("Enter a valid value for this input.".into()); }
+        let selected = self.current.as_ref().and_then(|current| current.view.inputs.iter().find(|input| input.id == line_id));
+        if selected.is_some_and(|input| input.unavailable || input.name != descriptor.name) { return Err("This selected input is unavailable or changed.".into()); }
+        let default = super::input::InputConfig::default();
+        let config = selected.map_or(&default, |input| &input.config);
+        let replacement = super::input::replace_literal(source, &descriptor, config, value)?;
         validate_source_size(&replacement).map_err(|error| error.to_string())?;
         Ok(replacement)
     }
 
+    pub(crate) fn apply_input(&mut self, basis: super::EvaluationBasis, line_id: LineId, original: &str, config: &super::input::InputConfig, value: &str) -> Result<bool, String> {
+        if self.evaluation_basis() != Some(basis) { return Err("Source changed; reset this draft.".into()); }
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        if !current.view.inputs.iter().any(|input| input.id == line_id && !input.unavailable && &input.config == config) {
+            return Err("Input settings changed; reset this draft.".into());
+        }
+        let source = self.input_replacement(basis.revision, line_id, original, value)?;
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let ids = current.line_ids.clone();
+        let next = current.next_line_id;
+        self.commit_source_edit(source, ids, next, RelatedReferenceEdits::default()).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn input_projection(&self, line_id: LineId) -> Result<super::input::InputProjection, String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let selection = current.view.inputs.iter().find(|input| input.id == line_id).ok_or("Input is not selected.")?;
+        if selection.unavailable { return Err("Input is unavailable.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == line_id).ok_or("Input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line && input.name == selection.name).ok_or("Input changed or is no longer a literal.")?;
+        super::input::project(descriptor, selection.config.clone())
+    }
+
+    pub(crate) fn configure_input(&mut self, line_id: LineId, mut config: super::input::InputConfig) -> Result<(), String> {
+        let current = self.current.as_ref().ok_or("No document is open.")?;
+        let selection = current.view.inputs.iter().find(|input| input.id == line_id).ok_or("Input is not selected.")?;
+        if selection.unavailable { return Err("Input is unavailable.".into()); }
+        let line = current.line_ids.iter().position(|id| *id == line_id).ok_or("Input no longer exists.")?;
+        let descriptor = super::document::literal_inputs(&current.source).into_iter().find(|input| input.line == line && input.name == selection.name).ok_or("Input changed or is no longer a literal.")?;
+        config.anchor = config.has_numeric_constraints().then(|| descriptor.kind.anchor());
+        super::input::validate_config(&descriptor.kind, &config)?;
+        let mut view = current.view.clone();
+        view.inputs.iter_mut().find(|input| input.id == line_id).ok_or("Input is not selected.")?.config = config;
+        self.set_view_metadata(view).map_err(str::to_owned)
+    }
+
     pub fn replace_source(&mut self, source: impl Into<String>) -> Result<bool, SessionError> {
+        let basis = self.evaluation_basis().ok_or(SessionError::NoActiveDocument)?;
+        self.commit_related_edit(basis, source.into(), RelatedReferenceEdits::default())
+    }
+
+    pub(crate) fn commit_related_edit(
+        &mut self,
+        basis: super::EvaluationBasis,
+        source: String,
+        related: RelatedReferenceEdits,
+    ) -> Result<bool, SessionError> {
         self.ensure_editable()?;
-        let source = source.into();
+        if self.evaluation_basis() != Some(basis) { return Err(SessionError::StaleRelatedEdit); }
         validate_source_size(&source)?;
         let current = self
             .current
@@ -739,15 +1336,24 @@ impl CalculationPadSession {
             &source,
             current.next_line_id,
         )?;
-        self.commit_source_edit(source, line_ids, next_line_id)
+        self.commit_source_edit(source, line_ids, next_line_id, related)
     }
 
     /// Restores an unnamed recovery draft over the session's initial blank
     /// document. Recovery starts with fresh line identities, no undo history,
     /// and the blank source as its saved baseline so restored text stays dirty.
+    #[cfg(test)]
     pub(crate) fn restore_recovered_source(
         &mut self,
         source: String,
+    ) -> Result<bool, SessionError> {
+        self.restore_recovered_document(source, DocumentOptions::default())
+    }
+
+    pub(crate) fn restore_recovered_document(
+        &mut self,
+        source: String,
+        options: DocumentOptions,
     ) -> Result<bool, SessionError> {
         self.ensure_editable()?;
         validate_source_size(&source)?;
@@ -763,6 +1369,8 @@ impl CalculationPadSession {
             return Ok(false);
         }
         if source.is_empty() {
+            self.retire_background_evaluation();
+            if let Some(current) = self.current.as_mut() { current.options = options; }
             self.history.clear();
             return Ok(true);
         }
@@ -786,6 +1394,7 @@ impl CalculationPadSession {
         current.line_ids = line_ids;
         current.next_line_id = next_line_id;
         current.revision = next_revision;
+        current.options = options;
         current.cached_evaluation = None;
         self.history.clear();
         Ok(true)
@@ -796,6 +1405,7 @@ impl CalculationPadSession {
         source: String,
         line_ids: Vec<LineId>,
         next_line_id: u64,
+        related: RelatedReferenceEdits,
     ) -> Result<bool, SessionError> {
         let current = self
             .current
@@ -805,6 +1415,15 @@ impl CalculationPadSession {
             return Ok(false);
         }
         let before = current.editable_state();
+        let watch_ids = related.watches.iter().map(|edit| current.view.watches.iter().position(|name| name == &edit.before).map(|index| current.watch_ids[index])).collect();
+        let sensitivity_ids = related.sensitivity_outputs.iter().map(|edit| current.view.sensitivity.as_ref().and_then(|settings| settings.definition.outputs.iter().position(|name| name == &edit.before)).map(|index| current.sensitivity_output_ids[index])).collect();
+        let keys = chart_output_keys(&current.view);
+        let chart_ids = related.chart_outputs.iter().map(|edit| keys.iter().position(|key| match key {
+            ChartOutputKey::Sensitivity(name) => name == &edit.before,
+            ChartOutputKey::Vector(super::ChartVectorReference::Named { name }) => name == &edit.before,
+            ChartOutputKey::Vector(_) => false,
+        }).map(|index| current.chart_output_ids[index])).collect();
+        let view = related.apply(&current.view, false, true).map_err(SessionError::InvalidRelatedMetadata)?;
         let mut after = before.clone();
         after.source = source.clone();
         after.line_ids = line_ids.clone();
@@ -813,8 +1432,9 @@ impl CalculationPadSession {
             .checked_add(1)
             .ok_or(SessionError::RevisionExhausted)?;
 
+        self.retire_sensitivity();
         self.retire_background_evaluation();
-        self.history.record(before, after);
+        self.history.record(before, after, related, watch_ids, sensitivity_ids, chart_ids);
         let current = self
             .current
             .as_mut()
@@ -823,6 +1443,8 @@ impl CalculationPadSession {
         current.line_ids = line_ids;
         current.next_line_id = next_line_id;
         current.revision = next_revision;
+        current.view = view;
+        self.prune_hidden_watch_ids();
         Ok(true)
     }
 
@@ -850,7 +1472,7 @@ impl CalculationPadSession {
         }
         let line_ids = current.line_ids.clone();
         let next_line_id = current.next_line_id;
-        self.commit_source_edit(source, line_ids, next_line_id)
+        self.commit_source_edit(source, line_ids, next_line_id, RelatedReferenceEdits::default())
     }
 
     pub fn undo(&mut self) -> bool {
@@ -863,15 +1485,28 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
-        let Some(entry) = self.history.undo.pop_back() else {
+        let Some(mut entry) = self.history.undo.back().cloned() else { return false; };
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, true) else {
             return false;
         };
+        if self.history.undo.pop_back().is_none() {
+            return false;
+        }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.before);
             current.revision = next_revision;
+            current.view = view;
+            current.watch_ids = watch_ids;
+            current.hidden_watch_ids = hidden_watch_ids;
+            current.sensitivity_output_ids = sensitivity_ids;
+            current.hidden_sensitivity_output_ids = sensitivity_hidden;
+            current.chart_output_ids = chart_ids;
+            current.hidden_chart_output_ids = chart_hidden;
         }
         self.history.redo.push_back(entry);
+        self.prune_hidden_watch_ids();
         true
     }
 
@@ -885,30 +1520,42 @@ impl CalculationPadSession {
         let Some(next_revision) = current.revision.checked_add(1) else {
             return false;
         };
-        let Some(entry) = self.history.redo.pop_back() else {
+        let Some(mut entry) = self.history.redo.back().cloned() else { return false; };
+        let Ok((view, watch_ids, hidden_watch_ids, sensitivity_ids, sensitivity_hidden, chart_ids, chart_hidden)) = entry.replay(&current.view, &current.watch_ids, &current.hidden_watch_ids, &current.sensitivity_output_ids, &current.hidden_sensitivity_output_ids, &current.chart_output_ids, &current.hidden_chart_output_ids, false) else {
             return false;
         };
+        if self.history.redo.pop_back().is_none() {
+            return false;
+        }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         if let Some(current) = self.current.as_mut() {
             apply_editable_state(current, &entry.after);
             current.revision = next_revision;
+            current.view = view;
+            current.watch_ids = watch_ids;
+            current.hidden_watch_ids = hidden_watch_ids;
+            current.sensitivity_output_ids = sensitivity_ids;
+            current.hidden_sensitivity_output_ids = sensitivity_hidden;
+            current.chart_output_ids = chart_ids;
+            current.hidden_chart_output_ids = chart_hidden;
         }
         self.history.undo.push_back(entry);
+        self.prune_hidden_watch_ids();
         true
     }
 
-    /// Returns owned line outcomes, recomputing only after a source revision changes.
-    pub fn evaluation(&mut self) -> Option<&SessionEvaluation> {
-        let stamp = self.evaluation_stamp()?;
+    fn poll_evaluation(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
         if let Some(completion) = self
             .evaluation_worker
             .as_ref()
             .and_then(EvaluationWorker::take)
-            && completion.stamp == stamp
+            && completion.stamp == stamp && self.scheduled_evaluation == Some(stamp)
         {
             self.scheduled_evaluation = None;
             match completion.result {
-                Ok(result) => {
+                Ok(result) if result.basis == stamp => {
                     if let Some(current) = self.current.as_mut() {
                         current.cached_evaluation = Some(Arc::new(result));
                         current.dependency_snapshot = None;
@@ -918,82 +1565,98 @@ impl CalculationPadSession {
                         }
                     }
                 }
+                Ok(_) => self.evaluation_failure = Some((stamp, "Calculation results have an invalid evaluation identity.".into())),
                 Err(message) => self.evaluation_failure = Some((stamp, message)),
             }
         }
-        let needs_evaluation = self
-            .current
-            .as_ref()?
-            .cached_evaluation
-            .as_ref()
-            .is_none_or(|evaluation| evaluation.revision != stamp.revision);
-        if needs_evaluation && self.evaluation_wake.is_some() {
-            if self.scheduled_evaluation == Some(stamp)
-                || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
-            {
-                return None;
-            }
-            let current = self.current.as_ref()?;
-            if CalculationDocument::source_requires_repeated_execution(&current.source) {
-                if self.scheduled_evaluation != Some(stamp)
-                    && self
-                        .evaluation_failure
-                        .as_ref()
-                        .is_none_or(|(failed, _)| *failed != stamp)
-                {
-                    if self.evaluation_worker.is_none() {
-                        let wake = Arc::clone(self.evaluation_wake.as_ref()?);
-                        match EvaluationWorker::start(wake) {
-                            Ok(worker) => self.evaluation_worker = Some(worker),
-                            Err(error) => {
-                                self.evaluation_failure = Some((stamp, error));
-                                return None;
-                            }
-                        }
-                    }
-                    let current = self.current.as_ref()?;
-                    self.evaluation_worker.as_ref()?.submit(EvaluationRequest {
-                        stamp,
-                        source: current.source.clone(),
-                        line_ids: current.line_ids.clone(),
-                    });
-                    self.scheduled_evaluation = Some(stamp);
-                }
-                return None;
-            }
-        }
-        let current = self.current.as_mut()?;
-        if current
-            .cached_evaluation
-            .as_ref()
-            .is_none_or(|evaluation| evaluation.revision != current.revision)
-        {
-            let document = CalculationDocument::new(current.source.clone());
-            let evaluation = document.evaluate();
-            match project_evaluation(evaluation, &current.line_ids, current.revision) {
-                Ok(result) => current.cached_evaluation = Some(Arc::new(result)),
-                Err(message) => {
-                    self.evaluation_failure = Some((stamp, message));
-                    return None;
+    }
+
+    fn start_evaluation(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        let Some(current) = self.current.as_ref() else { return; };
+        #[cfg(test)]
+        { self.evaluation_attempts += 1; }
+        let limits = super::limits::profile_limits(current.options.profile);
+        let within_profile = current.source.len() <= limits.bytes && physical_rows(&current.source) <= limits.lines;
+        if self.evaluation_wake.is_some() && (current.options.profile == super::persistence::DocumentProfile::Extended || (within_profile && CalculationDocument::source_requires_repeated_execution(&current.source))) {
+            if self.evaluation_worker.is_none() {
+                let Some(wake) = self.evaluation_wake.as_ref().cloned() else { return; };
+                match EvaluationWorker::start(wake) {
+                    Ok(worker) => self.evaluation_worker = Some(worker),
+                    Err(error) => { self.evaluation_failure = Some((stamp, error)); return; }
                 }
             }
-            #[cfg(test)]
-            {
-                current.evaluation_count += 1;
-            }
+            let Some(worker) = self.evaluation_worker.as_ref() else { return; };
+            worker.submit(EvaluationRequest { stamp, source: current.source.clone(), line_ids: current.line_ids.clone(), profile: current.options.profile });
+            self.scheduled_evaluation = Some(stamp);
+            return;
         }
-        current.cached_evaluation.as_deref()
+        let document = CalculationDocument::with_profile(current.source.clone(), current.options.profile);
+        let evaluation = document.evaluate();
+        match project_evaluation(evaluation, &current.line_ids, stamp) {
+            Ok(result) => {
+                if let Some(current) = self.current.as_mut() {
+                    current.cached_evaluation = Some(Arc::new(result));
+                    current.dependency_snapshot = None;
+                    #[cfg(test)]
+                    { current.evaluation_count += 1; }
+                }
+            }
+            Err(message) => self.evaluation_failure = Some((stamp, message)),
+        }
+    }
+
+    /// Poll a finished worker and advance automatic calculation once when needed.
+    pub(crate) fn advance_automatic(&mut self) {
+        self.poll_evaluation();
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        if self.pending.is_some()
+            || self.document_options().is_none_or(|options| options.calculation != super::CalculationPolicy::Automatic)
+            || self.scheduled_evaluation == Some(stamp)
+            || self.canceled_evaluation == Some(stamp)
+            || self.evaluation_failure.as_ref().is_some_and(|(failed, _)| *failed == stamp)
+            || self.current.as_ref().and_then(|current| current.cached_evaluation.as_ref()).is_some_and(|result| result.basis == stamp)
+        { return; }
+        self.start_evaluation();
+    }
+
+    /// Explicitly calculate the current document, coalescing an active request.
+    pub fn request_calculate(&mut self) {
+        let Some(stamp) = self.evaluation_stamp() else { return; };
+        if self.pending.is_some() || self.scheduled_evaluation == Some(stamp) { return; }
+        self.poll_evaluation();
+        self.retire_background_evaluation();
+        self.start_evaluation();
+    }
+
+    pub fn cancel_calculation(&mut self, basis: super::EvaluationBasis) -> bool {
+        if self.scheduled_evaluation != Some(basis) || self.evaluation_stamp() != Some(basis) { return false; }
+        self.retire_background_evaluation();
+        self.canceled_evaluation = self.evaluation_stamp();
+        true
+    }
+
+    /// Drive automatic evaluation explicitly and return current results only.
+    pub fn evaluation(&mut self) -> Option<&SessionEvaluation> {
+        self.advance_automatic();
+        let stamp = self.evaluation_stamp()?;
+        self.current.as_ref()?.cached_evaluation.as_deref().filter(|result| result.basis == stamp)
     }
 
     /// Returns the source and its evaluation from the same current revision.
     pub(crate) fn evaluation_with_source(&mut self) -> Option<(&str, &SessionEvaluation)> {
-        self.evaluation()?;
+        let stamp = self.evaluation_stamp()?;
         let current = self.current.as_ref()?;
-        Some((&current.source, current.cached_evaluation.as_deref()?))
+        let evaluation = current.cached_evaluation.as_deref().filter(|result| result.basis == stamp)?;
+        Some((&evaluation.source, evaluation))
     }
 
     pub(crate) fn shared_evaluation(&mut self) -> Option<Arc<SessionEvaluation>> {
-        self.evaluation()?;
+        let stamp = self.evaluation_stamp()?;
+        self.current.as_ref()?.cached_evaluation.as_ref().filter(|result| result.basis == stamp).cloned()
+    }
+
+    pub(crate) fn displayed_evaluation(&self) -> Option<Arc<SessionEvaluation>> {
         self.current.as_ref()?.cached_evaluation.clone()
     }
 
@@ -1001,7 +1664,7 @@ impl CalculationPadSession {
         self.current
             .as_ref()
             .and_then(|document| document.cached_evaluation.as_ref())
-            .map(|evaluation| evaluation.revision)
+            .map(|evaluation| evaluation.basis.revision)
     }
 
     pub fn save(&mut self) -> Result<(), SessionError> {
@@ -1041,6 +1704,7 @@ impl CalculationPadSession {
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
             view: current.view.clone(),
+            options: current.options,
             format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
@@ -1057,7 +1721,9 @@ impl CalculationPadSession {
             current.line_ids.clone(),
             current.next_line_id,
             current.view.clone(),
+            current.options,
         )?;
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         let current = self
             .current
@@ -1072,6 +1738,7 @@ impl CalculationPadSession {
             disk_sha256: Some(disk_sha256),
             next_line_id: current.next_line_id,
             view: current.view.clone(),
+            options: current.options,
             format_version: super::persistence::CURRENT_DOCUMENT_FORMAT_VERSION,
         };
         Ok(())
@@ -1095,6 +1762,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Open(id));
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = Some(ActiveDocument::from_loaded(loaded));
         self.history.clear();
@@ -1110,6 +1778,7 @@ impl CalculationPadSession {
             self.pending = Some(PendingAction::Close);
             return Ok(TransitionOutcome::DecisionRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
@@ -1125,6 +1794,7 @@ impl CalculationPadSession {
         if self.is_saved() {
             return Err(SessionError::RecoveryScratchRequired);
         }
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = None;
         self.history.clear();
@@ -1164,6 +1834,7 @@ impl CalculationPadSession {
             PendingAction::Open(id) => Some(ActiveDocument::from_loaded(self.store.open(id)?)),
             PendingAction::Close => None,
         };
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = current;
         self.pending = None;
@@ -1172,6 +1843,7 @@ impl CalculationPadSession {
     }
 
     fn install_new(&mut self) {
+        self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = Some(ActiveDocument::new_blank());
         self.history.clear();
@@ -1207,7 +1879,7 @@ fn validate_source_size(source: &str) -> Result<(), SessionError> {
             max_bytes: MAX_DOCUMENT_BYTES,
         });
     }
-    let line_count = source.split('\n').count();
+    let line_count = physical_rows(source);
     if line_count > MAX_SOURCE_LINES {
         return Err(SessionError::TooManyLines {
             max_lines: MAX_SOURCE_LINES,
@@ -1256,7 +1928,7 @@ fn remap_line_ids(
         }
     }
     let width = new_count + 1;
-    let mut lcs = vec![0usize; (old_count + 1) * width];
+    let mut lcs = vec![0u16; (old_count + 1) * width];
     for old_index in (0..old_count).rev() {
         for new_index in (0..new_count).rev() {
             let value = if old_lines[old_index] == new_lines[new_index] {
@@ -1346,7 +2018,7 @@ mod tests {
     };
     use crate::calculation_pad::{
         CalculationValue, DiagnosticKind, DocumentId, LineId, LineOutcome, MAX_DOCUMENT_BYTES,
-        MAX_SOURCE_LINES, PadStoreError,
+        PadStoreError,
     };
     use crate::platform::app_data::AppDataRoot;
     use std::path::PathBuf;
@@ -1365,9 +2037,607 @@ mod tests {
     }
 
     #[test]
+    fn decimal_literal_input_preserves_constructor_and_exact_source() {
+        let (_directory, _root, mut session) = fixture();
+        let source = "price = decimal(\"0.10\") # retained\r\nprice * 2";
+        session.replace_source(source).unwrap();
+        let input = super::super::document::literal_inputs(source).into_iter().next().unwrap();
+        assert_eq!(input.value, "0.10");
+        assert_eq!(&source[input.value_range.clone()], "0.10");
+        let line = session.line_id(0).unwrap();
+        let revision = session.revision().unwrap();
+        assert!(session.input_replacement(revision, line, &input.source_line, "1/3").is_err());
+        let replacement = session.input_replacement(revision, line, &input.source_line, "0.25").unwrap();
+        assert_eq!(replacement, "price = decimal(\"0.25\") # retained\r\nprice * 2");
+        session.replace_source(replacement).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
+    fn multiline_literal_input_apply_preserves_comments_crlf_and_undo() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "{α#} = u64( // explanation\r\n  42) # retained\r\nfor i in range(2):\r\n  hidden = 3\r\nresult = {α#}";
+        session.replace_source(source).unwrap();
+        let input = super::super::document::literal_inputs(source).into_iter().next().unwrap();
+        assert_eq!(input.line, 0);
+        assert_eq!(&source[input.value_range.clone()], "42");
+        let line = session.line_ids().unwrap()[0];
+        let replacement = session.input_replacement(session.revision().unwrap(), line, &input.source_line, "99").unwrap();
+        assert_eq!(replacement, source.replace("42)", "99)"));
+        session.replace_source(replacement).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
+    fn options_round_trip_dirty_state_and_retire_same_revision_results() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("u8(3)").unwrap();
+        let line = session.line_id(0).unwrap();
+        session.evaluation().unwrap();
+        let original = session.inspector_source(line).unwrap();
+        let basis = session.evaluation_basis().unwrap();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended };
+        session.set_document_options(options).unwrap();
+        assert_eq!(session.revision(), Some(basis.revision));
+        assert_ne!(session.evaluation_basis(), Some(basis));
+        assert!(session.is_dirty());
+        assert!(session.inspector_source(line).is_none());
+        session.request_calculate();
+        session.evaluation().unwrap();
+        assert_ne!(session.inspector_source(line).unwrap().basis, original.basis);
+        session.save_as("options").unwrap();
+        assert!(session.inspector_source(line).is_none());
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.document_options(), Some(options));
+    }
+
+    #[test]
+    fn sensitivity_definition_persists_and_rename_undo_preserves_later_settings() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\ny = x + 1").unwrap();
+        let settings = super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "10".into(), sampling: super::super::Sampling::Count(3), outputs: vec!["x".into(), "y".into()] } };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(settings.clone());
+        session.set_view_metadata(view).unwrap();
+        session.save_as("sensitivity").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.view_metadata().unwrap().sensitivity, Some(settings));
+        let preview = reopened.preview_rename(0, "z").unwrap();
+        assert!(reopened.apply_rename(&preview).unwrap());
+        let mut later = reopened.view_metadata().unwrap().clone();
+        let sensitivity = later.sensitivity.as_mut().unwrap();
+        assert_eq!(sensitivity.input_name, "z");
+        assert_eq!(sensitivity.definition.outputs, vec!["z", "y"]);
+        sensitivity.definition.end = "20".into();
+        reopened.set_view_metadata(later).unwrap();
+        assert!(reopened.undo());
+        let sensitivity = reopened.view_metadata().unwrap().sensitivity.as_ref().unwrap();
+        assert_eq!(sensitivity.input_name, "x");
+        assert_eq!(sensitivity.definition.outputs, vec!["x", "y"]);
+        assert_eq!(sensitivity.definition.end, "20");
+    }
+
+    #[test]
+    fn sensitivity_rename_does_not_rewrite_removed_and_readded_output() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.clear();
+        session.set_view_metadata(view.clone()).unwrap();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x"]);
+    }
+
+    #[test]
+    fn chained_sensitivity_renames_preserve_independent_reselection() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let first = session.preview_rename(0, "y").unwrap(); session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap(); session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.clear();
+        session.set_view_metadata(view.clone()).unwrap();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("y".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo()); assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["y"]);
+        assert!(session.redo()); assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["y"]);
+    }
+
+    #[test]
+    fn sensitivity_rename_collision_restores_hidden_selection() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap(); session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity.as_mut().unwrap().definition.outputs.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().sensitivity.as_ref().unwrap().definition.outputs, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn chained_sensitivity_input_retarget_survives_undo() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nother = 3\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.sensitivity = Some(super::super::SensitivitySettings { input_name: "x".into(), definition: super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "1".into(), sampling: super::super::Sampling::Count(2), outputs: vec!["x".into()] } });
+        session.set_view_metadata(view).unwrap();
+        let first = session.preview_rename(0, "y").unwrap(); session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap(); session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        let settings = view.sensitivity.as_mut().unwrap();
+        settings.definition.input = session.line_id(1).unwrap(); settings.input_name = "other".into();
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo()); assert!(session.undo());
+        let settings = session.view_metadata().unwrap().sensitivity.as_ref().unwrap();
+        assert_eq!(settings.input_name, "other");
+        assert_eq!(settings.definition.input, session.line_id(1).unwrap());
+    }
+
+    #[test]
+    fn chart_definition_roundtrip_and_rename_history_keeps_independent_selection() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()] });
+        session.set_view_metadata(view).unwrap();
+        session.save_as("chart").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root); reopened.request_open(id).unwrap();
+        assert!(matches!(&reopened.view_metadata().unwrap().chart.as_ref().unwrap().source, super::super::ChartSource::Sensitivity { outputs } if outputs == &["x"]));
+        let first = reopened.preview_rename(0, "y").unwrap(); reopened.apply_rename(&first).unwrap();
+        let second = reopened.preview_rename(0, "z").unwrap(); reopened.apply_rename(&second).unwrap();
+        let mut view = reopened.view_metadata().unwrap().clone();
+        let Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs }, .. }) = view.chart.as_mut() else { panic!("sensitivity chart"); };
+        outputs.clear(); reopened.set_view_metadata(view.clone()).unwrap();
+        let Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs }, .. }) = view.chart.as_mut() else { panic!("sensitivity chart"); };
+        outputs.push("y".into()); reopened.set_view_metadata(view).unwrap();
+        assert!(reopened.undo()); assert!(reopened.undo());
+        assert!(matches!(&reopened.view_metadata().unwrap().chart.as_ref().unwrap().source, super::super::ChartSource::Sensitivity { outputs } if outputs == &["y"]));
+    }
+
+    #[test]
+    fn named_chart_references_follow_rename_history_and_independent_edits() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = [1]\ny = [2]").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new() });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Named { name }), y } if name == "z" && y[1] == named("z")));
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        chart.kind = ChartKind::Scatter;
+        chart.source = ChartSource::Vectors { x: Some(Ref::Physical(ids[1])), y: vec![named("y"), named("z"), Ref::Physical(ids[0])] };
+        chart.hidden = vec![1];
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.kind, ChartKind::Scatter);
+        assert_eq!(chart.hidden, [1]);
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Physical(id)), y } if *id == ids[1] && y == &[named("y"), named("x"), Ref::Physical(ids[0])]));
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone();
+        let chart = view.chart.as_mut().unwrap();
+        let ChartSource::Vectors { y, .. } = &mut chart.source else { panic!("vector chart"); };
+        y.push(named("x"));
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { y, .. } if y == &[named("y"), Ref::Physical(ids[0]), named("x")]));
+        assert!(chart.hidden.is_empty());
+        assert!(session.redo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert!(matches!(&chart.source, ChartSource::Vectors { x: Some(Ref::Physical(id)), y } if *id == ids[1] && y == &[named("y"), Ref::Physical(ids[0]), named("x"), named("z")]));
+        assert_eq!(chart.hidden, [3]);
+        session.save_as("named chart").unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(session.current_id().unwrap()).unwrap();
+        assert_eq!(reopened.view_metadata().unwrap().chart, session.view_metadata().unwrap().chart);
+    }
+
+    #[test]
+    fn related_reference_transaction_undo_preserves_later_view_changes() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let line = session.line_id(0).unwrap();
+        let view = super::PadViewMetadata {
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
+            watches: vec!["x".into(), "other".into()],
+            ..Default::default()
+        };
+        session.set_view_metadata(view).unwrap();
+        let edits = super::RelatedReferenceEdits {
+            inputs: vec![super::RelatedInputRename { id: line, before: "x".into(), after: "y".into() }],
+            watches: vec![super::RelatedWatchRename { before: "x".into(), after: "y".into() }],
+            ..Default::default()
+        };
+        let basis = session.evaluation_basis().unwrap();
+        assert!(session.commit_related_edit(basis, "y = 2\ny + 1".into(), edits.clone()).unwrap());
+        let mut later = session.view_metadata().unwrap().clone();
+        later.inputs[0].unavailable = true;
+        later.watches.push("later".into());
+        session.set_view_metadata(later).unwrap();
+        session.save_as("related edit").unwrap();
+        let saved_id = session.current_id();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some("x = 2\nx + 1"));
+        assert_eq!(session.current_id(), saved_id);
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "x");
+        assert!(session.view_metadata().unwrap().inputs[0].unavailable);
+        assert_eq!(session.view_metadata().unwrap().watches, ["x", "other", "later"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "y");
+        assert_eq!(session.view_metadata().unwrap().watches, ["y", "other", "later"]);
+        let before = session.source().unwrap().to_owned();
+        assert!(matches!(session.commit_related_edit(basis, "z = 1".into(), edits), Err(super::SessionError::StaleRelatedEdit)));
+        assert_eq!(session.source(), Some(before.as_str()));
+    }
+
+    #[test]
+    fn rename_transaction_preserves_ids_related_settings_and_independent_watches() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("x = 2\nx + 1").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: ids[0], name: "x".into(), unavailable: false, config: Default::default() }], watches: vec!["x".into()], ..Default::default() };
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.line_ids().unwrap(), ids);
+        let mut view = session.view_metadata().unwrap().clone();
+        view.inputs[0].unavailable = true;
+        view.watches.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["x"]);
+        assert!(session.view_metadata().unwrap().inputs[0].unavailable);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["x", "y"]);
+        session.save_as("renamed").unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(session.current_id().unwrap()).unwrap();
+        assert_eq!(reopened.source(), Some("y = 2\ny + 1"));
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        assert!(session.apply_rename(&preview).is_err());
+    }
+
+    #[test]
+    fn rename_undo_does_not_resurrect_removed_and_repinned_watch() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        session.set_view_metadata(super::PadViewMetadata::default()).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["y".into()], ..Default::default() }).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+    }
+
+    #[test]
+    fn chained_renames_preserve_independently_repinned_watch_identity() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let first = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&first).unwrap();
+        let second = session.preview_rename(0, "z").unwrap();
+        session.apply_rename(&second).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.push("y".into());
+        session.set_view_metadata(view).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.retain(|name| name != "z");
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert!(session.undo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+        assert!(session.redo());
+        assert!(session.redo());
+        assert_eq!(session.view_metadata().unwrap().watches, ["y"]);
+    }
+
+    #[test]
+    fn full_watch_list_never_blocks_rename_history() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 2\nx").unwrap();
+        session.set_view_metadata(super::PadViewMetadata { watches: vec!["x".into()], ..Default::default() }).unwrap();
+        let preview = session.preview_rename(0, "y").unwrap();
+        session.apply_rename(&preview).unwrap();
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.push("x".into());
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.extend((0..63).map(|index| format!("watch_{index}")));
+        session.set_view_metadata(view).unwrap();
+        assert!(session.redo());
+        assert_eq!(session.source(), Some("y = 2\ny"));
+        assert_eq!(session.view_metadata().unwrap().watches.len(), 64);
+        assert!(session.undo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.watches.pop();
+        session.set_view_metadata(view).unwrap();
+        assert!(session.redo());
+        assert!(session.view_metadata().unwrap().watches.iter().any(|name| name == "y"));
+    }
+
+    #[test]
+    fn rename_preview_rejects_stale_and_oversized_result() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\nx").unwrap();
+        let preview = session.preview_rename(0, "longer").unwrap();
+        session.replace_source("x = 2\nx").unwrap();
+        assert!(session.apply_rename(&preview).is_err());
+        assert_eq!(session.source(), Some("x = 2\nx"));
+        let max = crate::calculation_pad::MAX_ADMITTED_DOCUMENT_BYTES;
+        let source = format!("x = 1\n#{}", "a".repeat(max - 7));
+        session.replace_source(source.clone()).unwrap();
+        assert!(session.preview_rename(0, "longer").is_err());
+        assert_eq!(session.source(), Some(source.as_str()));
+    }
+
+    #[test]
+    fn recovery_restores_blank_nondefault_options_as_dirty_scratch() {
+        let (_dir, _root, mut session) = fixture();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard };
+        assert!(session.restore_recovered_document(String::new(), options).unwrap());
+        assert_eq!(session.source(), Some(""));
+        assert_eq!(session.revision(), Some(0));
+        assert_eq!(session.document_options(), Some(options));
+        assert!(session.is_dirty());
+        assert!(!session.can_undo());
+        assert!(!session.is_saved());
+    }
+
+    #[test]
+    fn manual_mode_never_calculates_from_edits_or_observers() {
+        let (_dir, _root, mut session) = fixture();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard };
+        session.set_document_options(options).unwrap();
+        for value in 1..=6 {
+            session.replace_source(format!("x = {value}\nx * 2")).unwrap();
+            assert!(session.evaluation().is_none());
+            assert!(session.shared_evaluation().is_none());
+            assert!(session.dependency_snapshot().is_none());
+            assert!(session.comparison_context().is_none());
+        }
+        assert!(session.undo());
+        assert!(session.redo());
+        assert_eq!(session.evaluation_attempts, 0);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::NotCalculated);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 1);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        let old = session.displayed_evaluation().unwrap();
+        session.replace_source("x = 10\nx * 2").unwrap();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Outdated);
+        assert_eq!(&*old.source, "x = 6\nx * 2");
+        assert!(session.evaluation_with_source().is_none());
+        assert!(session.inspector_source(session.line_id(0).unwrap()).is_none());
+        assert_eq!(session.evaluation_attempts, 1);
+        session.set_document_options(super::DocumentOptions::default()).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_attempts, 2);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
+    fn cancel_retires_same_revision_and_explicit_retry_uses_new_generation() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluator = std::sync::Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(request.stamp.generation).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        session.replace_source("sum(range(1000))").unwrap();
+        session.request_calculate();
+        let first = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), first.generation);
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Pending);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 1);
+        assert!(session.cancel_calculation(first));
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Canceled);
+        session.advance_automatic();
+        assert_eq!(session.evaluation_attempts, 1);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 2);
+        assert_ne!(session.evaluation_basis(), Some(first));
+        assert!(!session.cancel_calculation(first));
+        continue_tx.send(()).unwrap();
+        let second = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), second.generation);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 2);
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        session.request_calculate();
+        assert_eq!(session.evaluation_attempts, 3);
+        let third = session.evaluation_basis().unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)).unwrap(), third.generation);
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+    }
+
+    #[test]
+    fn extended_capacity_worker_and_controlled_cancellation_observation() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { let _ = wake_tx.send(()); });
+        let evaluator = Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(request.stamp).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)).unwrap();
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended }).unwrap();
+        let source = vec![format!("1 #{}", "x".repeat(127)); 1000].join("\n");
+        session.replace_source(&source).unwrap();
+        let start = Instant::now();
+        session.request_calculate();
+        let retired = started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(session.cancel_calculation(retired));
+        session.request_calculate();
+        let current = session.evaluation_basis().unwrap();
+        assert_ne!(retired, current);
+        continue_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(30)).unwrap(), current);
+        assert!(session.displayed_evaluation().is_none());
+        continue_tx.send(()).unwrap();
+        wake_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        session.advance_automatic();
+        let evaluation = session.displayed_evaluation().unwrap();
+        assert_eq!(evaluation.basis, current);
+        assert!(evaluation.diagnostic.is_none());
+        println!("capacity worker profile=Extended bytes={} rows=1000 elapsed={:?} usage={:?} retired_never_published=true", source.len(), start.elapsed(), evaluation.usage);
+    }
+
+    #[test]
+    fn usage_counters_belong_to_current_evaluation_basis() {
+        let (_dir, _root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        session.replace_source("for i in range(3):\n  x = i + 1").unwrap();
+        session.request_calculate();
+        let first = session.displayed_evaluation().unwrap();
+        let usage = first.usage.unwrap();
+        assert_eq!(usage.loop_iterations, 3);
+        assert!(usage.work_units > 0);
+        session.replace_source("1").unwrap();
+        assert_ne!(Some(first.basis), session.evaluation_basis());
+        assert!(session.evaluation_with_source().is_none());
+    }
+
+    #[test]
+    fn profile_shrink_keeps_source_and_reports_current_admission_failure() {
+        let (_dir, _root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Extended }).unwrap();
+        let source = vec!["1"; 257].join("\n");
+        session.replace_source(&source).unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, profile: super::super::DocumentProfile::Standard }).unwrap();
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::NotCalculated);
+        session.request_calculate();
+        let result = session.displayed_evaluation().unwrap();
+        assert!(matches!(&result.diagnostic, Some(super::DocumentDiagnostic::TooManyLines { .. })));
+        assert_eq!(result.usage, None);
+        session.replace_source("1").unwrap();
+        assert_eq!(session.source(), Some("1"));
+    }
+
+    #[test]
+    fn extended_evaluation_limits_preserve_larger_admitted_saved_source() {
+        use super::super::limits::{EXTENDED_BYTES, EXTENDED_LINES};
+        let (_dir, root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() }).unwrap();
+        let exact_bytes = format!("#{}", "x".repeat(EXTENDED_BYTES - 1));
+        session.replace_source(&exact_bytes).unwrap();
+        assert!(session.evaluation().unwrap().diagnostic.is_none());
+        let larger = format!("{exact_bytes}x");
+        session.replace_source(&larger).unwrap();
+        assert!(matches!(&session.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::DocumentTooLarge { max_bytes }) if *max_bytes == EXTENDED_BYTES));
+        session.save_as("over extended limit").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.source(), Some(larger.as_str()));
+        reopened.replace_source(vec!["1"; EXTENDED_LINES].join("\n")).unwrap();
+        assert!(reopened.evaluation().unwrap().diagnostic.is_none());
+        reopened.replace_source(vec!["1"; EXTENDED_LINES + 1].join("\n")).unwrap();
+        assert!(matches!(&reopened.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { max_lines }) if *max_lines == EXTENDED_LINES));
+    }
+
+    #[test]
+    fn changing_profile_retires_pending_extended_worker() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let continue_rx = Mutex::new(continue_rx);
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {});
+        let evaluator = std::sync::Arc::new(move |request: super::EvaluationRequest, cancellation| {
+            started_tx.send(()).unwrap();
+            continue_rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            let document = super::CalculationDocument::with_profile(request.source, request.profile);
+            super::project_evaluation(document.evaluate_with_cancellation(cancellation), &request.line_ids, request.stamp)
+        });
+        session.evaluation_worker = Some(super::EvaluationWorker::start_with(wake.clone(), evaluator).unwrap());
+        session.evaluation_wake = Some(wake);
+        session.replace_source("1").unwrap();
+        session.set_document_options(super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() }).unwrap();
+        session.advance_automatic();
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let old = session.evaluation_basis().unwrap();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Pending);
+        session.set_document_options(super::DocumentOptions::default()).unwrap();
+        assert_ne!(session.evaluation_basis(), Some(old));
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        continue_tx.send(()).unwrap();
+        session.advance_automatic();
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Ready);
+        assert_ne!(session.shared_evaluation().unwrap().basis, old);
+    }
+
+    #[test]
     fn watches_use_final_current_binding_including_failed_reassignment() {
         let (_dir, _root, mut session) = fixture();
         session.replace_source("x = 2\nx = x + 3\nbroken = 7\nbroken = 1 / 0").unwrap();
+        session.evaluation().unwrap();
         let evaluation = session.shared_evaluation().unwrap();
         assert!(matches!(&evaluation.final_bindings["x"].outcome, LineOutcome::Value(CalculationValue::Scalar(value)) if *value == 5.0));
         assert!(matches!(&evaluation.final_bindings["broken"].outcome, LineOutcome::Error(_)));
@@ -1426,6 +2696,169 @@ mod tests {
         assert!(session.source().unwrap().contains("x = u64(4)"));
         let quantity = session.input_replacement(session.revision().unwrap(), ids[2], &inputs[2].source_line, "7").unwrap();
         assert!(quantity.contains("distance = 7 m"));
+    }
+
+    #[test]
+    fn configured_input_survives_rename_save_reopen_and_rejects_unit_changes() {
+        let (_dir, root, mut session) = fixture();
+        session.replace_source("distance = 5 m\ndistance * 2").unwrap();
+        let line = session.line_id(0).unwrap();
+        let view = super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id: line, name: "distance".into(), unavailable: false, config: Default::default() }], ..Default::default() };
+        session.set_view_metadata(view).unwrap();
+        let options = super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() };
+        session.set_document_options(options).unwrap();
+        session.configure_input(line, super::super::InputConfig { label: "Trip".into(), suffix: "display only".into(), minimum: Some("6".into()), maximum: Some("10".into()), step: Some("1".into()), control: super::super::InputControl::Slider, ..Default::default() }).unwrap();
+        let projection = session.input_projection(line).unwrap();
+        assert!(projection.current_error.is_some());
+        assert!(projection.slider_available);
+        assert_eq!(projection.config.suffix, "display only");
+        let descriptor = projection.descriptor;
+        let revision = session.revision().unwrap();
+        assert!(session.input_replacement(revision, line, &descriptor.source_line, "11").is_err());
+        let replacement = session.input_replacement(revision, line, &descriptor.source_line, "7").unwrap();
+        session.replace_source(replacement).unwrap();
+        assert_eq!(session.evaluation_attempts, 0);
+        let preview = session.preview_rename(0, "length").unwrap();
+        session.apply_rename(&preview).unwrap();
+        assert_eq!(session.input_projection(line).unwrap().config.label, "Trip");
+        assert!(session.undo());
+        assert_eq!(session.input_projection(line).unwrap().config.label, "Trip");
+        assert!(session.redo());
+        session.save_as("configured input").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.input_projection(line).unwrap().config.label, "Trip");
+        reopened.replace_source("length = 7 cm\nlength * 2").unwrap();
+        assert!(reopened.input_projection(line).unwrap_err().contains("type or unit changed"));
+    }
+
+    #[test]
+    fn decorative_input_settings_survive_type_and_unit_changes() {
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("size = 2 m").unwrap();
+        let id = session.line_id(0).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id, name: "size".into(), unavailable: false, config: Default::default() }], ..Default::default() }).unwrap();
+        session.configure_input(id, super::super::InputConfig { label: "Size".into(), suffix: "ore".into(), ..Default::default() }).unwrap();
+        session.replace_source("size = 3 cm").unwrap();
+        let projection = session.input_projection(id).unwrap();
+        assert_eq!(projection.config.label, "Size");
+        assert_eq!(projection.config.suffix, "ore");
+        assert!(projection.current_error.is_none());
+        assert!(session.input_replacement(session.revision().unwrap(), id, &projection.descriptor.source_line, "4").unwrap().contains("4 cm"));
+    }
+
+    #[test]
+    fn sensitivity_is_independent_of_manual_main_results_and_supersedes_old_runs() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("ore = 1000\nxp = ore * 56.2\nremaining = 1000000 - xp").unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() }).unwrap();
+        session.request_calculate();
+        let original_result = session.shared_evaluation().unwrap();
+        let source = session.source().unwrap().to_owned();
+        let dirty = session.is_dirty();
+        let undo = session.history.undo.len();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "1000".into(), end: "5000".into(), sampling: super::super::Sampling::Step("1000".into()), outputs: vec!["xp".into(), "remaining".into()] };
+        let old = session.request_sensitivity(definition.clone()).unwrap();
+        let current = session.request_sensitivity(definition).unwrap();
+        assert_ne!(old.generation, current.generation);
+        for _ in 0..20 {
+            wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            session.poll_sensitivity();
+            if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; }
+        }
+        let table = session.sensitivity_table().unwrap();
+        assert_eq!(table.basis, current);
+        assert_eq!(table.rows.len(), 5);
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.is_dirty(), dirty);
+        assert_eq!(session.history.undo.len(), undo);
+        assert!(std::sync::Arc::ptr_eq(&session.shared_evaluation().unwrap(), &original_result));
+        session.request_calculate();
+        assert!(session.sensitivity_table().is_some());
+        session.replace_source("ore = 2000\nxp = ore * 56.2\nremaining = 1000000 - xp").unwrap();
+        assert!(session.sensitivity_table().is_none());
+        assert_eq!(session.sensitivity_status(), super::super::SensitivityStatus::Outdated);
+    }
+
+    #[test]
+    fn sensitivity_cancel_and_retry_retire_the_exact_run() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\ny = x + 1").unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: session.line_id(0).unwrap(), start: "0".into(), end: "999".into(), sampling: super::super::Sampling::Count(1000), outputs: vec!["y".into()] };
+        let old = session.request_sensitivity(definition.clone()).unwrap();
+        assert!(session.cancel_sensitivity(&old));
+        assert_eq!(session.sensitivity_status(), super::super::SensitivityStatus::Canceled);
+        assert!(session.sensitivity_table().is_none());
+        let mut retry = definition;
+        retry.sampling = super::super::Sampling::Count(2);
+        let current = session.request_sensitivity(retry).unwrap();
+        assert!(!session.cancel_sensitivity(&old));
+        for _ in 0..20 {
+            wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            session.poll_sensitivity();
+            if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; }
+        }
+        assert_eq!(session.sensitivity_table().unwrap().basis, current);
+    }
+
+    #[test]
+    fn sensitivity_does_not_apply_editable_input_bounds() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = 1\ny = x").unwrap();
+        let id = session.line_id(0).unwrap();
+        session.set_view_metadata(super::PadViewMetadata { inputs: vec![super::super::persistence::PadInputReference { id, name: "x".into(), unavailable: false, config: Default::default() }], ..Default::default() }).unwrap();
+        session.configure_input(id, super::super::InputConfig { minimum: Some("1".into()), maximum: Some("1".into()), ..Default::default() }).unwrap();
+        session.set_document_options(super::DocumentOptions { calculation: super::super::CalculationPolicy::Manual, ..Default::default() }).unwrap();
+        session.request_calculate();
+        let main = session.shared_evaluation().unwrap();
+        let source = session.source().unwrap().to_owned();
+        let history = session.history.undo.len();
+        let dirty = session.is_dirty();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        session.enable_background_evaluation(move || { let _ = wake_tx.send(()); });
+        let definition = super::super::SensitivityDefinition { input: id, start: "0".into(), end: "2".into(), sampling: super::super::Sampling::Count(3), outputs: vec!["y".into()] };
+        session.request_sensitivity(definition).unwrap();
+        for _ in 0..20 { wake_rx.recv_timeout(Duration::from_secs(10)).unwrap(); session.poll_sensitivity(); if session.sensitivity_status() == super::super::SensitivityStatus::Ready { break; } }
+        let table = session.sensitivity_table().unwrap();
+        assert_eq!(table.rows.len(), 3);
+        assert!(table.rows.iter().all(|row| row.cells[0].is_ok()));
+        let dataset = super::super::ChartDataset::from_sensitivity(&table, &[0]).unwrap();
+        assert_eq!(dataset.series[0].points.len(), 3);
+        assert_eq!(dataset.series[0].points[0].as_ref().unwrap().x, 0.0);
+        assert_eq!(dataset.series[0].points[2].as_ref().unwrap().y, 2.0);
+        assert_eq!(session.source(), Some(source.as_str()));
+        assert_eq!(session.history.undo.len(), history);
+        assert_eq!(session.is_dirty(), dirty);
+        assert!(std::sync::Arc::ptr_eq(&session.shared_evaluation().unwrap(), &main));
+        session.replace_line(id, "x = 2").unwrap();
+        assert!(session.sensitivity_table().is_none());
+        assert!(session.shared_evaluation().is_none());
+    }
+
+    #[test]
+    fn parameter_rename_and_undo_leave_document_binding_unchanged() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "x = 10\nfn add_one(x) = (\n  x + 1\n)\nadd_one(2) + x";
+        session.replace_source(source).unwrap();
+        let parameter = source.find("add_one(x)").unwrap() + "add_one(".len();
+        let preview = session.preview_rename(parameter, "value").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.source(), Some("x = 10\nfn add_one(value) = (\n  value + 1\n)\nadd_one(2) + x"));
+        assert_eq!(scalar(&mut session, 4), 13.0);
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+        assert_eq!(scalar(&mut session, 4), 13.0);
     }
 
     #[test]
@@ -1548,9 +2981,15 @@ mod tests {
         assert_eq!(original.revision, 0);
         assert_eq!(original.revision, reopened.revision);
         assert_ne!(original.incarnation, reopened.incarnation);
-        let mut colliding_saved_binding = reopened.clone();
-        colliding_saved_binding.incarnation = original.incarnation;
-        assert_eq!(original, colliding_saved_binding);
+        assert_eq!(original.basis.document, reopened.basis.document);
+        assert_eq!(original.basis.document, id);
+        assert_eq!(original.basis.revision, reopened.basis.revision);
+        assert_ne!(original.basis.incarnation, reopened.basis.incarnation);
+        assert_eq!(original.line_id, reopened.line_id);
+        assert_eq!(original.source_range, reopened.source_range);
+        assert_eq!(original.source_text, reopened.source_text);
+        assert_eq!(original.value, reopened.value);
+        assert_eq!(original.origin, reopened.origin);
         assert!(matches!(
             session.apply_inspector_insert(request),
             Err(InspectorInsertError::StaleSource)
@@ -1794,30 +3233,81 @@ mod tests {
 
     #[test]
     fn rejects_oversized_and_overlong_edits_before_line_diffing() {
+        use crate::calculation_pad::{MAX_ADMITTED_DOCUMENT_BYTES as LIMIT_BYTES, MAX_ADMITTED_SOURCE_LINES as LIMIT_LINES};
         let (_directory, _root, mut session) = fixture();
         session.replace_source("existing = 1").unwrap();
         let original = session.source().unwrap().to_owned();
 
         assert!(matches!(
-            session.replace_source("x".repeat(MAX_DOCUMENT_BYTES + 1)),
+            session.replace_source("x".repeat(LIMIT_BYTES + 1)),
             Err(SessionError::DocumentTooLarge { .. })
         ));
-        let too_many_lines = vec![""; MAX_SOURCE_LINES + 1].join("\n");
+        let too_many_lines = vec![""; LIMIT_LINES + 1].join("\n");
         assert!(matches!(
             session.replace_source(too_many_lines),
             Err(SessionError::TooManyLines { .. })
         ));
         assert!(matches!(
-            super::remap_line_ids("", &[LineId(1)], &"x".repeat(MAX_DOCUMENT_BYTES + 1), 2),
+            super::remap_line_ids("", &[LineId(1)], &"x".repeat(LIMIT_BYTES + 1), 2),
             Err(SessionError::DocumentTooLarge { .. })
         ));
-        let too_many_lines = vec![""; MAX_SOURCE_LINES + 1].join("\n");
+        let too_many_lines = vec![""; LIMIT_LINES + 1].join("\n");
         assert!(matches!(
             super::remap_line_ids("", &[LineId(1)], &too_many_lines, 2),
             Err(SessionError::TooManyLines { .. })
         ));
         assert_eq!(session.source(), Some(original.as_str()));
         assert_eq!(session.line_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn extended_source_survives_profile_save_reopen_and_recovery() {
+        let (_directory, root, mut session) = fixture();
+        let source = format!("{}value = 2\r\nr257", "# α\r\n".repeat(256));
+        session.replace_source(source.clone()).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert!(matches!(session.evaluation().unwrap().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { .. })));
+        session.save_as("extended source").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        assert_eq!(reopened.source(), Some(source.as_str()));
+        assert_eq!(reopened.line_ids().unwrap(), ids);
+        let options = super::DocumentOptions { profile: super::super::DocumentProfile::Extended, ..Default::default() };
+        reopened.set_document_options(options).unwrap();
+        let result = reopened.evaluation().unwrap();
+        assert!(result.diagnostic.is_none());
+        assert!(matches!(result.lines[257].outcome, LineOutcome::Value(CalculationValue::Scalar(2.0))));
+        let comparison = reopened.comparison_context().unwrap().compare(super::super::ComparisonRequest {
+            left: super::super::ComparisonSlot::Expression("r257".into()),
+            right: super::super::ComparisonSlot::Expression("value".into()),
+        });
+        assert!(matches!(comparison.relation, super::super::ComparisonRelation::Scalar { ordering: std::cmp::Ordering::Equal, .. }));
+        let mut recovery = super::super::PadRecoveryWriter::new(super::super::PadRecoveryStore::new(&root));
+        let snapshot = super::super::PadRecoverySnapshot { document_id: id, revision: 1, source: source.clone(), options };
+        recovery.save_now(snapshot).unwrap();
+        let loaded = recovery.load().unwrap().unwrap();
+        assert_eq!(loaded.source, source);
+        let mut restored = CalculationPadSession::new(&root);
+        assert!(restored.restore_recovered_document(loaded.source, loaded.options).unwrap());
+        assert_eq!(restored.source(), Some(source.as_str()));
+    }
+
+    #[test]
+    fn absolute_admission_counts_utf8_bytes_and_trailing_physical_rows() {
+        use crate::calculation_pad::{MAX_ADMITTED_DOCUMENT_BYTES as BYTES, MAX_ADMITTED_SOURCE_LINES as LINES};
+        let (_directory, _root, mut session) = fixture();
+        let exact_bytes = "é".repeat(BYTES / 2);
+        session.replace_source(exact_bytes.clone()).unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert!(session.replace_source(format!("{exact_bytes}a")).is_err());
+        assert_eq!(session.source(), Some(exact_bytes.as_str()));
+        assert_eq!(session.line_ids().unwrap(), ids);
+        let exact_rows = "\r\n".repeat(LINES - 1);
+        session.replace_source(exact_rows.clone()).unwrap();
+        assert_eq!(session.line_ids().unwrap().len(), LINES);
+        assert!(session.replace_source(format!("{exact_rows}\n")).is_err());
+        assert_eq!(session.source(), Some(exact_rows.as_str()));
     }
 
     #[test]
@@ -2032,6 +3522,36 @@ mod tests {
     }
 
     #[test]
+    fn collection_failure_retained_binding_survives_manual_history_and_reopen() {
+        let (_directory, root, mut session) = fixture();
+        session.set_document_options(super::DocumentOptions {
+            calculation: super::super::CalculationPolicy::Manual,
+            profile: super::super::DocumentProfile::Standard,
+        }).unwrap();
+        session.replace_source("v = [1]\nv = append(v, get([], 0))\nlen(v)").unwrap();
+        assert!(session.shared_evaluation().is_none());
+        session.request_calculate();
+        let old = session.shared_evaluation().unwrap();
+        assert_eq!(old.final_bindings["v"].line_index, 0);
+        assert!(matches!(&old.lines[2].outcome, LineOutcome::Value(CalculationValue::Scalar(1.0))));
+        let preview = session.preview_rename(0, "data").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.evaluation_status(), super::EvaluationStatus::Outdated);
+        assert!(session.shared_evaluation().is_none());
+        assert!(session.undo());
+        assert_eq!(old.final_bindings["v"].line_index, 0);
+        session.request_calculate();
+        assert_eq!(formatted(&mut session, 2), "1");
+        session.save_as("collection retention").unwrap();
+        let id = session.current_id().unwrap();
+        let mut reopened = CalculationPadSession::new(&root);
+        reopened.request_open(id).unwrap();
+        reopened.request_calculate();
+        assert_eq!(formatted(&mut reopened, 2), "1");
+        assert_eq!(reopened.shared_evaluation().unwrap().final_bindings["v"].line_index, 0);
+    }
+
+    #[test]
     fn dimensional_quantities_survive_session_cache_edit_undo_and_redo() {
         let (_directory, _root, mut session) = fixture();
         session
@@ -2160,8 +3680,9 @@ mod tests {
         let line = session.line_id(0).unwrap();
         let revision = session.revision();
         let view = super::super::persistence::PadViewMetadata {
-            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false }],
+            inputs: vec![super::super::persistence::PadInputReference { id: line, name: "x".into(), unavailable: false, config: Default::default() }],
             watches: vec!["x".into(), "missing".into()],
+            ..Default::default()
         };
         session.set_view_metadata(view.clone()).unwrap();
         assert!(session.is_dirty());

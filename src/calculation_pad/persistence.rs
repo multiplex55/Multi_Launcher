@@ -1,6 +1,7 @@
 //! Bounded persistence for explicitly opened Calculation Pad documents.
 
-use crate::calculation_pad::document::{MAX_DOCUMENT_BYTES, MAX_NAME_BYTES, MAX_SOURCE_LINES};
+use crate::calculation_pad::document::MAX_NAME_BYTES;
+use crate::calculation_pad::limits::{ABSOLUTE_BYTES as MAX_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_SOURCE_LINES, physical_rows};
 use crate::common::atomic_file::save_atomic;
 use crate::platform::app_data::AppDataRoot;
 use serde::{Deserialize, Serialize};
@@ -14,15 +15,16 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
-pub const MAX_STORED_DOCUMENT_BYTES: usize = 512 * 1024;
-pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 2;
+pub(crate) const MAX_WATCHES: usize = 64;
+pub const MAX_STORED_DOCUMENT_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
+pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 4;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
 const DOCUMENTS_DIRECTORY: &str = "documents";
 const RECOVERY_FILE: &str = "last_source.json";
 const MAX_DIRECTORY_ENTRIES: usize = MAX_SAVED_DOCUMENTS * 4;
-pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 1;
-pub const MAX_STORED_RECOVERY_BYTES: usize = 512 * 1024;
+pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 2;
+pub const MAX_STORED_RECOVERY_BYTES: usize = super::limits::SERIALIZED_ENVELOPE_BYTES;
 const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,18 +32,53 @@ pub struct PadRecoverySnapshot {
     pub document_id: DocumentId,
     pub revision: u64,
     pub source: String,
+    pub options: DocumentOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalculationPolicy {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentProfile {
+    #[default]
+    Standard,
+    Extended,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentOptions {
+    pub calculation: CalculationPolicy,
+    pub profile: DocumentProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PadRecoveryWriteFailure {
     pub document_id: DocumentId,
     pub revision: u64,
+    pub options: DocumentOptions,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct StoredRecovery {
+    format_version: u32,
+    document_id: DocumentId,
+    revision: u64,
+    source: String,
+    options: DocumentOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRecoveryV1 {
     format_version: u32,
     document_id: DocumentId,
     revision: u64,
@@ -87,15 +124,22 @@ impl PadRecoveryStore {
         let Some(bytes) = read_recovery_limited(&self.path)? else {
             return Ok(None);
         };
-        let stored: StoredRecovery = serde_json::from_slice(&bytes)
+        let version: DocumentVersion = serde_json::from_slice(&bytes)
             .map_err(|error| anyhow::anyhow!("invalid Calculation Pad recovery JSON: {error}"))?;
-        if stored.format_version != CURRENT_RECOVERY_FORMAT_VERSION {
+        if version.format_version != 1 && version.format_version != CURRENT_RECOVERY_FORMAT_VERSION {
             anyhow::bail!(
                 "unsupported Calculation Pad recovery version {} (supported version is {})",
-                stored.format_version,
+                version.format_version,
                 CURRENT_RECOVERY_FORMAT_VERSION
             );
         }
+        let stored = if version.format_version == 1 {
+            let old: StoredRecoveryV1 = serde_json::from_slice(&bytes)?;
+            StoredRecovery { format_version: old.format_version, document_id: old.document_id,
+                revision: old.revision, source: old.source, options: DocumentOptions::default() }
+        } else {
+            serde_json::from_slice::<StoredRecovery>(&bytes)?
+        };
         if stored.document_id.0 == 0 {
             anyhow::bail!("Calculation Pad recovery document identity is invalid");
         }
@@ -104,6 +148,7 @@ impl PadRecoveryStore {
             document_id: stored.document_id,
             revision: stored.revision,
             source: stored.source,
+            options: stored.options,
         }))
     }
 
@@ -121,6 +166,7 @@ impl PadRecoveryStore {
             document_id: snapshot.document_id,
             revision: snapshot.revision,
             source: snapshot.source.clone(),
+            options: snapshot.options,
         };
         let bytes = serde_json::to_vec(&stored)
             .map_err(|error| anyhow::anyhow!("encode Calculation Pad recovery: {error}"))?;
@@ -131,6 +177,7 @@ impl PadRecoveryStore {
         }
         let _transaction = self.lock_transaction();
         self.ensure_write_directory()?;
+        self.ensure_supported_existing()?;
         crate::common::atomic_file::save_atomic(&self.path, &bytes)
             .map_err(|error| anyhow::anyhow!("write Calculation Pad recovery: {error}"))?;
         Ok(())
@@ -142,7 +189,12 @@ impl PadRecoveryStore {
             return Ok(());
         }
         match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                self.ensure_supported_existing()?;
+                fs::remove_file(&self.path)
+                    .map_err(|error| anyhow::anyhow!("clear Calculation Pad recovery: {error}"))?;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
                 fs::remove_file(&self.path)
                     .map_err(|error| anyhow::anyhow!("clear Calculation Pad recovery: {error}"))?;
             }
@@ -165,6 +217,16 @@ impl PadRecoveryStore {
         self.transaction
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn ensure_supported_existing(&self) -> anyhow::Result<()> {
+        if let Some(bytes) = read_recovery_limited(&self.path)?
+            && let Ok(version) = serde_json::from_slice::<DocumentVersion>(&bytes)
+            && version.format_version > CURRENT_RECOVERY_FORMAT_VERSION
+        {
+            anyhow::bail!("unsupported Calculation Pad recovery version {}", version.format_version);
+        }
+        Ok(())
     }
 
     fn ensure_existing_directory(&self) -> anyhow::Result<bool> {
@@ -200,7 +262,7 @@ fn validate_recovery_source(source: &str) -> anyhow::Result<()> {
     if source.len() > MAX_DOCUMENT_BYTES {
         anyhow::bail!("recovered source exceeds the {MAX_DOCUMENT_BYTES}-byte limit");
     }
-    let lines = source.split('\n').count();
+    let lines = physical_rows(source);
     if lines > MAX_SOURCE_LINES {
         anyhow::bail!("recovered source exceeds the {MAX_SOURCE_LINES}-line limit");
     }
@@ -455,7 +517,7 @@ fn recovery_worker(store: PadRecoveryStore, shared: Arc<(Mutex<RecoveryQueue>, C
                     &shared,
                     result,
                     reply,
-                    Some((snapshot.document_id, snapshot.revision)),
+                    Some((snapshot.document_id, snapshot.revision, snapshot.options)),
                 );
             }
             RecoveryCommand::Clear { reply } => {
@@ -496,11 +558,11 @@ fn finish_recovery_command(
     shared: &Arc<(Mutex<RecoveryQueue>, Condvar)>,
     result: anyhow::Result<()>,
     reply: Option<mpsc::Sender<anyhow::Result<()>>>,
-    failure_identity: Option<(DocumentId, u64)>,
+    failure_identity: Option<(DocumentId, u64, DocumentOptions)>,
 ) {
     if let Some(reply) = reply {
         let _ = reply.send(result);
-    } else if let (Err(error), Some((document_id, revision))) = (result, failure_identity) {
+    } else if let (Err(error), Some((document_id, revision, options))) = (result, failure_identity) {
         let (state, changed) = &**shared;
         state
             .lock()
@@ -509,6 +571,7 @@ fn finish_recovery_command(
             .push(PadRecoveryWriteFailure {
                 document_id,
                 revision,
+                options,
                 message: error.to_string(),
             });
         changed.notify_all();
@@ -698,6 +761,16 @@ impl std::error::Error for PadStoreError {
 pub(crate) struct PadViewMetadata {
     pub inputs: Vec<PadInputReference>,
     pub watches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<SensitivitySettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<super::ChartDefinition>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SensitivitySettings {
+    pub input_name: String,
+    pub definition: super::SensitivityDefinition,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -705,6 +778,22 @@ pub(crate) struct PadInputReference {
     pub id: LineId,
     pub name: String,
     pub unavailable: bool,
+    #[serde(default)]
+    pub config: super::input::InputConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyInputReference { id: LineId, name: String, unavailable: bool }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyViewMetadata { inputs: Vec<LegacyInputReference>, watches: Vec<String> }
+
+impl From<LegacyViewMetadata> for PadViewMetadata {
+    fn from(old: LegacyViewMetadata) -> Self {
+        Self { inputs: old.inputs.into_iter().map(|input| PadInputReference { id: input.id, name: input.name, unavailable: input.unavailable, config: Default::default() }).collect(), watches: old.watches, sensitivity: None, chart: None }
+    }
 }
 #[derive(Deserialize)]
 struct DocumentVersion { format_version: u32 }
@@ -719,6 +808,18 @@ struct StoredDocumentV1 {
     next_line_id: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDocumentV2 {
+    format_version: u32,
+    id: DocumentId,
+    name: String,
+    source: String,
+    line_ids: Vec<LineId>,
+    next_line_id: u64,
+    view: LegacyViewMetadata,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredDocument {
@@ -729,6 +830,7 @@ pub(super) struct StoredDocument {
     pub line_ids: Vec<LineId>,
     pub next_line_id: u64,
     pub view: PadViewMetadata,
+    pub options: DocumentOptions,
 }
 
 impl StoredDocument {
@@ -747,6 +849,7 @@ impl StoredDocument {
             line_ids,
             next_line_id,
             view: PadViewMetadata::default(),
+            options: DocumentOptions::default(),
         }
     }
 
@@ -824,9 +927,9 @@ impl PadDocumentStore {
     }
 
     pub(super) fn save_as_with_metadata(
-        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata,
+        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata, options: DocumentOptions,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
-        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, save_atomic)
+        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, options, save_atomic)
     }
 
     pub(super) fn save_as_with_writer(
@@ -844,6 +947,7 @@ impl PadDocumentStore {
             line_ids,
             next_line_id,
             PadViewMetadata::default(),
+            DocumentOptions::default(),
             writer,
         )
     }
@@ -856,6 +960,7 @@ impl PadDocumentStore {
         line_ids: Vec<LineId>,
         next_line_id: u64,
         view: PadViewMetadata,
+        options: DocumentOptions,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
         let name = validate_name(name)?;
@@ -880,6 +985,7 @@ impl PadDocumentStore {
         }
         let mut stored = StoredDocument::new(id, name, source, line_ids, next_line_id);
         stored.view = view;
+        stored.options = options;
         let bytes = encode_document(&path, &stored)?;
         self.ensure_write_directories()?;
         writer(&path, &bytes).map_err(|source| PadStoreError::AtomicWrite {
@@ -1106,15 +1212,42 @@ fn validate_stored_document(stored: &StoredDocument, path: &Path) -> Result<(), 
 }
 
 pub(super) fn validate_view_metadata(view: &PadViewMetadata) -> Result<(), &'static str> {
-    if view.inputs.len() > 64 || view.watches.len() > 64 { return Err("too many input or watch references"); }
+    if view.inputs.len() > 64 || view.watches.len() > MAX_WATCHES { return Err("too many input or watch references"); }
     let valid_name = |name: &str| super::document::watch_name(&format!("{{{name}}}")).as_deref() == Some(name);
     let mut lines = HashSet::new();
     if view.inputs.iter().any(|input| input.id.0 == 0 || !valid_name(&input.name) || !lines.insert(input.id)) {
         return Err("invalid or duplicate input reference");
     }
+    for input in &view.inputs { input.config.validate_storage()?; }
     let mut names = HashSet::new();
     if view.watches.iter().any(|name| !valid_name(name) || !names.insert(name)) {
         return Err("invalid or duplicate watch name");
+    }
+    if let Some(settings) = &view.sensitivity {
+        if !valid_name(&settings.input_name) { return Err("invalid sensitivity input name"); }
+        let definition = &settings.definition;
+        let mut outputs = HashSet::new();
+        if definition.input.0 == 0 || definition.start.len() > 256 || definition.end.len() > 256
+            || definition.start.chars().any(char::is_control) || definition.end.chars().any(char::is_control)
+            || definition.outputs.len() > 8 || definition.outputs.iter().any(|name| !valid_name(name) || !outputs.insert(name))
+            || match &definition.sampling { super::Sampling::Step(step) => step.len() > 256 || step.chars().any(char::is_control), super::Sampling::Count(count) => *count > 1000 }
+        { return Err("invalid sensitivity definition"); }
+    }
+    if let Some(chart) = &view.chart {
+        if chart.x_label.len() > 128 || chart.y_label.len() > 128 || chart.bar_labels.len() > super::vector::MAX_VECTOR_COMPONENTS || chart.bar_labels.iter().any(|label| label.len() > 128 || label.chars().any(char::is_control))
+            || chart.x_label.chars().any(char::is_control) || chart.y_label.chars().any(char::is_control)
+            || chart.hidden.len() > 8 || chart.hidden.iter().any(|index| *index >= 8)
+            || match &chart.source {
+                super::ChartSource::Vectors { x, y } => {
+                    let valid = |reference: &super::ChartVectorReference| match reference {
+                        super::ChartVectorReference::Physical(id) => id.0 != 0,
+                        super::ChartVectorReference::Named { name } => valid_name(name),
+                    };
+                    x.as_ref().is_some_and(|reference| !valid(reference)) || y.len() > 8
+                        || y.iter().enumerate().any(|(index, reference)| !valid(reference) || y[..index].contains(reference))
+                },
+                super::ChartSource::Sensitivity { outputs } => { let mut seen = HashSet::new(); outputs.len() > 8 || outputs.iter().any(|name| !valid_name(name) || !seen.insert(name)) },
+            } { return Err("invalid chart definition"); }
     }
     Ok(())
 }
@@ -1128,7 +1261,7 @@ fn validate_source_and_line_ids(
     if source.len() > MAX_DOCUMENT_BYTES {
         return Err(invalid_document(path, "source exceeds its byte limit"));
     }
-    let line_count = source.split('\n').count();
+    let line_count = physical_rows(source);
     if line_count > MAX_SOURCE_LINES {
         return Err(invalid_document(path, "source exceeds its line limit"));
     }
@@ -1171,15 +1304,25 @@ fn decode_document(
     }
     let version: DocumentVersion = serde_json::from_slice(bytes)
         .map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
-    if version.format_version != 1 && version.format_version != CURRENT_DOCUMENT_FORMAT_VERSION {
+    if !(1..=CURRENT_DOCUMENT_FORMAT_VERSION).contains(&version.format_version) {
         return Err(PadStoreError::UnsupportedVersion { found: version.format_version, supported: CURRENT_DOCUMENT_FORMAT_VERSION });
     }
     let stored = if version.format_version == 1 {
         let old: StoredDocumentV1 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
-        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default() }
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: PadViewMetadata::default(), options: DocumentOptions::default() }
+    } else if version.format_version == 2 {
+        let old: StoredDocumentV2 = serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?;
+        StoredDocument { format_version: old.format_version, id: old.id, name: old.name, source: old.source, line_ids: old.line_ids, next_line_id: old.next_line_id, view: old.view.into(), options: DocumentOptions::default() }
     } else {
         serde_json::from_slice(bytes).map_err(|source| PadStoreError::MalformedJson { path: path.to_path_buf(), source })?
     };
+    if version.format_version == 3
+        && let Some(super::ChartDefinition { source: super::ChartSource::Vectors { x, y }, .. }) = &stored.view.chart
+        && (x.as_ref().is_some_and(|reference| matches!(reference, super::ChartVectorReference::Named { .. }))
+            || y.iter().any(|reference| matches!(reference, super::ChartVectorReference::Named { .. })))
+    {
+        return Err(invalid_document(path, "version 3 chart references must be physical rows"));
+    }
     validate_stored_document(&stored, path)?;
     if expected_id.is_some_and(|id| id != stored.id) {
         return Err(invalid_document(
@@ -1296,6 +1439,48 @@ mod tests {
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn chart_bar_label_admission_matches_vector_capacity() {
+        let mut view = super::PadViewMetadata::default();
+        view.chart = Some(super::super::ChartDefinition {
+            source: super::super::ChartSource::Vectors { x: None, y: vec![super::super::ChartVectorReference::Physical(LineId(1))] },
+            kind: super::super::ChartKind::Bar,
+            x_label: String::new(), y_label: String::new(), hidden: Vec::new(),
+            bar_labels: vec!["label".into(); 1024],
+        });
+        assert!(super::validate_view_metadata(&view).is_ok());
+        view.chart.as_mut().unwrap().bar_labels.push("overflow".into());
+        assert!(super::validate_view_metadata(&view).is_err());
+    }
+
+    #[test]
+    fn chart_reference_versions_preserve_physical_rows_and_validate_named_wire() {
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference};
+        let (_directory, store) = fixture();
+        let (mut stored, _) = store.save_as("chart refs", "[1]\n[2]".into(), vec![LineId(1), LineId(2)], 3).unwrap();
+        let path = store.document_path(stored.id);
+        stored.id = DocumentId(41);
+        stored.format_version = 3;
+        stored.view.chart = Some(ChartDefinition { source: ChartSource::Vectors {
+            x: Some(ChartVectorReference::Physical(LineId(1))), y: vec![ChartVectorReference::Physical(LineId(2))],
+        }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new() });
+        let old = serde_json::to_vec(&stored).unwrap();
+        let decoded = super::decode_document(&path, &old, Some(stored.id)).unwrap();
+        assert_eq!(decoded.view.chart, stored.view.chart);
+        let chart = stored.view.chart.as_mut().unwrap();
+        chart.source = ChartSource::Vectors { x: Some(ChartVectorReference::Named { name: "x".into() }), y: vec![ChartVectorReference::Physical(LineId(2)), ChartVectorReference::Named { name: "y".into() }] };
+        assert!(super::decode_document(&path, &serde_json::to_vec(&stored).unwrap(), None).is_err());
+        stored.format_version = super::CURRENT_DOCUMENT_FORMAT_VERSION;
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let decoded = super::decode_document(&path, &bytes, Some(stored.id)).unwrap();
+        assert_eq!(decoded.view.chart, stored.view.chart);
+        let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        invalid["view"]["chart"]["source"]["x"]["extra"] = serde_json::json!(true);
+        assert!(super::decode_document(&path, &serde_json::to_vec(&invalid).unwrap(), None).is_err());
+        invalid["format_version"] = serde_json::json!(super::CURRENT_DOCUMENT_FORMAT_VERSION + 1);
+        assert!(matches!(super::decode_document(&path, &serde_json::to_vec(&invalid).unwrap(), None), Err(super::PadStoreError::UnsupportedVersion { .. })));
+    }
+
     fn fixture() -> (tempfile::TempDir, PadDocumentStore) {
         let directory = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(directory.path().join("app-data"));
@@ -1314,6 +1499,7 @@ mod tests {
             document_id: DocumentId(41),
             revision,
             source: source.to_owned(),
+            options: super::DocumentOptions::default(),
         }
     }
 
@@ -1330,9 +1516,66 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), old);
         session.save().unwrap();
         let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(upgraded["format_version"], 2);
+        assert_eq!(upgraded["format_version"], CURRENT_DOCUMENT_FORMAT_VERSION);
         assert_eq!(upgraded["source"], "x = 2\r\n");
         assert_eq!(upgraded["view"]["inputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn legacy_v2_preserves_view_and_upgrades_options_only_on_save() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("v2", "x = 2".into(), vec![LineId(1)], 2).unwrap();
+        let path = store.document_path(saved.id);
+        let bytes = format!(r#"{{"format_version":2,"id":{},"name":"v2","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false}}],"watches":["x"]}}}}"#, saved.id.as_u128()).into_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut session = crate::calculation_pad::CalculationPadSession::with_store(store.clone());
+        session.request_open(saved.id).unwrap();
+        assert_eq!(session.document_options(), Some(super::DocumentOptions::default()));
+        assert_eq!(session.view_metadata().unwrap().watches, ["x"]);
+        assert_eq!(session.view_metadata().unwrap().inputs[0].name, "x");
+        assert_eq!(session.view_metadata().unwrap().inputs[0].config, Default::default());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        session.save().unwrap();
+        let upgraded: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(upgraded["format_version"], CURRENT_DOCUMENT_FORMAT_VERSION);
+        assert_eq!(upgraded["view"]["watches"], serde_json::json!(["x"]));
+        assert_eq!(upgraded["view"]["inputs"][0]["name"], "x");
+    }
+
+    #[test]
+    fn input_config_v3_defaults_and_v2_rejects_new_fields() {
+        let (_directory, store) = fixture();
+        let (saved, _) = store.save_as("input migration", "x = 2".into(), vec![LineId(1)], 2).unwrap();
+        let path = store.document_path(saved.id);
+        let v3 = format!(r#"{{"format_version":3,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false}}],"watches":[]}},"options":{{"calculation":"automatic","profile":"standard"}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, &v3).unwrap();
+        let loaded = store.open(saved.id).unwrap();
+        assert_eq!(loaded.stored.view.inputs[0].config, Default::default());
+        let v2_with_config = format!(r#"{{"format_version":2,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false,"config":{{}}}}],"watches":[]}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, v2_with_config).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
+        let bad = format!(r#"{{"format_version":3,"id":{},"name":"input migration","source":"x = 2","line_ids":[1],"next_line_id":2,"view":{{"inputs":[{{"id":1,"name":"x","unavailable":false,"config":{{"minimum":"10","maximum":"5","step":"0","anchor":{{"kind":"scalar"}}}}}}],"watches":[]}},"options":{{"calculation":"automatic","profile":"standard"}}}}"#, saved.id.as_u128());
+        std::fs::write(&path, bad).unwrap();
+        assert!(matches!(store.open(saved.id), Err(PadStoreError::InvalidDocument { .. })));
+    }
+
+    #[test]
+    fn legacy_recovery_defaults_options_and_future_record_is_preserved() {
+        let (_directory, _root, store) = recovery_fixture();
+        store.save(&recovery_snapshot("source", 4)).unwrap();
+        let mut old: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        old["format_version"] = serde_json::json!(1);
+        old.as_object_mut().unwrap().remove("options");
+        std::fs::write(store.path(), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().options, super::DocumentOptions::default());
+        old["format_version"] = serde_json::json!(CURRENT_RECOVERY_FORMAT_VERSION + 1);
+        old["future"] = serde_json::json!(true);
+        let future = serde_json::to_vec(&old).unwrap();
+        std::fs::write(store.path(), &future).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.save(&recovery_snapshot("replacement", 5)).is_err());
+        assert!(store.clear().is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), future);
     }
 
     #[test]
@@ -1358,7 +1601,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
         assert!(matches!(store.open(saved.id), Err(PadStoreError::MalformedJson { .. })));
         let mut future = original.clone();
-        future["format_version"] = serde_json::json!(3);
+        future["format_version"] = serde_json::json!(CURRENT_DOCUMENT_FORMAT_VERSION + 1);
         future["future_payload"] = serde_json::json!({"preserve": true});
         std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
         assert!(matches!(store.open(saved.id), Err(PadStoreError::UnsupportedVersion { .. })));
@@ -1556,6 +1799,7 @@ mod tests {
                 vec![LineId(1)],
                 2,
                 super::PadViewMetadata::default(),
+                super::DocumentOptions::default(),
                 |_, _| anyhow::bail!("occupied path must not reach the writer")
             ),
             Err(PadStoreError::OccupiedPath(path)) if path == store.document_path(saved.id)

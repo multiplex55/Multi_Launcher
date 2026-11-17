@@ -1,0 +1,94 @@
+# Calculation Pad dynamic vectors and analysis dialogs
+
+| Git identity | Value |
+| --- | --- |
+| parent_branch | `feat/calc-pad-and-file-search` |
+| parent_tip_sha | `df62fd792a7a20d5a1c55fb542eddc73dd37bad1` |
+| task branch | `feat/calc-pad-dynamic-vectors` |
+| baseline_sha | `b745cb397d9f2d1445081c603e4ccdb604d19d28` |
+| upstream | `origin/feat/calc-pad-dynamic-vectors` |
+
+M0-A passed. The only later commit on the predecessor branch archived documents and added this task's instructions. The delivered predecessor tip remains the parent. The baseline was an intentional empty commit, its direct parent matched the delivered tip, and the initial upstream push exited 0. The existing checkout was clean at bootstrap.
+
+| Checkpoint | Status | Requirements |
+| --- | --- | --- |
+| M0-A | Accepted and pushed | Branch ancestry and baseline |
+| M0-B | Live owners and focused test names confirmed | Preparation |
+| M1-A | Accepted and pushed at `ab6fa52d4` | V1, V3 |
+| M1-B | Accepted and pushed at `0911e8000` | V2, V3 |
+| M2-A | Accepted and pushed at `71075bbd6` | V4, V5 |
+| M2-B | Accepted and pushed at `6f1d2f89d` | V5, V6 |
+| M3-A | Accepted and pushed at `05f5cfbe1` | C1, C2 |
+| M3-B | Accepted and pushed at `e680b1886` | C1, C2 |
+| M4-A | Accepted and pushed at `ad689dbbc` | U1 |
+| M4-B | Accepted and pushed at `8e09a6e01` | U2, U3 |
+| M5-A | Accepted and pushed at `a720d26bf` | V6, C1, C2, U1–U3 |
+| M5-B | Accepted. Native acceptance limited. | Integrated verification and delivery |
+
+Automated work uses targeted library Nextest selectors and the `fast-dev` profile. Build and cached execution receipts go under `target/calc-pad-dynamic-vectors-evidence`.
+
+## M1-A
+
+Empty vectors and 1,024 finite scalar components are supported. Source keeps the ordinary 2 KiB expression limit, with 32 KiB for vector-literal expressions and separately bounded prepared templates. Vector parse fuel is separate from shared runtime metering.
+
+The first library compile exited 101 due to three new test lifetimes. After correction, `cargo nextest list --lib --cargo-profile fast-dev --list-type binaries-only` compiled in 209.30 seconds owned elapsed. Cargo exited 0. The wrapper flagged descendants at root exit, then verified all recorded PIDs absent and output drained. Reusing the resulting binary metadata, five document/vector cases and one vector aggregate/cancellation case passed in their 100-second cached deadlines. The temporary archived diagram fixture was removed and was absent before staging.
+
+## M1-B
+
+The twelve collection operations use the shared script catalog and pure vector value semantics. Vector snapshots share an immutable allocation. Transformations that return a new vector copy the result once, after bounds and budget checks. The ordinary evaluation limit remains 50,000 work units. Vector work has a separate ceiling of 4,194,304 units for bounded traversal, copying, source bytes and other vector costs. Sensitivity charges one aggregate unit per 32 vector units, rounded up per evaluation.
+
+Library compilation exited 0 in 283.78 seconds, with cleanup and output drain verified. The runner again reported descendants at root exit and verified retirement. The focused cached Nextest batch passed 17/17 in 3.12 owned seconds. The required two-vector script took 40.90 ms in fast-dev with 37,940 ordinary units and 1,068,086 vector units. Immutable append writes 1,049,600 components across the two chains. Snapshot publication shares vector storage. All three required scripts, local work exhaustion, cancellation and sensitivity aggregate exhaustion passed.
+
+## M2-A
+
+Both evaluator routes preserve the immediate valid binding after an evaluated collection call or argument fails outside a running loop. The failed physical row and its diagnostic remain visible, while named dependencies use the retained origin. Nested/formula failure provenance stays private to evaluation. Loop rollback and poisoning and ordinary errors retain their existing behavior.
+
+The scoped library build exited 0 in 268.32 owned seconds with PIDs retired and output drained. The 11 listed Nextest cases passed in 1.42 owned seconds. Evidence covers both evaluator routes, dependency origins, compound assignments, loop transactions, Manual observation, rename/Undo/save and reopen, and worker retirement.
+
+## M2-B
+
+Vector rows format the first eight values and a count when longer. Canonical Copy uses full, bit-preserving scalar tokens and remains separate from explicitly formatted copying. The existing shared catalog drives highlighting, completion and nested hints.
+
+The scoped library build exited 0 in 161.64 owned seconds with output drained and cleanup verified. Six listed Nextest cases passed in 1.44 owned seconds, including exact 1,024-component round-trip, subnormal and finite extrema, signed zero, clipboard routing, and editor discovery.
+
+## M3-A
+
+Vector charts accept 0–1,024 points and bar labels, use zero-based automatic X, and omit the scene and Copy action for matched empty data. Sensitivity remains at 1,000 samples. One-point line markers, exact length checks, distinct all-hidden errors and renderer limits remain enforced. Grouped bars use subpixel widths and a half-group inset at the plot ends.
+
+Library build exited 0 in 160.00 owned seconds. Ten listed Nextest cases passed in 1.84 owned seconds, with cleanup and drain verified. In Windows x64 fast-dev with Rust 1.99.1, all eight 1,024-point series produced 8,192 hits per chart. The 640 × 400 scene and raster took 57.23 ms for line (16,394 primitives), 337.83 ms for bar (8,210 primitives), and 67.07 ms for scatter (8,210 primitives). Existing render budgets were sufficient.
+
+## M3-B
+
+Charts select final named bindings or physical result rows using typed references. Selectors use the current values' lengths without copying their components. Named documents now write v4. v3 chart selections keep their numeric physical IDs, v1–v3 records remain readable, and recovery stays v2. Rename history follows named selections and preserves independent edits and visibility.
+
+The library build exited 0 in 299.42 owned seconds with cleanup and drain verified. Nextest passed all 18 chart and compatibility cases in the cached run. The substring selector also matched one unrelated diagram smoke case, which passed. Total owned execution was 5.73 seconds.
+
+## M4-A
+
+Sensitivity Tables is a retained companion under Config Menu → Tools. The Pad session owns the definition, run and table. Existing worker wakeups also target the active child viewport, and the root runtime polls independently of Pad painting. Closing the child retains the definition and table, and stale child actions fail current-owner checks.
+
+The first library compile exited 101 due to the fixed-size panel inventory declaration. The corrected compile exited 0 in 221.83 owned seconds with cleanup and output drain verified. Twelve listed Nextest cases passed in 2.24 owned seconds. They cover retained open/action ownership, Manual generation, current-only export, close and reopen, child wakeup, exact run retirement, hosted geometry and the related Chart and Dependencies host contracts.
+
+## M4-B
+
+Config Menu → View → Document usage defaults off and saves through the retained application-wide display preference path. Over-profile diagnostics stay visible. Charts places Dock/Pop out and Close in one row, including the pinned Close behavior.
+
+Library compilation exited 0 in 207.39 owned seconds with cleanup and output drain verified. Four listed Nextest cases passed in 1.25 owned seconds, including actual retained menu interaction, source/evaluation/history neutrality, legacy and malformed preference handling, and the chart controls in both presentations.
+
+## M5-A
+
+The in-app catalog includes all three exact requested scripts, a full-capacity formula helper and deliberate boundary/failure examples. The linked guide and root README describe collections, current named charts, the Sensitivity Tables companion, usage visibility and persisted format compatibility.
+
+Library compilation exited 0 in 183.15 owned seconds with cleanup and drain verified. Four listed Nextest cases passed in 1.49 owned seconds, including execution of the complete example catalog and explicit assertions for the named results of all three requested scripts.
+
+## M5-B
+
+Independent cumulative review identified inclusive thin-bar raster work accounting, X tick alignment under the bar inset, the need to scroll through long Y selectors, and companion-lifecycle and usage evidence gaps. The corrections address all findings. One scoped `cargo clippy -p multi_launcher --lib --bin multi_launcher --no-deps --profile fast-dev --locked` pass exited 0 in 117.83 owned seconds. It reported 121 library and three binary warnings. The new large Sensitivity command warning was corrected by boxing its retained action. The existing application and vendored warnings were outside this correction.
+
+The corrected source library build exited 0 in 187.37 owned seconds. The consolidated run passed 69 cases, then stopped when the new hosted test captured the root viewport before child bootstrap. The fixture now waits for a native child owner and tests actual retained Tools open and Generate, table retention after close and reopen, and parent retirement. The 89.97-second test-only rebuild and the focused rerun passed the corrected test and two previously unrun settings checks. All 72 selected acceptance cases are accounted for. Cleanup and output drain were verified throughout.
+
+### Windows and final delivery
+
+The owned `cargo build -p multi_launcher --bin multi_launcher --profile fast-dev --locked` succeeded in 261.30 seconds. The isolated accessibility-first session observed the full-capacity script, compact results, and new menu entries in the Windows app. Additional interaction evidence was limited by computer-use approval, pointer geometry and the owned deadlines. See the [native acceptance report](stalls/20261116T104630Z.md) for observed behavior, exact diagnostics and remaining checks.
+
+The final implementation checkpoint `04dd2b21c37e7812e64f53d81fcd17fe92785ecf` was pushed. The task used the original checkout and one task branch. Review of the cumulative diff and ancestry found no side checkouts or integration commits. This reporting commit follows the accepted implementation checkpoint. The final response records the actual final tip and upstream outcome.

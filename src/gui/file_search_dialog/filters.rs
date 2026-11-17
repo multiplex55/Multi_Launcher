@@ -6,12 +6,15 @@ use std::path::PathBuf;
 use crate::file_search::model::{
     ContentMatchMode, FileTypeFilter, FilenameMatchMode, SearchRequest, SearchScope,
 };
+use crate::file_search::predicate::{
+    DateMode, DatePreference, MetadataPreferences, SizeMode, SizePreference, SizeUnit,
+};
 use crate::file_search::settings::{FileSearchContentSort, FileSearchFilenameSort};
 use eframe::egui;
 
 use super::{
-    FileSearchDialogState, FileSearchMode, FileSearchRequestError, FileSearchScopeMode,
-    resolve_valid_roots,
+    resolve_valid_roots, FileSearchDialogState, FileSearchMode, FileSearchRequestError,
+    FileSearchScopeMode,
 };
 
 macro_rules! register_filter_target {
@@ -29,13 +32,14 @@ macro_rules! register_filter_target {
 }
 
 impl FileSearchRequestError {
-    pub fn user_message(&self) -> &'static str {
+    pub fn user_message(&self) -> &str {
         match self {
             Self::EmptySearchText => "Enter search text before searching.",
             Self::EmptyGlobalRoots => {
                 "Configure at least one valid global search root in File Search settings."
             }
             Self::EmptyDirectoryRoots => "Choose at least one valid root directory first.",
+            Self::InvalidMetadata(message) => message,
         }
     }
 }
@@ -56,6 +60,46 @@ fn extension_list_text(values: &[String]) -> String {
     values.join(", ")
 }
 
+fn short_filter_text(text: &str) -> String {
+    let mut chars = text.chars().filter(|ch| !ch.is_control());
+    let mut result = chars.by_ref().take(24).collect::<String>();
+    if chars.next().is_some() {
+        result.push('…');
+    }
+    result
+}
+
+fn date_filter_summary(date: &DatePreference) -> String {
+    match date.mode {
+        DateMode::Any => "Any".into(),
+        DateMode::Today => "Today".into(),
+        DateMode::Yesterday => "Yesterday".into(),
+        DateMode::Last24Hours => "Last 24 hours (rolling)".into(),
+        DateMode::Last7Days => "Last 7 days (rolling)".into(),
+        DateMode::Last30Days => "Last 30 days (rolling)".into(),
+        DateMode::Custom => format!(
+            "{}–{}",
+            short_filter_text(&date.start),
+            short_filter_text(&date.end)
+        ),
+    }
+}
+
+fn size_filter_summary(size: &SizePreference) -> String {
+    match size.mode {
+        SizeMode::Any => "Any".into(),
+        SizeMode::Empty => "Empty".into(),
+        SizeMode::SmallerThan => format!("< {} {:?}", short_filter_text(&size.upper), size.unit),
+        SizeMode::LargerThan => format!("> {} {:?}", short_filter_text(&size.lower), size.unit),
+        SizeMode::Between => format!(
+            "{}–{} {:?}",
+            short_filter_text(&size.lower),
+            short_filter_text(&size.upper),
+            size.unit
+        ),
+    }
+}
+
 impl FileSearchDialogState {
     pub fn effective_excluded_directory_names(&self) -> Vec<String> {
         if self.excluded_directory_names_overridden {
@@ -66,6 +110,15 @@ impl FileSearchDialogState {
     }
 
     pub fn build_search_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
+        let mut request = self.build_semantic_request()?;
+        request.metadata = request
+            .metadata_preferences
+            .capture(request.kind, request.max_file_size_bytes)
+            .map_err(FileSearchRequestError::InvalidMetadata)?;
+        Ok(request)
+    }
+
+    pub(super) fn build_semantic_request(&self) -> Result<SearchRequest, FileSearchRequestError> {
         let text = self.search_text.trim();
         if text.is_empty() {
             return Err(FileSearchRequestError::EmptySearchText);
@@ -102,9 +155,16 @@ impl FileSearchDialogState {
             content_match_mode: self.ui_preferences.content_match_mode,
             whole_word: self.ui_preferences.whole_word,
             file_type_filter: match self.selected_mode {
+                _ if self.ui_preferences.metadata.size.mode
+                    != crate::file_search::predicate::SizeMode::Any =>
+                {
+                    FileTypeFilter::FilesOnly
+                }
                 FileSearchMode::Filename => self.ui_preferences.file_type_filter,
                 FileSearchMode::Content => FileTypeFilter::FilesOnly,
             },
+            metadata_preferences: self.ui_preferences.metadata.clone(),
+            metadata: Default::default(),
         })
     }
 
@@ -112,10 +172,11 @@ impl FileSearchDialogState {
         matches!(
             self.current_status,
             crate::file_search::model::SearchStatus::Completed
-        ) && self
-            .last_submitted_request
-            .as_ref()
-            .is_some_and(|last| self.build_search_request().ok().as_ref() != Some(last))
+        ) && self.last_submitted_form.as_ref().is_some_and(|last| {
+            self.build_semantic_request()
+                .ok()
+                .is_none_or(|current| !last.same_criteria(&current))
+        })
     }
 
     pub fn filters_ui(&mut self, ui: &mut egui::Ui) {
@@ -140,6 +201,98 @@ impl FileSearchDialogState {
             self.excluded_directory_names_overridden = true;
         }
         let mut exclusion_structure_changed = false;
+        let mut metadata_structure_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "Date Modified: {}",
+                date_filter_summary(&self.ui_preferences.metadata.date)
+            ));
+            if self.ui_preferences.metadata.date != DatePreference::default() {
+                let clear_date = ui.button("Clear date");
+                register_filter_target!(
+                    scope,
+                    ui,
+                    &clear_date,
+                    "filters/date/clear",
+                    "Clear date filter",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    visual_order
+                );
+                if clear_date.clicked() && commit_actions {
+                    self.ui_preferences.metadata.date = DatePreference::default();
+                    metadata_structure_changed = true;
+                }
+            }
+            ui.label(format!(
+                "File Size: {}",
+                size_filter_summary(&self.ui_preferences.metadata.size)
+            ));
+            if self.ui_preferences.metadata.size != SizePreference::default() {
+                let clear_size = ui.button("Clear size");
+                register_filter_target!(
+                    scope,
+                    ui,
+                    &clear_size,
+                    "filters/size/clear",
+                    "Clear size filter",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    visual_order
+                );
+                if clear_size.clicked() && commit_actions {
+                    self.ui_preferences.metadata.size = SizePreference::default();
+                    metadata_structure_changed = true;
+                }
+            }
+            let active = self.ui_preferences.metadata != MetadataPreferences::default();
+            if active {
+                let clear_both = ui.button("Clear date and size");
+                register_filter_target!(
+                    scope,
+                    ui,
+                    &clear_both,
+                    "filters/metadata/clear",
+                    "Clear date and size",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    visual_order
+                );
+                if clear_both.clicked() && commit_actions {
+                    self.ui_preferences.metadata = MetadataPreferences::default();
+                    metadata_structure_changed = true;
+                }
+            }
+        });
+        if let Err(message) = self.ui_preferences.metadata.date.validate_draft() {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("Date Modified: {message}"),
+            );
+        }
+        match self.ui_preferences.metadata.size.resolve_draft() {
+            Err(message) => {
+                ui.colored_label(ui.visuals().error_fg_color, format!("File Size: {message}"));
+            }
+            Ok(_) if self.selected_mode == FileSearchMode::Content => match self
+                .ui_preferences
+                .metadata
+                .size
+                .content_warning(self.settings.max_content_search_file_size_bytes.max(1))
+            {
+                Err(message) => {
+                    ui.colored_label(ui.visuals().error_fg_color, message);
+                }
+                Ok(Some(message)) => {
+                    ui.colored_label(ui.visuals().warn_fg_color, message);
+                }
+                Ok(None) => {}
+            },
+            Ok(_) => {}
+        }
+        if self.selected_mode == FileSearchMode::Filename
+            && (self.ui_preferences.metadata.date.mode != DateMode::Any
+                || self.ui_preferences.metadata.size.mode != SizeMode::Any)
+        {
+            ui.small("When Everything would otherwise be used, metadata filters switch to filesystem-backed WalkDir; this may be slower.");
+        }
         let filters_header = egui::CollapsingHeader::new("Filters")
             .id_salt("file-search-filters")
             .default_open(false)
@@ -450,7 +603,8 @@ impl FileSearchDialogState {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Type");
-                    let enabled = self.selected_mode == FileSearchMode::Filename;
+                    let size_active = self.ui_preferences.metadata.size.mode != SizeMode::Any;
+                    let enabled = self.selected_mode == FileSearchMode::Filename && !size_active;
                     ui.add_enabled_ui(enabled, |ui| {
                         let response = ui.radio_value(
                             &mut self.ui_preferences.file_type_filter,
@@ -496,10 +650,78 @@ impl FileSearchDialogState {
                         );
                     })
                     .response
-                    .on_hover_text(
-                        "Content search reads file contents, so it always searches files only.",
-                    );
+                    .on_hover_text("Content or size-filtered search uses files only. The selected type preference is restored when the size filter is cleared.");
+                    if size_active { ui.label("Files only while File Size is active; your type preference is retained."); }
                 });
+
+                let date_header = egui::CollapsingHeader::new("Date Modified")
+                    .id_salt("file-search-date-modified").default_open(false).show(ui, |ui| {
+                        for (mode, label, id) in [
+                            (DateMode::Any, "Any", "filters/date/any"),
+                            (DateMode::Today, "Today (local calendar)", "filters/date/today"),
+                            (DateMode::Yesterday, "Yesterday (local calendar)", "filters/date/yesterday"),
+                            (DateMode::Last24Hours, "Last 24 Hours (rolling)", "filters/date/last24"),
+                            (DateMode::Last7Days, "Last 7 Days (rolling)", "filters/date/last7"),
+                            (DateMode::Last30Days, "Last 30 Days (rolling)", "filters/date/last30"),
+                            (DateMode::Custom, "Custom Range (inclusive local dates)", "filters/date/custom"),
+                        ] {
+                            let response = ui.radio_value(&mut self.ui_preferences.metadata.date.mode, mode, label);
+                            register_filter_target!(scope, ui, &response, id, label, crate::gui::jump_mode::TargetKind::Selectable, visual_order);
+                        }
+                        if self.ui_preferences.metadata.date.mode == DateMode::Custom {
+                            ui.horizontal(|ui| {
+                                ui.label("Start (YYYY-MM-DD)");
+                                let response = ui.add(egui::TextEdit::singleline(&mut self.ui_preferences.metadata.date.start).id_salt("file-search-date-start").char_limit(32).desired_width(110.0));
+                                register_filter_target!(scope, ui, &response, "filters/date/start", "Start date", crate::gui::jump_mode::TargetKind::TextEntry, visual_order);
+                                ui.label("End (YYYY-MM-DD)");
+                                let response = ui.add(egui::TextEdit::singleline(&mut self.ui_preferences.metadata.date.end).id_salt("file-search-date-end").char_limit(32).desired_width(110.0));
+                                register_filter_target!(scope, ui, &response, "filters/date/end", "End date", crate::gui::jump_mode::TargetKind::TextEntry, visual_order);
+                            });
+                        }
+                        ui.small("Calendar dates use the local timezone. Rolling windows end at the instant Search is pressed.");
+                    });
+                register_filter_target!(scope, ui, &date_header.header_response, "filters/date/toggle", "Date Modified", crate::gui::jump_mode::TargetKind::Button, visual_order);
+                if date_header.header_response.clicked() && commit_actions { metadata_structure_changed = true; }
+
+                let size_header = egui::CollapsingHeader::new("File Size")
+                    .id_salt("file-search-file-size").default_open(false).show(ui, |ui| {
+                        for (mode, label, id) in [
+                            (SizeMode::Any, "Any", "filters/size/any"),
+                            (SizeMode::Empty, "Empty (0 bytes)", "filters/size/empty"),
+                            (SizeMode::SmallerThan, "Smaller Than (exclusive)", "filters/size/smaller"),
+                            (SizeMode::LargerThan, "Larger Than (exclusive)", "filters/size/larger"),
+                            (SizeMode::Between, "Between (inclusive)", "filters/size/between"),
+                        ] {
+                            let response = ui.radio_value(&mut self.ui_preferences.metadata.size.mode, mode, label);
+                            register_filter_target!(scope, ui, &response, id, label, crate::gui::jump_mode::TargetKind::Selectable, visual_order);
+                        }
+                        let mode = self.ui_preferences.metadata.size.mode;
+                        if matches!(mode, SizeMode::SmallerThan | SizeMode::LargerThan | SizeMode::Between) {
+                            ui.horizontal(|ui| {
+                                if matches!(mode, SizeMode::LargerThan | SizeMode::Between) {
+                                    ui.label(if mode == SizeMode::Between { "Minimum" } else { "Larger than" });
+                                    let response = ui.add(egui::TextEdit::singleline(&mut self.ui_preferences.metadata.size.lower).id_salt("file-search-size-lower").char_limit(65).desired_width(90.0));
+                                    register_filter_target!(scope, ui, &response, "filters/size/lower", "Minimum size", crate::gui::jump_mode::TargetKind::TextEntry, visual_order);
+                                }
+                                if matches!(mode, SizeMode::SmallerThan | SizeMode::Between) {
+                                    ui.label(if mode == SizeMode::Between { "Maximum" } else { "Smaller than" });
+                                    let response = ui.add(egui::TextEdit::singleline(&mut self.ui_preferences.metadata.size.upper).id_salt("file-search-size-upper").char_limit(65).desired_width(90.0));
+                                    register_filter_target!(scope, ui, &response, "filters/size/upper", "Maximum size", crate::gui::jump_mode::TargetKind::TextEntry, visual_order);
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Unit");
+                                for (unit, label, id) in [(SizeUnit::B, "B", "filters/size/unit/b"), (SizeUnit::KB, "KB", "filters/size/unit/kb"), (SizeUnit::MB, "MB", "filters/size/unit/mb"), (SizeUnit::GB, "GB", "filters/size/unit/gb"), (SizeUnit::KiB, "KiB", "filters/size/unit/kib"), (SizeUnit::MiB, "MiB", "filters/size/unit/mib"), (SizeUnit::GiB, "GiB", "filters/size/unit/gib")] {
+                                    let response = ui.radio_value(&mut self.ui_preferences.metadata.size.unit, unit, label);
+                                    register_filter_target!(scope, ui, &response, id, label, crate::gui::jump_mode::TargetKind::Selectable, visual_order);
+                                }
+                            });
+                            ui.small("KB/MB/GB use powers of 1000; KiB/MiB/GiB use powers of 1024. Fractional bytes are not accepted.");
+                        }
+                    });
+                register_filter_target!(scope, ui, &size_header.header_response, "filters/size/toggle", "File Size", crate::gui::jump_mode::TargetKind::Button, visual_order);
+                if size_header.header_response.clicked() && commit_actions { metadata_structure_changed = true; }
+                ui.small("When Everything would otherwise be used, date or size filters use filesystem-backed WalkDir instead; this may be slower. Content reads retain their independent size limit.");
 
                 ui.horizontal(|ui| {
                     ui.label("Include extensions");
@@ -645,12 +867,22 @@ impl FileSearchDialogState {
             visual_order
         );
         if commit_actions
-            && (filters_header.header_response.clicked() || exclusion_structure_changed)
+            && (filters_header.header_response.clicked()
+                || exclusion_structure_changed
+                || metadata_structure_changed
+                || prefs_before.metadata.date.mode != self.ui_preferences.metadata.date.mode
+                || prefs_before.metadata.size.mode != self.ui_preferences.metadata.size.mode)
         {
             self.invalidate_jump_mode_form(scope);
         }
         if commit_actions && self.ui_preferences != prefs_before {
-            self.handle_sort_changed();
+            let mut before_other = prefs_before.clone();
+            before_other.metadata = self.ui_preferences.metadata.clone();
+            if before_other == self.ui_preferences {
+                self.mark_ui_preferences_dirty();
+            } else {
+                self.handle_sort_changed();
+            }
         }
         if !commit_actions {
             self.ui_preferences = prefs_before;
@@ -779,6 +1011,136 @@ mod tests {
             .candidates,
             vec![crate::file_search::model::SearchBackend::WalkDir]
         );
+    }
+
+    #[test]
+    fn metadata_resets_require_owner_and_preserve_file_type_without_searching() {
+        let temp = tempdir().unwrap();
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            selected_scope: FileSearchScopeMode::Directory,
+            custom_roots: vec![temp.path().display().to_string()],
+            ..Default::default()
+        };
+        state.ui_preferences.file_type_filter = FileTypeFilter::DirectoriesOnly;
+        state.ui_preferences.metadata.date.mode = DateMode::Last24Hours;
+        state.ui_preferences.metadata.size.mode = SizeMode::SmallerThan;
+        state.ui_preferences.metadata.size.upper = "2".into();
+        state.ui_preferences.metadata.size.unit = SizeUnit::KB;
+        let ctx = egui::Context::default();
+        let draw = |state: &mut FileSearchDialogState,
+                    events: Vec<egui::Event>,
+                    time: f64,
+                    owner: bool| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 1100.0),
+                    )),
+                    focused: true,
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let mut scope = None;
+                        let mut order = 0;
+                        state.filters_ui_with_jump_mode(ui, &mut scope, &mut order, true, owner);
+                    });
+                },
+            )
+        };
+        let position = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.pos + egui::vec2(3.0, 3.0))
+                    }
+                    _ => None,
+                })
+                .expect("metadata reset button is rendered")
+        };
+        let output = draw(&mut state, vec![], 1.0, true);
+        let date_pos = position(&output, "Clear date");
+        output.drop_without_applying_deltas();
+        for (index, pressed) in [true, false].into_iter().enumerate() {
+            draw(
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(date_pos),
+                    egui::Event::PointerButton {
+                        pos: date_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.1 + index as f64 * 0.1,
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            state.ui_preferences.metadata.date.mode,
+            DateMode::Last24Hours
+        );
+        assert_eq!(
+            state.build_search_request().unwrap().file_type_filter,
+            FileTypeFilter::FilesOnly
+        );
+        for (index, pressed) in [true, false].into_iter().enumerate() {
+            draw(
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(date_pos),
+                    egui::Event::PointerButton {
+                        pos: date_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.3 + index as f64 * 0.1,
+                true,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(state.ui_preferences.metadata.date.mode, DateMode::Any);
+        assert_eq!(
+            state.ui_preferences.metadata.size.mode,
+            SizeMode::SmallerThan
+        );
+        let output = draw(&mut state, vec![], 1.5, true);
+        let size_pos = position(&output, "Clear size");
+        output.drop_without_applying_deltas();
+        for (index, pressed) in [true, false].into_iter().enumerate() {
+            draw(
+                &mut state,
+                vec![
+                    egui::Event::PointerMoved(size_pos),
+                    egui::Event::PointerButton {
+                        pos: size_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.6 + index as f64 * 0.1,
+                true,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(state.ui_preferences.metadata.size.mode, SizeMode::Any);
+        assert_eq!(
+            state.build_search_request().unwrap().file_type_filter,
+            FileTypeFilter::DirectoriesOnly
+        );
+        assert!(state.ui_preferences_dirty);
+        assert!(state.active_search_id.is_none());
     }
 
     #[test]

@@ -350,6 +350,8 @@ impl SearchCoordinator {
                 .unwrap_or(SearchBackend::WalkDir)
         } else {
             match (&request.kind, &request.scope) {
+                (SearchKind::Content, SearchScope::Files { .. }) if request.metadata.active() => SearchBackend::Native,
+                (SearchKind::Filename, _) if request.metadata.active() => SearchBackend::WalkDir,
                 (SearchKind::Filename, SearchScope::Roots { .. })
                     if request.filename_match_mode
                         != crate::file_search::model::FilenameMatchMode::RankedSubstring =>
@@ -758,6 +760,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         }
     }
 
@@ -1274,6 +1277,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -1311,6 +1315,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -1366,6 +1371,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -1423,6 +1429,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -1485,6 +1492,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);
@@ -1529,6 +1537,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         });
 
         let events = drain_until_terminal(&mut coordinator);

@@ -1,6 +1,7 @@
 use crate::calculation_pad::CalculationValue;
 use crate::settings::{
-    CalculationPadDisplayPreferences as Preferences, CalculationPadNumberMode as Mode,
+    CalculationPadDisplayPreferences as Preferences, CalculationPadExactMode as ExactMode,
+    CalculationPadNumberMode as Mode,
 };
 
 fn group(text: &str) -> String {
@@ -61,6 +62,8 @@ pub(super) fn supports_precision(value: &CalculationValue) -> bool {
     matches!(
         value,
         CalculationValue::Scalar(_)
+            | CalculationValue::ApproximateScalar(_)
+            | CalculationValue::Exact(_)
             | CalculationValue::DimensionalQuantity(_)
             | CalculationValue::PhysicalQuantity { .. }
     )
@@ -68,7 +71,7 @@ pub(super) fn supports_precision(value: &CalculationValue) -> bool {
 
 pub(super) fn supports_percent(value: &CalculationValue) -> bool {
     match value {
-        CalculationValue::Scalar(_) => true,
+        CalculationValue::Scalar(_) | CalculationValue::ApproximateScalar(_) => true,
         CalculationValue::DimensionalQuantity(value) => value
             .display_parts()
             .is_some_and(|(_, unit)| unit.is_empty()),
@@ -77,6 +80,16 @@ pub(super) fn supports_percent(value: &CalculationValue) -> bool {
 }
 
 pub(super) fn display(value: &CalculationValue, preferences: Preferences) -> Option<String> {
+    if let CalculationValue::Exact(value) = value {
+        return Some(match preferences.exact_mode {
+            ExactMode::Exact => value.display(),
+            ExactMode::Decimal => value.decimal_display((preferences.number_mode != Mode::Auto).then_some(preferences.decimal_places)),
+            ExactMode::MixedNumber => value.mixed_display(),
+        });
+    }
+    if let CalculationValue::ApproximateScalar(value) = value {
+        return Some(format!("≈ {}", scalar(*value, preferences, true)?));
+    }
     // Auto is exactly the existing presentation when no additional option is set.
     if preferences.number_mode == Mode::Auto && !preferences.group_digits && !preferences.percent {
         return value.formatted_result();
@@ -112,6 +125,49 @@ pub(super) fn display(value: &CalculationValue, preferences: Preferences) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_presentation_ignores_numeric_preferences() {
+        use crate::calculation_pad::{CalculationDocument, LineOutcome};
+        let document = CalculationDocument::new("date(\"2026-11-15\")\nweekday(date(\"2026-11-15\"))");
+        let evaluation = document.evaluate();
+        let mut preferences = Preferences::default();
+        preferences.number_mode = Mode::Scientific;
+        preferences.decimal_places = 4;
+        preferences.group_digits = true;
+        preferences.percent = true;
+        let LineOutcome::Value(date) = &evaluation.lines[0].outcome else { panic!("date"); };
+        let LineOutcome::Value(day) = &evaluation.lines[1].outcome else { panic!("weekday"); };
+        assert_eq!(display(date, preferences).as_deref(), Some("2026-11-15"));
+        assert_eq!(display(day, preferences).as_deref(), Some("Sunday"));
+        assert!(!supports_precision(date));
+        assert!(!supports_percent(date));
+    }
+
+    #[test]
+    fn exact_views_preserve_value_and_show_rounding_provenance() {
+        use crate::calculation_pad::{CalculationDocument, LineOutcome};
+        let document = CalculationDocument::new("fraction(7,4)\nfraction(-7,4)\nfraction(1,3)\ndecimal_div(decimal(\"1\"),decimal(\"8\"),2)\nto_float(fraction(1,2))\ndecimal(\"1.75\")");
+        let evaluation = document.evaluate();
+        let get = |line: usize| match &evaluation.lines[line].outcome {
+            LineOutcome::Value(value) => value,
+            other => panic!("expected value, got {other:?}"),
+        };
+        let mut preferences = Preferences::default();
+        assert_eq!(display(get(0), preferences).as_deref(), Some("7/4"));
+        preferences.exact_mode = ExactMode::Decimal;
+        assert_eq!(display(get(0), preferences).as_deref(), Some("1.75"));
+        assert_eq!(display(get(2), preferences).as_deref(), Some("≈ 0.333333333333"));
+        assert_eq!(display(get(3), preferences).as_deref(), Some("≈ 0.12"));
+        preferences.number_mode = Mode::Fixed;
+        preferences.decimal_places = 1;
+        assert_eq!(display(get(0), preferences).as_deref(), Some("≈ 1.8"));
+        assert_eq!(display(get(4), preferences).as_deref(), Some("≈ 0.5"));
+        preferences.exact_mode = ExactMode::MixedNumber;
+        assert_eq!(display(get(1), preferences).as_deref(), Some("-1 3/4"));
+        assert_eq!(display(get(5), preferences).as_deref(), Some("1 3/4"));
+        assert_eq!(get(0).canonical_result().as_deref(), Some("fraction(7,4)"));
+    }
     #[test]
     fn formatting_is_local_bounded_and_preserves_exact_values() {
         let mut p = Preferences::default();

@@ -22,21 +22,118 @@ use super::vector::{self, VectorExpression};
 pub(super) mod script;
 #[path = "loops.rs"]
 mod loops;
+#[path = "syntax.rs"]
+pub(super) mod syntax;
+#[path = "rename.rs"]
+pub(super) mod rename;
 pub use script::CalculationSequence;
 
 pub(crate) fn editor_loop_header(source: &str) -> bool {
-    loops::editor_iterator(source).is_some()
+    loops::editor_block_header(source)
+}
+
+pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
+    loops::editor_control_keyword(source)
 }
 pub(crate) use script::{FUNCTIONS, function_signature_help};
+pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_VECTOR_COMPONENT_WORK};
+pub(crate) use loops::{MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
+
+#[derive(Clone, Debug)]
+pub(crate) struct EditorFunction {
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub line: usize,
+    pub keyword_range: Range<usize>,
+    pub name_range: Range<usize>,
+    pub parameter_ranges: Vec<Range<usize>>,
+    pub body_ranges: Vec<Range<usize>>,
+    pub valid: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct EditorFunctionScope {
+    pub declarations: Vec<EditorFunction>,
+    pub owner_line: usize,
+    pub local_parameters: Option<Vec<String>>,
+    pub in_declaration_header: bool,
+}
+
+fn mapped_ranges(row: &syntax::SourceRow, range: Range<usize>) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for offset in row.offsets.get(range).unwrap_or_default().iter().flatten().copied() {
+        if let Some(last) = ranges.last_mut() && last.end == offset { last.end += 1; }
+        else { ranges.push(offset..offset + 1); }
+    }
+    ranges
+}
+
+/// Describe declarations and the current lexical scope without evaluating the Pad.
+pub(crate) fn editor_function_scope(source: &str, caret: usize) -> EditorFunctionScope {
+    let Some(prefix) = source.get(..caret) else { return EditorFunctionScope::default(); };
+    let analysis = syntax::SourceAnalysis::new(source);
+    let caret_line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let Some(current) = analysis.rows.get(caret_line) else { return EditorFunctionScope::default(); };
+    let owner_line = current.owner.unwrap_or(caret_line);
+    let mut scope = EditorFunctionScope { owner_line, ..Default::default() };
+    if !analysis.rows.iter().any(|row| row.owner.is_none() && row.text.trim_start().strip_prefix("fn").is_some_and(|rest| rest.starts_with(char::is_whitespace))) {
+        return scope;
+    }
+    let (valid_functions, _, _) = script::build_functions(&analysis);
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() { continue; }
+        let Some(header) = script::declaration_header(&row.text) else { continue; };
+        let Ok(header) = header else {
+            let logical_caret = row.offsets.iter().position(|offset| offset.is_some_and(|offset| offset >= caret)).unwrap_or(row.text.len());
+            if line == owner_line {
+                if find_assignment_delimiter(&row.text).is_some_and(|delimiter| logical_caret >= delimiter.right_start) {
+                    scope.local_parameters = Some(Vec::new());
+                } else {
+                    scope.in_declaration_header = true;
+                }
+            }
+            continue;
+        };
+        let authored = header.parameters.iter().map(|parameter| row.text[parameter.range.clone()].to_owned()).collect::<Vec<_>>();
+        if line == owner_line {
+            let logical_caret = row.offsets.iter().position(|offset| offset.is_some_and(|offset| offset >= caret)).unwrap_or(row.text.len());
+            if header.body_start.is_some_and(|body_start| logical_caret >= body_start) {
+                scope.local_parameters = Some(authored.clone());
+            } else {
+                scope.in_declaration_header = true;
+            }
+        }
+        let Some(keyword_range) = mapped_ranges(row, header.keyword_range).into_iter().next() else { continue; };
+        let Some(name_range) = mapped_ranges(row, header.name_range).into_iter().next() else { continue; };
+        let parameter_ranges = header.parameters.iter().flat_map(|parameter| mapped_ranges(row, parameter.range.clone())).collect();
+        let body_ranges = header.body_start.map_or_else(Vec::new, |start| mapped_ranges(row, start..row.text.len()));
+        let valid = valid_functions.iter().any(|function| function.line == line && function.name == header.name);
+        scope.declarations.push(EditorFunction { name: header.name, parameters: authored, line,
+            keyword_range, name_range, parameter_ranges, body_ranges, valid });
+    }
+    scope
+}
 
 /// Names visible before the caret, without evaluating the document.
-pub(crate) fn editor_bindings(source: &str, caret: usize) -> Vec<String> {
+pub(crate) fn editor_bindings(source: &str, caret: usize, function_scope: &EditorFunctionScope) -> Vec<String> {
     let Some(prefix) = source.get(..caret) else { return Vec::new(); };
-    let current_indent = prefix.rsplit('\n').next().unwrap_or("").chars().take_while(|c| *c == ' ').count();
+    if let Some(parameters) = &function_scope.local_parameters { return parameters.clone(); }
     let mut bindings: Vec<(String, Vec<usize>)> = Vec::new();
     let mut scopes: Vec<(usize, usize)> = Vec::new();
-    let lines: Vec<_> = prefix.split('\n').collect();
-    for (line_number, line) in lines.iter().take(lines.len().saturating_sub(1)).enumerate() {
+    let analysis = syntax::SourceAnalysis::new(source);
+    let caret_line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let current = analysis.rows.get(caret_line);
+    let current_start = current.and_then(|row| row.owner).unwrap_or(caret_line);
+    let indentation_source = if current.is_some_and(|row| row.owner.is_some()) {
+        &source[analysis.rows[current_start].range.clone()]
+    } else {
+        prefix.rsplit('\n').next().unwrap_or("")
+    };
+    let current_indent = indentation_source.chars().take_while(|c| *c == ' ').count();
+    for (line_number, row) in analysis.rows.iter().enumerate().take(current_start) {
+        if row.owner.is_some() { continue; }
+        if row.offsets.iter().flatten().any(|offset| *offset >= caret) { continue; }
+        let line = row.text.as_str();
         let trimmed = line.trim();
         if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
         let indent = line.chars().take_while(|ch| *ch == ' ').count();
@@ -70,7 +167,7 @@ pub(crate) fn watch_name(input: &str) -> Option<String> {
         && (parsed.braced || !is_reserved_name(&parsed.canonical))).then_some(parsed.canonical)
 }
 
-fn integer_literal_token(value: &str) -> bool {
+pub(super) fn integer_literal_token(value: &str) -> bool {
     let value = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
     let (digits, radix) = if let Some(rest) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) { (rest, 16) }
         else if let Some(rest) = value.strip_prefix("0b").or_else(|| value.strip_prefix("0B")) { (rest, 2) }
@@ -86,18 +183,21 @@ pub(crate) struct LiteralInput {
     pub line: usize,
     pub value: String,
     pub value_range: Range<usize>,
+    pub statement_range: Range<usize>,
     pub source_line: String,
+    pub kind: super::input::InputKind,
 }
 
 pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
     let mut result = Vec::new();
-    let mut offset = 0;
-    let has_loops = loops::contains_loop(source);
-    for (line, raw) in source.split_inclusive('\n').enumerate().take(MAX_SOURCE_LINES) {
-        let text = raw.trim_end_matches(['\r', '\n']);
+    let analysis = syntax::SourceAnalysis::new(source);
+    let has_loops = loops::contains_loop_in(&analysis);
+    for (line, row) in analysis.rows.iter().enumerate().take(super::limits::ABSOLUTE_LINES) {
+        if row.owner.is_some() { continue; }
+        let text = row.text.as_str();
         let trimmed = text.trim();
-        if trimmed.is_empty() || is_full_line_comment(trimmed) { offset += raw.len(); continue; }
-        if has_loops && text.len() != text.trim_start().len() { offset += raw.len(); continue; }
+        if trimmed.is_empty() || is_full_line_comment(trimmed) { continue; }
+        if has_loops && text.len() != text.trim_start().len() { continue; }
         if let Some(delimiter) = find_assignment_delimiter(text)
             && delimiter.operator == AssignmentOperator::Assign
             && let Ok(name) = parse_assignment_name(text[..delimiter.left_end].trim())
@@ -109,12 +209,19 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
             let expr = rhs.trim();
             let (value, start, valid_shape) = if let Some(open) = expr.find('(') {
                 let constructor = &expr[..open];
-                let valid = matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
-                    && expr.ends_with(')');
+                let valid = (matches!(constructor, "int" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128")
+                    || constructor.eq_ignore_ascii_case("decimal")) && expr.ends_with(')');
                 let argument = if valid { &expr[open + 1..expr.len() - 1] } else { "" };
-                let value = argument.trim();
-                let start = open + 1 + argument.len() - argument.trim_start().len();
-                (value, start, valid && integer_literal_token(value))
+                let argument_start = open + 1 + argument.len() - argument.trim_start().len();
+                let argument = argument.trim();
+                if constructor.eq_ignore_ascii_case("decimal") {
+                    let value = argument.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or("");
+                    let valid_decimal = !value.is_empty()
+                        && super::exact::ExactNumber::decimal(value, &mut script::WorkBudget::default()).is_ok();
+                    (value, argument_start + 1, valid && valid_decimal)
+                } else {
+                    (argument, argument_start, valid && integer_literal_token(argument))
+                }
             } else {
                 let sign = usize::from(expr.starts_with('+') || expr.starts_with('-'));
                 let rest = &expr[sign..];
@@ -128,37 +235,81 @@ pub(crate) fn literal_inputs(source: &str) -> Vec<LiteralInput> {
             };
             if valid_shape {
                 let needs_quantity = !expr.ends_with(')') && !expr[value.len()..].trim().is_empty();
-                let evaluation = CalculationDocument::new(expr).evaluate_owned_literal(needs_quantity);
-                if evaluation {
-                    let value_start = offset + delimiter.right_start + leading + start;
-                    result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
-                        value_range: value_start..value_start + value.len(), source_line: text.to_owned() });
+                let document = CalculationDocument::new(expr);
+                let evaluation = document.evaluate();
+                let kind = evaluation.lines.first().and_then(|line| match &line.outcome {
+                    LineOutcome::Value(CalculationValue::Integer(value)) if !needs_quantity => Some(super::input::InputKind::Integer(value.mode())),
+                    LineOutcome::Value(CalculationValue::Exact(_)) if !needs_quantity => Some(super::input::InputKind::Decimal),
+                    LineOutcome::Value(CalculationValue::Scalar(_)) if !needs_quantity && value.trim_start_matches(['+', '-']).get(..2).is_some_and(|prefix| matches!(prefix, "0x" | "0X" | "0b" | "0B" | "0o" | "0O")) => Some(super::input::InputKind::ExactInteger),
+                    LineOutcome::Value(CalculationValue::Scalar(_)) if !needs_quantity => Some(super::input::InputKind::Scalar),
+                    LineOutcome::Value(CalculationValue::ExactBase { .. }) if !needs_quantity => Some(super::input::InputKind::ExactInteger),
+                    LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) if needs_quantity => Some(super::input::InputKind::Quantity { unit: expr[value.len()..].trim().to_owned() }),
+                    _ => None,
+                });
+                if let Some(kind) = kind {
+                    let logical_start = delimiter.right_start + leading + start;
+                    let logical_end = logical_start + value.len();
+                    if let Some(offsets) = row.offsets.get(logical_start..logical_end)
+                        && let Some(Some(value_start)) = offsets.first()
+                        && offsets.iter().enumerate().all(|(index, offset)| *offset == Some(*value_start + index))
+                    {
+                        let mut last = line;
+                        while analysis.rows.get(last + 1).is_some_and(|next| next.owner == Some(line)) { last += 1; }
+                        result.push(LiteralInput { name: name.canonical, line, value: value.to_owned(),
+                            value_range: *value_start..*value_start + value.len(), statement_range: row.range.start..analysis.rows[last].range.end, source_line: source[row.range.start..analysis.rows[last].range.end].to_owned(), kind });
+                    }
                 }
             }
         }
-        offset += raw.len();
     }
     result
 }
 
-impl CalculationDocument {
-    fn evaluate_owned_literal(&self, needs_quantity: bool) -> bool {
-        self.evaluate().lines.first().is_some_and(|line| match &line.outcome {
-            LineOutcome::Value(CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }) => true,
-            LineOutcome::Value(CalculationValue::Scalar(_) | CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }) => !needs_quantity,
-            _ => false,
-        })
-    }
-}
-
-pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
-pub const MAX_SOURCE_LINES: usize = 256;
+pub const MAX_DOCUMENT_BYTES: usize = super::limits::STANDARD_BYTES;
+pub const MAX_SOURCE_LINES: usize = super::limits::STANDARD_LINES;
+const SLOT_BASE: usize = super::limits::SLOT_BASE;
 pub const MAX_EXPRESSION_BYTES: usize = 2048;
+pub(crate) const MAX_VECTOR_EXPRESSION_BYTES: usize = 32 * 1024;
 pub const MAX_EXPRESSION_NESTING: usize = 32;
 pub const MAX_DEPENDENCIES: usize = 512;
 pub const MAX_DEPENDENCIES_PER_LINE: usize = 64;
 pub const MAX_NAME_BYTES: usize = 128;
 const MAX_PREPARED_EXPRESSION_BYTES: usize = MAX_EXPRESSION_BYTES * 4;
+
+// A vector literal may contain many independent scalar expressions. Keep the
+// ordinary limit on everything outside literals, including quoted names.
+pub(super) fn expression_size_limit(source: &str, internal_template: bool) -> usize {
+    let ordinary = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    let mut outside = 0usize;
+    let mut depth = 0usize;
+    let mut braced = false;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut has_literal = false;
+    for ch in source.chars() {
+        if depth == 0 { outside += ch.len_utf8(); }
+        if quoted {
+            if escaped { escaped = false; }
+            else if ch == '\\' { escaped = true; }
+            else if ch == '"' { quoted = false; }
+        } else if braced {
+            if ch == '}' { braced = false; }
+        } else {
+            match ch {
+                '"' => quoted = true,
+                '{' => braced = true,
+                '[' => { depth += 1; has_literal = true; }
+                ']' if depth > 0 => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    if has_literal && outside <= ordinary {
+        if internal_template { MAX_VECTOR_EXPRESSION_BYTES * 4 } else { MAX_VECTOR_EXPRESSION_BYTES }
+    } else {
+        ordinary
+    }
+}
 
 type CheckedExpression = FlatEx<f64, CheckedOperators>;
 type ModuloExpression = FlatEx<f64, ModuloOperators>;
@@ -169,13 +320,19 @@ const MAX_EXACT_SCALAR_INTEGER: u64 = 1_u64 << 53;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalculationDocument {
     source: String,
+    profile: super::persistence::DocumentProfile,
 }
 
 impl CalculationDocument {
     pub fn new(source: impl Into<String>) -> Self {
         Self {
             source: source.into(),
+            profile: super::persistence::DocumentProfile::Standard,
         }
+    }
+
+    pub(crate) fn with_profile(source: impl Into<String>, profile: super::persistence::DocumentProfile) -> Self {
+        Self { source: source.into(), profile }
     }
 
     pub fn source(&self) -> &str {
@@ -200,14 +357,18 @@ impl CalculationDocument {
 
     /// Reevaluates every source line from the current document contents.
     pub fn evaluate(&self) -> CalculationEvaluation<'_> {
-        self.evaluate_inner(None)
+        self.evaluate_inner(None, None)
     }
 
     pub(crate) fn evaluate_with_cancellation(
         &self,
         cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> CalculationEvaluation<'_> {
-        self.evaluate_inner(Some(cancellation))
+        self.evaluate_inner(Some(cancellation), None)
+    }
+
+    pub(crate) fn evaluate_for_analysis(&self, cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>, aggregate: std::sync::Arc<script::AggregateWork>) -> CalculationEvaluation<'_> {
+        self.evaluate_inner(Some(cancellation), Some(aggregate))
     }
 
     #[cfg(test)]
@@ -216,9 +377,12 @@ impl CalculationDocument {
     }
 
     pub(crate) fn source_requires_repeated_execution(source: &str) -> bool {
-        loops::contains_loop(source)
-            || source.lines().any(|line| {
+        let analysis = syntax::SourceAnalysis::new(source);
+        loops::contains_loop_in(&analysis)
+            || analysis.rows.iter().filter(|row| row.owner.is_none()).any(|row| {
+                let line = row.text.as_str();
                 let line = line.trim();
+                if script::declaration(line).is_some() { return true; }
                 if line.is_empty() || is_full_line_comment(line) {
                     return false;
                 }
@@ -235,55 +399,62 @@ impl CalculationDocument {
     fn evaluate_inner(
         &self,
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        aggregate: Option<std::sync::Arc<script::AggregateWork>>,
     ) -> CalculationEvaluation<'_> {
         let source = self.source.as_str();
-        if source.len() > MAX_DOCUMENT_BYTES {
+        let limits = super::limits::profile_limits(self.profile);
+        if source.len() > limits.bytes {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
                 final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::DocumentTooLarge {
-                    max_bytes: MAX_DOCUMENT_BYTES,
+                    max_bytes: limits.bytes,
                 }),
+                usage: None,
             };
         }
 
-        let source_line_count = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        if source_line_count > MAX_SOURCE_LINES {
+        let source_line_count = super::limits::physical_rows(source);
+        if source_line_count > limits.lines {
             return CalculationEvaluation {
                 source,
                 lines: Vec::new(),
                 final_bindings: HashMap::new(),
                 diagnostic: Some(DocumentDiagnostic::TooManyLines {
-                    max_lines: MAX_SOURCE_LINES,
+                    max_lines: limits.lines,
                 }),
+                usage: None,
             };
         }
-        if loops::contains_loop(source) {
-            return loops::evaluate(source, cancellation);
+        let analysis = syntax::SourceAnalysis::new(source);
+        let (functions, function_rows, function_identifiers) = script::build_functions(&analysis);
+        if loops::contains_loop_in(&analysis) {
+            return loops::evaluate(source, &analysis, &functions, &function_rows, function_identifiers, cancellation, aggregate);
         }
 
         // Alias fallback must see forward declarations too, so
         // references keep the same diagnostics as ordinary named variables.
-        let declared_names = declared_names(source);
-        let mut total_identifiers = 0;
+        let declared_names = declared_names_in(&analysis);
+        let mut total_identifiers = function_identifiers;
         let mut prepared = Vec::with_capacity(source_line_count);
-        let mut source_offset = 0;
-        for raw_line in source.split('\n') {
-            let raw_end = source_offset + raw_line.len();
-            let content_end = if raw_line.ends_with('\r') {
-                raw_end - 1
-            } else {
-                raw_end
-            };
-            let content = &source[source_offset..content_end];
-            prepared.push(prepare_line(
-                source_offset..content_end,
-                content,
-                &mut total_identifiers,
-                &declared_names,
-            ));
-            source_offset = raw_end.saturating_add(1);
+        for (line_index, row) in analysis.rows.iter().enumerate() {
+            if row.owner.is_some() {
+                prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+                continue;
+            }
+            let span_end = row.offsets.iter().rev().find_map(|offset| *offset)
+                .map_or(row.range.end, |offset| offset + 1);
+            if function_rows[line_index].is_some() {
+                prepared.push(PreparedLine::simple(row.range.clone(), PreparedStatement::Blank));
+                continue;
+            }
+            let visible = functions.partition_point(|function| function.line < line_index);
+            let mut item = prepare_line_with_functions(row.range.start..span_end, &row.text, &mut total_identifiers, &declared_names, &functions[..visible]);
+            if let Some(diagnostic) = &row.diagnostic {
+                item.diagnostic = Some(Diagnostic::new(diagnostic.clone()));
+            }
+            prepared.push(item);
         }
 
         let definitions = assignment_definitions(&prepared);
@@ -294,14 +465,34 @@ impl CalculationDocument {
         let mut values = vec![None; prepared.len()];
         let mut results = Vec::with_capacity(prepared.len());
 
-        let mut work = cancellation.map_or_else(
-            script::WorkBudget::default,
-            script::WorkBudget::with_cancellation,
-        );
+        let mut work = match (cancellation, aggregate) {
+            (Some(cancel), Some(aggregate)) => script::WorkBudget::with_analysis(cancel, aggregate),
+            (Some(cancel), None) => script::WorkBudget::with_cancellation(cancel),
+            _ => script::WorkBudget::default(),
+        };
         let mut terminal = false;
-        for (line_index, line) in prepared.iter().enumerate() {
+        let mut retained_origins = HashMap::new();
+        let mut final_bindings: HashMap<String, FinalBinding> = HashMap::new();
+        for (line_index, line) in prepared.iter_mut().enumerate() {
+            if !retained_origins.is_empty() {
+                resolve_one_line(line, line_index, source_line_count, &definitions, &retained_origins);
+            }
             let mut dependencies = line.dependencies.clone();
-            let outcome = if terminal
+            work.called_definitions.clear();
+            work.clear_collection_failure();
+            let original = &source[analysis.rows[line_index].range.clone()];
+            let outcome = if let Some(owner) = analysis.rows[line_index].owner {
+                if original.trim().is_empty() { LineOutcome::Blank }
+                else if is_full_line_comment(original.trim()) { LineOutcome::Comment }
+                else { LineOutcome::Continuation { owner_line: owner } }
+            } else if is_full_line_comment(original.trim()) {
+                LineOutcome::Comment
+            } else if let Some(definition) = &function_rows[line_index] {
+                match definition {
+                    Ok(()) => LineOutcome::Definition,
+                    Err(kind) => LineOutcome::Error(Diagnostic::new(kind.clone())),
+                }
+            } else if terminal
                 && !matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment)
             {
                 LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted))
@@ -315,8 +506,10 @@ impl CalculationDocument {
                 let result = expression.evaluate(line_index, &outcomes, &values, &mut dependencies, &mut work);
                 match result { Ok(value) => LineOutcome::Value(value), Err(kind) => LineOutcome::Error(Diagnostic::new(kind)) }
             } else {
-                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values)
+                evaluate_line(line_index, line, &cyclic_lines, &outcomes, &values, &mut work)
             };
+            let collection_failure = work.take_collection_failure();
+            dependencies.extend(work.called_definitions.drain(..));
             if matches!(
                 outcome,
                 LineOutcome::Error(Diagnostic { kind: DiagnosticKind::WorkLimit | DiagnosticKind::Canceled })
@@ -331,10 +524,23 @@ impl CalculationDocument {
             if let LineOutcome::Value(value) = &outcome {
                 values[line_index] = Some(value.clone());
             }
+            if let Some(name) = &line.assignment_name
+                && definitions.get(name).is_some_and(|lines| lines.binary_search(&line_index).is_ok())
+                && !matches!(outcome, LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted }))
+            {
+                let retain = collection_failure
+                    && matches!(&outcome, LineOutcome::Error(Diagnostic { kind }) if !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
+                    && final_bindings.get(name).is_some_and(|binding| matches!(binding.outcome, LineOutcome::Value(_)));
+                if retain {
+                    retained_origins.insert(line_index, final_bindings[name].line_index);
+                } else {
+                    final_bindings.insert(name.clone(), FinalBinding { line_index, outcome: outcome.clone() });
+                }
+            }
             outcomes.push(outcome.clone());
             results.push(CalculationLineResult {
                 line_index,
-                source_range: line.source_range.clone(),
+                source_range: analysis.rows[line_index].range.clone(),
                 assignment_name: line.assignment_name.clone(),
                 dependency_indices: dependencies,
                 loop_iteration: None,
@@ -345,18 +551,9 @@ impl CalculationDocument {
         CalculationEvaluation {
             source,
             lines: results,
-            final_bindings: definitions
-                .into_iter()
-                .filter_map(|(name, lines)| {
-                    lines.into_iter().rev().find(|&line| {
-                        !matches!(
-                            outcomes[line],
-                            LineOutcome::Error(Diagnostic { kind: DiagnosticKind::NotExecuted })
-                        )
-                    }).map(|line| (name, FinalBinding { line_index: line, outcome: outcomes[line].clone() }))
-                })
-                .collect(),
+            final_bindings,
             diagnostic: None,
+            usage: Some(EvaluationUsage { work_units: work.used(), vector_component_work: work.vector_used(), loop_iterations: 0 }),
         }
     }
 }
@@ -403,6 +600,15 @@ pub struct CalculationEvaluation<'a> {
     /// The physical row of each name's latest binding, including failures.
     pub(crate) final_bindings: HashMap<String, FinalBinding>,
     pub diagnostic: Option<DocumentDiagnostic>,
+    pub usage: Option<EvaluationUsage>,
+}
+
+/// Counters charged by this evaluation, absent when source admission prevented evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvaluationUsage {
+    pub work_units: usize,
+    pub vector_component_work: usize,
+    pub loop_iterations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -429,13 +635,19 @@ pub struct CalculationLineResult {
 pub enum LineOutcome {
     Blank,
     Comment,
+    Definition,
+    Control,
+    Continuation { owner_line: usize },
     Value(CalculationValue),
     Error(Diagnostic),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
+    Calendar(super::calendar::CalendarValue),
     Scalar(f64),
+    ApproximateScalar(f64),
+    Exact(super::exact::ExactNumber),
     Boolean(bool),
     Sequence(CalculationSequence),
     Vector(vector::CalculationVector),
@@ -459,7 +671,10 @@ impl CalculationValue {
     /// Formats a result using the shared number formatter where it applies.
     pub fn formatted_result(&self) -> Option<String> {
         match self {
+            Self::Calendar(value) => Some(value.display()),
             Self::Scalar(value) => format_number(*value),
+            Self::ApproximateScalar(value) => Some(format!("≈ {}", format_number(*value)?)),
+            Self::Exact(value) => Some(value.display()),
             Self::Boolean(value) => Some(value.to_string()),
             Self::Sequence(value) => Some(value.display()),
             Self::Vector(value) => value.formatted_result(),
@@ -475,7 +690,11 @@ impl CalculationValue {
     /// Complete parseable value for clipboard operations.
     pub fn canonical_result(&self) -> Option<String> {
         match self {
+            Self::Calendar(value) => value.canonical(),
             Self::Sequence(value) => Some(value.canonical_copy().to_owned()),
+            Self::Vector(value) => Some(value.canonical_result()),
+            Self::Exact(value) => Some(value.canonical()),
+            Self::ApproximateScalar(value) => format_number(*value),
             _ => self.formatted_result(),
         }
     }
@@ -483,8 +702,10 @@ impl CalculationValue {
     pub fn is_approximate(&self) -> bool {
         match self {
             Self::DimensionalQuantity(value) => value.is_approximate(),
+            Self::Exact(value) => value.is_rounded(),
+            Self::ApproximateScalar(_) => true,
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
-            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
+            Self::Scalar(_) | Self::Boolean(_) | Self::Sequence(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } | Self::Calendar(_) => false,
         }
     }
 }
@@ -528,6 +749,9 @@ pub enum DiagnosticKind {
     ReservedName(String),
     UnknownName(String),
     UnknownRowReference(String),
+    DefinitionReference(String),
+    ControlReference(String),
+    ContinuationReference { reference: String, owner_line: usize },
     ForwardReference {
         reference: String,
         dependency_line: usize,
@@ -594,6 +818,11 @@ impl fmt::Display for Diagnostic {
             Kind::UnknownRowReference(reference) => {
                 write!(formatter, "no result is available for {reference}")
             }
+            Kind::DefinitionReference(reference) => write!(formatter, "{reference} is a function definition and has no result"),
+            Kind::ControlReference(reference) => write!(formatter, "{reference} is a control statement and has no result"),
+            Kind::ContinuationReference { reference, owner_line } => write!(
+                formatter, "{reference} is a continuation of line {} and has no result", owner_line + 1
+            ),
             Kind::ForwardReference {
                 reference,
                 dependency_line,
@@ -876,7 +1105,17 @@ fn prepare_line(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
 ) -> PreparedLine {
-    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false)
+    prepare_line_with_functions(source_range, source_line, total_identifiers, declared_names, &[])
+}
+
+fn prepare_line_with_functions(
+    source_range: Range<usize>,
+    source_line: &str,
+    total_identifiers: &mut usize,
+    declared_names: &HashSet<String>,
+    functions: &[std::sync::Arc<script::UserFunction>],
+) -> PreparedLine {
+    prepare_line_internal(source_range, source_line, total_identifiers, declared_names, false, functions)
 }
 
 fn prepare_line_internal(
@@ -885,6 +1124,7 @@ fn prepare_line_internal(
     total_identifiers: &mut usize,
     declared_names: &HashSet<String>,
     internal_template: bool,
+    functions: &[std::sync::Arc<script::UserFunction>],
 ) -> PreparedLine {
     let trimmed = source_line.trim();
     if trimmed.is_empty() {
@@ -940,7 +1180,7 @@ fn prepare_line_internal(
             DiagnosticKind::InvalidExpression,
         );
     }
-    let expression_limit = if internal_template { MAX_PREPARED_EXPRESSION_BYTES } else { MAX_EXPRESSION_BYTES };
+    let expression_limit = expression_size_limit(expression, internal_template);
     if expression.len() > expression_limit {
         return PreparedLine::invalid(
             source_range,
@@ -962,7 +1202,7 @@ fn prepare_line_internal(
         if split_to_keyword(expression).is_some() {
             let previous_identifiers = *total_identifiers;
             let rhs = prepare_line_internal(
-                0..expression.len(), expression, total_identifiers, declared_names, true,
+                0..expression.len(), expression, total_identifiers, declared_names, true, functions,
             );
             if let Some(diagnostic) = rhs.diagnostic.clone() {
                 return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
@@ -982,7 +1222,7 @@ fn prepare_line_internal(
             template_names.extend(slots.iter().map(|(name, _)| name.clone()));
             let mut template_identifiers = 0;
             let mut outer = prepare_line_internal(
-                source_range.clone(), &template, &mut template_identifiers, &template_names, true,
+                source_range.clone(), &template, &mut template_identifiers, &template_names, true, functions,
             );
             if let Some(diagnostic) = outer.diagnostic.take() {
                 return PreparedLine::invalid(source_range, assignment_name, diagnostic.kind);
@@ -1012,14 +1252,14 @@ fn prepare_line_internal(
         }
         let composed = format!("{target} {operator} ({expression})");
         let mut prepared = prepare_line_internal(
-            source_range, &composed, total_identifiers, declared_names, true,
+            source_range, &composed, total_identifiers, declared_names, true, functions,
         );
         prepared.assignment_name = assignment_name;
         prepared.compound = Some(CompoundBinding { prior: None });
         return prepared;
     }
 
-    if script::uses_script_syntax(expression) {
+    if script::uses_script_syntax(expression) || script::contains_user_call(expression, functions) {
         let identifiers = match script::validate_source(expression) {
             Ok(count) => count,
             Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
@@ -1028,7 +1268,7 @@ fn prepare_line_internal(
             return PreparedLine::invalid(source_range, assignment_name, DiagnosticKind::TooManyIdentifiers { max_identifiers: MAX_DEPENDENCIES });
         }
         *total_identifiers += identifiers;
-        return match script::prepare(expression, declared_names) {
+        return match script::prepare_with_functions(expression, declared_names, functions) {
             Ok(expression) => PreparedLine {
                 compound: None,
                 source_range, assignment_name,
@@ -1497,8 +1737,17 @@ impl PreparedLine {
 
 fn find_assignment_delimiter(expression: &str) -> Option<AssignmentDelimiter> {
     let mut in_braces = false;
+    let mut quoted = false;
+    let mut escaped = false;
     for (index, character) in expression.char_indices() {
+        if quoted {
+            if escaped { escaped = false; }
+            else if character == '\\' { escaped = true; }
+            else if character == '"' { quoted = false; }
+            continue;
+        }
         match character {
+            '"' if !in_braces => quoted = true,
             '{' => in_braces = true,
             '}' => in_braces = false,
             '=' if !in_braces => {
@@ -1639,10 +1888,15 @@ fn is_row_reference_name(name: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn declared_names(source: &str) -> HashSet<String> {
-    source
-        .split('\n')
-        .filter_map(|line| {
+    declared_names_in(&syntax::SourceAnalysis::new(source))
+}
+
+fn declared_names_in(analysis: &syntax::SourceAnalysis) -> HashSet<String> {
+    analysis.rows.iter().filter(|row| row.owner.is_none())
+        .filter_map(|row| {
+            let line = row.text.as_str();
             let line = line.trim();
             if is_full_line_comment(line) {
                 return None;
@@ -2349,37 +2603,49 @@ fn assignment_definitions(lines: &[PreparedLine]) -> HashMap<String, Vec<usize>>
 
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     let row_count = lines.len();
+    let retained_origins = HashMap::new();
     for (line_index, line) in lines.iter_mut().enumerate() {
-        let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
-        let compound_name = compound_name.as_deref();
-        let prior = compound_name.and_then(|name| {
-            definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
-        });
-        if let Some(compound) = &mut line.compound {
-            compound.prior = prior;
-            if let Some(prior) = prior {
-                line.dependencies.push(prior);
-            } else if let Some(name) = compound_name {
-                set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
-                // The implicit target is evaluated first, so RHS edges cannot
-                // participate in a cycle until a prior binding exists.
-                continue;
-            }
-        }
-        let named_binding = |name: &str| {
-            if compound_name == Some(name) {
-                return prior;
-            }
-            definitions.get(name).and_then(|locations| {
-                locations.iter().rev().find(|&&location| location < line_index)
-                    .or_else(|| locations.first()).copied()
-            })
-        };
-        if let PreparedStatement::Script(expression) = &mut line.statement {
-            expression.resolve(line_index, row_count, named_binding);
-        }
-        resolve_line_references(line, row_count, named_binding);
+        resolve_one_line(line, line_index, row_count, definitions, &retained_origins);
     }
+}
+
+fn resolve_one_line(
+    line: &mut PreparedLine,
+    line_index: usize,
+    row_count: usize,
+    definitions: &HashMap<String, Vec<usize>>,
+    retained_origins: &HashMap<usize, usize>,
+) {
+    line.dependencies.clear();
+    let compound_name = line.compound.as_ref().and(line.assignment_name.clone());
+    let compound_name = compound_name.as_deref();
+    let prior = compound_name.and_then(|name| {
+        definitions.get(name)?.iter().rev().find(|&&location| location < line_index).copied()
+    }).map(|line| retained_origins.get(&line).copied().unwrap_or(line));
+    if let Some(compound) = &mut line.compound {
+        compound.prior = prior;
+        if let Some(prior) = prior {
+            line.dependencies.push(prior);
+        } else if let Some(name) = compound_name {
+            set_diagnostic_if_missing(line, DiagnosticKind::UnknownName(name.to_owned()));
+            // The implicit target is evaluated first, so RHS edges cannot
+            // participate in a cycle until a prior binding exists.
+            return;
+        }
+    }
+    let named_binding = |name: &str| {
+        if compound_name == Some(name) {
+            return prior;
+        }
+        definitions.get(name).and_then(|locations| {
+            locations.iter().rev().find(|&&location| location < line_index)
+                .or_else(|| locations.first()).copied()
+        }).map(|line| retained_origins.get(&line).copied().unwrap_or(line))
+    };
+    if let PreparedStatement::Script(expression) = &mut line.statement {
+        expression.resolve(line_index, row_count, named_binding);
+    }
+    resolve_line_references(line, row_count, named_binding);
 }
 
 fn resolve_line_references(
@@ -2465,10 +2731,10 @@ pub(super) fn evaluate_comparison_expression(
     let mut names = final_bindings.keys().cloned().collect::<Vec<_>>();
     names.sort();
     let slots = names.iter().enumerate().map(|(index, name)| {
-        (name.clone(), MAX_SOURCE_LINES + index)
+        (name.clone(), SLOT_BASE + index)
     }).collect::<HashMap<_, _>>();
-    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); MAX_SOURCE_LINES];
-    let mut values = vec![None; MAX_SOURCE_LINES];
+    let mut outcomes = vec![LineOutcome::Error(Diagnostic::new(DiagnosticKind::NotExecuted)); SLOT_BASE];
+    let mut values = vec![None; SLOT_BASE];
     for (index, row) in rows.iter().enumerate() {
         outcomes[index] = row.outcome.clone();
         if let LineOutcome::Value(value) = &row.outcome { values[index] = Some(value.clone()); }
@@ -2486,8 +2752,8 @@ pub(super) fn evaluate_comparison_expression(
     work.runtime_line = Some(rows.len());
     match expression_tree.evaluate(rows.len(), &outcomes, &values, &mut Vec::new(), &mut work) {
         Ok(value) => LineOutcome::Value(value),
-        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= MAX_SOURCE_LINES => {
-            let name = &names[dependency_line - MAX_SOURCE_LINES];
+        Err(DiagnosticKind::DependencyFailed { dependency_line }) if dependency_line >= SLOT_BASE => {
+            let name = &names[dependency_line - SLOT_BASE];
             LineOutcome::Error(Diagnostic::new(DiagnosticKind::DependencyFailed {
                 dependency_line: final_bindings[name].line_index,
             }))
@@ -2560,6 +2826,7 @@ fn evaluate_line(
     cyclic: &[bool],
     outcomes: &[LineOutcome],
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> LineOutcome {
     if let Some(diagnostic) = &line.diagnostic {
         return LineOutcome::Error(diagnostic.clone());
@@ -2579,6 +2846,7 @@ fn evaluate_line(
                             value,
                             CalculationValue::Integer(_)
                                 | CalculationValue::ExactBase { .. }
+                                | CalculationValue::Exact(_)
                                 | CalculationValue::Vector(_)
                         )
                     })
@@ -2649,6 +2917,17 @@ fn evaluate_line(
         }
         match outcomes.get(dependency_line) {
             Some(LineOutcome::Value(_)) => {}
+            Some(LineOutcome::Definition) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::DefinitionReference(reference.name.clone())));
+            }
+            Some(LineOutcome::Control) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ControlReference(reference.name.clone())));
+            }
+            Some(LineOutcome::Continuation { owner_line }) => {
+                return LineOutcome::Error(Diagnostic::new(DiagnosticKind::ContinuationReference {
+                    reference: reference.name.clone(), owner_line: *owner_line,
+                }));
+            }
             Some(LineOutcome::Blank | LineOutcome::Comment) => {
                 return LineOutcome::Error(Diagnostic::new(DiagnosticKind::UnknownRowReference(
                     reference.name.clone(),
@@ -2662,7 +2941,7 @@ fn evaluate_line(
         }
     }
 
-    let result = evaluate_prepared_statement(&line.statement, line, values);
+    let result = evaluate_prepared_statement(&line.statement, line, values, work);
 
     match result {
         Ok(value) => LineOutcome::Value(value),
@@ -2674,13 +2953,14 @@ fn evaluate_prepared_statement(
     statement: &PreparedStatement,
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     match statement {
         PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid | PreparedStatement::Script(_) => {
             unreachable!("non-result line states returned above")
         }
         PreparedStatement::Expression(expression) => {
-            evaluate_prepared_expression(expression, line, values)
+            evaluate_prepared_expression(expression, line, values, work)
         }
         PreparedStatement::PhysicalConversion(expression) => {
             match unit_conversion::evaluate_conversion(expression) {
@@ -2783,13 +3063,22 @@ fn evaluate_prepared_expression(
     expression: &PreparedExpression,
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
+    work: &mut script::WorkBudget,
 ) -> Result<CalculationValue, DiagnosticKind> {
     if let Some(name) = &expression.simple_reference
         && let Some(reference) = line.references.iter().find(|reference| &reference.name == name)
         && let Some(value) = reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
-        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_))
+        && matches!(value, CalculationValue::Boolean(_) | CalculationValue::Sequence(_) | CalculationValue::Exact(_) | CalculationValue::Calendar(_))
     {
         return Ok(value.clone());
+    }
+    let has_exact = line.references.iter().any(|reference| {
+        reference.target_line.and_then(|index| values.get(index)).and_then(Option::as_ref)
+            .is_some_and(|value| matches!(value, CalculationValue::Exact(_)))
+    });
+    if has_exact {
+        let programmer = expression.programmer.as_ref().ok_or_else(|| DiagnosticKind::Script("unsupported exact expression".into()))?;
+        return programmer.evaluate_exact(&quantity_bindings(line, values), work);
     }
     let has_vector_reference = line.references.iter().any(|reference| {
         reference
@@ -2804,7 +3093,7 @@ fn evaluate_prepared_expression(
             .as_ref()
             .ok_or_else(|| DiagnosticKind::Vector("unsupported vector expression".into()))?;
         let vector = vector.as_ref().map_err(Clone::clone)?;
-        return vector.evaluate(&quantity_bindings(line, values));
+        return vector.evaluate(&quantity_bindings(line, values), work);
     }
     let has_quantity_reference = line.references.iter().any(|reference| {
         reference
@@ -2892,6 +3181,7 @@ fn evaluate_prepared_expression(
     };
 
     let mut variables = Vec::with_capacity(expression.var_names().len());
+    let mut approximate = false;
     for name in expression.var_names() {
         let Some(reference) = line
             .references
@@ -2905,15 +3195,67 @@ fn evaluate_prepared_expression(
         };
         match values.get(dependency_line).and_then(Option::as_ref) {
             Some(CalculationValue::Scalar(value)) => variables.push(*value),
+            Some(CalculationValue::ApproximateScalar(value)) => {
+                approximate = true;
+                variables.push(*value);
+            }
             Some(_) => return Err(DiagnosticKind::ExpectedScalar(name.clone())),
             None => return Err(DiagnosticKind::DependencyFailed { dependency_line }),
         }
     }
     match expression.eval(&variables) {
-        Ok(value) if value.is_finite() => Ok(CalculationValue::Scalar(value)),
+        Ok(value) if value.is_finite() => Ok(if approximate { CalculationValue::ApproximateScalar(value) } else { CalculationValue::Scalar(value) }),
         Ok(_) => Err(DiagnosticKind::InvalidArithmetic),
         Err(_) => Err(DiagnosticKind::InvalidExpression),
     }
+}
+
+pub(super) fn evaluate_legacy_fragment(
+    source: &str,
+    bindings: &HashMap<String, CalculationValue>,
+    work: &mut script::WorkBudget,
+) -> Result<CalculationValue, DiagnosticKind> {
+    let declared = bindings.keys().cloned().collect();
+    let mut count = 0;
+    let mut line = prepare_line_internal(0..source.len(), source, &mut count, &declared, true, &[]);
+    if let Some(diagnostic) = &line.diagnostic { return Err(diagnostic.kind.clone()); }
+    if let PreparedStatement::Script(expression) = &mut line.statement {
+        let mut names = bindings.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        let line_index = SLOT_BASE + names.len();
+        let mut outcomes = vec![LineOutcome::Blank; line_index];
+        let mut values = vec![None; line_index];
+        for (index, name) in names.iter().enumerate() {
+            let value = bindings[name].clone();
+            let slot = SLOT_BASE + index;
+            outcomes[slot] = LineOutcome::Value(value.clone());
+            values[slot] = Some(value.clone());
+            if let Some(row) = name.strip_prefix('r').and_then(|number| number.parse::<usize>().ok())
+                && (1..=SLOT_BASE).contains(&row)
+            {
+                outcomes[row - 1] = LineOutcome::Value(value.clone());
+                values[row - 1] = Some(value);
+            }
+        }
+        expression.resolve(line_index, SLOT_BASE, |name| {
+            names.iter().position(|candidate| candidate == name).map(|index| SLOT_BASE + index)
+        });
+        let runtime_line = work.runtime_line.take();
+        let runtime_definitions = work.runtime_definitions.take();
+        let result = expression.evaluate(line_index, &outcomes, &values, &mut Vec::new(), work);
+        work.runtime_line = runtime_line;
+        work.runtime_definitions = runtime_definitions;
+        return result;
+    }
+    if matches!(line.statement, PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid) {
+        return Err(DiagnosticKind::Script("unsupported operand in exact arithmetic".into()));
+    }
+    let mut values = Vec::new();
+    for reference in &mut line.references {
+        reference.target_line = Some(values.len());
+        values.push(Some(bindings.get(&reference.name).cloned().ok_or_else(|| DiagnosticKind::UnknownName(reference.name.clone()))?));
+    }
+    evaluate_prepared_statement(&line.statement, &line, &values, work)
 }
 
 fn quantity_bindings(
@@ -2943,6 +3285,187 @@ mod tests {
     use crate::calculation_pad::{ProgrammerError, TypedInteger};
     use crate::common::numeric_base::NumericBase;
     use crate::unit_conversion::{Approximation, ConversionError, Unit};
+
+    #[test]
+    fn formula_functions_are_pure_prior_only_and_track_definition_dependencies() {
+        let document = CalculationDocument::new(concat!(
+            "price = 7\n",
+            "fn discounted_price(price, discount) = (price *\n",
+            "  (1 - discount))\n",
+            "fn twice(x) = discounted_price(x, 0) * 2\n",
+            "discounted_price(100, 0.10)\n",
+            "twice(4)\n",
+            "price\n",
+            "r2"
+        ));
+        let result = document.evaluate();
+        assert!(matches!(result.lines[1].outcome, LineOutcome::Definition));
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Continuation { owner_line: 1 }));
+        assert_eq!(scalar(&result, 4), 90.0);
+        assert_eq!(scalar(&result, 5), 8.0);
+        assert_eq!(scalar(&result, 6), 7.0);
+        assert_eq!(result.lines[4].dependency_indices, [1]);
+        assert_eq!(result.lines[5].dependency_indices, [1, 3]);
+        assert!(matches!(error(&result, 7), DiagnosticKind::DefinitionReference(_)));
+    }
+
+    #[test]
+    fn formula_functions_reject_capture_recursion_and_bad_definitions() {
+        let document = CalculationDocument::new(concat!(
+            "x = 10\n",
+            "fn capture(a) = if(false, x, a)\n",
+            "fn recur(a) = recur(a)\n",
+            "fn bad(a, a) = a\n",
+            "fn sin(a) = a\n",
+            "fn f(a) = a + 1\n",
+            "fn f(a) = a + 2\n",
+            "f(2, 3)\n",
+            "f(2)\n",
+            "fn assignment(a) = a = a + 1"
+        ));
+        let result = document.evaluate();
+        for index in 1..=4 { assert!(matches!(result.lines[index].outcome, LineOutcome::Error(_)), "row {index}"); }
+        assert!(matches!(result.lines[5].outcome, LineOutcome::Definition));
+        assert!(matches!(result.lines[6].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[7].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&result, 8), 3.0);
+        assert!(error_message(&result, 9).contains("without assignments"));
+    }
+
+    #[test]
+    fn formula_functions_support_typed_arguments_loop_and_contextual_fn() {
+        let document = CalculationDocument::new(concat!(
+            "fn = 2\n",
+            "fn half(x) = x / 2\n",
+            "total = fraction(0,1)\n",
+            "for i in range(1,4):\n",
+            "  total += half(fraction(1,1))\n",
+            "total\n",
+            "fn mod 2"
+        ));
+        let result = document.evaluate();
+        assert_eq!(value(&result, 5).canonical_result().as_deref(), Some("fraction(3,2)"));
+        assert_eq!(scalar(&result, 6), 0.0);
+        assert!(result.lines[4].dependency_indices.contains(&1));
+        assert!(result.lines[4].dependency_indices.iter().all(|&line| line < result.lines.len()));
+    }
+
+    #[test]
+    fn formula_function_calls_are_lazy_and_enforce_depth_and_count() {
+        let document = CalculationDocument::new(concat!(
+            "fn positive(x) = x > 0\n",
+            "if(false, positive(1), 7)\n",
+            "if(true, positive(2), false)"
+        ));
+        let result = document.evaluate();
+        assert_eq!(scalar(&result, 1), 7.0);
+        assert!(result.lines[1].dependency_indices.is_empty());
+        assert!(matches!(value(&result, 2), CalculationValue::Boolean(true)));
+        assert_eq!(result.lines[2].dependency_indices, [0]);
+
+        let mut source = String::from("fn f0(x) = x\n");
+        for index in 1..17 {
+            source.push_str(&format!("fn f{index}(x) = f{}(x)\n", index - 1));
+        }
+        source.push_str("f16(1)");
+        let document = CalculationDocument::new(source);
+        assert!(error_message(&document.evaluate(), 17).contains("depth"));
+
+        let mut source = String::new();
+        for index in 0..65 { source.push_str(&format!("fn p{index}(x) = x\n")); }
+        let document = CalculationDocument::new(source);
+        assert!(error_message(&document.evaluate(), 64).contains("64-function"));
+    }
+
+    #[test]
+    fn exact_decimal_fraction_arithmetic_and_canonical_round_trip() {
+        let source = concat!(
+            "a = decimal(\"0.1\") + decimal(\"0.2\")\n",
+            "b = fraction(1,3) + fraction(1,6)\n",
+            "c = b * 3\n",
+            "d = u64(9007199254740993) + fraction(1,2)\n",
+            "a == decimal(\"0.3\")\n",
+            "if(false, fraction(1,0), b)"
+        );
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(value(&result, 0).formatted_result().as_deref(), Some("0.3"));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("1/2"));
+        assert_eq!(value(&result, 2).formatted_result().as_deref(), Some("3/2"));
+        assert_eq!(value(&result, 3).canonical_result().as_deref(), Some("fraction(18014398509481987,2)"));
+        assert!(matches!(value(&result, 4), CalculationValue::Boolean(true)));
+        let canonical = value(&result, 3).canonical_result().unwrap();
+        let copy = CalculationDocument::new(canonical);
+        assert_eq!(value(&copy.evaluate(), 0), value(&result, 3));
+        assert_eq!(value(&result, 5), value(&result, 1));
+    }
+
+    #[test]
+    fn exact_division_rounding_mixing_and_bounds_are_explicit() {
+        let document = CalculationDocument::new(concat!(
+            "decimal(\"1\") / decimal(\"3\")\n",
+            "decimal_div(decimal(\"1\"), decimal(\"8\"), 2)\n",
+            "decimal_div(decimal(\"-3\"), decimal(\"8\"), 2)\n",
+            "fraction(1,0)\n",
+            "fraction(1,2) + 0.1\n",
+            "decimal(\"1e1001\")\n",
+            "sin(to_float(fraction(1,2)))"
+        ));
+        let result = document.evaluate();
+        assert!(error_message(&result, 0).contains("nonterminating"));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("≈ 0.12"));
+        assert_eq!(value(&result, 2).formatted_result().as_deref(), Some("≈ -0.38"));
+        assert!(error_message(&result, 3).contains("zero"));
+        assert!(matches!(result.lines[4].outcome, LineOutcome::Error(_)));
+        assert!(matches!(result.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(value(&result, 6).is_approximate());
+    }
+
+    #[test]
+    fn exact_values_work_through_loop_and_compound_assignments() {
+        let document = CalculationDocument::new(concat!(
+            "total = fraction(0,1)\n",
+            "for i in range(1,4):\n",
+            "  total += fraction(1,2)\n",
+            "total"
+        ));
+        let result = document.evaluate();
+        assert_eq!(value(&result, 3).canonical_result().as_deref(), Some("fraction(3,2)"));
+    }
+
+    #[test]
+    fn exact_mixed_operands_and_approximate_comparisons_are_safe() {
+        let document = CalculationDocument::new(concat!(
+            "decimal(\"1\") + true\n",
+            "decimal(\"1\") + sum(range(4))\n",
+            "to_float(fraction(1,2)) == 0.5\n",
+            "fraction(1,2) == to_float(fraction(1,2))"
+        ));
+        let result = document.evaluate();
+        assert!(matches!(result.lines[0].outcome, LineOutcome::Error(_)));
+        assert_eq!(value(&result, 1).formatted_result().as_deref(), Some("7"));
+        assert!(matches!(value(&result, 2), CalculationValue::Boolean(true)));
+        assert!(matches!(result.lines[3].outcome, LineOutcome::Error(_)));
+        let mut work = super::script::WorkBudget::default();
+        let bindings = std::collections::HashMap::new();
+        assert!(matches!(
+            super::evaluate_legacy_fragment("sum(range(4))", &bindings, &mut work),
+            Ok(CalculationValue::Scalar(value)) if value == 6.0
+        ));
+        assert!(matches!(
+            super::evaluate_legacy_fragment("true", &bindings, &mut work),
+            Ok(CalculationValue::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn exact_decimal_at_bit_limit_has_parseable_canonical_copy() {
+        let document = CalculationDocument::new("decimal(\"1e617\") * decimal(\"1e616\")");
+        let result = document.evaluate();
+        let canonical = value(&result, 0).canonical_result().unwrap();
+        let copy = CalculationDocument::new(canonical);
+        assert_eq!(value(&copy.evaluate(), 0), value(&result, 0));
+    }
 
     fn value<'a>(
         evaluation: &'a CalculationEvaluation<'_>,
@@ -3003,6 +3526,46 @@ mod tests {
         value(evaluation, line_index)
             .formatted_result()
             .expect("numeric result should have a display form")
+    }
+
+    #[test]
+    fn logical_statements_preserve_physical_rows_comments_and_references() {
+        let source = "{α#//} = 2 # comment\r\nsum = ({α#//} +\r\n  3) // comment\r\nr2 + 1\r\nr3\r\nif(false, r3, 7)";
+        let document = CalculationDocument::new(source);
+        let result = document.evaluate();
+        assert_eq!(result.source, source);
+        assert_eq!(result.lines.len(), 6);
+        assert_eq!(scalar(&result, 1), 5.0);
+        assert!(matches!(result.lines[2].outcome, LineOutcome::Continuation { owner_line: 1 }));
+        assert_eq!(&source[result.lines[2].source_range.clone()], "  3) // comment");
+        assert_eq!(scalar(&result, 3), 6.0);
+        assert!(matches!(error(&result, 4), DiagnosticKind::ContinuationReference { owner_line: 1, .. }));
+        assert_eq!(scalar(&result, 5), 7.0);
+    }
+
+    #[test]
+    fn multiline_source_limits_and_diagnostics_remain_bounded() {
+        let source = format!("x = ({}\n + 1)", "1 + ".repeat(600));
+        let document = CalculationDocument::new(source);
+        assert!(matches!(error(&document.evaluate(), 0), DiagnosticKind::ExpressionTooLong { .. }));
+        let document = CalculationDocument::new("x = (1\n + 2]");
+        assert!(error_message(&document.evaluate(), 0).contains("line 2, byte 5"));
+        let document = CalculationDocument::new("x = (1\n + 2");
+        assert!(error_message(&document.evaluate(), 0).contains("unclosed delimiter"));
+    }
+
+    #[test]
+    fn multiline_statements_keep_existing_typed_values() {
+        let document = CalculationDocument::new(concat!(
+            "integer = u64(\n  42)\n",
+            "vector = [1,\n  2, 3]\n",
+            "distance = (2 m\n  + 3 m)\n",
+            "integer\nvector\ndistance",
+        ));
+        let result = document.evaluate();
+        assert!(matches!(value(&result, 6), CalculationValue::Integer(_)));
+        assert!(matches!(value(&result, 7), CalculationValue::Vector(_)));
+        assert!(matches!(value(&result, 8), CalculationValue::DimensionalQuantity(_) | CalculationValue::PhysicalQuantity { .. }));
     }
 
     #[test]
@@ -3080,7 +3643,7 @@ mod tests {
     #[test]
     fn evaluates_balanced_nested_minimum_and_maximum_calls() {
         let document = CalculationDocument::new(
-            "min(100, min(50, 75))\nmin(min(100, 50), 75)\nmax(min(100, 50), min(75, 60))\nbase = 20\nmin(base + 40, max(base * 2, 50))\nx = min(100,min(50,75)\nmin(100, min(1 / 0, 75))\nMAX(min(100, 50), mod(-7, 3))\natan2(min(2, 1), max(1, 2))\nmin(1)\nmin(1, 2, 3)",
+            "min(100, min(50, 75))\nmin(min(100, 50), 75)\nmax(min(100, 50), min(75, 60))\nbase = 20\nmin(base + 40, max(base * 2, 50))\nmin(100, min(1 / 0, 75))\nMAX(min(100, 50), mod(-7, 3))\natan2(min(2, 1), max(1, 2))\nmin(1)\nmin(1, 2, 3)",
         );
         let evaluation = document.evaluate();
 
@@ -3088,12 +3651,14 @@ mod tests {
         assert_eq!(scalar(&evaluation, 1), 50.0);
         assert_eq!(scalar(&evaluation, 2), 60.0);
         assert_eq!(scalar(&evaluation, 4), 50.0);
-        assert!(matches!(error(&evaluation, 5), DiagnosticKind::InvalidExpression));
-        assert!(matches!(error(&evaluation, 6), DiagnosticKind::InvalidArithmetic));
-        assert_eq!(scalar(&evaluation, 7), 50.0);
-        assert_eq!(scalar(&evaluation, 8), 1.0_f64.atan2(2.0));
-        assert!(matches!(error(&evaluation, 9), DiagnosticKind::Script(message) if message.contains("collection")));
-        assert!(matches!(error(&evaluation, 10), DiagnosticKind::InvalidExpression));
+        assert!(matches!(error(&evaluation, 5), DiagnosticKind::InvalidArithmetic));
+        assert_eq!(scalar(&evaluation, 6), 50.0);
+        assert_eq!(scalar(&evaluation, 7), 1.0_f64.atan2(2.0));
+        assert!(matches!(error(&evaluation, 8), DiagnosticKind::Script(message) if message.contains("collection")));
+        assert!(matches!(error(&evaluation, 9), DiagnosticKind::InvalidExpression));
+        let malformed = CalculationDocument::new("x = min(100,min(50,75)");
+        let malformed = malformed.evaluate();
+        assert!(matches!(error(&malformed, 0), DiagnosticKind::Script(message) if message.contains("unclosed delimiter at line 1, byte 8")));
     }
 
     #[test]
@@ -3216,7 +3781,8 @@ mod tests {
         assert!(matches!(error(&evaluation, 14), DiagnosticKind::ReservedName(_)));
         assert!(!super::literal_inputs("x = 1\nx += 2").iter().any(|input| input.line == 1));
         let source = "x = 1\nx += 2\n";
-        assert!(super::editor_bindings(source, source.len()).contains(&"x".to_owned()));
+        let scope = super::editor_function_scope(source, source.len());
+        assert!(super::editor_bindings(source, source.len(), &scope).contains(&"x".to_owned()));
     }
 
     #[test]
@@ -3794,7 +4360,8 @@ mod tests {
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();
-        for line in 0..14 {
+        assert!(matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().is_empty()));
+        for line in 1..14 {
             if line == 10 || line == 12 {
                 continue;
             }
@@ -3805,7 +4372,7 @@ mod tests {
             );
         }
         assert_eq!(scalar(&evaluation, 14), 7.0);
-        let too_long = format!("[{}]", vec!["1"; 129].join(","));
+        let too_long = format!("[{}]", vec!["1"; 1025].join(","));
         let document = CalculationDocument::new(too_long);
         assert!(matches!(
             document.evaluate().lines[0].outcome,
@@ -3813,15 +4380,15 @@ mod tests {
         ));
         let source = format!(
             "v = [{}]\n{}",
-            vec!["1"; 128].join(","),
-            ["v"; 10].join(" * ")
+            vec!["1"; 1024].join(","),
+            ["v"; 30].join(" * ")
         );
         let document = CalculationDocument::new(source);
         let evaluation = document.evaluate();
         assert!(
-            matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 128)
+            matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 1024)
         );
-        assert!(matches!(evaluation.lines[1].outcome, LineOutcome::Error(_)));
+        assert!(matches!(&evaluation.lines[1].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 1024), "{:?}", evaluation.lines[1].outcome);
 
         let document =
             CalculationDocument::new("v = [1, 2]\nv * 6 % 4\nv * 6 mod 4\nv * 6 min 4\n");
@@ -3833,6 +4400,205 @@ mod tests {
                 line + 1
             );
         }
+    }
+
+    #[test]
+    fn vector_empty_and_capacity_boundaries_share_the_document_budget() {
+        let source = "[]\n[] + []\n[] * 2\ndot([], [])\n[] / 0\n[] % []\n[1]\n";
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [0, 1, 2] {
+            assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().is_empty()));
+        }
+        assert_eq!(scalar(&evaluation, 3), 0.0);
+        assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(matches!(&evaluation.lines[6].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components() == [1.0]));
+    }
+
+    #[test]
+    fn vector_large_literals_have_bounded_expression_admission() {
+        let literal = format!("[{}]", vec!["1.2345678901234567e-100"; 1024].join(", "));
+        assert!(literal.len() > MAX_EXPRESSION_BYTES);
+        let direct_document = CalculationDocument::new(literal.clone());
+        let direct = direct_document.evaluate();
+        assert!(matches!(&direct.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024));
+        let source = format!("fn sample() = (\n    {literal}\n)\nsample()\n");
+        let function_document = CalculationDocument::new(source);
+        let function = function_document.evaluate();
+        assert!(matches!(&function.lines[3].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024), "{:?}", function.lines[3].outcome);
+        let scalar = format!("1 + {}", "1".repeat(MAX_EXPRESSION_BYTES));
+        assert!(matches!(CalculationDocument::new(scalar).evaluate().lines[0].outcome, LineOutcome::Error(_)));
+        assert_eq!(super::expression_size_limit(&format!("\"[\" + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+        assert_eq!(super::expression_size_limit(&format!("{{name[0]}} + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+        assert_eq!(super::expression_size_limit(&format!("[] + {}", "1".repeat(MAX_EXPRESSION_BYTES)), false), MAX_EXPRESSION_BYTES);
+    }
+
+    #[test]
+    fn vector_collection_operations_are_pure_and_compose() {
+        let document = CalculationDocument::new(concat!(
+            "v = [10, 20, 30]\nalias = v\nAPPEND(v, 40)\n",
+            "insert(v, 1, 15)\nset_at(v, 0, 5)\nremove_at(v, 1)\npop(v)\n",
+            "get(v, 1)\nfirst(v)\nlast(v)\nlen(v)\n",
+            "slice(v, 1, 3)\nreverse(v)\nconcat(v, [40])\n",
+            "len(append(v, 5))\n[ get(v, 0), len(v) ]\n",
+            "dot(append([1], 2), [3, 4])\n",
+            "fn add_sample(input, x) = append(input, x)\nadd_sample(v, 5)\n",
+            "append = 7\nappend + 1\nlen([])\nsum([])\nconcat([], [])\nslice([], 0, 0)\nreverse([])\n"
+        ));
+        let evaluation = document.evaluate();
+        for (line, expected) in [(0, "[10, 20, 30]"), (1, "[10, 20, 30]"), (2, "[10, 20, 30, 40]"),
+            (3, "[10, 15, 20, 30]"), (4, "[5, 20, 30]"), (5, "[10, 30]"), (6, "[10, 20]"),
+            (11, "[20, 30]"), (12, "[30, 20, 10]"), (13, "[10, 20, 30, 40]"),
+            (15, "[10, 3]"), (18, "[10, 20, 30, 5]"), (23, "[]"), (24, "[]"), (25, "[]")] {
+            assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+        }
+        for (line, expected) in [(7, 20.0), (8, 10.0), (9, 30.0), (10, 3.0), (14, 4.0),
+            (16, 11.0), (20, 8.0), (21, 0.0), (22, 0.0)] {
+            assert_eq!(scalar(&evaluation, line), expected, "line {}", line + 1);
+        }
+    }
+
+    #[test]
+    fn vector_collection_indices_types_and_capacity_are_checked() {
+        let full = format!("[{}]", vec!["1"; 1024].join(","));
+        let source = format!(concat!(
+            "v = {}\nappend(v, 2)\ninsert(v, 1024, 2)\nconcat(v, [1])\n",
+            "insert([1], 1, 2)\nremove_at([1], 0)\nslice([1], 1, 1)\n",
+            "get([], 0)\nfirst([])\nlast([])\npop([])\n",
+            "get([1], -1)\nget([1], 0.5)\nget([1], 1e100)\n",
+            "set_at([1], 1, 2)\nremove_at([1], 1)\nslice([1], 1, 0)\n",
+            "append([], u8(1))\nappend([], fraction(1,2))\nappend([], true)\n",
+            "concat([], range(1))\nget([1], u8(0))\n"
+        ), full);
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] {
+            assert!(matches!(&evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}: {:?}", line + 1, evaluation.lines[line].outcome);
+        }
+        assert_eq!(formatted(&evaluation, 4), "[1, 2]");
+        assert_eq!(formatted(&evaluation, 5), "[]");
+        assert_eq!(formatted(&evaluation, 6), "[]");
+    }
+
+    #[test]
+    fn vector_collection_loop_builds_two_full_datasets_with_bounded_work() {
+        let document = CalculationDocument::new(concat!(
+            "x_values = []\ny_values = []\n",
+            "for i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n",
+            "point_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)\n"
+        ));
+        let started = std::time::Instant::now();
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 5), 1024.0);
+        assert_eq!(scalar(&evaluation, 6), 1046529.0);
+        assert!((scalar(&evaluation, 7) - 349013.5).abs() < 1e-6);
+        for (name, last) in [("x_values", 1023.0), ("y_values", 1046529.0)] {
+            assert!(matches!(&evaluation.final_bindings[name].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 1024 && v.components()[0] == 0.0 && v.components()[1023] == last));
+        }
+        let usage = evaluation.usage.unwrap();
+        assert!(usage.vector_component_work > 1_000_000);
+        assert!(usage.vector_component_work <= super::MAX_VECTOR_COMPONENT_WORK);
+        eprintln!("two 1024-point vectors: {:?}, {} scalar work, {} component work", started.elapsed(), usage.work_units, usage.vector_component_work);
+    }
+
+    #[test]
+    fn vector_collection_formula_builds_a_dataset() {
+        let document = CalculationDocument::new(concat!(
+            "starting_balance = 10000\nannual_growth = 0.07\n",
+            "fn projected_value(base, growth, year) = (\n    base * (1 + growth) ^ year\n)\n",
+            "years = []\nbalances = []\nfor year in range(31):\n",
+            "    years = append(years, year)\n    balances = append(\n        balances,\n",
+            "        projected_value(starting_balance, annual_growth, year)\n    )\n",
+            "point_count = len(balances)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 13), 31.0);
+        assert!(matches!(&evaluation.final_bindings["balances"].outcome, LineOutcome::Value(CalculationValue::Vector(v)) if v.components().len() == 31));
+    }
+
+    #[test]
+    fn vector_collection_edit_script_matches_expected_values() {
+        let document = CalculationDocument::new(concat!(
+            "values = [10, 20, 30]\nvalues = append(values, 40)\n",
+            "values = insert(values, 1, 15)\nvalues = set_at(values, 0, 5)\n",
+            "values = remove_at(values, 2)\nvalues = pop(values)\n",
+            "count = len(values)\nfirst_value = first(values)\nlast_value = last(values)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 5), "[5, 15, 30]");
+        assert_eq!(scalar(&evaluation, 6), 3.0);
+        assert_eq!(scalar(&evaluation, 7), 5.0);
+        assert_eq!(scalar(&evaluation, 8), 30.0);
+    }
+
+    #[test]
+    fn collection_failure_preserves_current_binding_in_both_evaluator_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!("{}{}", concat!(
+                "v = [1]\nalias = v\nv = append(v, get([], 0))\n",
+                "a = v + alias\nphysical = r3\nsize = len(v)\n"
+            ), suffix);
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(formatted(&evaluation, 3), "[2]");
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 5), 1.0);
+            assert_eq!(evaluation.lines[3].dependency_indices, [0, 1]);
+            assert_eq!(evaluation.lines[4].dependency_indices, [2]);
+            assert_eq!(evaluation.final_bindings["v"].line_index, 0);
+            assert!(matches!(evaluation.final_bindings["v"].outcome, LineOutcome::Value(_)));
+        }
+    }
+
+    #[test]
+    fn collection_failure_provenance_is_structural_and_scoped_per_row() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!("{}{}", concat!(
+                "fn bad(v) = get(v, 9)\nx = 5\nx = bad([1])\na = x\n",
+                "x = if(false, get([], 0), 1 / 0)\nb = x\n",
+                "z = 1 / 0\nz = append([], 1 / 0)\nc = z\n",
+                "missing = append([], 1 / 0)\n",
+                "v = [1]\nv += append([], get([], 0))\nsize = len(v)\n"
+            ), suffix);
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 3), 5.0);
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[8].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.final_bindings["missing"].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[11].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 12), 1.0);
+            assert_eq!(evaluation.final_bindings["v"].line_index, 10);
+        }
+    }
+
+    #[test]
+    fn collection_failure_outside_loop_conditional_retains_but_loop_failure_poisons() {
+        let document = CalculationDocument::new(concat!(
+            "v = [1]\nif true:\n    v = append(v, get([], 0))\n",
+            "after = len(v)\nfor i in range(2):\n    v = append(v, get([], 0))\n",
+            "failed = len(v)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+        assert_eq!(scalar(&evaluation, 3), 1.0);
+        assert_eq!(evaluation.lines[3].dependency_indices, [0]);
+        assert!(matches!(evaluation.lines[5].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.lines[6].outcome, LineOutcome::Error(_)));
+        assert!(matches!(evaluation.final_bindings["v"].outcome, LineOutcome::Error(_)));
+    }
+
+    #[test]
+    fn vector_component_work_limit_terminates_the_loop() {
+        let full = vec!["1"; 1024].join(",");
+        let document = CalculationDocument::new(format!("v = [{full}]\nfor i in range(1024):\n    v = v * 1\n    v = v * 1\n"));
+        let evaluation = document.evaluate();
+        assert!(evaluation.lines.iter().any(|line| matches!(&line.outcome, LineOutcome::Error(diagnostic) if diagnostic.kind == DiagnosticKind::WorkLimit || matches!(&diagnostic.kind, DiagnosticKind::LoopError { cause, .. } if **cause == DiagnosticKind::WorkLimit))), "{:?}", evaluation.lines);
     }
 
     #[test]
@@ -4385,6 +5151,27 @@ mod tests {
             error(&evaluation, 0),
             DiagnosticKind::NameTooLong { .. }
         ));
+    }
+
+    #[test]
+    fn extended_rows_keep_physical_references_distinct_from_runtime_slots() {
+        let prefix = "# α\r\n".repeat(256);
+        let plain = format!("{prefix}a = u8(4)\ncopy = r257\nfn same(x) = x\nsame(r257)\nfraction(1,2) + r257\nr257 == u8(4)");
+        let ordinary = CalculationDocument::with_profile(plain, super::super::persistence::DocumentProfile::Extended);
+        let result = ordinary.evaluate();
+        assert!(result.diagnostic.is_none());
+        for line in [256, 257, 259, 260, 261] {
+            assert!(matches!(result.lines[line].outcome, LineOutcome::Value(_)), "line {line}: {:?}", result.lines[line].outcome);
+        }
+        let source = format!("{prefix}a = u8(4)\ncopy = r257\nfn same(x) = x\nsame(r257)\nif r257 == u8(4):\n  loopcopy = r257\nloopcopy");
+        let standard = CalculationDocument::new(source.clone());
+        assert!(matches!(standard.evaluate().diagnostic, Some(super::DocumentDiagnostic::TooManyLines { max_lines: 256 })));
+        let extended = CalculationDocument::with_profile(source, super::super::persistence::DocumentProfile::Extended);
+        let result = extended.evaluate();
+        assert!(result.diagnostic.is_none());
+        for line in [256, 257, 259, 260, 261, 262] {
+            assert!(matches!(result.lines[line].outcome, LineOutcome::Value(_)), "line {line}: {:?}", result.lines[line].outcome);
+        }
     }
 
     #[test]

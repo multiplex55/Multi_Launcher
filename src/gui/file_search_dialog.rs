@@ -115,6 +115,7 @@ pub enum FileSearchRequestError {
     EmptySearchText,
     EmptyGlobalRoots,
     EmptyDirectoryRoots,
+    InvalidMetadata(String),
 }
 
 pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
@@ -436,6 +437,7 @@ pub struct FileSearchDialogState {
     pub ripgrep_missing_prompt_dismissed: bool,
     pub excluded_directory_names_overridden: bool,
     pub last_submitted_request: Option<SearchRequest>,
+    last_submitted_form: Option<SearchRequest>,
     pub pending_sort_change: bool,
     jump_mode_form_generation: u64,
     jump_mode_results_revision: u64,
@@ -606,6 +608,7 @@ impl Default for FileSearchDialogState {
             ripgrep_missing_prompt_dismissed: false,
             excluded_directory_names_overridden: false,
             last_submitted_request: None,
+            last_submitted_form: None,
             pending_sort_change: false,
             jump_mode_form_generation: 0,
             jump_mode_results_revision: 0,
@@ -942,7 +945,7 @@ impl FileSearchDialogState {
         };
         self.preview_dialog.retire();
         self.clear_results_and_selection();
-        self.warning_error_message = None;
+        self.warning_error_message = request.metadata.warning.clone();
         self.inaccessible_path_warnings = 0;
         self.diagnostics.clear();
         self.current_status = SearchStatus::Running;
@@ -951,9 +954,11 @@ impl FileSearchDialogState {
             Some(&self.settings),
         ));
         let submitted_request = request.clone();
+        let submitted_form = request.clone();
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.last_submitted_request = Some(submitted_request);
+        self.last_submitted_form = Some(submitted_form);
         self.pending_sort_change = false;
         self.request_immediate_repaint = true;
         Some(id)
@@ -982,6 +987,7 @@ impl FileSearchDialogState {
         self.inaccessible_path_warnings = 0;
         self.diagnostics.clear();
         self.last_submitted_request = None;
+        self.last_submitted_form = None;
         self.pending_sort_change = false;
         self.show_ripgrep_missing_prompt = false;
         self.request_immediate_repaint = true;
@@ -3145,19 +3151,26 @@ impl FileSearchDialogState {
             return;
         }
         self.selected_mode = FileSearchMode::Content;
-        let mut request = match self.build_search_request() {
+        let mut request = match if let Some(previous) = &self.last_submitted_request {
+            self.build_semantic_request().and_then(|mut request| {
+                request.metadata_preferences = previous.metadata_preferences.clone();
+                request.metadata = previous.metadata.for_content(request.max_file_size_bytes).map_err(FileSearchRequestError::InvalidMetadata)?;
+                Ok(request)
+            })
+        } else { self.build_search_request() } {
             Ok(request) => request,
             Err(error) => {
                 self.warning_error_message = Some(error.user_message().to_string());
                 return;
             }
         };
+        let submitted_form = request.clone();
         request.scope = SearchScope::Files {
             files: vec![path.to_path_buf()],
         };
         request.max_results = 1;
         self.clear_results_and_selection();
-        self.warning_error_message = None;
+        self.warning_error_message = request.metadata.warning.clone();
         self.inaccessible_path_warnings = 0;
         self.diagnostics.clear();
         self.current_status = SearchStatus::Running;
@@ -3169,6 +3182,7 @@ impl FileSearchDialogState {
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.last_submitted_request = Some(submitted_request);
+        self.last_submitted_form = Some(submitted_form);
         self.pending_sort_change = false;
         self.request_immediate_repaint = true;
     }
@@ -3498,6 +3512,40 @@ mod tests {
             self.requests.lock().unwrap().push(request);
             let _ = events.send(SearchEvent::Completed { id: SearchId(1) });
         }
+    }
+
+    #[test]
+    fn file_drilldown_keeps_frozen_window_and_form_dirty_baseline() {
+        use chrono::TimeZone;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = FileSearchDialogState {
+            search_text: "needle".into(),
+            selected_mode: FileSearchMode::Content,
+            selected_scope: FileSearchScopeMode::Directory,
+            custom_roots: vec![temp.path().display().to_string()],
+            ..Default::default()
+        };
+        state.ui_preferences.metadata.date.mode = crate::file_search::predicate::DateMode::Last24Hours;
+        let mut previous = state.build_search_request().unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap();
+        previous.metadata = previous.metadata_preferences.resolve_at(now, None, previous.kind, previous.max_file_size_bytes).unwrap();
+        let mut later = previous.clone();
+        later.metadata = later.metadata_preferences.resolve_at(now + chrono::Duration::hours(2), None, later.kind, later.max_file_size_bytes).unwrap();
+        assert!(previous.same_criteria(&later));
+        assert_ne!(previous.metadata, later.metadata);
+        let frozen = previous.metadata.clone();
+        state.last_submitted_request = Some(previous);
+        let executor = RecordingExecutor::new();
+        let mut coordinator = SearchCoordinator::with_executor(executor);
+        state.start_file_content_search(&temp.path().join("sample.txt"), &mut coordinator);
+        let submitted = state.last_submitted_request.as_ref().unwrap();
+        assert_eq!(submitted.metadata, frozen);
+        assert!(matches!(submitted.scope, SearchScope::Files { .. }));
+        assert_eq!(submitted.max_results, 1);
+        state.current_status = SearchStatus::Completed;
+        assert!(!state.filters_changed_since_last_search());
+        state.ui_preferences.metadata.date.mode = crate::file_search::predicate::DateMode::Last7Days;
+        assert!(state.filters_changed_since_last_search());
     }
 
     struct HeldSearchExecutor {

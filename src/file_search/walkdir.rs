@@ -1,7 +1,7 @@
 use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
-    FileKind, FileTypeFilter, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
+    FileKind, FileTypeFilter, FilenameResult, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
@@ -47,6 +47,8 @@ pub struct WalkDirSearchSummary {
     pub inaccessible_entries: u64,
     pub cancelled: bool,
     pub root_errors: Vec<String>,
+    pub metadata_unavailable: u64,
+    pub global_truncated: bool,
 }
 
 pub fn search_filenames_in_directory(
@@ -81,7 +83,7 @@ pub fn search_filenames_in_directory(
     let resolved_roots: Vec<PathBuf> = roots
         .into_iter()
         .filter_map(|root| match root.canonicalize() {
-            Ok(resolved) if resolved.is_dir() => Some(resolved),
+            Ok(resolved) if resolved.is_dir() || (matches!(&request.scope, SearchScope::Files { .. }) && resolved.is_file()) => Some(resolved),
             Ok(resolved) => {
                 summary
                     .root_errors
@@ -89,6 +91,7 @@ pub fn search_filenames_in_directory(
                 None
             }
             Err(err) => {
+                if request.metadata.active() { summary.metadata_unavailable = summary.metadata_unavailable.saturating_add(1); }
                 summary
                     .root_errors
                     .push(format!("{}: {err}", root.display()));
@@ -98,6 +101,7 @@ pub fn search_filenames_in_directory(
         .collect();
     let roots = dedup_resolved_roots(resolved_roots);
     if roots.is_empty() {
+        if summary.metadata_unavailable > 0 { return Err(format!("No usable search roots; metadata unavailable for {} entries.", summary.metadata_unavailable)); }
         return Err("walkdir filename search requires at least one usable root".to_owned());
     }
 
@@ -129,7 +133,7 @@ pub fn search_filenames_in_directory(
                     continue;
                 }
             };
-            if entry.path() != root && should_skip_entry(&entry, &excluded_names, include_hidden) {
+            if (entry.path() != root || entry.file_type().is_file()) && should_skip_entry(&entry, &excluded_names, include_hidden) {
                 summary.skipped_entries += 1;
                 continue;
             }
@@ -137,6 +141,15 @@ pub fn search_filenames_in_directory(
                 summary.skipped_entries += 1;
                 continue;
             }
+            if entry.file_type().is_dir() { summary.directories_scanned += 1; } else { summary.files_scanned += 1; }
+            let allowed_type = match request.file_type_filter {
+                FileTypeFilter::FilesOnly => entry.file_type().is_file(),
+                FileTypeFilter::DirectoriesOnly => entry.file_type().is_dir(),
+                FileTypeFilter::FilesAndDirectories => true,
+            };
+            if !allowed_type { continue; }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let Some(highlight) = filename_highlight_match(&file_name, entry.path(), &needle, request.case_sensitive, request.filename_match_mode) else { continue; };
             let metadata = match entry.metadata() {
                 Ok(metadata) => Some(metadata),
                 Err(_) => {
@@ -144,32 +157,18 @@ pub fn search_filenames_in_directory(
                     None
                 }
             };
-            if metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
-                summary.directories_scanned += 1;
-            } else {
-                summary.files_scanned += 1;
+            match crate::file_search::predicate::metadata_matches(&request.metadata, metadata.as_ref()) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => { summary.metadata_unavailable = summary.metadata_unavailable.saturating_add(1); continue; }
             }
-            let allowed_type = match request.file_type_filter {
-                FileTypeFilter::FilesOnly => metadata.as_ref().is_some_and(|m| m.is_file()),
-                FileTypeFilter::DirectoriesOnly => metadata.as_ref().is_some_and(|m| m.is_dir()),
-                FileTypeFilter::FilesAndDirectories => true,
-            };
-            if !allowed_type {
-                continue;
-            }
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if let Some(highlight) = filename_highlight_match(
-                &file_name,
-                entry.path(),
-                &needle,
-                request.case_sensitive,
-                request.filename_match_mode,
-            ) {
+            {
                 let rank = highlight.rank;
                 let identity = crate::file_search::model::normalize_path_for_identity(entry.path());
                 if !seen_results.insert(identity) {
                     continue;
                 }
+                if ranked_results.len() >= request.max_results { summary.global_truncated = true; break; }
                 let result = FilenameResult {
                     path: entry.path().to_path_buf(),
                     file_name,
@@ -194,12 +193,10 @@ pub fn search_filenames_in_directory(
                 }
                 ranked_results.push(result);
                 summary.results_found += 1;
-                if summary.results_found >= request.max_results {
-                    break;
-                }
+                if !request.metadata.active() && summary.results_found >= request.max_results { break; }
             }
         }
-        if summary.results_found >= request.max_results {
+        if summary.global_truncated || (!request.metadata.active() && summary.results_found >= request.max_results) {
             break;
         }
     }
@@ -221,9 +218,12 @@ pub fn search_filenames_in_directory(
             directories_scanned: summary.directories_scanned,
             results_found: summary.results_found,
             status,
-            global_truncated: false,
+            global_truncated: summary.global_truncated,
         },
     });
+    if summary.metadata_unavailable > 0 {
+        let _ = event_sender.send(SearchEvent::Diagnostic { id: search_id, diagnostic: SearchDiagnostic::Warning(format!("Metadata unavailable for {} entries; they were excluded by the active filters.", summary.metadata_unavailable)) });
+    }
     let _ = if summary.cancelled {
         event_sender.send(SearchEvent::Cancelled { id: search_id })
     } else {
@@ -355,6 +355,7 @@ mod tests {
             content_match_mode: crate::file_search::model::ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: crate::file_search::model::FileTypeFilter::FilesAndDirectories,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         }
     }
 
@@ -592,6 +593,55 @@ mod tests {
         .unwrap();
         assert!(summary.cancelled);
         assert_eq!(summary.results_found, 0);
+    }
+
+    #[test]
+    fn explicit_metadata_filtered_files_count_only_eligible_matches() {
+        use crate::file_search::predicate::SizePredicate;
+        let temp = tempfile::tempdir().unwrap();
+        let small = temp.path().join("match-small.txt"); let large = temp.path().join("match-large.txt");
+        fs::write(&small, "x").unwrap(); fs::write(&large, "large").unwrap();
+        let mut request = request(temp.path().into(), "match", 1);
+        request.scope = SearchScope::Files { files: vec![small, large.clone()] };
+        request.metadata.size = Some(SizePredicate::LargerThan(1));
+        let (summary, events) = run(request.clone());
+        assert_eq!(summary.results_found, 1);
+        assert!(!summary.global_truncated);
+        assert!(events.iter().any(|event| matches!(event, SearchEvent::Result { result: SearchResult::Filename(result), .. } if result.path == large.canonicalize().unwrap())));
+        let extra = temp.path().join("match-extra.txt"); fs::write(&extra, "also large").unwrap();
+        request.scope = SearchScope::Files { files: vec![large, extra] };
+        assert!(run(request).0.global_truncated);
+    }
+
+    #[test]
+    fn unfiltered_cap_does_not_visit_remaining_explicit_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("match.txt"); let second = temp.path().join("other.txt");
+        fs::write(&first, "x").unwrap(); fs::write(&second, "x").unwrap();
+        let mut request = request(temp.path().into(), "match", 1);
+        request.scope = SearchScope::Files { files: vec![first, second] };
+        let (unfiltered, _) = run(request.clone());
+        assert_eq!(unfiltered.files_scanned, 1);
+        assert!(!unfiltered.global_truncated);
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::LargerThan(0));
+        let (filtered, _) = run(request);
+        assert_eq!(filtered.files_scanned, 2);
+        assert!(!filtered.global_truncated);
+    }
+
+    #[test]
+    fn rejected_directory_does_not_prune_eligible_descendant() {
+        use crate::file_search::predicate::DateWindow;
+        let temp = tempfile::tempdir().unwrap();
+        let sub = temp.path().join("match-directory"); fs::create_dir(&sub).unwrap();
+        let child = sub.join("match-child.txt"); fs::write(&child, "").unwrap();
+        let target = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new().write(true).open(&child).unwrap().set_times(fs::FileTimes::new().set_modified(target)).unwrap();
+        let mut request = request(temp.path().into(), "match", 5);
+        request.metadata.date = Some(DateWindow { start: target - std::time::Duration::from_secs(1), end: target + std::time::Duration::from_secs(1), end_inclusive: true });
+        let (summary, events) = run(request);
+        assert_eq!(summary.results_found, 1);
+        assert!(events.iter().any(|event| matches!(event, SearchEvent::Result { result: SearchResult::Filename(result), .. } if result.file_name == "match-child.txt")));
     }
 
     #[test]

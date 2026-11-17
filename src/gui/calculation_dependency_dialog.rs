@@ -12,6 +12,7 @@ pub(super) struct DependencyNavigation {
     pub document: DocumentId,
     pub incarnation: DocumentIncarnation,
     pub line: LineId,
+    pub basis: Option<crate::calculation_pad::EvaluationBasis>,
 }
 #[derive(Default)]
 pub(crate) struct CalculationDependencyDialog {
@@ -31,7 +32,7 @@ pub(super) struct DependencyRuntime {
 }
 #[derive(Default)]
 pub(super) struct DependencyActions {
-    pub basis: Option<(DocumentId, DocumentIncarnation, u64)>,
+    pub basis: Option<crate::calculation_pad::EvaluationBasis>,
     pub pad_host: Option<super::utility_host::HostIdentity>,
     pub host_request: Option<UtilityPresentation>,
     pub close: bool,
@@ -82,7 +83,7 @@ impl CalculationDependencyDialog {
         }
         if let Some(id) = actions.selected
             && snapshot.is_some_and(|s| {
-                actions.basis == Some((s.document_id, s.incarnation, s.revision))
+                actions.basis == Some(s.basis)
                     && s.rows.iter().any(|row| row.id == id)
             })
         {
@@ -94,19 +95,20 @@ impl CalculationDependencyDialog {
                     && s.incarnation == inc
                     && s.rows.iter().any(|row| row.id == id)
             }) && !(identity == Some((doc, inc))
-                && matches!(status, EvaluationStatus::Pending | EvaluationStatus::Failed(_)))
+                && !matches!(status, EvaluationStatus::Ready | EvaluationStatus::Inactive))
         }) {
             self.selected = None;
         }
         let basis = actions.basis;
         actions.navigate.filter(|nav| {
             snapshot.is_some_and(|s| {
-                basis == Some((s.document_id, s.incarnation, s.revision))
+                basis == Some(s.basis)
+                    && nav.basis == Some(s.basis)
                     && s.document_id == nav.document
                     && s.incarnation == nav.incarnation
                     && s.rows.iter().any(|row| row.id == nav.line)
             })
-        }).and_then(|navigation| basis.map(|(_, _, revision)| (navigation, revision)))
+        }).and_then(|navigation| basis.map(|basis| (navigation, basis.revision)))
     }
     pub(super) fn render_host(
         &mut self,
@@ -123,7 +125,7 @@ impl CalculationDependencyDialog {
             basis: runtime
                 .snapshot
                 .as_ref()
-                .map(|s| (s.document_id, s.incarnation, s.revision)),
+                .map(|s| s.basis),
             pad_host: runtime.pad_host,
             ..Default::default()
         };
@@ -149,6 +151,7 @@ impl CalculationDependencyDialog {
                 let Some(snapshot) = runtime.snapshot.as_deref() else {
                     match &runtime.status {
                         EvaluationStatus::Pending if runtime.identity.is_some() => { ui.label("Calculation is pending. Dependencies will appear when results are ready."); }
+                        EvaluationStatus::NotCalculated | EvaluationStatus::Outdated | EvaluationStatus::Canceled if runtime.identity.is_some() => { ui.label("Calculate the current document to browse dependencies."); }
                         EvaluationStatus::Failed(message) if runtime.identity.is_some() => { ui.colored_label(ui.visuals().error_fg_color, message); }
                         _ => { ui.label("Calculation Pad is unavailable. Open a Pad document to browse dependencies."); }
                     }
@@ -188,6 +191,9 @@ impl CalculationDependencyDialog {
                         LineOutcome::Error(error) => { ui.colored_label(ui.visuals().error_fg_color, error.to_string()); }
                         LineOutcome::Blank => { ui.weak("Blank line"); }
                         LineOutcome::Comment => { ui.weak("Comment"); }
+                        LineOutcome::Definition => { ui.weak("Function definition"); }
+                        LineOutcome::Control => { ui.weak("Control statement"); }
+                        LineOutcome::Continuation { owner_line } => { ui.weak(format!("Continuation of line {}", owner_line + 1)); }
                     }
                     let go = ui.button("Go to source");
                     #[cfg(test)]
@@ -195,6 +201,7 @@ impl CalculationDependencyDialog {
                     if go.clicked() {
                         actions.navigate = Some(DependencyNavigation {
                             document: snapshot.document_id, incarnation: snapshot.incarnation, line: row.id,
+                            basis: Some(snapshot.basis),
                         });
                     }
                     for (title, direct, upstream) in [
@@ -248,6 +255,9 @@ fn describe_value(value: &crate::calculation_pad::CalculationValue) -> String {
     use crate::calculation_pad::CalculationValue;
     let kind = match value {
         CalculationValue::Scalar(_) => "Scalar".to_owned(),
+        CalculationValue::ApproximateScalar(_) => "Approximate scalar".to_owned(),
+        CalculationValue::Exact(_) => "Exact".to_owned(),
+        CalculationValue::Calendar(value) => value.type_label().to_owned(),
         CalculationValue::Boolean(_) => "Boolean".to_owned(),
         CalculationValue::Sequence(_) => "Sequence".to_owned(),
         CalculationValue::Vector(_) => "Vector".to_owned(),
@@ -301,6 +311,7 @@ fn relation_rows(
                 document: snapshot.document_id,
                 incarnation: snapshot.incarnation,
                 line: *id,
+                basis: Some(snapshot.basis),
             });
         }
     }
@@ -322,6 +333,7 @@ mod tests {
             document: first.document_id,
             incarnation: first.incarnation,
             line: first.rows[1].id,
+            basis: Some(first.basis),
         };
         let mut dialog = CalculationDependencyDialog::default();
         dialog.open(Some((old.document, old.incarnation, old.line)));
@@ -329,7 +341,7 @@ mod tests {
         session.evaluation();
         let deleted = session.dependency_snapshot().unwrap();
         let actions = DependencyActions {
-            basis: Some((old.document, old.incarnation, first.revision)),
+            basis: Some(first.basis),
             navigate: Some(old),
             ..Default::default()
         };
@@ -343,7 +355,7 @@ mod tests {
         let reopened = session.dependency_snapshot().unwrap();
         assert_ne!(reopened.incarnation, old.incarnation);
         let actions = DependencyActions {
-            basis: Some((old.document, old.incarnation, first.revision)),
+            basis: Some(first.basis),
             selected: Some(old.line),
             navigate: Some(old),
             ..Default::default()
@@ -372,9 +384,9 @@ mod tests {
         let after = session.dependency_snapshot().unwrap();
         assert_eq!(after.rows[1].id, target);
         let actions = DependencyActions {
-            basis: Some((before.document_id, before.incarnation, before.revision)),
+            basis: Some(before.basis),
             selected: Some(target),
-            navigate: Some(DependencyNavigation { document: before.document_id, incarnation: before.incarnation, line: target }),
+            navigate: Some(DependencyNavigation { document: before.document_id, incarnation: before.incarnation, line: target, basis: Some(before.basis) }),
             ..Default::default()
         };
         assert!(dialog.commit(actions, Some(&after), Some((after.document_id, after.incarnation)), &EvaluationStatus::Ready).is_none());

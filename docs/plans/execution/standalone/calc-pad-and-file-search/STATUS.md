@@ -1,0 +1,237 @@
+# Calculation Pad expansion and File Search metadata filters
+
+The execution contract is preserved in commit `09ca2427c5da5782eb540a538ce0f1bb71a39434` at `docs/plans/CODEX_GOAL_CALC_PAD_AND_FILE_SEARCH.md`. The task branch starts at the previous Goal's final committed tip.
+
+| Git field | Value |
+| --- | --- |
+| parent_branch | `codex/calc-pad-examples-reference` |
+| parent_tip_sha | `aeec0fb900364a6018cade76a1017fb2deeaa469` |
+| task branch | `feat/calc-pad-and-file-search` |
+| baseline_sha | `d17b595053ce809a772e0fab0905d1268bf9c8aa` |
+| baseline push | `git push -u origin HEAD` succeeded and configured the matching upstream |
+
+The previous Goal's final handoff in Codex chat `01a1dc67-898d-7e81-9fa1-0105f290aafc` names the parent SHA. The local and remote-tracking predecessor refs agreed. The checkout was clean before and after the switch, and the baseline's direct parent was verified. One existing checkout was used.
+
+| Checkpoint | State | Evidence |
+| --- | --- | --- |
+| M0-A | Verified | Exact parent and baseline, fresh task branch, successful push |
+| M0-B | Verified and pushed | `8d76bb28e0f7dd82229d6d3bd53e1d473d569079`. Five Calc Pad and three File Search baseline cases passed. |
+| M1-A | Verified and pushed | `80d790e5af3eab84b5b2435a6f4385646c1be2cf`. Shared analysis and evaluator routes. 13 focused tests passed. |
+| M1-B | Verified and pushed | `5a724285e402db21411c5cf3454ed9a797e22c61`. Shared editor/observer mapping; focused batches passed 20/20 and 3/3. |
+| M2-A | Verified and pushed | `ffbc28d6a0fc3feecca7ed489846dd9dd177d026`. Versioned options/recovery, evaluation identity and related-reference edit seam. Focused batch passed 20/20. |
+| M2-B | Verified and pushed | `54567303d7ff18aa5ce751a044cf103093b4e30e`. Manual lifecycle, immutable stale results, guarded actions. Focused batches passed 18/18 and 4/4. |
+| M3-A | Verified and pushed | `fad44d1cf51e88a2093eb9c1d74de86a1e2fa13c`. Exact arithmetic, bounds, canonical copy and approximation. Batches passed 12/12 and 7/7. |
+| M3-B | Verified and pushed | `7499ede1b9c064030df389bea999e3bf9993a8d8`. Exact display, comparison and current copy. Batches passed 13/13 and 5/5. |
+| M4-A | Verified and pushed | `7fa01717e6fa7fd8e298255aaf67b18b24937e42`. All ten helpers. Focused batch passed 10/10. |
+| M5-A | Verified and pushed | `0cdba26a511b5c3abb3c0e14b9b433bbb2608a9a`. Formula runtime. Batches passed 11/11 and 7/7. |
+| M5-B | Verified and pushed | `c5a7fbfed5fe53dbd31ee0944ff6232c088d647b`. Formula editor and examples. Focused batch passed 13/13. |
+| M5-C | Verified and pushed | `3aa2402776a075c74673cc4e792535923871902d`. Conditional blocks, loop flow and recovery. Final batch passed 16/16. |
+| M6-A | Verified and pushed | `da6d58cca7453770c95079c3a031dee10941f608`. Calendar domain. Batches passed 11/11 and 5/5. |
+| M6-B | Verified and pushed | `ae72a9246fdd000ba41fc7750e6f49e43c5cfcb0`. Calendar presentation and examples. Focused batch passed 14/14. |
+| M7-A | Verified and pushed | `07857478c05296eda7b3554b3399d27ee09887a5`. Extended source lifecycle, worker, row slots, save/recovery and atomic edits. Batch passed 19/19. |
+| M7-B | Verified and pushed | `9039f3296226184de3aaa37cf45fd12f0b919fd5`. Profile and usage controls, independent admission ceilings and capacity checks. Final scoped batch passed 9/9. |
+| M8-A | Verified and pushed | `f0f87495d5cf2d2bafd1de456804cca2f188476a`. Scope-aware source plans and atomic source/reference history. Focused batches passed 12/12 and 6/6. |
+| M8-B | Verified and pushed | `c796de9d7d049fcf81ec26ea8c36d0c7a72d6ea7`. F2 and right-click preview, retained host actions, stale and history protection. |
+| M9-A | Verified and pushed | `c48bed1d9c7df339e6939ace09a70728401180be`. Typed input definitions, retained v3 configuration and source projection. Focused batch passed 12/12. |
+| M9-B | Verified and pushed | `3f7a47d17e6e2d8571a90f177f6818d0993aca33`. Preferred controls, exact/local drafts, guarded Apply and stable IDs. |
+| M10-A | Verified and pushed | `b5bd5b163e95b201faf506f8331cd163245f4862`. Bounded immutable sensitivity analysis and current-only publication. Focused batch passed 15/15. |
+| M10-B | Verified and pushed | `64cf01ae222c1fd2e03d0ae9952f2aa58c1eaa93`. Persisted definition, retained panel and exact table exports. Final batch passed 19/19. |
+| M11-A | Verified and pushed | `349088413ef4d38d45099273a4e521b72645fcbc`. Typed chart datasets, shared scene and bounded raster. Final batch passed 5/5, and the PNG was inspected. |
+| M11-B | Verified and pushed | `eb7c6fdb1f3a2251ac9b84f52d9d8e31dae68025`. Dockable Charts companion, persisted definition and guarded image copy. Final batch passed 12/12. |
+| M12-A | Verified and pushed | `4b8b52bedd0711ca904071190fa057d74d17ec69`. Typed predicates and frozen criteria. Focused batches passed 35/35 and 6/6, and the domain target compiled. |
+| M12-B | Verified and pushed | `379422e6e26884b3a91d4624d28796c51ea85605`. Pre-cap filtering and filesystem policy. Corrected focused checks and all nine domain cases passed. |
+| M12-C | Verified and pushed | `d8aeacd97d4e86202a44c394b3dad29eb0492f1f`. Date and size controls, preference ownership and help. Scoped batch passed 29/29. |
+| M13-A | Automated checks passed; native acceptance limited; pushed | `c532e4ec0c7f30ae4b2f4caa8f706c4fa1221118`. 360 Calc Pad library cases accounted for after three fixture migrations, 378 File Search library cases and 15 domain cases. Two bounded owned Windows attempts. |
+| M13-B | Reviewed and automated checks passed; native acceptance limited | Five review findings resolved or scoped to existing numeric limits. Corrective library 4/4, final domain 10/10, and scoped Clippy exit 0. |
+
+## Requirements and live owners
+
+| ID | Implementation | Verification | Owners and boundaries |
+| --- | --- | --- | --- |
+| C20 | Implemented | Focused automated domain/editor checks passed. Native integrated check environment-blocked. | Calc Pad document, nested script/loops evaluators, editor and observer mappings |
+| C24 | Implemented | Focused scheduler, persistence and host tests passed. Native integrated check environment-blocked. | Session scheduling, worker stamps, persistence/recovery and companion observers |
+| C25 | Implemented | Focused exact/legacy, formatting, settings, copy and example checks passed. Native integrated check environment-blocked. | Typed document/script arithmetic, existing numeric dependencies, result formatting and canonical copy |
+| C21 | Implemented | Focused numeric, compatibility, hint and executable example checks passed. | Script function catalog and signatures, editor hints, executable examples |
+| C18 | Implemented | Focused runtime, editor, navigation and examples passed. Native integrated check environment-blocked. | Shared syntax and bindings, typed script invocation, editor and dependencies |
+| C27 | Implemented | Focused conditional, nested flow, rollback and source/editor regressions passed. Native integrated check environment-blocked. | Existing loop block parser, transactional execution and editor structure |
+| C22 | Implemented | Focused arithmetic, DST, comparison, copy/observer and examples checks passed. Native integrated check environment-blocked. | Existing calendar and named-zone domain, typed Pad operations and formatting |
+| C26 | Implemented | Focused edit, worker, recovery, storage, usage and capacity checks passed. Native integrated check environment-blocked. | Extended evaluates at 128 KiB/1,024 rows. Edit and storage admission retain 256 KiB/2,048, with a 4 MiB envelope. |
+| C14 | Implemented | Focused scope, contextual syntax, transaction, persistence and editor/host tests passed. Native integrated check environment-blocked. | Binding identity, session history/metadata, guarded editor preview and Apply |
+| C6 | Implemented | Focused typed control, persistence, source Apply, stale metadata and Undo checks passed. Native integrated check environment-blocked. | Source-authoritative typed input configuration and accepted draft Apply |
+| C4 | Implemented | Focused XP, sample, worker, panel, exact exports, stale actions, persistence and rename history passed. Native integrated check environment-blocked. | Session-owned bounded worker and retained Config Menu actions |
+| C5 | Implemented | Focused chart model, raster, clipboard, ownership and persistence tests passed. Chart-only PNG inspected. Native integrated check environment-blocked. | Typed vector and sensitivity data, shared scene, utility ownership and clipboard |
+| F3 | Implemented | Focused predicates, backend, dialog, persistence and domain cases passed. Native integrated check environment-blocked. | Semantic preferences, frozen request, backend routing, dialog filters |
+
+## Verification evidence
+
+Local receipts are stored under `target/calc-pad-and-file-search-evidence`. The predecessor's diagram library test still includes an old fixture path. Scoped test builds may use the byte-identical archived fixture temporarily. Keep that copy out of Git and remove it after use.
+
+### M0-B baseline
+
+- `cargo nextest run -p multi_launcher --lib --test domain --cargo-profile fast-dev -E <eight intended cases> --test-threads 1 --no-run` completed with compiler exit 0 in 678.6 seconds under the 900-second compile deadline. It produced fresh library and domain binaries. The wrapper drained output and found 31 observed processes absent. It could not classify one process identity, PID 16032, at cleanup; a subsequent lookup found that PID absent. The temporary fixture was removed and its absence checked.
+- Listed the cases in the fresh binaries and used their exact names to run the scoped baseline directly, avoiding a rebuild after fixture cleanup. The library batch passed 5/5 in 0.21 seconds under a 100-second deadline, covering example validation, v1 loading and upgrading, stable source line IDs, full-line comments and physical references, and typed loop rollback. The domain batch passed 3/3 in 0.05 seconds under the same deadline, covering filename extension filters, native content fallback, and criteria dirty state. Both runs exited 0 with verified cleanup and output drain. See `m0b-build`, `m0b-lib`, and `m0b-domain` receipts under the evidence root.
+- Pre-existing compiler warnings were observed in vendored and first-party code. The baseline produced no feature-related test failures. Native interaction and final Clippy are later checkpoints.
+
+### M1-A domain
+
+- Scoped library `cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev -E <M1-A selectors> --test-threads 1` passed 13/13 with exit 0 in 2.28 seconds under the 100-second watchdog. The separate fixture-assisted compilation exited 0 in 283.84 seconds under a 900-second deadline. Both receipts confirmed cleanup and output drain. Selectors and results are in `m1a-build` and `m1a-run`.
+- Coverage includes six physical/logical source cases, typed values, loop/header grouping, continuation errors, legacy row references, laziness, loop rollback, and existing examples. Editor integration remains M1-B.
+
+### M1-B editor and observers
+
+- Scoped library Nextest passed 20/20 in 2.58 seconds, including folding and projected highlighting, multiline hints and references, original-byte literal edit/undo, and physical result copying and navigation. Diff inspection exposed a dedented-continuation completion issue. The correction uses the logical owner's indentation and excludes the current assignment as a prior binding. Its three-test focused rerun passed in 1.95 seconds.
+- Both batches used a 100-second watchdog. Separate compile stages finished in 330.53 and 210.43 seconds under the 900-second deadline. Receipts are in `m1b-build`, `m1b-run`, `m1b-correction-build`, and `m1b-correction-run`; cleanup and output drain passed.
+
+### M2-A document and run identity
+
+- The initial library compile exited 101 on a missed fixture call to the expanded Save As helper. After updating that call, an all-case diagnostic run passed 19/20. Its lone failure was the new v2 fixture converting a full-width document ID through `serde_json::Value`. The fixture now emits the exact numeric ID and asserts selected input and watch retention.
+- Final library Nextest passed 20/20 with exit 0 in 3.03 seconds under the 100-second watchdog. The final separate compile exited 0 in 182.59 seconds under the 900-second deadline. Both cleanup and output drain were verified. Receipts are in `m2a-build`, `m2a-correction-build`, `m2a-correction-run`, `m2a-failure-diagnosis`, `m2a-final-build`, and `m2a-final-run`.
+- Coverage includes v1 and v2 migration, options and recovery, rejection/preservation of future records, atomic writes, same-revision worker retirement, Save As and derived receipt lifetimes, and the source/reference undo seam. C14 must handle the case where the old watch name is pinned separately after a rename. The M2-A transaction currently refuses conflicting replay to avoid dropping that later pin.
+
+### M2-B Manual scheduling
+
+- Scoped library Nextest passed 18/18 in 2.58 seconds. The correction kept the already-finished but undelivered worker request coalesced and retained the accurate pending companion notice. Its four-test rerun passed in 2.10 seconds.
+- Both batches used a 100-second watchdog. Separate compilation ran 246.89 and 159.13 seconds under the 900-second deadline. Cleanup and output drain passed. Receipts are in `m2b-build`, `m2b-run`, `m2b-correction-build`, and `m2b-correction-run`.
+- Coverage includes six edits and read-only observers producing zero Manual attempts, explicit calculation, immutable stale source, cancel/coalesce/retry generations, Automatic restoration, result navigation, and preservation of Automatic canonical same-frame copy. Native controls and cross-feature behavior remain for integrated acceptance.
+
+### M3-A exact-number domain
+
+- Promoted already-locked numeric crates to direct dependencies. `Cargo.lock` changes only those dependency edges. Exact decimal/fraction arithmetic uses bounded rational operands, opted-in constructors, canonical copy, explicit approximate conversion and shared evaluation work.
+- Scoped library Nextest initially passed 12/12 in 2.57 seconds (separate compile 433.96 seconds). Code inspection found a script-fragment panic path, a decimal canonical length mismatch at the admitted bit limit, and missing approximate scalar comparison. The correction batch passed 6/7; the sole failing assertion used the wrong expected sum for `range(4)`, which is 0 through 3. After correcting the fixture, the focused batch passed 7/7 with exit 0 in 2.37 seconds (final compile 66.84 seconds).
+- Verified bounded process cleanup and drained output. Cached batches used the 100-second deadline and separate compiles used 900 seconds. Receipts are under `m3a-build`, `m3a-run`, `m3a-correction-build`, `m3a-correction-run`, `m3a-final-build`, and `m3a-final-run`.
+
+### M3-B exact presentation and reference
+
+- Exact, Decimal and Mixed Number are persisted independent display choices. Formatting never converts fractions to binary float, marks actual approximation and leaves canonical copy parseable. Current-only copy and observer guards remain in effect. The linked catalogue now contains 81 executable examples.
+- Scoped library Nextest passed 13/13 in 2.61 seconds. A focused refinement for decimal-origin mixed text, bounded differences and pure literal validation passed 5/5 in 2.30 seconds. Separate compiles ran 367.61 and 196.34 seconds. Tests used 100-second deadlines and compiles 900-second deadlines. Cleanup and output drain passed. Receipts are in `m3b-build`, `m3b-run`, `m3b-correction-build`, and `m3b-correction-run`.
+
+### M4-A numeric helpers
+
+- Registered all ten helpers in the shared runtime and hint catalog and added all ten executable examples, for 91 total. Exact arithmetic and combinatorics preserve bounded integer/rational results above binary-float precision. Scalar and explicitly approximate behavior stays distinct.
+- Scoped library Nextest passed 10/10 with exit 0 in 2.48 seconds under the 100-second watchdog. Separate compile finished in 327.12 seconds under the 900-second deadline. Cleanup and output drain passed. See `m4a-build` and `m4a-run`.
+
+### M5-A formula runtime
+
+- Compiled earlier-only document callables with isolated typed parameters and shared work/call limits. Definition rows carry no value; call dependencies identify invoked physical definitions. The function declaration grammar preserves legacy uses of the variable `fn`.
+- Initial scoped library Nextest passed 11/11 in 2.71 seconds (332.25-second separate compile). Diff review exposed assignment syntax inside bodies and a missing structural boundary/rollback for declarations next to or inside loops. The correction's initial compile failed with E0425 because a new test was outside its own module. After moving the test, final focused Nextest passed 7/7 in 2.61 seconds after 213.56 seconds of compilation.
+- Cleanup and output drain passed. The cached deadline was 100 seconds, with 900-second compile bounds. Receipts are in `m5a-build`, `m5a-run`, `m5a-correction-build`, `m5a-final-build`, and `m5a-final-run`. Current results from formula calls are available to comparison by row or binding. Fresh Inspector expressions keep the existing frozen-result scope.
+
+### M5-B formula editor
+
+- Shared authored declarations and mapped UTF-8 source spans between runtime and editor. Completion respects local parameters and earlier callable visibility. Structured hints preserve punctuation within braced parameters. The catalogue now includes 95 executable examples.
+- Initial compile exited 101 because a local variable in a new test shadowed the completion function. After renaming it and reusing one scope per completion, scoped library Nextest passed 13/13 with exit 0 in 2.73 seconds. Compile took 338.21 seconds under the 900-second deadline; the cached run used a 100-second deadline. Cleanup and output drain passed. Receipts are in `m5b-build`, `m5b-correction-build` and `m5b-correction-run`.
+
+### M5-C conditional control flow
+
+- Added contextual blocks, Boolean condition evaluation, nearest-loop control outcomes, and physical/non-value control rows. Successful early exit preserves completed work. Existing error rollback and iteration accounting remain active, including structural errors in skipped branches.
+- Initial focused run passed 13/14; a legacy loop-validation case exposed an earlier source-mapping regression where an unclosed delimiter absorbed subsequent clear dedented assignments. Recovery now reports the opening physical location and resumes at the new assignment without affecting valid dedented continuations. The first correction compile identified a missing explicit owner type, corrected to `Option<usize>`.
+- Final Nextest passed 16/16 in 2.66 seconds with verified cleanup and output drain. Final separate compile ran 189.57 seconds. Cached tests used 100 seconds, compiles 900 seconds. Receipts are in `m5c-build`, `m5c-run`, `m5c-correction-build`, `m5c-final-build`, and `m5c-final-run`.
+
+### M6-A typed calendar domain
+
+- Added deterministic calendar constructors and operations, with compatibility for existing physical-time quantities. Named-zone resolution uses explicit fold/gap semantics and distinguishes local calendar shifts from elapsed time. Output constructors retain kind, zone/fold, offset and supported fractional precision.
+- Initial scoped library Nextest passed 11/11 in 2.53 seconds. Corrected false duration precision rejection caused by f64 representation and blocked excess fractional clock digits before parsing. The focused correction run passed 5/5 in 2.26 seconds. Separate compilation ran 282.86 and 193.37 seconds under 900-second deadlines. Cached tests used 100-second deadlines; cleanup and output drain passed. Receipts are in `m6a-build`, `m6a-run`, `m6a-correction-build`, and `m6a-correction-run`.
+
+### M6-B calendar presentation
+
+- Show distinct zone/fold offsets and named weekdays, typed temporal comparison, and canonical versus formatted copy with current evaluation guards. Added eight calendar examples for 103 total; retained the original Variables group first for existing reference-window interactions.
+- After fixing the inferred index in a new comparison test (initial compile exit 101), scoped Nextest passed 14/14 with exit 0 in 3.31 seconds. The successful separate compile took 219.13 seconds. Tested canonical/Manual copy, hints, same-instant comparisons, all executable examples, and legacy reference-window search/copy. Cleanup and output drain passed. Receipts are in `m6b-build`, `m6b-correction-build`, and `m6b-correction-run`.
+
+### M7-A source capacity lifecycle
+
+- Standard evaluation remains 64 KiB/256 rows; Extended and absolute source admission use 256 KiB/2,048. Both records use a shared 4 MiB envelope. Physical rows remain distinct from runtime binding slots. GUI Extended uses the coalescing worker even without control flow. Undo keeps its existing entry and byte budget.
+- Initial compile exited 101 on a fixture calling private recovery store methods. The fixture now uses the production writer boundary. The correction also rejects oversized Find/Replace content atomically, including when the widget would otherwise truncate a paste. Preflight avoids analyzing over-profile Standard source before returning its diagnostic.
+- Scoped Nextest passed 19/19 with exit 0 in 2.90 seconds after a 317.37-second separate compile. It covers high rows, UTF-8 and trailing rows, profile retirement, save/reopen/recovery, exact source and stable IDs, atomic oversized edits, older versions and envelope checks. Cleanup and output drain passed. Receipts in `m7a-build`, `m7a-correction-build`, and `m7a-correction-run`.
+
+### M7-B usage and capacity
+
+- Added per-document profile controls, source/evaluation usage and independent 90% warnings. Large Results snapshots draw visible rows, including stale Extended results still displayed after switching to Standard. Navigation can jump to a physical row outside the painted range.
+- The initial measurement at 255,647 bytes and 2,000 rows showed about 482 ms for the first result frame, reduced to about 221 ms with visible-row rendering. A subsequent expanded-editor pass still took about 264 ms warmed and 636 ms across three offscreen-navigation frames. Based on those measurements, the Extended evaluation ceiling is 128 KiB and 1,024 physical rows. Text above it can still be edited, saved and reopened within the independent 256 KiB/2,048-row absolute admission limits. The 4 MiB serialized envelope and existing work/history limits remain in force.
+- Final deterministic headless observations in the same fast-dev profile: Standard, 62,751 bytes/248 rows, 10.38 ms folded typing, 18.52 ms calculation, 88.64 ms first populated frame. Extended, 130,638 bytes/1,000 rows, 22.81 ms folded typing, 70.13 ms worker calculation, 113.69 ms first populated frame, 112.83 ms warmed expanded frame, 304.79 ms across the three-frame offscreen jump. Extended process working set went from 29.07 MB to 35.14 MB. The fully expanded near-ceiling editor shows perceptible lag in this headless fixture. Windows interaction checks are pending.
+- Channel-controlled Extended worker cancellation and replacement passed at 130,999 bytes/1,000 rows in 144.06 ms end to end. The retired generation never published. Tests also cover byte/row admission boundaries, over-profile source saving/reopening, folding, Find, full-source Copy, navigation and result-basis isolation.
+- Focused library Nextest final batch passed 9/9 with exit 0, 2.05 seconds reported by Nextest and 4.21 seconds owned elapsed under the 100-second deadline. Separate final compile took 348.45 seconds under a 900-second deadline. Cleanup and output drain passed. Receipts: `m7b-build`, `m7b-correction-*`, `m7b-final-*`, `m7b-stale-*`, `m7b-editor-cache-*`, `m7b-validated-ceiling-*`.
+
+### M8-A rename planning and transaction
+
+- Static preview distinguishes document reassignment families from function-local parameters. It preserves active/inactive lexical spans, protected source, CRLF, physical references, actual conditional/loop/quantity/operator grammar and programmer radix notation. Conflicts, capture, malformed source, and oversized projections are checked before application.
+- Apply checks document identity, revision/run basis, current metadata and the plan. The one source edit preserves physical line IDs and the allocator. Source-aware input names and watches follow the rename with one Undo/Redo. Ephemeral watch identities preserve chains, independently pinned/removed watches and source history at full watch capacity. Saved metadata keeps its established persisted shape.
+- Initial focused library run passed 10/10. The first expanded contextual-alias run passed 10/11; its fixture used bare terminal `to` in a position where the legacy evaluator attempts a conversion. The corrected fixture uses valid punctuation-adjacent references, adds radix coverage, and passed 12/12. A separate destination safeguard braces `to` so a renamed reference cannot become an attempted conversion; exact before/after value checks and directly related regressions passed 6/6. Each cached run met the 100-second deadline, final elapsed 2.32 seconds; separate compiles met 900-second deadlines, final 181.52 seconds. Cleanup and output drain passed. Receipts: `m8a-*`, `m8a-correction-*`, `m8a-final-*`, `m8a-destination-*`.
+
+### M8-B editor rename interaction
+
+- Exposed editor-owned F2 and `Rename Variable…` on the right-clicked source name, including projected folded text. Preview shows the resolved scope and bounded before/after physical rows. An invalid or stale preview disables Apply. A retained current host transaction refreshes authoritative input/watch metadata, and normal Undo/Redo restores it.
+- The initial compile and first corrective compile identified two mismatched error-handler sites. After restoring the existing session error path, the batch passed 8/9, including F2 focus, Manual-mode Apply/Undo, stale and retired-host checks. The pointer test fixture rendered its next click after an empty injected Cancel frame; refresh of the actual editor geometry and hit targets fixed the fixture. The final directly affected Nextest batch passed 4/4, including real egui context-event targeting and the existing results context menu. Cached checks stayed within 100 seconds, final elapsed 2.69 seconds. Separate compiles stayed within 900 seconds, final elapsed 153.57 seconds. Cleanup and output drain passed. Receipts: `m8b-build`, `m8b-correction-build`, `m8b-final-*`, `m8b-context-*`. Native desktop evidence remains pending.
+
+### M9-A typed editable inputs
+
+- Source-backed descriptors carry exact numeric kind and original logical statement/span. Configuration persists on the selected stable input ID in v3, with conservative defaults for existing v1/v2/v3 documents and strict legacy v2 decoding. Saved bounds and positive steps validate against their type or authored unit. Labels and decorative suffixes survive source-type changes; incompatible numeric limits require review.
+- Draft validation retains fixed-width bounds and exact decimal precision, preserves wrappers, unit text, comments and CRLF, and reports out-of-range source without clamping it. Private projection uses the same literal slot without mutating the session. Ordinary bare radix source still follows the existing exact-scalar range; full-width values remain available through typed integer constructors.
+- Focused library Nextest passed 12/12 with exit 0, in 0.42 seconds reported by Nextest and 2.53 seconds owned elapsed. Separate compile took 353.75 seconds under its 900-second deadline. Tests cover old metadata, named save/reopen, rename, stale source/host Apply, long exact decimal, source spans and type/unit boundary. Cleanup and output drain passed. Receipts: `m9a-build` and `m9a-run`.
+
+### M9-B input controls
+
+- Editable Inputs now offer labels, descriptions, decorative suffixes, numeric ranges and steps, a field, step controls, or a bounded slider. Typed exact grids use small ordinal coordinates, including fixed integers above the exact-scalar range. A bare radix assignment keeps its existing ±2^53 magnitude ceiling. Unsuitable sliders retain the ordinary field.
+- Step and drag update drafts. Guarded Apply verifies the current document/revision, selected input/configuration and original logical statement before one source edit. It retains physical IDs even when adjacent reassignments become identical. Accepted changes use normal Manual/Automatic, recovery and history behavior. An out-of-range current value is flagged and remains in source.
+- Initial scoped library Nextest passed 8/8. A focused audit constrained bare-radix generated values and reused direct scalar token parsing in form validation. The final batch passed 9/9 with exit 0, 0.29 seconds reported by Nextest and 2.41 seconds owned elapsed. The separate final compile took 191.51 seconds. Each cached check met the 100-second deadline and compiles met 900 seconds. Cleanup and output drain passed. Receipts: `m9b-*` and `m9b-final-*`. Native desktop evidence remains pending.
+
+### M10-A sensitivity evaluation
+
+- Added one session-owned sensitivity lane using the main evaluator's coalescing transport. Its identity binds document, incarnation, source revision, semantic options, definition and analysis generation. Main same-revision Calculate runs have independent generations.
+- Generates indexed samples from exact authored grids, including decimal endpoints and descending unsigned inputs. Private projection varies one stable declaration, retains the authored type/unit and leaves main source, results, undo and dirty state alone. The C6 presentation bounds do not restrict the analysis range. Rows retain intended X, typed output data and cell diagnostics.
+- The 1,000-case/eight-output and 1,000,000-work caps apply to the full request, with a shared aggregate meter and bounded source preparation. Existing per-case evaluator limits remain in force. Canceled, superseded or aggregate-exhausted requests cannot publish a completed table.
+- Focused library Nextest passed 15/15 with exit 0, 0.72 seconds reported by Nextest and 2.95 seconds owned elapsed, including the five-row XP fixture, invalid cases, exact/unit scenarios, shared worker retirement and Manual isolation. The separate compile took 348.61 seconds. Cleanup and output drain passed. Receipts: `m10a-build` and `m10a-run`. The compiler flagged the retained older atomic update name on the current toolchain. Final scoped lints remain pending.
+
+### M10-B sensitivity panel, metadata and export
+
+- Config Menu now offers an independently hideable, initially collapsed Sensitivity Tables section. Stable input ID/name, named outputs and sampling options persist together. Current results and progress remain transient. The table draws visible rows, and a completed typed snapshot is available to the next Charts checkpoint.
+- Accepted Generate, Cancel and Copy respect source, definition, semantic options and owner freshness. TSV, CSV and Markdown preserve intended input values, exact output values, real units and per-cell diagnostics. Export runs on the accepted Copy action.
+- Sensitivity references follow a source rename. Granular replay preserves later range/selection edits, uses stable ephemeral identities for chained sensitivity outputs and watches, and releases a hidden selection when a collision clears.
+- Initial scoped library Nextest passed 14/14. The final expanded history/host/persistence selection passed 19/19 with exit 0, 0.77 seconds reported by Nextest and 23.37 seconds owned elapsed. Its separate compile took 248.65 seconds. Cached and compile deadlines remained 100 and 900 seconds. Cleanup and output drain passed. Receipts: `m10b-*` and `m10b-final-*`. Native desktop evidence remains pending.
+
+### M11-A chart models and raster
+
+- Added bounded typed vector/sensitivity adapters, shared line/bar/scatter scene, stable view transforms, unit normalization, explicit gaps, exact and round-trip tooltip text, and approximation/collision disclosure. Axis coordinates and chart-only raster work are checked before drawing.
+- Initial scoped library Nextest passed 6/6. Inspection of the first PNG showed that the 1-pixel annotation stroke skipped integer-coordinate axes. The corrected shared scene uses visible axis/tick strokes. Final focused selection passed 5/5, including actual axis pixels, aligned labels, and absence of a line across a missing row. The corrected sample image `target/calc-pad-and-file-search-evidence/m11a-final-chart.png` was opened and inspected.
+- The final compile completed with exit 0 in 208.26 seconds and drained output. Its wrapper initially could not verify one observed process after exit. A read-only Windows PID/creation-time comparison confirmed the ID had been reused by a different system process, and no Cargo/compiler process remained. The completed build was reused for the final cached run, which passed with exit 0 in 2.64 seconds and verified cleanup/output drain. Receipts: `m11a-*` and `m11a-final-*`. Native viewport and clipboard checks remain pending.
+
+### M11-B Charts companion
+
+- Config Menu offers a parent-owned Charts companion with existing dock/pop-out and size/presentation persistence. It observes current Pad and sensitivity snapshots, reports stale or unavailable data, and resets transient view on document changes. Cached typed data and the shared chart scene serve both screen and copy. The same chart supports line/bar/scatter, source and visible series selection, axis labels and real units, bar labels, pan/zoom/reset and raw tooltips.
+- One bounded chart definition persists per named Pad. Observable image copy uses the retained owner, current source/definition stamps and the chart-only raster path. Chart selections follow source rename transactions and retain independent later output selections. Closing the Pad retires its Charts host.
+- Initial library compile exited 101 because the tracked Panel array count needed updating. The correction compile passed in 381.33 seconds. Scoped Nextest passed 12/12 with exit 0, 0.44 seconds reported by Nextest and 2.65 seconds owned elapsed. Verification covers chart source and owner guards, injected clipboard success/failure, type/quantity and raster models, definition round-trip, name history, and neighboring retained actions. Cleanup and output drain passed. Receipts: `m11b-build`, `m11b-correction-build`, and `m11b-correction-run`. Windows desktop interaction remains pending.
+
+### M12-A typed File Search filters
+
+- Added semantic date and size preferences with disabled defaults and a separate frozen request predicate. Calendar windows use local day boundaries from one captured zone, and rolling windows use an elapsed duration from one submission instant. The IANA zone lookup uses the already locked version as a direct dependency.
+- Decimal byte boundaries use checked integer arithmetic through `u64::MAX`. Equivalent authored units compare by their effective bytes, while stored text and preferences remain available for editing. Size filtering effectively searches files, and the independent content-reading cap yields explicit impossible or partial-intersection feedback.
+- Same-result content drill-down preserves the frozen metadata window while retaining the ordinary form criterion baseline. Dirty-state checks use semantic settings without a clock.
+- Initial library Nextest passed 35/35. The final narrower semantic/window selection passed 6/6 in 2.25 seconds owned elapsed after a 178.06-second separate compile. `cargo check -p multi_launcher --test domain --profile fast-dev --locked` passed in 148.76 seconds. All cached runs met 100 seconds, compiles met 900 seconds, and cleanup/output drain passed. Receipts: `m12a-*`, `m12a-final-*`, and `m12a-domain-check`.
+
+### M12-B File Search result admission
+
+- Apply one frozen metadata predicate before accepted filename/content result accounting in WalkDir, native content and both ripgrep paths. The streaming content parser decides eligibility on a group's first match and retains bounded parse/error behavior. Explicit-file scopes keep their stable cap slots. Date-rejected directories still allow eligible descendants.
+- Required metadata missing from otherwise eligible candidates produces bounded aggregate diagnostics. Metadata requests that would use the Everything index run through WalkDir and surface the filesystem policy. The direct Everything adapter rejects filtered requests before executable discovery. Unfiltered indexed plans retain their established route.
+- Initial scoped library Nextest passed 94/95. The failing Windows fixture compared a canonical result path with the uncanonicalized fixture path. The final affected selection passed 5/5 in 2.27 seconds owned elapsed after a 191.47-second separate compile. The real `domain` target filtered to `file_search_e2e` passed 9/9 in 2.31 seconds owned elapsed after its 302.26-second compile. Cached checks met 100 seconds, compiles met 900 seconds; cleanup and output drain passed. Receipts: `m12b-lib-*`, `m12b-final-lib-*`, and `m12b-domain-*`.
+
+### M12-C File Search filter controls
+
+- Filters now offer independent collapsed Date Modified and File Size controls, visible active summaries, reset actions and Jump Mode targets. Size-active searches use the effective Files Only type and retain the selected ordinary type preference for later use. Field validation runs without a clock, and Search resolves the actual date window.
+- Semantic criteria edits flow through the existing retained preference owner and preserve submitted rows and search state. The UI explains the independent content scan cap and the filesystem route for requests that would otherwise use the Everything index. The in-app help and README document the same behavior.
+- Scoped library Nextest passed 29/29 with exit 0, 0.74 seconds reported by Nextest and 2.87 seconds owned elapsed after a 377.39-second separate compile. The tests include actual filter actions, owner gating, independent resets, type retention, old settings, scoped File Search behavior and frozen drill-down. Cleanup and output drain passed. Receipts: `m12c-build` and `m12c-run`. Native interaction remains pending.
+
+### M13-A consolidated checks and native acceptance
+
+- Linked the expanded guide and added a 104th executable example combining a multiline formula with conditional loop flow. Added cross-feature tests for local rename/Undo, Manual freshness, sensitivity and chart isolation. The Calc Pad library run initially passed 357/360. Three deterministic fixture mismatches were corrected for logical grouping, the executed loop row aggregate, and canonical reopen identity. The focused rerun passed 7/7, including all three affected cases. The full first pass and the focused rerun together account for all 360 Calc Pad cases.
+- The File Search library run passed 378/378, and the actual `domain` File Search selection passed 15/15. The owned cached run times were 21.40 seconds (Calc Pad), 2.49 (corrections), 16.70 (File Search library), and 2.38 (File Search domain), each within 100 seconds. Separate compiles took 189.79, 171.77, and 190.46 seconds, each within 900 seconds. Nextest used the `fast-dev` profile, Cargo offline mode, one build job/test thread, and the isolated fixtures. `Cargo.lock` stayed unchanged during the consolidated runs. The File Search library wrapper could not inspect one PID at exit. An independent Windows process identity check established that the PID had already been reused by `SearchFilterHost.exe`; the test exited 0 and output drained. Receipts are under `target/calc-pad-and-file-search-evidence/m13a-*`.
+- The domain build also produced the current native launcher. Both native launches used that binary with `dev/run_owned_process.ps1`, a visible window, and an isolated profile with Paste Sequences Next and Cancel hotkeys disabled. The initial launcher was visible to Windows and its accessibility tree exposed the query field. The capture reported `FrameArrived timed out: timed out waiting on channel`, an indexed click reported `coordinate input geometry is unavailable`, and keyboard input populated the query with the internal token `calc:pad`; the supported launcher search is `calc pad`. No feature opened. Alt+F4 closed that owned test window (exit 0). The second launch used accessibility-first targeting. The launcher HWND enumerated, but initial and reselected targeting both reported `foreground window did not report a process id`. The matching owned test process was stopped, with cleanup and output drain verified for both launches. Receipts: `m13-native-owned`, `m13-native-accessibility`.
+- Native acceptance is environment-blocked for all six H3 scenarios: Manual and input controls; language, F2, physical navigation and exact/date clipboard; sensitivity exports and Charts clipboard; stale state, pop-out/dock/focus/close and pending document switches; Extended editing/save/reopen/opt-in recovery; and File Search badges, cap/backend notice, content and preferences. The headless chart PNG and retained host/clipboard tests remain automated evidence. The app launch, keyboard query entry, and first window close are partial environment evidence only. The two-attempt budget is exhausted.
+
+### M13-B independent review and remediation
+
+- The configured reviewer examined `aeec0fb900364a6018cade76a1017fb2deeaa469..c532e4ec0c7f30ae4b2f4caa8f706c4fa1221118` read-only. The review followed the lexer, branch and typed-value execution, rename and history, Manual publication, persistence, analysis/host ownership and File Search predicate paths. It reported five actionable findings.
+- Chart popups now retain input ownership for the chart's own visible controls on docked and pop-out hosts, with viewport and layer checks. The egui test clicks X, Y-vector and Y-output controls over separate frames and verifies that an unrelated popup has no chart ownership. The bar adapter overlays saved labels at matching positions and retains defaults for new points.
+- File Search restores legacy stop-at-cap behavior without active metadata while a filtered search checks for an extra eligible match. Metadata-filtered explicit-file content requests use the existing Native backend and disclose the independent read cap. The direct ripgrep boundary rejects that unsupported filtered scope before launching. Unfiltered routing stays as before.
+- The proposed sensitivity repro with a bare hexadecimal input above 2^53 was outside the legacy scalar parser's admission range. Preserve radix for valid temporary inputs, verify exact export at 2^53, and retain a diagnostic row for the next unrepresentable sample. The test does not change numeric admission. Replaced the sensitivity aggregate meter's deprecated atomic operation with bounded compare-exchange using the same accounting.
+- Initial focused library Nextest passed 11/12 at 2.85 seconds owned elapsed after a 268.03-second compile. The single failure was the out-of-range fixture at input discovery. The corrected sensitivity/aggregate/Charts library selection passed 4/4 at 2.60 seconds after a 192.79-second compile. The File Search domain `test(file_search_e2e)` selection passed 10/10 at 2.39 seconds after a 158.44-second compile. All used `--locked`, `fast-dev` and one build job/test thread. Cached runs met 100 seconds; compiles met 900 seconds. Cleanup and output drain were verified. Receipts: `m13b-fixes-lib-*`, `m13b-corrected-lib-*`, and `m13b-fixes-domain-*`.
+- `cargo clippy -p multi_launcher --lib --bin multi_launcher --no-deps --profile fast-dev --locked` exited 0 in 126.36 seconds within its 900-second deadline, with cleanup and output drain verified. It reported 120 library and three binary warnings, plus dependency compiler warnings. These include existing application warnings and advisory diagnostics in touched code (vector append, branch style, and large types). No lint was suppressed for this pass. The run did not require a repository-wide lint cleanup. Receipt: `m13b-clippy`.
+- All thirteen features are implemented and automated verification is complete within the selected scope. Windows feature interaction remains environment-blocked for the six scenarios recorded above. The remediation was verified with automated checks. Both exhausted native attempts used the M13-A build. The final tip must be read after the separate native-limit reporting commit. The next Goal's branch uses that exact tip as its direct parent.

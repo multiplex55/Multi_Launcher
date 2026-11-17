@@ -47,6 +47,7 @@ pub struct NativeSearchSummary {
     pub global_truncated: bool,
     pub inaccessible_count: u64,
     pub inaccessible_paths: Vec<InaccessiblePathDetail>,
+    pub metadata_unavailable: u64,
 }
 
 const INACCESSIBLE_SAMPLE_LIMIT: usize = 100;
@@ -71,6 +72,9 @@ pub fn search_content_native(
             id,
             diagnostic: SearchDiagnostic::InaccessiblePath(detail),
         });
+    }
+    if summary.metadata_unavailable > 0 {
+        let _ = events.send(SearchEvent::Diagnostic { id, diagnostic: SearchDiagnostic::Warning(format!("Metadata unavailable for {} files; they were excluded by the active filters.", summary.metadata_unavailable)) });
     }
     for result in summary.results.iter().cloned() {
         if cancellation.is_cancelled() {
@@ -133,7 +137,7 @@ pub fn search_content_native_summary(
             summary.cancelled = true;
             break;
         }
-        if summary.results.len() >= request.max_results {
+        if !request.metadata.active() && summary.results.len() >= request.max_results {
             summary.global_truncated = true;
             break;
         }
@@ -145,6 +149,7 @@ pub fn search_content_native_summary(
             &matcher,
             &mut summary,
         ) {
+            if summary.results.len() >= request.max_results { summary.global_truncated = true; break; }
             summary.results_found += 1;
             summary.results.push(result);
         }
@@ -313,6 +318,7 @@ fn search_file(
     let meta = match fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) => {
+            if request.metadata.active() { summary.metadata_unavailable = summary.metadata_unavailable.saturating_add(1); }
             record_inaccessible(
                 summary,
                 InaccessiblePathDetail {
@@ -326,6 +332,11 @@ fn search_file(
     };
     if !meta.is_file() || meta.len() > request.max_file_size_bytes {
         return None;
+    }
+    match crate::file_search::predicate::metadata_matches(&request.metadata, Some(&meta)) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(_) => { summary.metadata_unavailable = summary.metadata_unavailable.saturating_add(1); return None; }
     }
     summary.files_scanned += 1;
     if cancellation.is_cancelled() {
@@ -354,7 +365,7 @@ fn search_file(
         SearchScope::Files { .. } => usize::MAX,
         _ => settings.max_matches_per_content_file,
     };
-    let mut builder = ContentFileResultBuilder::new(path.to_path_buf(), display_limit);
+    let mut builder = ContentFileResultBuilder::with_modified(path.to_path_buf(), display_limit, meta.modified().ok());
     let mut buf = Vec::new();
     let mut line_number = 0;
     loop {
@@ -495,6 +506,7 @@ mod tests {
             content_match_mode: ContentMatchMode::ExactPhrase,
             whole_word: false,
             file_type_filter: FileTypeFilter::FilesOnly,
+            metadata_preferences: Default::default(), metadata: Default::default(),
         }
     }
     fn run(request: SearchRequest) -> NativeSearchSummary {
@@ -504,6 +516,42 @@ mod tests {
             &CancellationToken::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn metadata_rejected_file_does_not_consume_content_cap() {
+        use crate::file_search::predicate::SizePredicate;
+        let d = tempdir().unwrap();
+        let small = d.path().join("small.txt"); let large = d.path().join("large.txt");
+        write(&small, b"hit"); write(&large, b"hit plus");
+        let mut request = req(d.path().into(), "hit");
+        request.scope = SearchScope::Files { files: vec![small, large.clone()] };
+        request.max_results = 1;
+        request.metadata.size = Some(SizePredicate::LargerThan(3));
+        let summary = run(request.clone());
+        assert_eq!(summary.results.len(), 1);
+        assert_eq!(summary.results[0].path, large);
+        assert!(!summary.global_truncated);
+        let extra = d.path().join("extra.txt"); write(&extra, b"hit more too");
+        request.scope = SearchScope::Files { files: vec![large, extra] };
+        assert!(run(request).global_truncated);
+    }
+
+    #[test]
+    fn unfiltered_cap_stops_before_extra_file_but_filtered_checks_matching_extra() {
+        let d = tempdir().unwrap();
+        let first = d.path().join("first.txt"); let second = d.path().join("second.txt");
+        write(&first, b"hit"); write(&second, b"other");
+        let mut request = req(d.path().into(), "hit");
+        request.scope = SearchScope::Files { files: vec![first, second] };
+        request.max_results = 1;
+        let unfiltered = run(request.clone());
+        assert_eq!(unfiltered.files_scanned, 1);
+        assert!(unfiltered.global_truncated);
+        request.metadata.size = Some(crate::file_search::predicate::SizePredicate::LargerThan(0));
+        let filtered = run(request);
+        assert_eq!(filtered.files_scanned, 2);
+        assert!(!filtered.global_truncated);
     }
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
