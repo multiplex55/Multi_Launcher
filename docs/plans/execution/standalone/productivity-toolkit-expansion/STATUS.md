@@ -24,7 +24,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-B1 | complete |
 | M4-B2A | complete |
 | M4-B2B | complete |
-| M4-B3, M4-C | pending |
+| M4-B3A | complete |
+| M4-B3B, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -158,3 +159,12 @@ Independent review confirmed the tick corrections. Existing test-build warnings 
 M4-B2A was pushed at b15ac8822ffe25551c0e72d7643aa722305b1559. Chart title, legend placement, per-series color/style/marker/thickness and literal reference lines are part of the shared scene. Reference geometry accepts named values through a typed ID-to-value seam for B3. Dash phase carries through dense connected segments, and axis label formatting respects display bounds and log scale.
 
 The initial focused fast-dev library Nextest passed 13 of 13. After independent review corrections the final focused run passed 14 of 14, covering dense dashes, scale-aware log labels, new shared raster/reference primitives, and legacy parity. Review rechecked both findings, and diff whitespace verification passed.
+
+
+## M4-B3A current named reference values
+
+M4-B2B was pushed at 721334455e155cb5b633cca37eb3b4e3aa006029. Its initial and final commands were cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::tests::chart_)'.
+
+The Charts companion now resolves labeled named lines from current committed evaluation bindings, passes resolved IDs into the shared scene, and includes the matching evaluation basis when a sensitivity chart uses named values. Cached scene and Copy actions are fenced against stale data, definitions and ownership. The default and literal-only routes retain their existing behavior. Rename and style lifetimes remain M4-B3B.
+
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_)' passed 9 of 9. Independent review found no substantive freshness issue. Diff whitespace verification passed.

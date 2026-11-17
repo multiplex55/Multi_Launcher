@@ -183,6 +183,10 @@ fn numeric(
     })
 }
 
+pub(crate) fn scalar_reference_coordinate(value: &CalculationValue) -> Result<f64, String> {
+    numeric(value, None).map(|value| value.coordinate)
+}
+
 fn is_quantity(value: &CalculationValue) -> bool {
     matches!(
         value,

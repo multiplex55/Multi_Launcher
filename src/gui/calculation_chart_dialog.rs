@@ -1,12 +1,12 @@
 //! Read-only chart companion; actions are committed by its retained utility host.
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
-use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
+use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
 use eframe::egui;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ChartStamp { Evaluation(EvaluationBasis), Sensitivity(SensitivityBasis) }
+pub(super) enum ChartStamp { Evaluation(EvaluationBasis), Sensitivity(SensitivityBasis), SensitivityWithEvaluation(SensitivityBasis, EvaluationBasis) }
 
 #[derive(Clone)]
 pub(super) struct ChartRuntime {
@@ -36,6 +36,7 @@ struct ChartCache {
     stamp: ChartStamp,
     definition: ChartDefinition,
     dataset: Arc<ChartDataset>,
+    references: Vec<ResolvedReferenceLine>,
     scene: Option<(ChartView, u32, u32, Arc<ChartScene>)>,
 }
 
@@ -158,7 +159,10 @@ impl CalculationChartDialog {
                 let mut cache = self.cache.borrow_mut();
                 if cache.as_ref().is_none_or(|cache| cache.stamp != stamp || cache.definition != definition) {
                     match chart_data(runtime, &definition) {
-                        Ok((_, dataset)) => *cache = Some(ChartCache { stamp: stamp.clone(), definition: definition.clone(), dataset: Arc::new(dataset), scene: None }),
+                        Ok((_, dataset)) => match resolve_references(runtime, &definition) {
+                            Ok(references) => *cache = Some(ChartCache { stamp: stamp.clone(), definition: definition.clone(), dataset: Arc::new(dataset), references, scene: None }),
+                            Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); return; }
+                        },
                         Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); return; }
                     }
                 }
@@ -191,7 +195,10 @@ impl CalculationChartDialog {
             let scene = {
                 let mut cache = self.cache.borrow_mut();
                 let cached = cache.as_ref().and_then(|cache| cache.scene.as_ref()).filter(|(old, w, h, _)| *old == view && *w == width && *h == height).map(|(_, _, _, scene)| Arc::clone(scene));
-                if let Some(scene) = cached { Ok(Some(scene)) } else { dataset.scene_for_definition(&definition, view, width, height).map(|scene| scene.map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene })) }
+                if let Some(scene) = cached { Ok(Some(scene)) } else {
+                    let references = cache.as_ref().map(|cache| cache.references.as_slice()).unwrap_or_default();
+                    dataset.scene_for_definition_with_references(&definition, references, view, width, height).map(|scene| scene.map(|scene| { let scene = Arc::new(scene); if let Some(cache) = cache.as_mut() { cache.scene = Some((view, width, height, Arc::clone(&scene))); } scene }))
+                }
             };
             match scene {
                 Ok(Some(scene)) => {
@@ -217,7 +224,32 @@ impl CalculationChartDialog {
 }
 
 pub(super) fn chart_stamp(runtime: &ChartRuntime, definition: &ChartDefinition) -> Option<ChartStamp> {
-    match &definition.source { ChartSource::Vectors { .. } => runtime.evaluation.as_ref().filter(|value| Some(value.basis) == runtime.basis).map(|value| ChartStamp::Evaluation(value.basis)), ChartSource::Sensitivity { .. } => runtime.table.as_ref().map(|value| ChartStamp::Sensitivity(value.basis.clone())) }
+    let evaluation = || runtime.evaluation.as_ref().filter(|value| Some(value.basis) == runtime.basis);
+    match &definition.source {
+        ChartSource::Vectors { .. } => evaluation().map(|value| ChartStamp::Evaluation(value.basis)),
+        ChartSource::Sensitivity { .. } => {
+            let table = runtime.table.as_ref()?;
+            if definition.options.references.iter().any(|reference| matches!(reference.value, ChartReferenceValue::Named(_))) {
+                let evaluation = evaluation()?;
+                if table.basis.document != evaluation.basis.document || table.basis.incarnation != evaluation.basis.incarnation || table.basis.revision != evaluation.basis.revision { return None; }
+                Some(ChartStamp::SensitivityWithEvaluation(table.basis.clone(), evaluation.basis))
+            } else { Some(ChartStamp::Sensitivity(table.basis.clone())) }
+        }
+    }
+}
+
+fn resolve_references(runtime: &ChartRuntime, definition: &ChartDefinition) -> Result<Vec<ResolvedReferenceLine>, String> {
+    let mut resolved = Vec::new();
+    for reference in &definition.options.references {
+        let ChartReferenceValue::Named(name) = &reference.value else { continue; };
+        let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current chart reference results are unavailable or outdated.")?;
+        if evaluation.diagnostic.is_some() { return Err("Current chart reference evaluation failed.".into()); }
+        let binding = evaluation.final_bindings.get(name).ok_or_else(|| format!("Chart reference '{name}' is unavailable."))?;
+        let LineOutcome::Value(value) = &binding.outcome else { return Err(format!("Chart reference '{name}' failed or has no value.")); };
+        let value = crate::calculation_pad::scalar_reference_coordinate(value).map_err(|error| format!("Chart reference '{name}': {error}"))?;
+        resolved.push(ResolvedReferenceLine { id: reference.id, value });
+    }
+    Ok(resolved)
 }
 
 pub(super) fn actions_current(actions: &ChartActions, runtime: &ChartRuntime) -> bool {
@@ -228,17 +260,19 @@ pub(super) fn actions_current(actions: &ChartActions, runtime: &ChartRuntime) ->
 }
 
 pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -> Result<(ChartStamp, ChartDataset), String> {
-    let (stamp, mut dataset) = match &definition.source {
+    let stamp = chart_stamp(runtime, definition).ok_or("Chart data is unavailable or outdated.")?;
+    resolve_references(runtime, definition)?;
+    let mut dataset = match &definition.source {
         ChartSource::Vectors { x, y } => {
             let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current vector results are unavailable or outdated.")?;
             let x = x.as_ref().map(|reference| resolve_vector(evaluation, reference)).transpose().map_err(|error| format!("X vector: {error}"))?.map(|(_, values)| values);
             let vectors = y.iter().map(|reference| resolve_vector(evaluation, reference)).collect::<Result<Vec<_>, _>>().map_err(|error| format!("Y vector: {error}"))?;
-            (ChartStamp::Evaluation(evaluation.basis), ChartDataset::from_vectors(x, &vectors)?)
+            ChartDataset::from_vectors(x, &vectors)?
         }
         ChartSource::Sensitivity { outputs } => {
             let table = runtime.table.as_ref().ok_or("The current sensitivity table is unavailable.")?;
             let columns = outputs.iter().map(|name| table.basis.definition.outputs.iter().position(|output| output == name)).collect::<Option<Vec<_>>>().ok_or("A selected sensitivity output is unavailable.")?;
-            (ChartStamp::Sensitivity(table.basis.clone()), ChartDataset::from_sensitivity(table, &columns)?)
+            ChartDataset::from_sensitivity(table, &columns)?
         }
     };
     if !definition.x_label.is_empty() { dataset.x_label = definition.x_label.clone(); }
@@ -312,6 +346,43 @@ fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_named_reference_uses_current_evaluation_and_sensitivity_stamp() {
+        use crate::calculation_pad::{ChartReferenceAxis, ChartReferenceLine, DocumentOptions, Sampling, SensitivityDefinition};
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]\ntarget = 1\ntarget = 2").unwrap();
+        session.evaluation();
+        let basis = session.evaluation_basis().unwrap();
+        let sensitivity = SensitivityBasis { document: basis.document, incarnation: basis.incarnation, revision: basis.revision, options: DocumentOptions::default(), definition: SensitivityDefinition { input: session.line_id(1).unwrap(), start: "1".into(), end: "2".into(), sampling: Sampling::Count(2), outputs: vec!["target".into()] }, input_name: "target".into(), generation: 1 };
+        let table = Arc::new(SensitivityTable { basis: sensitivity, input_kind: crate::calculation_pad::InputKind::Scalar, rows: Vec::new(), work_units: 0 });
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), options: Default::default() };
+        definition.options.references.push(ChartReferenceLine { id: 1, axis: ChartReferenceAxis::Y, value: ChartReferenceValue::Named("target".into()), label: "target".into() });
+        definition.options.next_reference_id = 2;
+        let mut runtime = ChartRuntime { identity: Some((basis.document, basis.incarnation)), evaluation: session.shared_evaluation(), table: Some(table), definition: Some(definition.clone()), basis: Some(basis), pad_host: None, pinned: false };
+        assert_eq!(resolve_references(&runtime, &definition).unwrap()[0].value, 2.0);
+        assert!(chart_data(&runtime, &definition).is_ok());
+        let vector_stamp = chart_stamp(&runtime, &definition).unwrap();
+        definition.source = ChartSource::Sensitivity { outputs: vec!["target".into()] };
+        assert!(matches!(chart_stamp(&runtime, &definition), Some(ChartStamp::SensitivityWithEvaluation(_, _))));
+        Arc::make_mut(runtime.table.as_mut().unwrap()).basis.revision += 1;
+        assert!(chart_stamp(&runtime, &definition).is_none());
+        Arc::make_mut(runtime.table.as_mut().unwrap()).basis.revision -= 1;
+        let mut stale = basis; stale.revision += 1;
+        runtime.basis = Some(stale);
+        assert!(chart_stamp(&runtime, &definition).is_none());
+        assert!(chart_data(&runtime, &definition).is_err());
+        assert_ne!(chart_stamp(&runtime, &definition), Some(vector_stamp));
+        definition.options.references.clear();
+        assert!(matches!(chart_stamp(&runtime, &definition), Some(ChartStamp::Sensitivity(_))));
+        runtime.basis = Some(basis);
+        definition.options.references.push(ChartReferenceLine { id: 2, axis: ChartReferenceAxis::Y, value: ChartReferenceValue::Named("v".into()), label: String::new() });
+        assert!(resolve_references(&runtime, &definition).is_err());
+        definition.options.references[0].value = ChartReferenceValue::Named("missing".into());
+        assert!(resolve_references(&runtime, &definition).unwrap_err().contains("unavailable"));
+    }
 
     fn chart_frame(ctx: &egui::Context, dialog: &mut CalculationChartDialog, runtime: &mut ChartRuntime, events: Vec<egui::Event>) -> ChartActions {
         let base = dialog.popup_anchors.first().map(|(_, layer)| *layer);

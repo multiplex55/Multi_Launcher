@@ -67,6 +67,10 @@ pub(crate) use persistence::{PadViewMetadata, PadInputReference, SensitivitySett
 pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
 pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
 pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ResolvedReferenceLine, ScenePrimitive};
+pub(crate) use chart::scalar_reference_coordinate;
+pub(crate) use chart::options::ReferenceValue as ChartReferenceValue;
+#[cfg(test)]
+pub(crate) use chart::options::{ReferenceAxis as ChartReferenceAxis, ReferenceLine as ChartReferenceLine};
 pub(crate) use sensitivity::{TableExport, export_table, table_header, table_row};
 pub(crate) use input::{step_value, slider_values, exact_grid, exact_grid_value, project as project_input};
 pub use persistence::{
