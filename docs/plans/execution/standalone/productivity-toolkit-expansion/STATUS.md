@@ -14,7 +14,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | --- | --- |
 | M0-A | complete |
 | M0-B | complete |
-| M1-A | pending |
+| M1-A | complete, with interactive smoke pending |
 | M2-A, M2-B | pending |
 | M3-A, M3-B, M3-C | pending |
 | M4-A, M4-B, M4-C | pending |
@@ -59,3 +59,13 @@ Use existing Pad/vector/archive and Markdown source and asset limits. New tools 
 - Source differences from the planning reference include minor ZIP and archive lint corrections. The exact parent has an inherited clean-build defect: drawio.rs has a test-time include of a missing archived fixture. Master already repairs it with a source-adjacent fixture. Adopt that narrow test fixture repair before library Nextest, independently of feature code.
 
 No application build was run in M0-B. The Nextest binary is 0.9.135 and the active Rust toolchain is 1.99.1.
+
+## M1-A ZIP destination
+
+M0-B was pushed at 8ec6cbb23ce014163dc817616de0ba76f7a00e4d. The narrow test fixture repair was pushed at 4e7e6b101d18f4030dd4e143a9571ada6d656a4a.
+
+The ZIP dialog suggests the adjacent stem for a newly selected archive, retains same-source manual overrides and exposes the exact reviewed layout. The session carries held directory authority through preview, and confirmation creates the initially vacant root exclusively relative to its held parent. A competing root is preserved. Terminal results account for root creation even if a later operation fails. Rejected proof is discarded so another explicit preview can check the current destination.
+
+The first targeted library Nextest run passed 10 cases. The final scoped run passed 12 of 12 after review corrections, covering derived names, canceled and stale pickers, no write before confirmation, exact nested extraction, competitor survival and retry. Runner flags: cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1, with archive/session and ZIP GUI test filters. Each test had a 100-second cap after compilation. The initial sandboxed cargo check could not access the build lock; the elevated test build passed. Independent follow-up review closed all four ZIP findings. Staged diff whitespace check passed.
+
+The Windows filesystem and retained dialog tests ran. Standalone application picker smoke remains part of the native evidence work. Disposable settings and ZIP fixtures are ready under target/productivity-toolkit-expansion-evidence/m1a.

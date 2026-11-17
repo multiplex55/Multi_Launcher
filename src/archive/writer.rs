@@ -19,7 +19,7 @@ use super::ArchiveCatalog;
 use super::crc32::Crc32;
 use super::model::{ArchiveEntry, ArchiveEntryId, ArchiveRevision, EntryCompression, EntryKind};
 use super::native::{
-    NativeArchiveDestination, NativeArchiveError, NativeArchiveSource, OwnedStage,
+    NativeArchiveDestination, NativeArchiveError, NativeArchiveSource, NativeArchiveTarget, OwnedStage,
 };
 use super::native_io::ArchiveIoControl;
 use super::plan::{ExtractionPlan, PlannedOutput};
@@ -91,6 +91,7 @@ pub(crate) struct ArchiveWriteReport {
     pub cancelled_entry: Option<ArchiveEntryId>,
     pub unstarted_entries: Vec<ArchiveEntryId>,
     pub created_directories: usize,
+    pub created_destination_root: bool,
     pub actual_bytes_written: u64,
     pub failure: Option<(ArchiveWriteFailureKind, String)>,
     pub cleanup_failed: bool,
@@ -318,14 +319,14 @@ impl ArchiveWriteJob {
         destination: NativeArchiveDestination,
         cancellation: ScanCancellation,
     ) -> io::Result<Self> {
-        Self::start_shared(source, Arc::new(catalog), plan, destination, cancellation)
+        Self::start_shared(source, Arc::new(catalog), plan, destination.into(), cancellation)
     }
 
     pub(crate) fn start_shared(
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         cancellation: ScanCancellation,
     ) -> io::Result<Self> {
         Self::start_with_shared_control_and_hooks(
@@ -343,7 +344,7 @@ impl ArchiveWriteJob {
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         cancellation: ScanCancellation,
         gate: Arc<WriterTestGate>,
     ) -> io::Result<Self> {
@@ -389,7 +390,7 @@ impl ArchiveWriteJob {
             source,
             Arc::new(catalog),
             plan,
-            destination,
+            destination.into(),
             io,
             test_hooks,
         )
@@ -399,7 +400,7 @@ impl ArchiveWriteJob {
         source: NativeArchiveSource,
         catalog: Arc<ArchiveCatalog>,
         plan: ExtractionPlan,
-        destination: NativeArchiveDestination,
+        destination: NativeArchiveTarget,
         io: ArchiveIoControl,
         test_hooks: WriterTestHooks,
     ) -> io::Result<Self> {
@@ -441,7 +442,9 @@ impl ArchiveWriteJob {
                         ArchiveWriteFailureKind::WorkerPanicked,
                         "archive writer worker panicked".to_owned(),
                     ));
-                    report.status = if report.published_entries.is_empty() {
+                    report.status = if report.published_entries.is_empty()
+                        && !report.created_destination_root
+                    {
                         ArchiveWriteStatus::Failed
                     } else {
                         ArchiveWriteStatus::Partial
@@ -537,6 +540,7 @@ impl ArchiveWriteJob {
                     cancelled_entry: None,
                     unstarted_entries: Vec::new(),
                     created_directories: 0,
+                    created_destination_root: false,
                     actual_bytes_written: progress.actual_bytes_written,
                     failure: Some((
                         ArchiveWriteFailureKind::WorkerPanicked,
@@ -577,6 +581,7 @@ impl ArchiveWriteReport {
             cancelled_entry: None,
             unstarted_entries: Vec::new(),
             created_directories: 0,
+            created_destination_root: false,
             actual_bytes_written: 0,
             failure: None,
             cleanup_failed: false,
@@ -618,7 +623,7 @@ fn execute_pipeline(
     mut source: NativeArchiveSource,
     catalog: &ArchiveCatalog,
     plan: ExtractionPlan,
-    destination: NativeArchiveDestination,
+    destination: NativeArchiveTarget,
     control: &ArchiveWriteJobControl,
     report: &mut ArchiveWriteReport,
 ) {
@@ -704,14 +709,27 @@ fn execute_pipeline(
         report.status = ArchiveWriteStatus::Cancelled;
         return;
     }
-    if let Err(error) = destination.verify_identity() {
-        set_pipeline_failure(report, PipelineFailure::native(error, None));
+    if !control.admit_publication() {
+        report.status = ArchiveWriteStatus::Cancelled;
         return;
     }
-
+    let materialized = destination.materialize(&mut report.created_destination_root);
+    control.finish_publication();
+    report.created_directories += usize::from(report.created_destination_root);
+    let destination = match materialized {
+        Ok(result) => result,
+        Err(error) => {
+            set_pipeline_failure(report, PipelineFailure::native(error, None));
+            return;
+        }
+    };
     for output in plan.directories() {
         if control.is_cancelled() {
-            report.status = ArchiveWriteStatus::Cancelled;
+            report.status = if report.created_destination_root {
+                ArchiveWriteStatus::Partial
+            } else {
+                ArchiveWriteStatus::Cancelled
+            };
             return;
         }
         let (_, created) = match destination.ensure_directory_path(output.path()) {
@@ -1640,12 +1658,12 @@ fn set_pipeline_failure(report: &mut ArchiveWriteReport, failure: PipelineFailur
     report.cleanup_failed = failure.cleanup_failed;
     let cancelled = failure.kind == ArchiveWriteFailureKind::Cancelled;
     report.status = if cancelled {
-        if report.published_entries.is_empty() {
+        if report.published_entries.is_empty() && !report.created_destination_root {
             ArchiveWriteStatus::Cancelled
         } else {
             ArchiveWriteStatus::Partial
         }
-    } else if report.published_entries.is_empty() {
+    } else if report.published_entries.is_empty() && !report.created_destination_root {
         ArchiveWriteStatus::Failed
     } else {
         ArchiveWriteStatus::Partial

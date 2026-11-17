@@ -13,6 +13,26 @@ const MAX_FILTER_BYTES: usize = 1024;
 const MAX_DESTINATION_TEXT_BYTES: usize = 128 * 1024;
 
 #[cfg(windows)]
+fn suggested_extract_destination(path: &std::path::Path) -> Result<PathBuf, &'static str> {
+    if !path.extension().and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        return Err("Choose a file with a .zip extension.");
+    }
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or("The archive must have a parent folder.")?;
+    let stem = path.file_stem().and_then(|stem| stem.to_str())
+        .ok_or("The archive name cannot be used as a destination folder.")?;
+    let safe = crate::archive::SafeRelativePath::validate(
+        stem, crate::archive::EntryKind::File, &crate::archive::ArchiveLimits::default(),
+    ).map_err(|_| "The archive name cannot be used as a destination folder.")?;
+    if safe.component_count() != 1 {
+        return Err("The archive name cannot be used as a destination folder.");
+    }
+    Ok(parent.join(stem))
+}
+
+#[cfg(windows)]
 struct ZipHostFrame {
     root: super::utility_host::ViewportPassProvenance,
     owner: super::utility_host::ViewportPassProvenance,
@@ -58,6 +78,7 @@ enum PickerTestInvalidation {
     Host,
     Mode,
     Revision,
+    ExtractRevision,
     Close,
 }
 #[cfg(windows)]
@@ -106,6 +127,8 @@ pub(crate) struct ZipExtractorDialog {
     member_drafts: std::collections::HashMap<crate::archive::CreationMemberId, String>,
     filter: String,
     source_path: Option<PathBuf>,
+    #[cfg(windows)]
+    last_suggested_source: Option<PathBuf>,
     destination_path: Option<PathBuf>,
     destination_text: String,
     sort_by_name: bool,
@@ -139,6 +162,7 @@ struct WriteReportSummary {
     actual_bytes_written: u64,
     failure: Option<crate::archive::ArchiveWriteFailureKind>,
     cleanup_failed: bool,
+    created_destination_root: bool,
 }
 
 #[cfg(windows)]
@@ -150,6 +174,7 @@ fn summarize_write_report(report: &crate::archive::ArchiveWriteReport) -> WriteR
         actual_bytes_written: report.actual_bytes_written,
         failure: report.failure.as_ref().map(|(kind, _)| *kind),
         cleanup_failed: report.cleanup_failed,
+        created_destination_root: report.created_destination_root,
     }
 }
 
@@ -220,6 +245,7 @@ impl ZipExtractorDialog {
         #[cfg(windows)]
         {
             self.mode_epoch = self.mode_epoch.wrapping_add(1);
+            self.last_suggested_source = None;
             self.creation_snapshot = None;
             self.creation_active = false;
             self.creation_output = None;
@@ -258,6 +284,7 @@ impl ZipExtractorDialog {
         if self.mode != ZipMode::Extract {
             self.mode = ZipMode::Extract;
             self.mode_epoch = self.mode_epoch.wrapping_add(1);
+            self.last_suggested_source = None;
         }
         Ok(())
     }
@@ -654,6 +681,67 @@ impl ZipExtractorDialog {
                             "{} outputs: {} files, {} folders",
                             preview.output_count, preview.file_count, preview.directory_count
                         ));
+                        ui.label(format!("Destination: {}", preview.destination_path.display()));
+                        let preview_row_height = ui.text_style_height(&TextStyle::Body);
+                        let layout = egui::ScrollArea::both()
+                            .id_salt("zip-preview-layout")
+                            .max_height(140.0)
+                            .show_rows(
+                                ui,
+                                preview_row_height,
+                                preview.outputs.len(),
+                                |ui, rows| {
+                                    for index in rows {
+                                        let output = &preview.outputs[index];
+                                        let suffix = if output.kind() == crate::archive::EntryKind::Directory {
+                                            "/"
+                                        } else {
+                                            ""
+                                        };
+                                        ui.add(
+                                            egui::Label::new(format!("{}{suffix}", output.path().as_str()))
+                                                .extend(),
+                                        );
+                                    }
+                                },
+                            );
+                        let layout_focus = ui.interact(
+                            layout.inner_rect,
+                            layout.id.with("keyboard"),
+                            egui::Sense::focusable_noninteractive(),
+                        );
+                        register_target(
+                            jump_scope,
+                            ui,
+                            &layout_focus,
+                            "preview-layout",
+                            "Review output paths",
+                            crate::gui::jump_mode::TargetKind::Action,
+                            &mut visual_order,
+                        );
+                        if layout_focus.has_focus() {
+                            let movement = ui.input_mut(|input| {
+                                let mut movement = egui::Vec2::ZERO;
+                                for (key, delta) in [
+                                    (egui::Key::ArrowDown, egui::vec2(0.0, 30.0)),
+                                    (egui::Key::ArrowUp, egui::vec2(0.0, -30.0)),
+                                    (egui::Key::ArrowRight, egui::vec2(40.0, 0.0)),
+                                    (egui::Key::ArrowLeft, egui::vec2(-40.0, 0.0)),
+                                ] {
+                                    if input.consume_key(egui::Modifiers::NONE, key) {
+                                        movement += delta;
+                                    }
+                                }
+                                movement
+                            });
+                            if movement != egui::Vec2::ZERO {
+                                let mut state = layout.state;
+                                let maximum = (layout.content_size - layout.inner_rect.size()).max(egui::Vec2::ZERO);
+                                state.offset = (state.offset + movement).clamp(egui::Vec2::ZERO, maximum);
+                                state.store(ui.ctx(), layout.id);
+                                ui.ctx().request_repaint();
+                            }
+                        }
                         ui.label(format!(
                             "Declared output: {} · actual limits: {} per file, {} total",
                             format_bytes(preview.declared_output_bytes),
@@ -772,6 +860,9 @@ impl ZipExtractorDialog {
                             report.unstarted_count,
                             format_bytes(report.actual_bytes_written)
                         ));
+                        if report.created_destination_root {
+                            ui.label("The selected destination folder was created.");
+                        }
                         if let Some(failure) = report.failure {
                             ui.colored_label(ui.visuals().error_fg_color, write_failure_label(failure));
                         }
@@ -1520,6 +1611,11 @@ impl ZipExtractorDialog {
                             let _ = creation.edit(revision, member.id, "changed.txt".into());
                         }
                     }
+                    PickerTestInvalidation::ExtractRevision => {
+                        if let Some(path) = self.destination_path.clone() {
+                            let _ = session.select_destination(path);
+                        }
+                    }
                     PickerTestInvalidation::Close => self.open = false,
                 }
             }
@@ -1582,6 +1678,7 @@ impl ZipExtractorDialog {
                 {
                     self.mode = mode;
                     self.mode_epoch = self.mode_epoch.wrapping_add(1);
+                    self.last_suggested_source = None;
                     self.status_message = None;
                 }
             }
@@ -1809,11 +1906,23 @@ impl ZipExtractorDialog {
 
     #[cfg(windows)]
     fn load_archive_path(&mut self, path: PathBuf, session: &mut crate::archive::ArchiveSession) {
+        let changed = self.last_suggested_source.as_ref() != Some(&path);
         match session.request_open(path.clone()) {
             Ok(()) => {
+                let suggestion = changed.then(|| suggested_extract_destination(&path));
+                self.last_suggested_source = Some(path.clone());
                 self.source_path = Some(path);
                 self.confirmed_token = None;
                 self.status_message = None;
+                if let Some(suggestion) = suggestion {
+                    match suggestion {
+                        Ok(destination) => self.select_destination_path(destination, session),
+                        Err(message) => {
+                            self.set_destination_text(String::new(), session);
+                            self.status_message = Some(message.into());
+                        }
+                    }
+                }
                 self.update_session_snapshot(session.snapshot(), Instant::now());
             }
             Err(error) => self.status_message = Some(request_error_label(error).into()),
@@ -2519,6 +2628,105 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     #[test]
+    fn suggested_destination_preserves_stem_and_rejects_invalid_names() {
+        let archive = std::path::Path::new(r"C:\Downloads\gezik-0.1.0-rc.7-雪.ZIP");
+        assert_eq!(
+            suggested_extract_destination(archive).unwrap(),
+            PathBuf::from(r"C:\Downloads\gezik-0.1.0-rc.7-雪")
+        );
+        for name in [r"C:\Downloads\.zip", r"C:\Downloads\CON.zip",
+                     r"C:\Downloads\invalid..zip", r"C:\Downloads\other.txt"] {
+            assert!(suggested_extract_destination(std::path::Path::new(name)).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn selected_archive_suggests_destination_and_preserves_same_source_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.v1.ZIP");
+        let second = temp.path().join("second.zip");
+        create_small_archive(&first, 1);
+        create_small_archive(&second, 1);
+        let mut dialog = ZipExtractorDialog::default();
+        let mut session = crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        dialog.load_archive_path(first.clone(), &mut session);
+        assert_eq!(dialog.destination_path, Some(temp.path().join("first.v1")));
+        assert!(!temp.path().join("first.v1").exists());
+        settle(&mut session, &mut dialog);
+        let custom = temp.path().join("custom");
+        dialog.select_destination_path(custom.clone(), &mut session);
+        dialog.load_archive_path(first, &mut session);
+        assert_eq!(dialog.destination_path, Some(custom.clone()));
+        settle(&mut session, &mut dialog);
+        session.request_preview().unwrap();
+        let token = settle(&mut session, &mut dialog).preview.unwrap().token;
+        dialog.confirmed_token = Some(token);
+        dialog.apply_session_action(SessionAction::Confirm(token), &mut session);
+        settle(&mut session, &mut dialog);
+        let first = temp.path().join("first.v1.ZIP");
+        dialog.load_archive_path(first, &mut session);
+        assert_eq!(dialog.destination_path, Some(custom.clone()));
+        // A busy source request leaves both draft paths alone.
+        dialog.load_archive_path(second.clone(), &mut session);
+        assert_eq!(dialog.destination_path, Some(custom));
+        settle(&mut session, &mut dialog);
+        dialog.load_archive_path(second, &mut session);
+        assert_eq!(dialog.destination_path, Some(temp.path().join("second")));
+        assert!(!temp.path().join("second").exists());
+        session.shutdown();
+    }
+
+    #[test]
+    fn extract_picker_cancel_and_stale_results_preserve_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.zip");
+        let second = temp.path().join("second.zip");
+        create_small_archive(&first, 1);
+        create_small_archive(&second, 1);
+        for invalidation in [
+            None,
+            Some(PickerTestInvalidation::Host),
+            Some(PickerTestInvalidation::Mode),
+            Some(PickerTestInvalidation::ExtractRevision),
+            Some(PickerTestInvalidation::Close),
+        ] {
+            let mut dialog = ZipExtractorDialog::default();
+            dialog.open();
+            let mut session = crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+            let mut creation = crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+            dialog.load_archive_path(first.clone(), &mut session);
+            settle(&mut session, &mut dialog);
+            let expected_destination = dialog.destination_path.clone();
+            dialog.queue_picker_for_test(invalidation.as_ref().map(|_| second.clone()));
+            dialog.test_picker_invalidation = invalidation;
+            let host = dialog.host.identity();
+            let epoch = dialog.host_epoch;
+            dialog.apply_host_action(
+                UiAction::PickArchive, &mut session, &mut creation,
+                &egui::Context::default(), host, epoch, false,
+            );
+            assert_eq!(dialog.source_path.as_ref(), Some(&first));
+            assert_eq!(dialog.destination_path, expected_destination);
+            assert!(!session.has_active_worker());
+            session.shutdown();
+        }
+        let mut dialog = ZipExtractorDialog::default();
+        dialog.open();
+        let mut session = crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        let mut creation = crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+        dialog.queue_picker_for_test(Some(second.clone()));
+        let host = dialog.host.identity();
+        let epoch = dialog.host_epoch;
+        dialog.apply_host_action(
+            UiAction::PickArchive, &mut session, &mut creation,
+            &egui::Context::default(), host, epoch, false,
+        );
+        assert_eq!(dialog.source_path.as_ref(), Some(&second));
+        assert_eq!(dialog.destination_path, Some(temp.path().join("second")));
+        session.shutdown();
+    }
+
+    #[test]
     fn cleanup_feedback_uses_the_typed_report_flag() {
         fn report(message: &str, cleanup_failed: bool) -> crate::archive::ArchiveWriteReport {
             crate::archive::ArchiveWriteReport {
@@ -2532,6 +2740,7 @@ mod tests {
                 cancelled_entry: None,
                 unstarted_entries: Vec::new(),
                 created_directories: 0,
+                created_destination_root: false,
                 actual_bytes_written: 0,
                 failure: Some((
                     crate::archive::ArchiveWriteFailureKind::NativeIo,

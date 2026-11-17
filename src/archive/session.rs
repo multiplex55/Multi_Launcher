@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::file_operations::ScanCancellation;
 
-use super::native::{NativeArchiveDestination, NativeArchiveSource};
+use super::native::{NativeArchiveSource, NativeArchiveTarget};
 use super::native_io::ArchiveIoControl;
 use super::plan::{
     ArchiveSelection, CapturedOutputPolicy, ExtractionPlan, PlanBuildError, PlanReport,
@@ -88,6 +88,8 @@ pub(crate) struct PreviewToken {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ArchivePreviewSummary {
     pub token: PreviewToken,
+    pub destination_path: PathBuf,
+    pub outputs: Arc<[super::PlannedOutput]>,
     pub output_count: usize,
     pub file_count: usize,
     pub directory_count: usize,
@@ -122,7 +124,7 @@ pub(crate) struct ArchiveSession {
     catalog: Option<Arc<ArchiveCatalog>>,
     destination_revision: u64,
     destination_path: Option<PathBuf>,
-    destination: Option<NativeArchiveDestination>,
+    destination: Option<NativeArchiveTarget>,
     selection_revision: u64,
     selection: ArchiveSelection,
     preview_generation: u64,
@@ -245,7 +247,7 @@ enum PreparationCompletion {
     Previewed {
         stamp: RevisionStamp,
         source: NativeArchiveSource,
-        destination: Option<NativeArchiveDestination>,
+        destination: Option<NativeArchiveTarget>,
         result: Result<PreviewBuild, ArchiveSessionFailure>,
         #[cfg(test)]
         worker_thread: thread::ThreadId,
@@ -411,7 +413,7 @@ impl ArchiveSession {
         let preview_generation = next_revision(self.preview_generation)?;
         self.destination_revision = destination_revision;
         self.preview_generation = preview_generation;
-        self.destination_path = Some(path);
+        self.destination_path = (!path.as_os_str().is_empty()).then_some(path);
         self.destination = None;
         self.preview = None;
         self.plan_issues = None;
@@ -516,7 +518,7 @@ impl ArchiveSession {
                     Err(ArchiveSessionFailure::Cancelled)
                 } else {
                     if destination.is_none() {
-                        destination = NativeArchiveDestination::open(&destination_path).ok();
+                        destination = NativeArchiveTarget::open(&destination_path).ok();
                     }
                     match destination.as_ref() {
                         None => Err(ArchiveSessionFailure::DestinationAdmission),
@@ -939,6 +941,11 @@ impl ArchiveSession {
                         declared_output_bytes,
                         captured_policy,
                     }) => {
+                        let Some(destination_path) = self.destination_path.clone() else {
+                            self.preview = None;
+                            self.failure = Some(ArchiveSessionFailure::DestinationAdmission);
+                            return;
+                        };
                         let token = PreviewToken {
                             session_id: self.session_id,
                             session_generation: stamp.session_generation,
@@ -950,6 +957,8 @@ impl ArchiveSession {
                         self.preview = Some(StoredPreview {
                             summary: ArchivePreviewSummary {
                                 token,
+                                destination_path,
+                                outputs: Arc::from(plan.outputs()),
                                 output_count,
                                 file_count,
                                 directory_count,
@@ -970,6 +979,9 @@ impl ArchiveSession {
                     Err(failure) => {
                         self.preview = None;
                         self.plan_issues = None;
+                        if matches!(failure, ArchiveSessionFailure::DestinationAdmission) {
+                            self.destination = None;
+                        }
                         self.failure = Some(failure);
                     }
                 }
@@ -1030,7 +1042,7 @@ fn next_revision(value: u64) -> Result<u64, ArchiveSessionRequestError> {
 fn build_preview(
     source: &mut NativeArchiveSource,
     catalog: &ArchiveCatalog,
-    destination: &NativeArchiveDestination,
+    destination: &NativeArchiveTarget,
     selection: &ArchiveSelection,
     cancellation: &ScanCancellation,
     io: &ArchiveIoControl,
@@ -1070,6 +1082,9 @@ fn build_preview(
         ArchiveWriteFailureKind::SourceChanged => ArchiveSessionFailure::SourceChanged,
         other => ArchiveSessionFailure::Layout(other),
     })?;
+    destination
+        .verify_identity()
+        .map_err(|_| ArchiveSessionFailure::DestinationAdmission)?;
     Ok(PreviewBuild::Ready {
         output_count: plan.outputs().len(),
         file_count: plan.files().count(),
@@ -1278,6 +1293,108 @@ mod tests {
             b"archive payload"
         );
         assert!(session.destination.is_none());
+    }
+
+    #[test]
+    fn session_vacant_destination_is_created_only_on_confirmation() {
+        let fixture = Fixture::new(&[("nested/payload.bin", b"payload")]);
+        let destination = fixture._temp.path().join("new destination");
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        let opened = start_open(&mut session, &fixture);
+        assert_eq!(opened.phase, ArchiveSessionPhase::Ready);
+        session.select_destination(destination.clone()).unwrap();
+        session.request_preview().unwrap();
+        assert!(!destination.exists());
+        let preview = settle(&mut session);
+        assert_eq!(preview.phase, ArchiveSessionPhase::PreviewReady);
+        assert!(!destination.exists());
+        let summary = preview.preview.unwrap();
+        assert_eq!(summary.destination_path, destination);
+        assert!(summary.outputs.iter().any(|output| output.path().as_str() == "nested/payload.bin"));
+        session.confirm(summary.token).unwrap();
+        let finished = settle(&mut session);
+        let report = finished.write_report.unwrap();
+        assert_eq!(report.status, super::super::writer::ArchiveWriteStatus::Completed);
+        assert!(report.created_destination_root);
+        assert_eq!(fs::read(destination.join("nested/payload.bin")).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn session_vacant_destination_rejects_competitor_after_preview() {
+        let fixture = Fixture::new(&[("payload.bin", b"payload")]);
+        let destination = fixture._temp.path().join("new destination");
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        assert_eq!(start_open(&mut session, &fixture).phase, ArchiveSessionPhase::Ready);
+        session.select_destination(destination.clone()).unwrap();
+        session.request_preview().unwrap();
+        let preview = settle(&mut session);
+        assert_eq!(preview.phase, ArchiveSessionPhase::PreviewReady);
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("competitor.txt"), b"untouched").unwrap();
+        session.confirm(preview.preview.unwrap().token).unwrap();
+        let finished = settle(&mut session);
+        let report = finished.write_report.unwrap();
+        assert_eq!(report.status, super::super::writer::ArchiveWriteStatus::Failed);
+        assert!(!report.created_destination_root);
+        assert_eq!(fs::read(destination.join("competitor.txt")).unwrap(), b"untouched");
+        assert!(!destination.join("payload.bin").exists());
+    }
+
+    #[test]
+    fn session_failed_vacant_preview_reopens_current_destination_on_retry() {
+        let fixture = Fixture::new(&[("payload.bin", b"payload")]);
+        let destination = fixture._temp.path().join("new destination");
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        assert_eq!(start_open(&mut session, &fixture).phase, ArchiveSessionPhase::Ready);
+        session.select_destination(destination.clone()).unwrap();
+        let (gate, reached, mut release) = PreparationTestGate::new(false);
+        session.next_preview_gate = Some(gate);
+        session.request_preview().unwrap();
+        reached.recv_timeout(SESSION_TIMEOUT).unwrap();
+        fs::create_dir(&destination).unwrap();
+        release.release();
+        let failed = settle(&mut session);
+        assert_eq!(failed.failure, Some(ArchiveSessionFailure::DestinationAdmission));
+        assert!(session.destination.is_none());
+        session.request_preview().unwrap();
+        let preview = settle(&mut session);
+        assert_eq!(preview.phase, ArchiveSessionPhase::PreviewReady);
+        session.confirm(preview.preview.unwrap().token).unwrap();
+        let report = settle(&mut session).write_report.unwrap();
+        assert_eq!(report.status, super::super::writer::ArchiveWriteStatus::Completed);
+        assert!(!report.created_destination_root);
+        assert_eq!(fs::read(destination.join("payload.bin")).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn session_cancelled_new_root_can_be_reviewed_and_retried() {
+        let fixture = Fixture::new(&[("payload.bin", b"payload")]);
+        let destination = fixture._temp.path().join("new destination");
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        assert_eq!(start_open(&mut session, &fixture).phase, ArchiveSessionPhase::Ready);
+        session.select_destination(destination.clone()).unwrap();
+        session.request_preview().unwrap();
+        let preview = settle(&mut session).preview.unwrap();
+        let (gate, reached, resume) = WriterTestGate::new();
+        session.before_flush_gate = Some(gate);
+        session.confirm(preview.token).unwrap();
+        reached.recv_timeout(SESSION_TIMEOUT).unwrap();
+        session.cancel();
+        resume.send(()).unwrap();
+        let report = settle(&mut session).write_report.unwrap();
+        assert_eq!(report.status, super::super::writer::ArchiveWriteStatus::Partial);
+        assert!(report.created_destination_root);
+        assert!(destination.is_dir());
+        assert!(!destination.join("payload.bin").exists());
+
+        assert_eq!(start_open(&mut session, &fixture).phase, ArchiveSessionPhase::Ready);
+        session.request_preview().unwrap();
+        let preview = settle(&mut session).preview.unwrap();
+        session.confirm(preview.token).unwrap();
+        let report = settle(&mut session).write_report.unwrap();
+        assert_eq!(report.status, super::super::writer::ArchiveWriteStatus::Completed);
+        assert!(!report.created_destination_root);
+        assert_eq!(fs::read(destination.join("payload.bin")).unwrap(), b"payload");
     }
 
     #[test]

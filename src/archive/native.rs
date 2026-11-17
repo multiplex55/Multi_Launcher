@@ -390,6 +390,14 @@ impl HeldDirectory {
     }
 
     fn create_child(self: &Arc<Self>, component: &OsStr) -> Result<Arc<Self>, NativeArchiveError> {
+        self.create_child_observed(component, || {})
+    }
+
+    fn create_child_observed(
+        self: &Arc<Self>,
+        component: &OsStr,
+        on_created: impl FnOnce(),
+    ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         self.verify_identity()?;
         let (file, information) = open_relative(
@@ -416,6 +424,7 @@ impl HeldDirectory {
                 Some(self.identity),
             ));
         }
+        on_created();
         let metadata = file.metadata().map_err(|error| {
             NativeArchiveError::from_io(
                 "File::metadata(new output directory)",
@@ -492,6 +501,109 @@ fn is_name_collision(error: &NativeArchiveError) -> bool {
 /// reparse point. Its held directory chain is used for every later operation.
 pub(crate) struct NativeArchiveDestination {
     root: Arc<HeldDirectory>,
+}
+
+/// A reviewed output root. A missing final child is held by its verified parent
+/// and is created exclusively only after the extraction is confirmed.
+pub(crate) enum NativeArchiveTarget {
+    Existing(NativeArchiveDestination),
+    Vacant {
+        parent: NativeDirectoryHandle,
+        leaf: OsString,
+    },
+}
+
+impl From<NativeArchiveDestination> for NativeArchiveTarget {
+    fn from(destination: NativeArchiveDestination) -> Self {
+        Self::Existing(destination)
+    }
+}
+
+impl NativeArchiveTarget {
+    pub(crate) fn open(path: &Path) -> Result<Self, NativeArchiveError> {
+        match NativeArchiveDestination::open(path) {
+            Ok(destination) => return Ok(Self::Existing(destination)),
+            Err(error) if is_missing_relative_component(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let parent_path = path.parent().ok_or_else(|| {
+            NativeArchiveError::validation("destination has no parent", io::ErrorKind::InvalidInput, None)
+        })?;
+        let leaf = path.file_name().ok_or_else(|| {
+            NativeArchiveError::validation("destination has no final component", io::ErrorKind::InvalidInput, None)
+        })?.to_os_string();
+        let leaf_text = leaf.to_str().ok_or_else(|| {
+            NativeArchiveError::validation("destination name is not valid Unicode", io::ErrorKind::InvalidInput, None)
+        })?;
+        let safe = super::SafeRelativePath::validate(
+            leaf_text,
+            super::EntryKind::File,
+            &ArchiveLimits::default(),
+        ).map_err(|_| {
+            NativeArchiveError::validation("invalid destination name", io::ErrorKind::InvalidInput, None)
+        })?;
+        if safe.component_count() != 1 {
+            return Err(NativeArchiveError::validation(
+                "destination must be a single child",
+                io::ErrorKind::InvalidInput,
+                None,
+            ));
+        }
+        let parent = NativeDirectoryHandle {
+            directory: open_directory_path(parent_path, true)?,
+        };
+        if parent.probe_leaf_occupancy(&leaf)?.is_some() {
+            return Err(NativeArchiveError::validation(
+                "destination appeared during admission",
+                io::ErrorKind::AlreadyExists,
+                Some(parent.identity()),
+            ));
+        }
+        Ok(Self::Vacant { parent, leaf })
+    }
+
+    pub(crate) fn verify_identity(&self) -> Result<NativeFileIdentity, NativeArchiveError> {
+        match self {
+            Self::Existing(destination) => destination.verify_identity(),
+            Self::Vacant { parent, leaf } => {
+                let identity = parent.verify_identity()?;
+                if parent.probe_leaf_occupancy(leaf)?.is_some() {
+                    return Err(NativeArchiveError::validation(
+                        "proposed destination is no longer vacant",
+                        io::ErrorKind::AlreadyExists,
+                        Some(identity),
+                    ));
+                }
+                Ok(identity)
+            }
+        }
+    }
+
+    pub(crate) fn probe_occupancy(
+        &self,
+        path: &ValidatedRelativePath,
+    ) -> Result<DestinationOccupancy, io::ErrorKind> {
+        match self {
+            Self::Existing(destination) => destination.probe_occupancy(path),
+            Self::Vacant { .. } => Ok(DestinationOccupancy::Vacant),
+        }
+    }
+
+    pub(crate) fn materialize(
+        self,
+        created_root: &mut bool,
+    ) -> Result<NativeArchiveDestination, NativeArchiveError> {
+        match self {
+            Self::Existing(destination) => {
+                destination.verify_identity()?;
+                Ok(destination)
+            }
+            Self::Vacant { parent, leaf } => {
+                let root = parent.directory.create_child_observed(&leaf, || *created_root = true)?;
+                Ok(NativeArchiveDestination { root })
+            }
+        }
+    }
 }
 
 impl NativeArchiveDestination {
