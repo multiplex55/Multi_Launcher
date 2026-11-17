@@ -15,7 +15,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M0-A | complete |
 | M0-B | complete |
 | M1-A | complete, with interactive smoke pending |
-| M2-A, M2-B | pending |
+| M2-A | complete |
+| M2-B | pending |
 | M3-A, M3-B, M3-C | pending |
 | M4-A, M4-B, M4-C | pending |
 | M5-A, M5-B | pending |
@@ -69,3 +70,16 @@ The ZIP dialog suggests the adjacent stem for a newly selected archive, retains 
 The first targeted library Nextest run passed 10 cases. The final scoped run passed 12 of 12 after review corrections, covering derived names, canceled and stale pickers, no write before confirmation, exact nested extraction, competitor survival and retry. Runner flags: cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1, with archive/session and ZIP GUI test filters. Each test had a 100-second cap after compilation. The initial sandboxed cargo check could not access the build lock; the elevated test build passed. Independent follow-up review closed all four ZIP findings. Staged diff whitespace check passed.
 
 The Windows filesystem and retained dialog tests ran. Standalone application picker smoke remains part of the native evidence work. Disposable settings and ZIP fixtures are ready under target/productivity-toolkit-expansion-evidence/m1a.
+
+The final M1-A Nextest expression was test(session_vacant_destination) | test(session_failed_vacant_preview_reopens_current_destination_on_retry) | test(session_cancelled_new_root_can_be_reviewed_and_retried) | test(suggested_destination_preserves_stem_and_rejects_invalid_names) | test(selected_archive_suggests_destination_and_preserves_same_source_override) | test(extract_picker_cancel_and_stale_results_preserve_drafts) | test(session_preview_keeps_held_handles_and_has_no_effect_before_confirmation) | test(session_destination_change_discards_late_preview_and_uses_current_root) | test(session_source_replacement_invalidates_completed_preview_token) | test(session_preserves_competitor_created_after_preview) | test(create_picker_rejects_cancelled_and_stale_owners_and_drafts). M1-A was pushed at 6940a16d46be786ce3855523ee7c68345361ee2f.
+
+## M2-A ordering and uniqueness
+
+The shared collection path handles sort, sort_desc, and unique. Stable numeric ordering treats signed zeros as equal. Uniqueness keeps the first occurrence, including its exact zero representation. Existing document-local formulas with any of the new names retain exact-spelling precedence. Prior built-in reservations and recursion rules remain in force. The Pad guide and executable catalog describe the new functions.
+
+Both checks used cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1, with the following -E expressions.
+
+- test(ordering_and_uniqueness_) | test(vector_sort_and_unique_work_in_both_evaluator_routes) | test(old_local_functions_can_shadow_new_vector_names) | test(vector_collection_operations_are_pure_and_compose) | test(collection_failure_preserves_current_binding_in_both_evaluator_routes) | test(catalogue_search_finds_function_keywords_and_vector_examples) | test(all_examples) passed 7 of 7. The last selector matched no tests.
+- Cached test(shared_examples_evaluate_to_their_documented_results) passed 1 of 1.
+
+Independent review found no blocking issues. Diff whitespace verification passed.

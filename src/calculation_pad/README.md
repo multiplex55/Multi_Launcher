@@ -273,6 +273,14 @@ as a loop iterable, while these operations require vectors.
   requested element is unavailable. `len(v)` returns the component count.
 * `slice(v, start, end)` uses a zero-based inclusive start and exclusive end.
   Equal endpoints return `[]`. `reverse(v)` returns a reversed vector.
+* `sort(v)` and `sort_desc(v)` return stable numeric ordering in ascending and
+  descending order. Equal values preserve their input order, including signed
+  zeros. `unique(v)` keeps the first occurrence of each numeric value, treating
+  positive and negative zero as equal and preserving the first representation.
+  All three accept empty vectors and leave the original unchanged.
+
+Previously declared local formula functions named `sort`, `sort_desc` or
+`unique` retain precedence for calls using the same spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,

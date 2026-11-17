@@ -60,6 +60,7 @@ impl CalculationVector {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CollectionOperation {
     Append, Concat, Insert, SetAt, RemoveAt, Pop, Get, First, Last, Len, Slice, Reverse,
+    Sort, SortDesc, Unique,
 }
 
 impl CollectionOperation {
@@ -69,6 +70,7 @@ impl CollectionOperation {
             "set_at" => Self::SetAt, "remove_at" => Self::RemoveAt, "pop" => Self::Pop,
             "get" => Self::Get, "first" => Self::First, "last" => Self::Last,
             "len" => Self::Len, "slice" => Self::Slice, "reverse" => Self::Reverse,
+            "sort" => Self::Sort, "sort_desc" => Self::SortDesc, "unique" => Self::Unique,
             _ => return None,
         })
     }
@@ -154,6 +156,36 @@ impl CollectionOperation {
             (Self::Reverse, [_]) => {
                 work.charge_vector(values.len())?;
                 values.iter().rev().copied().collect()
+            }
+            (Self::Sort | Self::SortDesc, [_]) => {
+                let levels = (usize::BITS - values.len().leading_zeros()) as usize;
+                work.charge_vector(values.len().saturating_mul(levels + 2))?;
+                let mut result = values.to_vec();
+                result.sort_by(|left, right| {
+                    let order = if left == right {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        left.total_cmp(right)
+                    };
+                    if matches!(self, Self::SortDesc) {
+                        order.reverse()
+                    } else {
+                        order
+                    }
+                });
+                result
+            }
+            (Self::Unique, [_]) => {
+                work.charge_vector(values.len().saturating_mul(2))?;
+                let mut seen = HashSet::with_capacity(values.len());
+                let mut result = Vec::with_capacity(values.len());
+                for &value in values {
+                    let key = if value == 0.0 { 0 } else { value.to_bits() };
+                    if seen.insert(key) {
+                        result.push(value);
+                    }
+                }
+                result
             }
             _ => return Err(error("invalid collection operation arguments")),
         };
@@ -377,6 +409,44 @@ fn parse(
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn ordering_and_uniqueness_preserve_signed_zero_and_source() {
+        let source = CalculationVector::new(vec![2.0, -0.0, 0.0, 2.0, -1.0, -0.0]).unwrap();
+        let args = [CalculationValue::Vector(source.clone())];
+        let expected = [
+            (CollectionOperation::Sort, vec![-1.0_f64, -0.0, 0.0, -0.0, 2.0, 2.0]),
+            (CollectionOperation::SortDesc, vec![2.0_f64, 2.0, -0.0, 0.0, -0.0, -1.0]),
+            (CollectionOperation::Unique, vec![2.0_f64, -0.0, -1.0]),
+        ];
+        for (operation, expected) in expected {
+            let CalculationValue::Vector(output) = operation.call(&args, &mut WorkBudget::default()).unwrap() else {
+                panic!("expected a vector");
+            };
+            assert_eq!(
+                output.components().iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+            );
+            assert!(!Arc::ptr_eq(&source.0, &output.0));
+        }
+        assert_eq!(source.components().iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            [2.0_f64, -0.0, 0.0, 2.0, -1.0, -0.0].iter().map(|value| value.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ordering_and_uniqueness_charge_work_and_honor_cancellation() {
+        for operation in [CollectionOperation::Sort, CollectionOperation::SortDesc, CollectionOperation::Unique] {
+            let empty = [CalculationValue::Vector(CalculationVector::new(vec![]).unwrap())];
+            let cancelled = Arc::new(AtomicBool::new(true));
+            let mut work = WorkBudget::with_cancellation(cancelled);
+            assert!(matches!(operation.call(&empty, &mut work), Err(DiagnosticKind::Canceled)));
+
+            let values = [CalculationValue::Vector(CalculationVector::new(vec![1.0; MAX_VECTOR_COMPONENTS]).unwrap())];
+            let mut work = WorkBudget::default();
+            work.charge_vector(document::script::MAX_VECTOR_COMPONENT_WORK - 1).unwrap();
+            assert!(matches!(operation.call(&values, &mut work), Err(DiagnosticKind::WorkLimit)));
+        }
+    }
 
     #[test]
     fn vector_work_uses_aggregate_budget_and_cancellation() {

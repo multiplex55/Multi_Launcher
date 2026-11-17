@@ -259,6 +259,10 @@ pub(super) struct UserFunction {
 pub(super) type UserFunctions = Vec<Arc<UserFunction>>;
 
 pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) -> bool {
+    contains_named_call(source, |name| functions.iter().any(|function| function.name == name))
+}
+
+fn contains_named_call(source: &str, matches_name: impl Fn(&str) -> bool) -> bool {
     let mut index = 0;
     while index < source.len() {
         let ch = source[index..].chars().next().unwrap();
@@ -287,7 +291,7 @@ pub(super) fn contains_user_call(source: &str, functions: &[Arc<UserFunction>]) 
                 index += next.len_utf8();
             }
             if source[index..].trim_start().starts_with('(')
-                && functions.iter().any(|function| function.name == source[start..index])
+                && matches_name(&source[start..index])
             { return true; }
         } else {
             index += ch.len_utf8();
@@ -379,8 +383,16 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
                 return Err(error("function declarations must be top-level"));
             }
             if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
-            if signature(&name).is_some() || functions.iter().any(|function: &Arc<UserFunction>| function.name == name) {
+            let new_collection_name = ["sort", "sort_desc", "unique"]
+                .iter()
+                .any(|builtin| builtin.eq_ignore_ascii_case(&name));
+            if (signature(&name).is_some() && !new_collection_name)
+                || functions.iter().any(|function: &Arc<UserFunction>| function.name == name)
+            {
                 return Err(error("function name collides with an existing function"));
+            }
+            if new_collection_name && contains_named_call(body, |called| called == name) {
+                return Err(error("recursive function calls are not supported"));
             }
             let count = validate_source(body)?;
             if identifiers.saturating_add(count) > MAX_DEPENDENCIES {
@@ -454,6 +466,9 @@ pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "len", help: "len(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "slice", help: "slice(vector, start, end)", arities: &[3], insensitive: true },
     FunctionSignature { name: "reverse", help: "reverse(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sort", help: "sort(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "sort_desc", help: "sort_desc(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "unique", help: "unique(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "date", help: "date(\"YYYY-MM-DD\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "time", help: "time(\"HH:MM[:SS]\")", arities: &[1], insensitive: true },
     FunctionSignature { name: "datetime", help: "datetime(\"RFC3339 timestamp\")", arities: &[1], insensitive: true },

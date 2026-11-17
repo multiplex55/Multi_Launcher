@@ -316,6 +316,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Vectors",
         examples: &[
             CalculationExample {
+                title: "Sort and retain distinct values",
+                source: "values = [7, 2, 7, 4, 10]\nascending = sort(values)\ndescending = sort_desc(values)\nunique(values)",
+                explanation: "sort and sort_desc return ordered copies. unique preserves the first occurrence of each value; values is unchanged.",
+                expected: ExampleExpectation::Vector(&[7.0, 2.0, 4.0, 10.0]),
+            },
+            CalculationExample {
                 title: "Build two 1,024-point datasets",
                 source: "x_values = []\ny_values = []\n\nfor i in range(1024):\n    x_values = append(x_values, i)\n    y_values = append(y_values, i * i)\n\npoint_count = len(y_values)\nlargest = max(y_values)\naverage_value = average(y_values)",
                 explanation: "The vectors each contain 1,024 values. The largest is 1046529 and the average is 349013.5. In Charts, choose x_values and y_values as named X and Y sources.",
@@ -1065,7 +1071,7 @@ mod tests {
             "permutations",
             "map_range",
             "discounted_price",
-            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse",
+            "append", "concat", "insert", "set_at", "remove_at", "pop", "get", "first", "last", "len", "slice", "reverse", "sort", "sort_desc", "unique",
         ] {
             assert!(
                 EXAMPLE_GROUPS.iter().any(|group| group

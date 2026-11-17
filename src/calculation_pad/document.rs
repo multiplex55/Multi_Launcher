@@ -4460,6 +4460,59 @@ mod tests {
     }
 
     #[test]
+    fn vector_sort_and_unique_work_in_both_evaluator_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let full = vec!["7"; 1024].join(",");
+            let source = format!(concat!(
+                "v = [7, 2, 7, 4, 10]\nalias = v\n",
+                "sort(v)\nSORT_DESC(v)\nunique(v)\nv\nalias\n",
+                "sort([])\nsort_desc([])\nunique([])\nsort([1])\n",
+                "full = [{}]\nlen(sort(full))\nunique(full)\n",
+                "sort(3)\nsort(v, v)\nunique(true)\n",
+                "v = sort(3)\nlen(v)\n"
+            ), full) + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [
+                (2, "[2, 4, 7, 7, 10]"), (3, "[10, 7, 7, 4, 2]"),
+                (4, "[7, 2, 4, 10]"), (5, "[7, 2, 7, 4, 10]"),
+                (6, "[7, 2, 7, 4, 10]"), (7, "[]"), (8, "[]"),
+                (9, "[]"), (10, "[1]"), (13, "[7]"),
+            ] {
+                assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+            }
+            assert_eq!(scalar(&evaluation, 12), 1024.0);
+            for line in [14, 15, 16, 17] {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+            assert_eq!(scalar(&evaluation, 18), 5.0);
+        }
+    }
+
+    #[test]
+    fn old_local_functions_can_shadow_new_vector_names() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = format!(concat!(
+                "fn sort(a, b) = a + b\n",
+                "fn sort_desc(a) = a * 2\n",
+                "fn unique(a) = a - 1\n",
+                "sort(2, 3)\nsort_desc(4)\nunique(6)\n",
+                "SORT([3, 1])\n",
+                "fn reverse(a) = a\n",
+                "fn SORT_DESC(a) = SORT_DESC(a)\n"
+            ),) + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 3), 5.0);
+            assert_eq!(scalar(&evaluation, 4), 8.0);
+            assert_eq!(scalar(&evaluation, 5), 5.0);
+            assert_eq!(formatted(&evaluation, 6), "[1, 3]");
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+            assert!(matches!(evaluation.lines[8].outcome, LineOutcome::Error(_)));
+        }
+    }
+
+    #[test]
     fn vector_collection_indices_types_and_capacity_are_checked() {
         let full = format!("[{}]", vec!["1"; 1024].join(","));
         let source = format!(concat!(
