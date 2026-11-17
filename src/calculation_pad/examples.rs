@@ -316,6 +316,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Vectors",
         examples: &[
             CalculationExample {
+                title: "Quantiles and sample variance",
+                source: "values = [1, 2, 3, 4]\nlower_quartile = quantile(values, 0.25)\nmedian_value = percentile(values, 50)\nvariance_population(values)",
+                explanation: "The lower quartile is 1.75, the median is 2.5, and the population variance is 1.25. variance_sample and stdev_sample use the sample denominator.",
+                expected: ExampleExpectation::Scalar(1.25),
+            },
+            CalculationExample {
                 title: "Cumulative and rolling calculations",
                 source: "values = [10, 20, 15, 30]\ntotals = cumsum(values)\nchanges = diff(values)\nrolling_average(values, 2)",
                 explanation: "Cumulative totals are [10, 30, 45, 75], adjacent differences are [10, -5, 15], and the rolling average uses complete trailing windows.",

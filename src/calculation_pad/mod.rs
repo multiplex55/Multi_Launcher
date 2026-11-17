@@ -22,6 +22,7 @@ mod programmer;
 mod quantity;
 mod session;
 mod sensitivity;
+mod statistics;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;

@@ -297,12 +297,21 @@ as a loop iterable, while these operations require vectors.
   `max(len(v) - window + 1, 0)` values. For charts, align an existing X vector
   with `slice(x, window - 1, len(x))` when a complete window exists.
   Nonfinite intermediate arithmetic produces an error.
+* `quantile(v, q)` uses `q` from 0 to 1. `percentile(v, p)` uses
+  `p` from 0 to 100. Both sort a copy and linearly interpolate at index
+  `(len(v) - 1) * q`. They require a nonempty vector.
+* `variance_population(v)` divides the sum of squared deviations by the
+  number of values. `variance_sample(v)` and `stdev_sample(v)` use one
+  fewer than the number of values and require at least two. The existing
+  `stdev(v)` remains the population standard deviation. Results that cannot
+  be represented as finite scalars report an error.
 
 Previously declared local formula functions named `sort`, `sort_desc`,
 `unique`, `map`, `filter`, `count_if`, `find_indices`, `cumsum`,
 `cumprod`, `diff`, `percent_changes`, `rolling_sum`, `rolling_average`,
-`rolling_min` or `rolling_max` retain precedence for calls using the same
-spelling.
+`rolling_min`, `rolling_max`, `quantile`, `percentile`,
+`variance_population`, `variance_sample` or `stdev_sample` retain
+precedence for calls using the same spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,

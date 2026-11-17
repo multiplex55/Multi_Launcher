@@ -462,7 +462,8 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
             }
             if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
             let new_collection_name = ["sort", "sort_desc", "unique", "map", "filter", "count_if", "find_indices",
-                "cumsum", "cumprod", "diff", "percent_changes", "rolling_sum", "rolling_average", "rolling_min", "rolling_max"]
+                "cumsum", "cumprod", "diff", "percent_changes", "rolling_sum", "rolling_average", "rolling_min", "rolling_max",
+                "quantile", "percentile", "variance_population", "variance_sample", "stdev_sample"]
                 .iter()
                 .any(|builtin| builtin.eq_ignore_ascii_case(&name));
             if (signature(&name).is_some() && !new_collection_name)
@@ -502,6 +503,7 @@ pub(super) enum Compare {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Function {
     Collection(super::super::vector::CollectionOperation),
+    Statistic(super::super::statistics::VectorStatistic),
     Range,
     Sum,
     Average,
@@ -556,6 +558,11 @@ pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "rolling_average", help: "rolling_average(vector, window)", arities: &[2], insensitive: true },
     FunctionSignature { name: "rolling_min", help: "rolling_min(vector, window)", arities: &[2], insensitive: true },
     FunctionSignature { name: "rolling_max", help: "rolling_max(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "quantile", help: "quantile(vector, q)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "percentile", help: "percentile(vector, p)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "variance_population", help: "variance_population(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "variance_sample", help: "variance_sample(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "stdev_sample", help: "stdev_sample(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "map", help: "map(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "filter", help: "filter(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "count_if", help: "count_if(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
@@ -668,6 +675,9 @@ fn special(name: &str, arity: usize) -> Option<Function> {
     if let Some(operation) = super::super::vector::CollectionOperation::from_name(name) {
         return Some(Function::Collection(operation));
     }
+    if let Some(statistic) = super::super::statistics::VectorStatistic::from_name(name) {
+        return Some(Function::Statistic(statistic));
+    }
     match name.to_ascii_lowercase().as_str() {
         "round_to" => Some(Function::RoundTo),
         "floor_to" => Some(Function::FloorTo),
@@ -754,7 +764,7 @@ pub(super) fn uses_script_syntax(source: &str) -> bool {
             return true;
         }
         if source[end..].trim_start().starts_with('(')
-            && (super::super::vector::CollectionOperation::from_name(name).is_some() || VectorCallback::from_name(name).is_some() || matches!(
+            && (super::super::vector::CollectionOperation::from_name(name).is_some() || super::super::statistics::VectorStatistic::from_name(name).is_some() || VectorCallback::from_name(name).is_some() || matches!(
                 name.to_ascii_lowercase().as_str(),
                 "if" | "range" | "sum" | "average" | "median" | "stdev" | "decimal" | "fraction" | "decimal_div" | "to_float" |
                 "round_to" | "floor_to" | "ceil_to" | "clamp" | "percent_change" | "percent_of" | "choose" | "permutations" | "lerp" | "map_range"
@@ -1568,7 +1578,7 @@ impl ScriptExpression {
                         .collect::<Result<Vec<_>, _>>()?;
                     call(*function, &values, work)
                 })();
-                if matches!(function, Function::Collection(_))
+                if matches!(function, Function::Collection(_) | Function::Statistic(_))
                     && result.as_ref().is_err_and(|kind| !matches!(kind, DiagnosticKind::WorkLimit | DiagnosticKind::Canceled))
                 {
                     work.collection_failure = true;
@@ -1762,6 +1772,9 @@ fn call(
     use super::super::exact::{EverydayFunction, ExactNumber};
     if let Function::Collection(operation) = function {
         return operation.call(arguments, work);
+    }
+    if let Function::Statistic(statistic) = function {
+        return statistic.call(arguments, work);
     }
     let everyday = match function {
         Function::RoundTo => Some(EverydayFunction::RoundTo),
@@ -1959,7 +1972,7 @@ fn call(
             }
             finite((variance_sum / values.len() as f64).max(0.0).sqrt())?
         }
-        Function::Collection(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
+        Function::Collection(_) | Function::Statistic(_) | Function::Range | Function::Fraction | Function::DecimalDivide | Function::ToFloat
         | Function::RoundTo | Function::FloorTo | Function::CeilTo | Function::Clamp
         | Function::PercentChange | Function::PercentOf | Function::Choose | Function::Permutations
         | Function::Lerp | Function::MapRange => unreachable!(),

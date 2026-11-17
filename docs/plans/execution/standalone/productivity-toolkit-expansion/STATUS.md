@@ -18,7 +18,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M2-A | complete |
 | M2-B | complete, with interactive smoke pending |
 | M3-A | complete |
-| M3-B, M3-C | pending |
+| M3-B | complete |
+| M3-C | pending |
 | M4-A, M4-B, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
@@ -105,3 +106,10 @@ Both runs used cargo nextest run --config-file target/productivity-toolkit-nexte
 - Frozen-source rerun -E test(cumulative_and_rolling_vectors_follow_complete_window_semantics) | test(rolling_windows_bound_work_and_handle_large_values) passed 2 of 2.
 
 Diff whitespace verification passed.
+
+
+## M3-B quantiles and sample statistics
+
+M3-A was pushed at 3c11de694918eafc0deb86f36b5b5128b101547e. Quantile and percentile use linear interpolation over a sorted copy. New dispersion calculations center and scale values ahead of moment calculation, and sample standard deviation is evaluated directly even when sample variance would overflow. The existing population stdev keeps its existing definition. The new functions return ordinary scalars and use the existing collection error and work boundaries.
+
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E with test(univariate_statistics_) | test(previous_local_statistic_names_preserve_function_precedence) | test(shared_examples_evaluate_to_their_documented_results) | test(vector_collection_operations_are_pure_and_compose) passed 6 of 6 on frozen source. Independent review found no substantive issues. Diff whitespace verification passed.

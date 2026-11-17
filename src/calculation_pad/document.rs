@@ -4539,6 +4539,43 @@ mod tests {
     }
 
     #[test]
+    fn univariate_statistics_validate_ranges_and_preserve_old_statistics() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [1, 2, 3, 4]\nquantile(v, 0.25)\npercentile(v, 50)\n",
+                "variance_population(v)\nvariance_sample(v)\nstdev_sample(v)\nstdev(v)\n",
+                "quantile(v, 0)\npercentile(v, 100)\nvariance_population([5])\n",
+                "quantile([], 0.5)\nvariance_population([])\nvariance_sample([1])\n",
+                "stdev_sample([1])\nquantile(v, -0.1)\nquantile(v, 1.1)\n",
+                "percentile(v, 101)\nquantile(v, true)\nvariance_sample(range(3))\n",
+                "quantile(v, u8(1))\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 1), 1.75);
+            assert_eq!(scalar(&evaluation, 2), 2.5);
+            assert!((scalar(&evaluation, 3) - 1.25).abs() < 1e-12);
+            assert!((scalar(&evaluation, 4) - 5.0 / 3.0).abs() < 1e-12);
+            assert!((scalar(&evaluation, 5) - (5.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+            assert!((scalar(&evaluation, 6) - 1.25_f64.sqrt()).abs() < 1e-12);
+            assert_eq!(scalar(&evaluation, 7), 1.0);
+            assert_eq!(scalar(&evaluation, 8), 4.0);
+            assert_eq!(scalar(&evaluation, 9), 0.0);
+            for line in 10..=19 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn previous_local_statistic_names_preserve_function_precedence() {
+        let document = CalculationDocument::new("fn quantile(a, b, c) = a + b + c\nquantile(1, 2, 3)\nQUANTILE([1, 2], 0.5)");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 1), 6.0);
+        assert_eq!(scalar(&evaluation, 2), 1.5);
+    }
+
+    #[test]
     fn cumulative_and_rolling_failures_do_not_publish_partial_vectors() {
         for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
             let source = concat!(
