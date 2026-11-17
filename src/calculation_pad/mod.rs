@@ -66,7 +66,7 @@ pub(crate) use document::rename::{RenamePlan, RenameScope};
 pub(crate) use persistence::{PadViewMetadata, PadInputReference, SensitivitySettings};
 pub(crate) use input::{InputConfig, InputControl, InputKind, SampleNumber};
 pub(crate) use sensitivity::{Sampling, SensitivityBasis, SensitivityDefinition, SensitivityRow, SensitivityStatus, SensitivityTable};
-pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ScenePrimitive};
+pub(crate) use chart::{ChartDataset, ChartHit, ChartKind, ChartPoint, ChartScene, ChartSeries, ChartVectorReference, ChartView, ResolvedReferenceLine, ScenePrimitive};
 pub(crate) use sensitivity::{TableExport, export_table, table_header, table_row};
 pub(crate) use input::{step_value, slider_values, exact_grid, exact_grid_value, project as project_input};
 pub use persistence::{

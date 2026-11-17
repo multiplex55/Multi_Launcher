@@ -461,6 +461,65 @@ mod tests {
     }
 
     #[test]
+    fn chart_appearance_and_reference_share_raster_scene() {
+        let dataset = ChartDataset::from_vectors(Some(&[1.0, 2.0, 3.0]), &[("values", &[1.0, 2.0, 3.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.title = "My title".into();
+        definition.options.legend = options::LegendPlacement::Bottom;
+        definition.options.styles.push(options::SeriesStyle {
+            key: options::SeriesKey::Vector(ChartVectorReference::Named { name: "values".into() }),
+            color: [12, 34, 56, 255], line: options::LineStyle::Dashed,
+            marker: options::MarkerStyle::Cross, thickness: options::FiniteValue::try_from(3.0).unwrap(),
+        });
+        definition.options.references.push(options::ReferenceLine {
+            id: 1, axis: options::ReferenceAxis::Y, value: options::ReferenceValue::Literal(options::FiniteValue::try_from(4.0).unwrap()), label: "target".into(),
+        });
+        definition.options.next_reference_id = 2;
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text == "My title")));
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text == "target")));
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { position, text, .. } if text == "values" && position[1] >= 380.0)));
+        assert!(scene.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Line { color, width, .. } if *color == [12, 34, 56, 255] && *width == 3.0)).count() > 4);
+        assert!(scene.rasterize().is_ok());
+        definition.options.legend = options::LegendPlacement::Hidden;
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert!(!scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text == "values")));
+    }
+
+    #[test]
+    fn chart_named_reference_seam_and_fixed_clipping() {
+        let dataset = ChartDataset::from_vectors(Some(&[1.0, 2.0]), &[("values", &[1.0, 2.0])]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.y.bounds = fixed_bounds(1.0, 3.0);
+        definition.options.references.push(options::ReferenceLine { id: 1, axis: options::ReferenceAxis::Y, value: options::ReferenceValue::Named("target".into()), label: "target".into() });
+        definition.options.next_reference_id = 2;
+        let view = ChartView::default();
+        assert!(dataset.scene_for_definition(&definition, view, 640, 400).unwrap_err().contains("missing"));
+        let scene = dataset.scene_for_definition_with_references(&definition, &[ResolvedReferenceLine { id: 1, value: 5.0 }], view, 640, 400).unwrap().unwrap();
+        assert!(!scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text == "target")));
+        let scene = dataset.scene_for_definition_with_references(&definition, &[ResolvedReferenceLine { id: 1, value: 2.0 }], view, 640, 400).unwrap().unwrap();
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text { text, .. } if text == "target")));
+        definition.options.y.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition_with_references(&definition, &[ResolvedReferenceLine { id: 1, value: 0.0 }], view, 640, 400).unwrap_err().contains("positive"));
+    }
+
+    #[test]
+    fn chart_dense_dashes_continue_between_samples() {
+        let x = (0..1000).map(|n| n as f64).collect::<Vec<_>>();
+        let y = vec![1.0; x.len()];
+        let dataset = ChartDataset::from_vectors(Some(&x), &[("values", &y)]).unwrap();
+        let mut definition = chart_definition_for(ChartKind::Line);
+        definition.options.styles.push(options::SeriesStyle {
+            key: options::SeriesKey::Vector(ChartVectorReference::Named { name: "values".into() }),
+            color: [12, 34, 56, 255], line: options::LineStyle::Dashed, marker: options::MarkerStyle::None,
+            thickness: options::FiniteValue::try_from(2.0).unwrap(),
+        });
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        let segments = scene.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Line { color, .. } if *color == [12, 34, 56, 255])).count();
+        assert!(segments > 100 && segments < 900, "{segments}");
+    }
+
+    #[test]
     fn chart_options_route_log_axes_and_reject_nonpositive_data() {
         let dataset = ChartDataset::from_vectors(Some(&[1.0, 10.0, 100.0]), &[("values", &[2.0, 4.0, 8.0])]).unwrap();
         let mut definition = chart_definition_for(ChartKind::Scatter);
@@ -544,6 +603,19 @@ mod tests {
         }).collect::<Vec<_>>();
         assert!(labels.contains(&"out of range"));
         assert!(!labels.contains(&"0"));
+
+        let dataset = ChartDataset::from_vectors(Some(&[1.0, 2.0]), &[("values", &[1e-300, 1e300])]).unwrap();
+        definition.options.x = options::AxisOptions::default();
+        definition.options.y.scale = options::AxisScale::Log10;
+        definition.options.y.bounds = fixed_bounds(1e-300, 1e300);
+        view.set(1.0, 0.5, 0.0, 0.0).unwrap();
+        let scene = dataset.scene_for_definition(&definition, view, 640, 400).unwrap().unwrap();
+        let labels = scene.primitives.iter().filter_map(|primitive| match primitive {
+            ScenePrimitive::Text { position, text, .. } if position[0] == 4.0 && position[1] >= 38.0 => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(!labels.contains(&"0"));
+        assert!(!labels.contains(&"inf"));
     }
 
     #[test]
@@ -1168,6 +1240,54 @@ fn option_tick_label(value: f64, scale: options::AxisScale) -> String {
     }
 }
 
+fn styled_line(primitives: &mut Vec<ScenePrimitive>, start: [f32; 2], end: [f32; 2], color: [u8; 4], width: f32, style: options::LineStyle, phase: &mut f32) -> Result<(), String> {
+    if style == options::LineStyle::Solid {
+        if primitives.len() >= MAX_PRIMITIVES { return Err("Chart has too many drawing commands.".into()); }
+        primitives.push(ScenePrimitive::Line { start, end, color, width });
+        return Ok(());
+    }
+    let length = (end[0] - start[0]).hypot(end[1] - start[1]);
+    let (on, period) = if style == options::LineStyle::Dashed { (8.0, 13.0) } else { (2.0, 6.0) };
+    let count = ((length / period).ceil() as usize).saturating_add(1);
+    if count > MAX_PRIMITIVES.saturating_sub(primitives.len()) { return Err("Chart has too many drawing commands.".into()); }
+    let mut cursor = -*phase;
+    for _ in 0..count {
+        let first = cursor.max(0.0);
+        let last = (cursor + on).min(length);
+        cursor += period;
+        if first >= last || length == 0.0 { continue; }
+        let a = first / length;
+        let b = last / length;
+        let at = |t: f32| [start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t];
+        primitives.push(ScenePrimitive::Line { start: at(a), end: at(b), color, width });
+    }
+    *phase = (*phase + length) % period;
+    Ok(())
+}
+
+fn styled_marker(primitives: &mut Vec<ScenePrimitive>, center: [f32; 2], radius: f32, bounds: [f32; 4], color: [u8; 4], width: f32, marker: options::MarkerStyle) {
+    let x0 = (center[0] - radius).max(bounds[0]);
+    let x1 = (center[0] + radius).min(bounds[2]);
+    let y0 = (center[1] - radius).max(bounds[1]);
+    let y1 = (center[1] + radius).min(bounds[3]);
+    match marker {
+        options::MarkerStyle::Auto | options::MarkerStyle::Circle => primitives.push(ScenePrimitive::Circle { center, radius, color }),
+        options::MarkerStyle::Square => primitives.push(ScenePrimitive::Rect { min: [x0, y0], max: [x1, y1], color }),
+        options::MarkerStyle::Cross => {
+            primitives.push(ScenePrimitive::Line { start: [x0, center[1]], end: [x1, center[1]], color, width });
+            primitives.push(ScenePrimitive::Line { start: [center[0], y0], end: [center[0], y1], color, width });
+        }
+        options::MarkerStyle::None => {}
+    }
+}
+
+/// A named reference resolved against the same evaluation as the dataset.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResolvedReferenceLine {
+    pub id: u64,
+    pub value: f64,
+}
+
 impl ChartDataset {
     pub(crate) fn scene(
         &self,
@@ -1176,7 +1296,7 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
-        self.scene_inner(kind, None, view, width, height)
+        self.scene_inner(kind, None, &[], view, width, height)
     }
 
     pub(crate) fn scene_for_definition(
@@ -1186,19 +1306,56 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
+        self.scene_for_definition_with_references(definition, &[], view, width, height)
+    }
+
+    pub(crate) fn scene_for_definition_with_references(
+        &self,
+        definition: &ChartDefinition,
+        resolved: &[ResolvedReferenceLine],
+        view: ChartView,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<ChartScene>, String> {
         definition.options.validate(&definition.source)?;
-        self.scene_inner(definition.kind, Some(&definition.options), view, width, height)
+        if definition.options.is_default() {
+            return self.scene(definition.kind, view, width, height);
+        }
+        self.scene_inner(definition.kind, Some(definition), resolved, view, width, height)
     }
 
     fn scene_inner(
         &self,
         kind: ChartKind,
-        options: Option<&options::ChartOptions>,
+        definition: Option<&ChartDefinition>,
+        resolved: &[ResolvedReferenceLine],
         view: ChartView,
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
         validate_dimensions(width, height)?;
+        let options = definition.map(|definition| &definition.options);
+        let mut references = Vec::new();
+        if let Some(options) = options {
+            for reference in &options.references {
+                let value = match &reference.value {
+                    options::ReferenceValue::Literal(value) => value.get(),
+                    options::ReferenceValue::Named(_) => {
+                        let mut matches = resolved.iter().filter(|value| value.id == reference.id);
+                        let value = matches.next().ok_or("Chart reference value is missing or stale.")?;
+                        if matches.next().is_some() { return Err("Duplicate resolved chart reference.".into()); }
+                        value.value
+                    }
+                };
+                if !value.is_finite() { return Err("Chart reference values must be finite.".into()); }
+                let axis = if reference.axis == options::ReferenceAxis::X { 0 } else { 1 };
+                let scale = if axis == 0 { options.x.scale } else { options.y.scale };
+                if scale == options::AxisScale::Log10 && value <= 0.0 {
+                    return Err("Logarithmic chart reference values must be positive.".into());
+                }
+                references.push((axis, value, reference.label.as_str()));
+            }
+        }
         let mut checked = ChartView::default();
         checked.set(view.zoom_x, view.zoom_y, view.pan_x, view.pan_y)?;
         let visible = self
@@ -1244,17 +1401,21 @@ impl ChartDataset {
         let legend_columns = ((width.saturating_sub(16) / 125) as usize)
             .max(1)
             .min(visible.len());
-        let legend_rows = visible.len().div_ceil(legend_columns);
+        let legend = options.map_or(options::LegendPlacement::Top, |options| options.legend);
+        let title_rows = usize::from(options.is_some_and(|options| !options.title.is_empty()));
+        let legend_rows = if legend == options::LegendPlacement::Hidden { 0 } else { visible.len().div_ceil(legend_columns) };
+        let top_legend_rows = if legend == options::LegendPlacement::Top { legend_rows } else { 0 };
         let warning_rows = usize::from(self.approximate) + usize::from(self.coordinate_collisions);
-        let top = 22.0 + (legend_rows + warning_rows) as f32 * 16.0;
-        let bounds = [66.0, top, width as f32 - 20.0, height as f32 - 52.0];
+        let top = 22.0 + (title_rows + top_legend_rows + warning_rows) as f32 * 16.0;
+        let bottom_legend_rows = if legend == options::LegendPlacement::Bottom { legend_rows } else { 0 };
+        let bounds = [66.0, top, width as f32 - 20.0, height as f32 - 52.0 - bottom_legend_rows as f32 * 16.0];
         if bounds[3] - bounds[1] < 24.0 {
             return Err("Increase chart height to show the legend and plot.".into());
         }
         let plot_width = bounds[2] - bounds[0];
         let bar_width = (plot_width / expected.max(1) as f32 * 0.75 / visible.len() as f32).min(32.0);
         let default_axis = options::AxisOptions::default();
-        let custom_axes = options.filter(|options| options.x != default_axis || options.y != default_axis || options.grid);
+        let custom_axes = options.filter(|options| options.x != default_axis || options.y != default_axis || options.grid || !references.is_empty());
         let inset = if kind == ChartKind::Bar && custom_axes.is_none_or(|options| matches!(options.x.bounds, options::AxisBounds::Auto)) {
             f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width))
         } else {
@@ -1264,10 +1425,10 @@ impl ChartDataset {
             if kind == ChartKind::Bar && options.y.scale == options::AxisScale::Log10 {
                 return Err("Bar charts require a linear Y axis for the zero baseline.");
             }
-            let x = AxisTransform::new(&options.x, points.iter().map(|point| point.x))?;
+            let x = AxisTransform::new(&options.x, points.iter().map(|point| point.x).chain(references.iter().filter(|(axis, _, _)| *axis == 0).map(|(_, value, _)| *value)))?;
             let y = AxisTransform::new(
                 &options.y,
-                points.iter().map(|point| point.y).chain((kind == ChartKind::Bar).then_some(0.0)),
+                points.iter().map(|point| point.y).chain((kind == ChartKind::Bar).then_some(0.0)).chain(references.iter().filter(|(axis, _, _)| *axis == 1).map(|(_, value, _)| *value)),
             )?;
             Ok(PlotAxes::new([x, y], checked, inset))
         }).transpose()?;
@@ -1331,7 +1492,7 @@ impl ChartDataset {
                 width: 2.0,
             },
             ScenePrimitive::Text {
-                position: [bounds[0], height as f32 - 22.0],
+                position: [bounds[0], height as f32 - 22.0 - bottom_legend_rows as f32 * 16.0],
                 text: bounded_label(&format!("{} {}", self.x_label, self.x_unit)),
                 color: black,
                 size: 13.0,
@@ -1374,11 +1535,14 @@ impl ChartDataset {
             primitives.truncate(6); // replace the legacy endpoint labels
             for (axis, options) in [&options.x, &options.y].into_iter().enumerate() {
                 let mut previous_label_edge = if axis == 0 { 0.0 } else { f32::INFINITY };
-                for (position, value) in axes.ticks(axis, options.ticks)? {
+                let ticks = axes.ticks(axis, options.ticks)?;
+                let compact = ticks.iter().map(|(_, value)| if !value.is_finite() || (options.scale == options::AxisScale::Log10 && *value <= 0.0) { "out of range".to_owned() } else { tick(*value) }).collect::<Vec<_>>();
+                let compact_unique = compact.iter().enumerate().all(|(index, label)| !compact[..index].contains(label));
+                for (index, (position, value)) in ticks.into_iter().enumerate() {
                     if !(0.0..=1.0).contains(&position) {
                         continue;
                     }
-                    let label = option_tick_label(value, options.scale);
+                    let label = if axis == 1 && compact_unique { compact[index].clone() } else { option_tick_label(value, options.scale) };
                     let label_width = text_ink_right(&label, 11.0);
                     let (start, end, text_position) = if axis == 0 {
                         let x = pixels([position, 0.0])[0];
@@ -1417,7 +1581,7 @@ impl ChartDataset {
                         fits
                     } else {
                         let top = text_position[1];
-                        let fits = top + 14.0 <= previous_label_edge;
+                        let fits = top + 14.0 <= previous_label_edge && 4.0 + label_width <= bounds[0] - 4.0;
                         if fits {
                             previous_label_edge = top;
                         }
@@ -1434,16 +1598,35 @@ impl ChartDataset {
                 }
             }
         }
+        if let Some(options) = options && !options.title.is_empty() {
+            primitives.push(ScenePrimitive::Text {
+                position: [8.0, 22.0], text: fit_label(&options.title, ((width as f32 - 16.0) / 8.0).floor() as usize), color: black, size: 13.0,
+            });
+        }
+        if let Some(axes) = axes {
+            for &(axis, value, label) in &references {
+                let position = axes.position(axis, value);
+                if !(0.0..=1.0).contains(&position) { continue; }
+                let (start, end) = if axis == 0 { (pixels([position, 0.0]), pixels([position, 1.0])) } else { (pixels([0.0, position]), pixels([1.0, position])) };
+                primitives.push(ScenePrimitive::Line { start, end, color: [110, 110, 110, 255], width: 1.0 });
+                if !label.is_empty() {
+                    let text = fit_label(label, ((bounds[2] - bounds[0]) / 7.0).floor().max(2.0) as usize);
+                    let x = if axis == 0 { (start[0] + 3.0).min((bounds[2] - text_ink_right(&text, 10.0)).max(bounds[0])) } else { bounds[0] + 3.0 };
+                    let y = if axis == 0 { bounds[1] + 2.0 } else { (start[1] - 12.0).max(bounds[1]) };
+                    primitives.push(ScenePrimitive::Text { position: [x, y], text, color: [110, 110, 110, 255], size: 10.0 });
+                }
+            }
+        }
         if self.approximate {
             primitives.push(ScenePrimitive::Text {
-                position: [8.0, 22.0 + legend_rows as f32 * 16.0],
+                position: [8.0, 22.0 + (title_rows + top_legend_rows) as f32 * 16.0],
                 text: "Approximate coordinates".into(),
                 color: [150, 70, 20, 255],
                 size: 11.0,
             });
             if self.coordinate_collisions {
                 primitives.push(ScenePrimitive::Text {
-                    position: [8.0, 22.0 + (legend_rows + 1) as f32 * 16.0],
+                    position: [8.0, 22.0 + (title_rows + top_legend_rows + 1) as f32 * 16.0],
                     text: "Coordinate collisions".into(),
                     color: [150, 70, 20, 255],
                     size: 11.0,
@@ -1459,11 +1642,21 @@ impl ChartDataset {
             .filter(|(_, series)| series.visible)
             .enumerate()
         {
-            let color = COLORS[series_index % COLORS.len()];
+            let key = definition.and_then(|definition| match &definition.source {
+                ChartSource::Vectors { y, .. } => y.get(series_index).cloned().map(options::SeriesKey::Vector),
+                ChartSource::Sensitivity { outputs } => outputs.get(series_index).cloned().map(options::SeriesKey::Sensitivity),
+            });
+            let style = options.and_then(|options| options.styles.iter().find(|style| Some(&style.key) == key.as_ref()));
+            let color = style.map_or(COLORS[series_index % COLORS.len()], |style| style.color);
+            let line_style = style.map_or(options::LineStyle::Solid, |style| style.line);
+            let marker = style.map_or(options::MarkerStyle::Auto, |style| style.marker);
+            let thickness = style.map_or(2.0, |style| style.thickness.get() as f32);
             let mut previous = None;
+            let mut dash_phase = 0.0;
             for (row, point) in series.points.iter().enumerate() {
                 let Some(point) = point else {
                     previous = None;
+                    dash_phase = 0.0;
                     continue;
                 };
                 let position = map(point);
@@ -1481,26 +1674,22 @@ impl ChartDataset {
                                 clip_line(before, position, bounds)
                             };
                             if let Some((start, end)) = clipped {
-                                primitives.push(ScenePrimitive::Line {
-                                    start, end, color, width: 2.0,
-                                });
+                                // Offscreen path length can be extreme; restart at the
+                                // visible boundary rather than carrying an unstable phase.
+                                if !inside(before) { dash_phase = 0.0; }
+                                styled_line(&mut primitives, start, end, color, thickness, line_style, &mut dash_phase)?;
+                                if !inside(position) { dash_phase = 0.0; }
+                            } else {
+                                dash_phase = 0.0;
                             }
                         }
                         if inside(position) {
-                            primitives.push(ScenePrimitive::Circle {
-                                center: position,
-                                radius: 3.0,
-                                color,
-                            });
+                            styled_marker(&mut primitives, position, 3.0, bounds, color, thickness, marker);
                         }
                     }
                     ChartKind::Scatter => {
                         if inside(position) {
-                            primitives.push(ScenePrimitive::Circle {
-                                center: position,
-                                radius: 4.0,
-                                color,
-                            });
+                            styled_marker(&mut primitives, position, 4.0, bounds, color, thickness, marker);
                         }
                     }
                     ChartKind::Bar => {
@@ -1524,6 +1713,7 @@ impl ChartDataset {
                         }
                     }
                 }
+                if primitives.len() > MAX_PRIMITIVES { return Err("Chart has too many drawing commands.".into()); }
                 if inside(hit_position) {
                     hits.push(ChartHit {
                         position: hit_position,
@@ -1550,10 +1740,10 @@ impl ChartDataset {
                 previous = Some((position, [point.x, point.y]));
             }
             let slot_width = (width as f32 - 16.0) / legend_columns as f32;
-            primitives.push(ScenePrimitive::Text {
+            if legend != options::LegendPlacement::Hidden { primitives.push(ScenePrimitive::Text {
                 position: [
                     8.0 + (visible_index % legend_columns) as f32 * slot_width,
-                    22.0 + (visible_index / legend_columns) as f32 * 16.0,
+                    if legend == options::LegendPlacement::Top { 22.0 + (title_rows + visible_index / legend_columns) as f32 * 16.0 } else { height as f32 - (legend_rows - visible_index / legend_columns) as f32 * 16.0 },
                 ],
                 text: fit_label(
                     &series.label,
@@ -1561,7 +1751,7 @@ impl ChartDataset {
                 ),
                 color,
                 size: 11.0,
-            });
+            }); }
         }
         if primitives.len() > MAX_PRIMITIVES {
             return Err("Chart has too many drawing commands.".into());

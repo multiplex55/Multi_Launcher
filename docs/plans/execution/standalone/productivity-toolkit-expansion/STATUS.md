@@ -23,7 +23,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-A | complete |
 | M4-B1 | complete |
 | M4-B2A | complete |
-| M4-B2B, M4-B3, M4-C | pending |
+| M4-B2B | complete |
+| M4-B3, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -150,3 +151,10 @@ Final focused rerun passed 5 of 5 in 0.223s after a 1m53s build.
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(chart_options_route_log_axes_and_reject_nonpositive_data) | test(chart_options_clip_extreme_crossings_without_dropping_raw_points) | test(chart_options_bound_ticks_and_preserve_legacy_rendering) | test(chart_options_ticks_distinguish_close_bounds_and_hide_overlapping_labels) | test(chart_options_zoom_does_not_label_underflowed_log_tick_zero)'
 
 Independent review confirmed the tick corrections. Existing test-build warnings remain in vendored and unrelated source. The shared appearance and reference-line work remains M4-B2B; runtime resolution, identities and freshness remain M4-B3.
+
+
+## M4-B2B shared appearance and reference geometry
+
+M4-B2A was pushed at b15ac8822ffe25551c0e72d7643aa722305b1559. Chart title, legend placement, per-series color/style/marker/thickness and literal reference lines are part of the shared scene. Reference geometry accepts named values through a typed ID-to-value seam for B3. Dash phase carries through dense connected segments, and axis label formatting respects display bounds and log scale.
+
+The initial focused fast-dev library Nextest passed 13 of 13. After independent review corrections the final focused run passed 14 of 14, covering dense dashes, scale-aware log labels, new shared raster/reference primitives, and legacy parity. Review rechecked both findings, and diff whitespace verification passed.
