@@ -461,7 +461,8 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
                 return Err(error("function declarations must be top-level"));
             }
             if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
-            let new_collection_name = ["sort", "sort_desc", "unique", "map", "filter", "count_if", "find_indices"]
+            let new_collection_name = ["sort", "sort_desc", "unique", "map", "filter", "count_if", "find_indices",
+                "cumsum", "cumprod", "diff", "percent_changes", "rolling_sum", "rolling_average", "rolling_min", "rolling_max"]
                 .iter()
                 .any(|builtin| builtin.eq_ignore_ascii_case(&name));
             if (signature(&name).is_some() && !new_collection_name)
@@ -547,6 +548,14 @@ pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "sort", help: "sort(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "sort_desc", help: "sort_desc(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "unique", help: "unique(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cumsum", help: "cumsum(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "cumprod", help: "cumprod(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "diff", help: "diff(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "percent_changes", help: "percent_changes(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "rolling_sum", help: "rolling_sum(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_average", help: "rolling_average(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_min", help: "rolling_min(vector, window)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "rolling_max", help: "rolling_max(vector, window)", arities: &[2], insensitive: true },
     FunctionSignature { name: "map", help: "map(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "filter", help: "filter(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "count_if", help: "count_if(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },

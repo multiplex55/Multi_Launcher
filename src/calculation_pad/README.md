@@ -287,10 +287,22 @@ as a loop iterable, while these operations require vectors.
   matching elements, count_if returns their count, and find_indices returns
   their zero-based positions. Empty input returns an empty vector or zero, but
   the callback name and arity are still checked.
+* `cumsum(v)` and `cumprod(v)` return cumulative sums and products with the
+  same length as their input. `diff(v)` returns consecutive differences.
+  `percent_changes(v)` returns `(current - previous) / previous` as ratios,
+  so `0.2` means 20%. A zero previous value is an error.
+* `rolling_sum(v, window)`, `rolling_average(v, window)`,
+  `rolling_min(v, window)` and `rolling_max(v, window)` use complete trailing
+  windows. The window is a positive integral ordinary scalar. The output has
+  `max(len(v) - window + 1, 0)` values. For charts, align an existing X vector
+  with `slice(x, window - 1, len(x))` when a complete window exists.
+  Nonfinite intermediate arithmetic produces an error.
 
 Previously declared local formula functions named `sort`, `sort_desc`,
-`unique`, `map`, `filter`, `count_if` or `find_indices` retain precedence
-for calls using the same spelling.
+`unique`, `map`, `filter`, `count_if`, `find_indices`, `cumsum`,
+`cumprod`, `diff`, `percent_changes`, `rolling_sum`, `rolling_average`,
+`rolling_min` or `rolling_max` retain precedence for calls using the same
+spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,

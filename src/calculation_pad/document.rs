@@ -4512,6 +4512,62 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_and_rolling_vectors_follow_complete_window_semantics() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [10, 20, 15, 30]\n",
+                "cumsum(v)\ncumprod([2, 3, 4])\ndiff(v)\npercent_changes(v)\n",
+                "rolling_sum(v, 2)\nrolling_average(v, 2)\n",
+                "rolling_min(v, 2)\nrolling_max(v, 2)\n",
+                "rolling_sum(v, 1)\nrolling_average(v, 4)\nrolling_max(v, 5)\n",
+                "rolling_sum(v, 1e100)\ncumsum([])\ncumprod([])\ndiff([1])\n",
+                "percent_changes([])\nrolling_sum([], 1)\nv\npercent_changes([-10, -5])\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [
+                (1, "[10, 30, 45, 75]"), (2, "[2, 6, 24]"), (3, "[10, -5, 15]"),
+                (4, "[1, -0.25, 1]"), (5, "[30, 35, 45]"), (6, "[15, 17.5, 22.5]"),
+                (7, "[10, 15, 15]"), (8, "[20, 20, 30]"), (9, "[10, 20, 15, 30]"),
+                (10, "[18.75]"), (11, "[]"), (12, "[]"), (13, "[]"),
+                (14, "[]"), (15, "[]"), (16, "[]"), (17, "[]"),
+                (18, "[10, 20, 15, 30]"), (19, "[-0.5]"),
+            ] {
+                assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn cumulative_and_rolling_failures_do_not_publish_partial_vectors() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "v = [10, 0, 20]\n",
+                "rolling_sum(v, 0)\nrolling_sum(v, -1)\nrolling_sum(v, 1.5)\n",
+                "rolling_sum([], 0)\nrolling_sum(v, true)\nrolling_sum(v, u8(1))\n",
+                "percent_changes(v)\npercent_changes([-0.0, 1])\n",
+                "cumsum([1e308, 1e308])\ncumprod([1e308, 2])\n",
+                "diff([-1e308, 1e308])\nrolling_sum([1e308, 1e308], 2)\n",
+                "v = percent_changes(v)\nlen(v)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for line in 1..=13 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}: {:?}", line + 1, evaluation.lines[line].outcome);
+            }
+            assert_eq!(scalar(&evaluation, 14), 3.0);
+        }
+    }
+
+    #[test]
+    fn previously_declared_rolling_names_remain_local_functions() {
+        let document = CalculationDocument::new("fn rolling_sum(a, b, c) = a + b + c\nrolling_sum(1, 2, 3)\nROLLING_SUM([1, 2], 2)");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 1), 6.0);
+        assert_eq!(formatted(&evaluation, 2), "[3]");
+    }
+
+    #[test]
     fn vector_callback_transforms_and_dependencies_follow_formula_scope() {
         for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
             let source = concat!(

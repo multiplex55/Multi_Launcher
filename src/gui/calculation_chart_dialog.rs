@@ -431,6 +431,41 @@ mod tests {
     }
 
     #[test]
+    fn chart_rolling_series_requires_explicit_aligned_x_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source(concat!(
+            "x = [0, 1, 2, 3]\ny = [10, 20, 15, 30]\nwindow = 2\n",
+            "aligned = slice(x, window - 1, len(x))\n",
+            "average = rolling_average(y, window)"
+        )).unwrap();
+        session.evaluation();
+        let runtime = ChartRuntime {
+            identity: session.current_id().zip(session.document_incarnation()),
+            evaluation: session.shared_evaluation(), table: None, definition: None,
+            basis: session.evaluation_basis(), pad_host: None, pinned: false,
+        };
+        let mut definition = ChartDefinition {
+            source: ChartSource::Vectors {
+                x: Some(ChartVectorReference::Named { name: "aligned".into() }),
+                y: vec![ChartVectorReference::Named { name: "average".into() }],
+            },
+            kind: ChartKind::Line, x_label: String::new(), y_label: String::new(),
+            hidden: Vec::new(), bar_labels: Vec::new(),
+        };
+        let dataset = chart_data(&runtime, &definition).unwrap().1;
+        let points = &dataset.series[0].points;
+        assert_eq!(points.iter().map(|point| point.as_ref().map(|point| (point.x, point.y))).collect::<Vec<_>>(),
+            [Some((1.0, 15.0)), Some((2.0, 17.5)), Some((3.0, 22.5))]);
+        definition.source = ChartSource::Vectors {
+            x: Some(ChartVectorReference::Named { name: "x".into() }),
+            y: vec![ChartVectorReference::Named { name: "average".into() }],
+        };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("matching lengths"));
+    }
+
+    #[test]
     fn chart_empty_adapter_keeps_missing_mismatch_and_hidden_states_distinct() {
         let directory = tempfile::tempdir().unwrap();
         let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());

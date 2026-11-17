@@ -61,6 +61,7 @@ impl CalculationVector {
 pub(super) enum CollectionOperation {
     Append, Concat, Insert, SetAt, RemoveAt, Pop, Get, First, Last, Len, Slice, Reverse,
     Sort, SortDesc, Unique,
+    CumSum, CumProd, Diff, PercentChanges, RollingSum, RollingAverage, RollingMin, RollingMax,
 }
 
 impl CollectionOperation {
@@ -71,6 +72,10 @@ impl CollectionOperation {
             "get" => Self::Get, "first" => Self::First, "last" => Self::Last,
             "len" => Self::Len, "slice" => Self::Slice, "reverse" => Self::Reverse,
             "sort" => Self::Sort, "sort_desc" => Self::SortDesc, "unique" => Self::Unique,
+            "cumsum" => Self::CumSum, "cumprod" => Self::CumProd, "diff" => Self::Diff,
+            "percent_changes" => Self::PercentChanges, "rolling_sum" => Self::RollingSum,
+            "rolling_average" => Self::RollingAverage, "rolling_min" => Self::RollingMin,
+            "rolling_max" => Self::RollingMax,
             _ => return None,
         })
     }
@@ -184,6 +189,73 @@ impl CollectionOperation {
                     if seen.insert(key) {
                         result.push(value);
                     }
+                }
+                result
+            }
+            (Self::CumSum | Self::CumProd, [_]) => {
+                work.charge_vector(values.len().saturating_mul(2))?;
+                let mut result = Vec::with_capacity(values.len());
+                let mut accumulator = if matches!(self, Self::CumSum) { 0.0 } else { 1.0 };
+                for &value in values {
+                    accumulator = checked(if matches!(self, Self::CumSum) {
+                        accumulator + value
+                    } else {
+                        accumulator * value
+                    })?;
+                    result.push(accumulator);
+                }
+                result
+            }
+            (Self::Diff | Self::PercentChanges, [_]) => {
+                work.charge_vector(values.len().saturating_sub(1).saturating_mul(3))?;
+                let mut result = Vec::with_capacity(values.len().saturating_sub(1));
+                for pair in values.windows(2) {
+                    if matches!(self, Self::PercentChanges) && pair[0] == 0.0 {
+                        return Err(error("percent change requires a nonzero previous value"));
+                    }
+                    let difference = checked(pair[1] - pair[0])?;
+                    result.push(if matches!(self, Self::PercentChanges) {
+                        checked(difference / pair[0])?
+                    } else {
+                        difference
+                    });
+                }
+                result
+            }
+            (Self::RollingSum | Self::RollingAverage | Self::RollingMin | Self::RollingMax, [_, window]) => {
+                let Scalar(window) = window else {
+                    return Err(error("rolling window must be a positive integral scalar"));
+                };
+                if !window.is_finite() || *window <= 0.0 || window.fract() != 0.0 {
+                    return Err(error("rolling window must be a positive integral scalar"));
+                }
+                if *window > values.len() as f64 {
+                    work.charge_vector(0)?;
+                    return Ok(Vector(CalculationVector(Arc::new(Vec::new()))));
+                }
+                let width = *window as usize;
+                let mut result = Vec::with_capacity(values.len() - width + 1);
+                for window in values.windows(width) {
+                    work.charge_vector(width + 1)?;
+                    let mut aggregate = window[0];
+                    for (index, &value) in window.iter().enumerate().skip(1) {
+                        aggregate = match self {
+                            Self::RollingSum => checked(aggregate + value)?,
+                            Self::RollingAverage => {
+                                let count = (index + 1) as f64;
+                                if value.is_sign_negative() != aggregate.is_sign_negative() {
+                                    checked(aggregate * (1.0 - 1.0 / count) + value / count)?
+                                } else {
+                                    let delta = checked(value - aggregate)?;
+                                    checked(aggregate + delta / count)?
+                                }
+                            }
+                            Self::RollingMin => aggregate.min(value),
+                            Self::RollingMax => aggregate.max(value),
+                            _ => unreachable!(),
+                        };
+                    }
+                    result.push(aggregate);
                 }
                 result
             }
@@ -409,6 +481,30 @@ fn parse(
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn rolling_windows_bound_work_and_handle_large_values() {
+        let inputs = [CalculationValue::Vector(CalculationVector::new(vec![f64::MAX, -f64::MAX]).unwrap()),
+            CalculationValue::Scalar(2.0)];
+        let CalculationValue::Vector(mean) = CollectionOperation::RollingAverage.call(&inputs, &mut WorkBudget::default()).unwrap() else {
+            panic!("expected vector");
+        };
+        assert_eq!(mean.components(), &[0.0]);
+        let inputs = [CalculationValue::Vector(CalculationVector::new(vec![1.0; MAX_VECTOR_COMPONENTS]).unwrap()),
+            CalculationValue::Scalar(512.0)];
+        let mut work = WorkBudget::default();
+        let CalculationValue::Vector(result) = CollectionOperation::RollingSum.call(&inputs, &mut work).unwrap() else {
+            panic!("expected vector");
+        };
+        assert_eq!(result.components().len(), 513);
+        assert!(result.components().iter().all(|value| *value == 512.0));
+        assert_eq!(work.vector_used(), 513 * 513);
+        let mut work = WorkBudget::default();
+        work.charge_vector(document::script::MAX_VECTOR_COMPONENT_WORK - 1).unwrap();
+        assert!(matches!(CollectionOperation::RollingSum.call(&inputs, &mut work), Err(DiagnosticKind::WorkLimit)));
+        let mut work = WorkBudget::with_cancellation(Arc::new(AtomicBool::new(true)));
+        assert!(matches!(CollectionOperation::RollingSum.call(&inputs, &mut work), Err(DiagnosticKind::Canceled)));
+    }
 
     #[test]
     fn ordering_and_uniqueness_preserve_signed_zero_and_source() {

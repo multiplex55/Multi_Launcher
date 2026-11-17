@@ -316,6 +316,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Vectors",
         examples: &[
             CalculationExample {
+                title: "Cumulative and rolling calculations",
+                source: "values = [10, 20, 15, 30]\ntotals = cumsum(values)\nchanges = diff(values)\nrolling_average(values, 2)",
+                explanation: "Cumulative totals are [10, 30, 45, 75], adjacent differences are [10, -5, 15], and the rolling average uses complete trailing windows.",
+                expected: ExampleExpectation::Vector(&[15.0, 17.5, 22.5]),
+            },
+            CalculationExample {
                 title: "Filter and map with explicit formula parameters",
                 source: "values = [7, 2, 7, 4, 10]\nthreshold = 5\nfactor = 2\nfn above(value, limit) = value > limit\nfn scale(value, multiplier) = value * multiplier\nselected = filter(values, above, threshold)\ndoubled = map(values, scale, factor)\nmatching_count = count_if(values, above, threshold)\nfind_indices(values, above, threshold)",
                 explanation: "Callbacks receive each element and explicit extra arguments. The filtered values are [7, 7, 10], doubled values are [14, 4, 14, 8, 20], and count is 3.",

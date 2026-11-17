@@ -17,7 +17,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M1-A | complete, with interactive smoke pending |
 | M2-A | complete |
 | M2-B | complete, with interactive smoke pending |
-| M3-A, M3-B, M3-C | pending |
+| M3-A | complete |
+| M3-B, M3-C | pending |
 | M4-A, M4-B, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
@@ -93,3 +94,14 @@ Focused Nextest passes were 6 of 6 initially, 13 of 13 after review corrections,
 test(vector_callback) | test(callback_records_nested_definitions_only_when_called) | test(invalid_callback_setup_preserves_prior_binding_in_both_routes) | test(prior_local_callback_operation_names_keep_function_precedence) | test(function_rename_tracks_calls_and_callbacks_without_capturing_values) | test(row_named_formula_is_distinct_from_physical_row_reference) | test(unresolved_callback_is_not_a_document_value_reference) | test(callback_identifier_completion_inserts_bare_function_name) | test(callback_function_rename_is_one_undoable_edit) | test(shared_examples_evaluate_to_their_documented_results) | test(old_local_functions_can_shadow_new_vector_names) | test(parameter_scope_capture_and_malformed_sources_are_checked)
 
 The reviewed corrections and the invalid-draft callback role edge are covered. Diff whitespace verification passed.
+
+
+## M3-A cumulative and rolling vectors
+
+M2-B was pushed at eab988ea1de45f541e0b604b1290b8774ccc9871. The eight C3 functions return reusable vectors. Rolling outputs use complete trailing windows, and the chart fixture tested explicit X alignment. The review correction prevents an overflowing subtraction in the mean of opposite-sign extrema. Adjacent percentage changes use ratios and reject zero prior values.
+
+Both runs used cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1:
+- Initial -E test(cumulative_and_rolling_) | test(rolling_windows_bound_work_and_handle_large_values) | test(previously_declared_rolling_names_remain_local_functions) | test(chart_rolling_series_requires_explicit_aligned_x_values) | test(shared_examples_evaluate_to_their_documented_results) | test(vector_collection_operations_are_pure_and_compose) passed 7 of 7.
+- Frozen-source rerun -E test(cumulative_and_rolling_vectors_follow_complete_window_semantics) | test(rolling_windows_bound_work_and_handle_large_values) passed 2 of 2.
+
+Diff whitespace verification passed.
