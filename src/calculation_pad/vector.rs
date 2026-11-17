@@ -14,7 +14,7 @@ pub(crate) const MAX_VECTOR_PARSE_WORK: usize = 8192;
 pub struct CalculationVector(Arc<Vec<f64>>);
 
 impl CalculationVector {
-    fn new(values: Vec<f64>) -> Result<Self, DiagnosticKind> {
+    pub(super) fn new(values: Vec<f64>) -> Result<Self, DiagnosticKind> {
         check_component_count(values.len())?;
         if values.iter().any(|value| !value.is_finite()) {
             return Err(error("vector components must be finite"));

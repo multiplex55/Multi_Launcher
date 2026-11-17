@@ -316,6 +316,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Vectors",
         examples: &[
             CalculationExample {
+                title: "Filter and map with explicit formula parameters",
+                source: "values = [7, 2, 7, 4, 10]\nthreshold = 5\nfactor = 2\nfn above(value, limit) = value > limit\nfn scale(value, multiplier) = value * multiplier\nselected = filter(values, above, threshold)\ndoubled = map(values, scale, factor)\nmatching_count = count_if(values, above, threshold)\nfind_indices(values, above, threshold)",
+                explanation: "Callbacks receive each element and explicit extra arguments. The filtered values are [7, 7, 10], doubled values are [14, 4, 14, 8, 20], and count is 3.",
+                expected: ExampleExpectation::Vector(&[0.0, 2.0, 4.0]),
+            },
+            CalculationExample {
                 title: "Sort and retain distinct values",
                 source: "values = [7, 2, 7, 4, 10]\nascending = sort(values)\ndescending = sort_desc(values)\nunique(values)",
                 explanation: "sort and sort_desc return ordered copies. unique preserves the first occurrence of each value; values is unchanged.",

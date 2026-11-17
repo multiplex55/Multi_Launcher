@@ -2862,6 +2862,18 @@ mod tests {
     }
 
     #[test]
+    fn callback_function_rename_is_one_undoable_edit() {
+        let (_dir, _root, mut session) = fixture();
+        let source = "fn scale(value) = value * 2\nmap([1, 2], scale)";
+        session.replace_source(source).unwrap();
+        let preview = session.preview_rename(source.find("scale").unwrap(), "double_value").unwrap();
+        assert!(session.apply_rename(&preview).unwrap());
+        assert_eq!(session.source(), Some("fn double_value(value) = value * 2\nmap([1, 2], double_value)"));
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(source));
+    }
+
+    #[test]
     fn inspector_observes_exact_values_and_preserves_dirty_binding() {
         use crate::calculation_pad::{InspectorSourceOrigin, ProgrammerInspector};
         let (_dir, _root, mut session) = fixture();

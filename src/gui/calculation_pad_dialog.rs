@@ -1786,6 +1786,7 @@ impl CalculationPadDialog {
             let scope = match &state.scope {
                 crate::calculation_pad::RenameScope::Document => "Document scope, including loop bindings".to_owned(),
                 crate::calculation_pad::RenameScope::Parameter { owner_line } => format!("Parameter of function at r{}", owner_line + 1),
+                crate::calculation_pad::RenameScope::Function { owner_line } => format!("Function declared at r{}", owner_line + 1),
             };
             ui.label(format!("{} · {scope}", state.old_name));
             let mut draft = state.draft.clone();

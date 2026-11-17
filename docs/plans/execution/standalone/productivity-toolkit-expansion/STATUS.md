@@ -16,7 +16,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M0-B | complete |
 | M1-A | complete, with interactive smoke pending |
 | M2-A | complete |
-| M2-B | pending |
+| M2-B | complete, with interactive smoke pending |
 | M3-A, M3-B, M3-C | pending |
 | M4-A, M4-B, M4-C | pending |
 | M5-A, M5-B | pending |
@@ -83,3 +83,13 @@ Both checks used cargo nextest run --config-file target/productivity-toolkit-nex
 - Cached test(shared_examples_evaluate_to_their_documented_results) passed 1 of 1.
 
 Independent review found no blocking issues. Diff whitespace verification passed.
+
+## M2-B named vector callbacks
+
+M2-A was pushed at 2ccf975ca0079dc9ee01f6ade2c279167e385ce0. Map, filter, count_if and find_indices resolve a bare previously declared formula, validate callback shape even on empty input, and run through the existing formula invocation and work limits. Explicit extra arguments are evaluated once, and callback output publishes only after success. Invalid setup remains lazy in unselected document branches and preserves prior bindings on evaluated failures. Formula definitions with invalid callback setup are rejected. Function rename, undo, editor completion and dependencies follow the actual callable rather than a same-spelling value or physical row reference.
+
+Focused Nextest passes were 6 of 6 initially, 13 of 13 after review corrections, and 14 of 14 on the final frozen source. The final build took 1m40s and test execution took 0.558s. The final command was cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 with -E:
+
+test(vector_callback) | test(callback_records_nested_definitions_only_when_called) | test(invalid_callback_setup_preserves_prior_binding_in_both_routes) | test(prior_local_callback_operation_names_keep_function_precedence) | test(function_rename_tracks_calls_and_callbacks_without_capturing_values) | test(row_named_formula_is_distinct_from_physical_row_reference) | test(unresolved_callback_is_not_a_document_value_reference) | test(callback_identifier_completion_inserts_bare_function_name) | test(callback_function_rename_is_one_undoable_edit) | test(shared_examples_evaluate_to_their_documented_results) | test(old_local_functions_can_shadow_new_vector_names) | test(parameter_scope_capture_and_malformed_sources_are_checked)
+
+The reviewed corrections and the invalid-draft callback role edge are covered. Diff whitespace verification passed.

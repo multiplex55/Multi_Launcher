@@ -278,9 +278,19 @@ as a loop iterable, while these operations require vectors.
   zeros. `unique(v)` keeps the first occurrence of each numeric value, treating
   positive and negative zero as equal and preserving the first representation.
   All three accept empty vectors and leave the original unchanged.
+* `map(v, function, extra_args...)`, `filter(v, function, extra_args...)`,
+  `count_if(v, function, extra_args...)` and
+  `find_indices(v, function, extra_args...)` use a previously declared
+  formula name as the second argument. Each call receives the current element
+  followed by the explicit extra arguments. Map returns finite dimensionless
+  scalars. The other callbacks must return Boolean values. Filter retains
+  matching elements, count_if returns their count, and find_indices returns
+  their zero-based positions. Empty input returns an empty vector or zero, but
+  the callback name and arity are still checked.
 
-Previously declared local formula functions named `sort`, `sort_desc` or
-`unique` retain precedence for calls using the same spelling.
+Previously declared local formula functions named `sort`, `sort_desc`,
+`unique`, `map`, `filter`, `count_if` or `find_indices` retain precedence
+for calls using the same spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,

@@ -35,7 +35,7 @@ pub(crate) fn editor_loop_header(source: &str) -> bool {
 pub(crate) fn editor_control_keyword(source: &str) -> Option<&'static str> {
     loops::editor_control_keyword(source)
 }
-pub(crate) use script::{FUNCTIONS, function_signature_help};
+pub(crate) use script::{FUNCTIONS, function_signature_help, is_vector_callback};
 pub(crate) use script::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_VECTOR_COMPONENT_WORK};
 pub(crate) use loops::{MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH};
 
@@ -112,6 +112,28 @@ pub(crate) fn editor_function_scope(source: &str, caret: usize) -> EditorFunctio
             keyword_range, name_range, parameter_ranges, body_ranges, valid });
     }
     scope
+}
+
+pub(crate) fn editor_callback_ranges(source: &str) -> Vec<Range<usize>> {
+    let analysis = syntax::SourceAnalysis::new(source);
+    let (functions, _, _) = script::build_functions(&analysis);
+    let mut ranges = Vec::new();
+    for (line, row) in analysis.rows.iter().enumerate() {
+        if row.owner.is_some() || row.diagnostic.is_some() { continue; }
+        let visible = functions.partition_point(|function| function.line < line);
+        if visible == 0 { continue; }
+        let body_start = script::declaration_header(&row.text)
+            .and_then(Result::ok)
+            .and_then(|header| header.body_start)
+            .unwrap_or(0);
+        for range in script::callback_ranges(&row.text[body_start..], &functions[..visible]) {
+            let range = range.start + body_start..range.end + body_start;
+            if functions[..visible].iter().any(|function| function.name == row.text[range.clone()]) {
+                ranges.extend(mapped_ranges(row, range));
+            }
+        }
+    }
+    ranges
 }
 
 /// Names visible before the caret, without evaluating the document.
@@ -4486,6 +4508,95 @@ mod tests {
                 assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
             }
             assert_eq!(scalar(&evaluation, 18), 5.0);
+        }
+    }
+
+    #[test]
+    fn vector_callback_transforms_and_dependencies_follow_formula_scope() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "values = [7, 2, 7, 4, 10]\nthreshold = 5\nfactor = 2\n",
+                "fn above(value, limit) = value > limit\n",
+                "fn scale(value, multiplier) = value * multiplier\n",
+                "filter(values, above, threshold)\nmap(values, scale, factor)\n",
+                "count_if(values, above, threshold)\nfind_indices(values, above, threshold)\n",
+                "map([], scale, factor)\nvalues\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [(5, "[7, 7, 10]"), (6, "[14, 4, 14, 8, 20]"),
+                (8, "[0, 2, 4]"), (9, "[]"), (10, "[7, 2, 7, 4, 10]")] {
+                assert_eq!(formatted(&evaluation, line), expected);
+            }
+            assert_eq!(scalar(&evaluation, 7), 3.0);
+            assert!(evaluation.lines[5].dependency_indices.contains(&3));
+            assert!(evaluation.lines[5].dependency_indices.contains(&1));
+            assert!(evaluation.lines[9].dependency_indices.contains(&4));
+        }
+    }
+
+    #[test]
+    fn callback_records_nested_definitions_only_when_called() {
+        let document = CalculationDocument::new(concat!(
+            "fn inner(v) = v * 2\nfn outer(v) = inner(v) + 1\n",
+            "map([], outer)\nmap([2], outer)\n"
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 2), "[]");
+        assert!(evaluation.lines[2].dependency_indices.contains(&1));
+        assert!(!evaluation.lines[2].dependency_indices.contains(&0));
+        assert_eq!(formatted(&evaluation, 3), "[5]");
+        assert!(evaluation.lines[3].dependency_indices.contains(&0));
+        assert!(evaluation.lines[3].dependency_indices.contains(&1));
+    }
+
+    #[test]
+    fn vector_callbacks_validate_even_empty_and_preserve_binding_on_failure() {
+        let source = concat!(
+            "fn twice(v) = v * 2\nfn bad(v) = v\nfn broken(v) = 1 / (v - 2)\n",
+            "v = [1, 2, 3]\nmap([], missing)\nmap([], twice, 1)\n",
+            "filter(v, bad)\nmap(v, bad)\n",
+            "v = map(v, broken)\nlen(v)\n"
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in [4, 5, 6, 8] {
+            assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+        }
+        assert_eq!(formatted(&evaluation, 7), "[1, 2, 3]");
+        assert_eq!(scalar(&evaluation, 9), 3.0);
+        assert!(error_message(&evaluation, 8).contains("index 1"));
+    }
+
+    #[test]
+    fn invalid_callback_setup_preserves_prior_binding_in_both_routes() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "fn one(v) = v\nv = [1]\n",
+                "v = map(v, missing)\nlen(v)\n",
+                "v = map(v, one, 4)\nlen(v)\n",
+                "if(false, map([], missing), 7)\n",
+                "fn invalid(v) = map(v, missing)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 3), 1.0);
+            assert!(matches!(evaluation.lines[4].outcome, LineOutcome::Error(_)));
+            assert_eq!(scalar(&evaluation, 5), 1.0);
+            assert_eq!(scalar(&evaluation, 6), 7.0);
+            assert!(matches!(evaluation.lines[7].outcome, LineOutcome::Error(_)));
+        }
+    }
+
+    #[test]
+    fn prior_local_callback_operation_names_keep_function_precedence() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = "fn map(a, b) = a + b\nfn filter(a) = a * 2\nmap(2, 3)\nfilter(4)".to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            assert_eq!(scalar(&evaluation, 2), 5.0);
+            assert_eq!(scalar(&evaluation, 3), 8.0);
         }
     }
 

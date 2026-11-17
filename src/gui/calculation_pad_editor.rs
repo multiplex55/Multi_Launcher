@@ -281,6 +281,7 @@ pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
     let mut spans = Vec::new();
     let analysis = crate::calculation_pad::SourceAnalysis::new(source);
     let functions = crate::calculation_pad::editor_function_scope(source, source.len());
+    let callbacks = crate::calculation_pad::editor_callback_ranges(source);
     let mut protected_spans = analysis.protected.iter().peekable();
     let mut offset = 0;
     for (line_index, line) in source.split_inclusive('\n').enumerate() {
@@ -343,7 +344,8 @@ pub(super) fn syntax_spans(source: &str) -> Vec<SyntaxSpan> {
                     && !line[pos..].trim_start().starts_with('(')
                 {
                     SyntaxKind::Operator
-                } else if functions.declarations.iter().any(|function| function.name_range == token_range)
+                } else if callbacks.contains(&token_range)
+                    || functions.declarations.iter().any(|function| function.name_range == token_range)
                     || line[pos..].trim_start().starts_with('(')
                         && (crate::calculation_pad::function_signature_help(token).is_some()
                             || functions.declarations.iter().any(|function| function.valid && function.line < owner_line && function.name == token))
@@ -426,6 +428,21 @@ pub(super) fn suggestions(source: &str, caret: usize) -> Vec<Suggestion> {
     let replacement = line_start + start..end;
     let mut output = Vec::new();
     let scope = crate::calculation_pad::editor_function_scope(source, caret);
+    let callback_position = call_hint(source, replacement.start)
+        .is_some_and(|hint| hint.callback && hint.argument == 1);
+    if callback_position && braced.is_none() {
+        return scope.declarations.iter()
+            .filter(|function| function.valid && function.line < scope.owner_line
+                && function.name.starts_with(fragment) && function.name != fragment)
+            .take(8)
+            .map(|function| Suggestion {
+                label: function.name.clone(),
+                insertion: function.name.clone(),
+                replacement: replacement.clone(),
+                cursor: replacement.start + function.name.len(),
+            })
+            .collect();
+    }
     for name in crate::calculation_pad::editor_bindings(source, caret, &scope) {
         if name.starts_with(fragment) && name != fragment {
             let cursor = replacement.start + name.len();
@@ -480,6 +497,7 @@ pub(super) struct CallHint {
     pub signature: String,
     pub argument: usize,
     pub parameter: Option<String>,
+    callback: bool,
 }
 
 pub(super) fn call_hint(source: &str, caret: usize) -> Option<CallHint> {
@@ -493,7 +511,7 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<CallHint> {
     let line = row.text.as_str();
     let scope = crate::calculation_pad::editor_function_scope(source, caret);
     if scope.in_declaration_header { return None; }
-    let mut stack: Vec<(Option<(String, Option<Vec<String>>)>, usize)> = Vec::new();
+    let mut stack: Vec<(Option<(String, Option<Vec<String>>, bool)>, usize)> = Vec::new();
     let mut protected_spans = analysis.protected.iter().peekable();
     for (index, ch) in line.char_indices() {
         let protected = row.offsets.get(index).and_then(|offset| *offset).is_some_and(|offset| {
@@ -517,8 +535,8 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<CallHint> {
                     .unwrap_or(0);
                 let name = &before[start..];
                 let user = scope.declarations.iter().find(|function| function.valid && function.line < scope.owner_line && function.name == name);
-                let signature = user.map(|function| (format!("{}({})", function.name, function.parameters.join(", ")), Some(function.parameters.clone())))
-                    .or_else(|| crate::calculation_pad::function_signature_help(name).map(|signature| (signature.to_owned(), None)));
+                let signature = user.map(|function| (format!("{}({})", function.name, function.parameters.join(", ")), Some(function.parameters.clone()), false))
+                    .or_else(|| crate::calculation_pad::function_signature_help(name).map(|signature| (signature.to_owned(), None, crate::calculation_pad::is_vector_callback(name))));
                 stack.push((signature, 0));
             }
             '[' => stack.push((None, 0)),
@@ -536,16 +554,18 @@ pub(super) fn call_hint(source: &str, caret: usize) -> Option<CallHint> {
     stack
         .into_iter()
         .rev()
-        .find_map(|(signature, argument)| signature.map(|(signature, parameters)| {
+        .find_map(|(signature, argument)| signature.map(|(signature, parameters, callback)| {
             let parameter = if let Some(parameters) = parameters {
                 parameters.get(argument).cloned()
+            } else if callback && argument >= 2 {
+                Some("extra_args...".into())
             } else {
                 let overload = if argument > 0 { signature.rsplit("  ·  ").next().unwrap_or(&signature) } else { signature.as_str() };
                 overload.split_once('(').and_then(|(_, rest)| rest.split_once(')'))
                     .and_then(|(parameters, _)| parameters.split(',').nth(argument))
                     .map(|parameter| parameter.trim().trim_matches(['[', ']']).trim().to_owned())
             };
-            CallHint { signature, argument, parameter }
+            CallHint { signature, argument, parameter, callback }
         }))
 }
 
@@ -925,7 +945,7 @@ mod tests {
         let source = "round(extract(u8(3), 1, ";
         assert_eq!(
             call_hint(source, source.len()),
-            Some(CallHint { signature: "extract(value, start, count)".into(), argument: 2, parameter: Some("count".into()) })
+            Some(CallHint { signature: "extract(value, start, count)".into(), argument: 2, parameter: Some("count".into()), callback: false })
         );
         let source = "round(3) #";
         assert!(syntax_spans(source).iter().any(|span| span.kind == SyntaxKind::Call && &source[span.range.clone()] == "round"));
@@ -1001,6 +1021,26 @@ mod tests {
         assert!(names.iter().any(|item| item.label == "price()" && item.insertion == "price()"));
         let header = "fn sqrt(value";
         assert!(call_hint(header, header.len()).is_none());
+    }
+
+    #[test]
+    fn callback_identifier_completion_inserts_bare_function_name() {
+        let source = "fn scale(value, factor) = value * factor\nmap([1], sc";
+        let choices = suggestions(source, source.len());
+        assert!(choices.iter().any(|choice| choice.insertion == "scale"));
+        assert!(choices.iter().all(|choice| !choice.insertion.ends_with("()")));
+        let complete = "fn scale(value) = value * 2\nmap([1], scale)";
+        assert!(syntax_spans(complete).iter().any(|span| span.kind == SyntaxKind::Call
+            && &complete[span.range.clone()] == "scale" && span.range.start > 25));
+        let shadowed = "fn scale(value) = value * 2\nfn map(vector, scale) = vector + scale\nmap(1, sc";
+        let choices = suggestions(shadowed, shadowed.len());
+        assert!(choices.iter().any(|choice| choice.insertion == "scale()"));
+        let declaration = "fn scale(value) = value * 2\nfn map(vector, scale) = vector + scale";
+        let parameter = declaration.rfind("scale)").unwrap();
+        assert!(syntax_spans(declaration).iter().any(|span| span.kind == SyntaxKind::Name
+            && span.range.start == parameter));
+        let hint_source = "fn scale(value, a, b) = value + a + b\nmap([1], scale, 2, 3";
+        assert_eq!(call_hint(hint_source, hint_source.len()).unwrap().parameter.as_deref(), Some("extra_args..."));
     }
 
     #[test]
