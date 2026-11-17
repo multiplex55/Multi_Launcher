@@ -463,7 +463,9 @@ pub(super) fn build_functions(analysis: &syntax::SourceAnalysis) -> (UserFunctio
             if functions.len() >= 64 { return Err(error("document exceeds the 64-function limit")); }
             let new_collection_name = ["sort", "sort_desc", "unique", "map", "filter", "count_if", "find_indices",
                 "cumsum", "cumprod", "diff", "percent_changes", "rolling_sum", "rolling_average", "rolling_min", "rolling_max",
-                "quantile", "percentile", "variance_population", "variance_sample", "stdev_sample"]
+                "quantile", "percentile", "variance_population", "variance_sample", "stdev_sample",
+                "covariance_population", "covariance_sample", "correlation", "regression_slope",
+                "regression_intercept", "regression_r2", "predict_linear"]
                 .iter()
                 .any(|builtin| builtin.eq_ignore_ascii_case(&name));
             if (signature(&name).is_some() && !new_collection_name)
@@ -563,6 +565,13 @@ pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "variance_population", help: "variance_population(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "variance_sample", help: "variance_sample(vector)", arities: &[1], insensitive: true },
     FunctionSignature { name: "stdev_sample", help: "stdev_sample(vector)", arities: &[1], insensitive: true },
+    FunctionSignature { name: "covariance_population", help: "covariance_population(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "covariance_sample", help: "covariance_sample(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "correlation", help: "correlation(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_slope", help: "regression_slope(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_intercept", help: "regression_intercept(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "regression_r2", help: "regression_r2(x, y)", arities: &[2], insensitive: true },
+    FunctionSignature { name: "predict_linear", help: "predict_linear(x, y, x_new)", arities: &[3], insensitive: true },
     FunctionSignature { name: "map", help: "map(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "filter", help: "filter(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },
     FunctionSignature { name: "count_if", help: "count_if(vector, function, extra_args...)", arities: &[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17], insensitive: true },

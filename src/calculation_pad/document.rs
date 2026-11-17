@@ -4568,6 +4568,34 @@ mod tests {
     }
 
     #[test]
+    fn paired_statistics_execute_in_both_routes_with_precise_degenerate_errors() {
+        for suffix in ["", "\nfor unused in range(0):\n    unused\n"] {
+            let source = concat!(
+                "x = [1, 2, 3]\ny = [3, 5, 7]\n",
+                "covariance_population(x, y)\ncovariance_sample(x, y)\n",
+                "correlation(x, y)\nregression_slope(x, y)\n",
+                "regression_intercept(x, y)\nregression_r2(x, y)\npredict_linear(x, y, 4)\n",
+                "correlation(x, [3, 2, 1])\nregression_r2(x, [1, 2, 4])\n",
+                "regression_slope(x, [7, 7, 7])\nregression_intercept(x, [7, 7, 7])\n",
+                "predict_linear(x, [7, 7, 7], 4)\nregression_r2(x, [7, 7, 7])\n",
+                "correlation(x, [7, 7, 7])\nregression_slope([2, 2], [1, 2])\n",
+                "covariance_population([], [])\ncorrelation([1], [2])\n",
+                "covariance_sample(x, [1, 2])\npredict_linear(x, y, true)\n"
+            ).to_owned() + suffix;
+            let document = CalculationDocument::new(source);
+            let evaluation = document.evaluate();
+            for (line, expected) in [(2, 4.0 / 3.0), (3, 2.0), (4, 1.0), (5, 2.0),
+                (6, 1.0), (7, 1.0), (8, 9.0), (9, -1.0), (10, 27.0 / 28.0),
+                (11, 0.0), (12, 7.0), (13, 7.0)] {
+                assert!((scalar(&evaluation, line) - expected).abs() < 1e-12, "line {}", line + 1);
+            }
+            for line in 14..=20 {
+                assert!(matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)), "line {}", line + 1);
+            }
+        }
+    }
+
+    #[test]
     fn previous_local_statistic_names_preserve_function_precedence() {
         let document = CalculationDocument::new("fn quantile(a, b, c) = a + b + c\nquantile(1, 2, 3)\nQUANTILE([1, 2], 0.5)");
         let evaluation = document.evaluate();

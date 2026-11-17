@@ -1,6 +1,8 @@
 //! Bounded statistics over the Pad's finite numeric vectors.
 
 use super::document::{CalculationValue, DiagnosticKind, script::WorkBudget};
+use num_rational::BigRational;
+use num_traits::{ToPrimitive, Zero};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum VectorStatistic {
@@ -9,6 +11,13 @@ pub(super) enum VectorStatistic {
     VariancePopulation,
     VarianceSample,
     StdevSample,
+    CovariancePopulation,
+    CovarianceSample,
+    Correlation,
+    RegressionSlope,
+    RegressionIntercept,
+    RegressionR2,
+    PredictLinear,
 }
 
 impl VectorStatistic {
@@ -19,6 +28,13 @@ impl VectorStatistic {
             "variance_population" => Self::VariancePopulation,
             "variance_sample" => Self::VarianceSample,
             "stdev_sample" => Self::StdevSample,
+            "covariance_population" => Self::CovariancePopulation,
+            "covariance_sample" => Self::CovarianceSample,
+            "correlation" => Self::Correlation,
+            "regression_slope" => Self::RegressionSlope,
+            "regression_intercept" => Self::RegressionIntercept,
+            "regression_r2" => Self::RegressionR2,
+            "predict_linear" => Self::PredictLinear,
             _ => return None,
         })
     }
@@ -50,6 +66,12 @@ impl VectorStatistic {
             (Self::VariancePopulation, [_]) => dispersion(values, false, false, work)?,
             (Self::VarianceSample, [_]) => dispersion(values, true, false, work)?,
             (Self::StdevSample, [_]) => dispersion(values, true, true, work)?,
+            (Self::PredictLinear, [_, CalculationValue::Vector(y), CalculationValue::Scalar(x_new)])
+                if x_new.is_finite() => paired(self, values, y.components(), Some(*x_new), work)?,
+            (Self::CovariancePopulation | Self::CovarianceSample | Self::Correlation
+                | Self::RegressionSlope | Self::RegressionIntercept | Self::RegressionR2,
+                [_, CalculationValue::Vector(y)]) =>
+                paired(self, values, y.components(), None, work)?,
             _ => return Err(error("invalid statistic arguments")),
         };
         Ok(CalculationValue::Scalar(result))
@@ -100,25 +122,181 @@ fn dispersion(
             "population statistic requires a nonempty vector"
         }));
     }
-    work.charge_vector(values.len())?;
-    let (minimum, maximum) = values.iter().copied().fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
-    );
-    let center = minimum.midpoint(maximum);
-    let scale = (minimum - center).abs().max((maximum - center).abs());
-    if scale == 0.0 { return Ok(0.0); }
-
-    work.charge_vector(values.len())?;
-    let mean = values.iter().map(|value| (value - center) / scale).sum::<f64>() / values.len() as f64;
+    let axis = CenteredAxis::new(values, work)?;
+    if axis.scale == 0.0 { return Ok(0.0); }
     work.charge_vector(values.len())?;
     let squared = values.iter().map(|value| {
-        let deviation = (value - center) / scale - mean;
+        let deviation = axis.deviation(*value);
         deviation * deviation
     }).sum::<f64>();
     let divisor = (values.len() - usize::from(sample)) as f64;
-    let deviation = finite((squared / divisor).sqrt() * scale)?;
+    let deviation = finite((squared / divisor).sqrt() * axis.scale)?;
     if standard_deviation { Ok(deviation) } else { finite(deviation * deviation) }
+}
+
+struct CenteredAxis {
+    center: f64,
+    scale: f64,
+    mean: f64,
+}
+
+impl CenteredAxis {
+    fn new(values: &[f64], work: &mut WorkBudget) -> Result<Self, DiagnosticKind> {
+        work.charge_vector(values.len())?;
+        let (minimum, maximum) = values.iter().copied().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
+        );
+        let center = minimum.midpoint(maximum);
+        let scale = (minimum - center).abs().max((maximum - center).abs());
+        if scale == 0.0 {
+            return Ok(Self { center, scale, mean: 0.0 });
+        }
+        work.charge_vector(values.len())?;
+        let mut sum = 0.0;
+        let mut correction = 0.0;
+        for &value in values {
+            compensated_add(&mut sum, &mut correction, (value - center) / scale);
+        }
+        let mean = (sum + correction) / values.len() as f64;
+        Ok(Self { center, scale, mean })
+    }
+
+    fn deviation(&self, value: f64) -> f64 {
+        if self.scale == 0.0 { 0.0 } else { (value - self.center) / self.scale - self.mean }
+    }
+
+}
+
+fn rational(value: f64) -> Result<BigRational, DiagnosticKind> {
+    BigRational::from_float(value).ok_or(DiagnosticKind::InvalidArithmetic)
+}
+
+fn rational_float(value: BigRational) -> Result<f64, DiagnosticKind> {
+    finite(value.to_f64().ok_or(DiagnosticKind::InvalidArithmetic)?)
+}
+
+// A compensated sum limits cancellation in the centered cross products.
+fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) {
+    let next = *sum + value;
+    if sum.abs() >= value.abs() {
+        *correction += (*sum - next) + value;
+    } else {
+        *correction += (value - next) + *sum;
+    }
+    *sum = next;
+}
+
+fn exact_cross(x: &[f64], y: &[f64], work: &mut WorkBudget) -> Result<BigRational, DiagnosticKind> {
+    let mut x_sum = BigRational::zero();
+    let mut y_sum = BigRational::zero();
+    let mut products = BigRational::zero();
+    for (left, right) in x.iter().zip(y) {
+        work.charge_vector(8)?;
+        let left = rational(*left)?;
+        let right = rational(*right)?;
+        products += &left * &right;
+        x_sum += left;
+        y_sum += right;
+    }
+    Ok(products - x_sum * y_sum / BigRational::from_integer(x.len().into()))
+}
+
+fn exact_mean(values: &[f64], work: &mut WorkBudget) -> Result<BigRational, DiagnosticKind> {
+    let mut sum = BigRational::zero();
+    for &value in values {
+        work.charge_vector(4)?;
+        sum += rational(value)?;
+    }
+    Ok(sum / BigRational::from_integer(values.len().into()))
+}
+
+fn paired(
+    operation: VectorStatistic,
+    x: &[f64],
+    y: &[f64],
+    x_new: Option<f64>,
+    work: &mut WorkBudget,
+) -> Result<f64, DiagnosticKind> {
+    if x.len() != y.len() {
+        return Err(error("paired vectors must have matching lengths"));
+    }
+    let population = matches!(operation, VectorStatistic::CovariancePopulation);
+    if x.len() < if population { 1 } else { 2 } {
+        return Err(error(if population {
+            "population covariance requires at least one pair"
+        } else {
+            "paired statistic requires at least two pairs"
+        }));
+    }
+    let x_axis = CenteredAxis::new(x, work)?;
+    let y_axis = CenteredAxis::new(y, work)?;
+    let covariance = matches!(operation, VectorStatistic::CovariancePopulation | VectorStatistic::CovarianceSample);
+    if covariance && (x_axis.scale == 0.0 || y_axis.scale == 0.0) {
+        return Ok(0.0);
+    }
+    if x_axis.scale == 0.0 {
+        return Err(error("statistic requires nonconstant X values"));
+    }
+    if y_axis.scale == 0.0 {
+        return match operation {
+            VectorStatistic::RegressionSlope => Ok(0.0),
+            VectorStatistic::RegressionIntercept | VectorStatistic::PredictLinear => Ok(y_axis.center),
+            _ => Err(error("statistic requires nonconstant Y values")),
+        };
+    }
+
+    work.charge_vector(x.len().saturating_mul(3))?;
+    let mut xx = 0.0;
+    let mut yy = 0.0;
+    let mut xy = 0.0;
+    let mut correction = 0.0;
+    let mut lost_precision = false;
+    for (&left, &right) in x.iter().zip(y) {
+        let dx = x_axis.deviation(left);
+        let dy = y_axis.deviation(right);
+        xx += dx * dx;
+        yy += dy * dy;
+        let product = dx * dy;
+        lost_precision |= (dx != 0.0 && dy != 0.0 && (product == 0.0 || product.is_subnormal()))
+            || (left != x_axis.center && (left - x_axis.center) / x_axis.scale == 0.0)
+            || (right != y_axis.center && (right - y_axis.center) / y_axis.scale == 0.0);
+        compensated_add(&mut xy, &mut correction, product);
+    }
+    xy += correction;
+    let cross = if xy == 0.0 || lost_precision {
+        let exact = exact_cross(x, y, work)?;
+        xy = rational_float(exact.clone() / rational(x_axis.scale)? / rational(y_axis.scale)?)?;
+        exact
+    } else {
+        rational(xy)? * rational(x_axis.scale)? * rational(y_axis.scale)?
+    };
+    if covariance {
+        let divisor = x.len() - usize::from(matches!(operation, VectorStatistic::CovarianceSample));
+        return rational_float(cross / BigRational::from_integer(divisor.into()));
+    }
+    if matches!(operation, VectorStatistic::Correlation) {
+        return finite((xy / xx.sqrt() / yy.sqrt()).clamp(-1.0, 1.0));
+    }
+    if matches!(operation, VectorStatistic::RegressionR2) {
+        work.charge_vector(x.len().saturating_mul(2))?;
+        let coefficient = xy / xx;
+        let residual = x.iter().zip(y).map(|(&left, &right)| {
+            let value = y_axis.deviation(right) - coefficient * x_axis.deviation(left);
+            value * value
+        }).sum::<f64>();
+        return finite(1.0 - residual / yy);
+    }
+    let slope = cross / (rational(xx)? * rational(x_axis.scale)? * rational(x_axis.scale)?);
+    if matches!(operation, VectorStatistic::RegressionSlope) {
+        return rational_float(slope);
+    }
+    let target = match operation {
+        VectorStatistic::RegressionIntercept => BigRational::zero(),
+        VectorStatistic::PredictLinear => rational(x_new.ok_or(DiagnosticKind::InvalidExpression)?)?,
+        _ => return Err(DiagnosticKind::InvalidExpression),
+    };
+    rational_float(exact_mean(y, work)? + slope * (target - exact_mean(x, work)?))
 }
 
 #[cfg(test)]
@@ -162,5 +340,64 @@ mod tests {
         assert!(matches!(VectorStatistic::Quantile.call(&arguments, &mut work), Err(DiagnosticKind::WorkLimit)));
         let mut work = WorkBudget::with_cancellation(Arc::new(AtomicBool::new(true)));
         assert!(matches!(VectorStatistic::Quantile.call(&arguments, &mut work), Err(DiagnosticKind::Canceled)));
+    }
+
+    #[test]
+    fn paired_statistics_handle_scaling_and_degenerate_axes() {
+        let x = vector(&[1.0, 2.0, 3.0]);
+        let y = vector(&[3.0, 5.0, 7.0]);
+        let args = [x.clone(), y.clone()];
+        for (operation, expected) in [
+            (VectorStatistic::CovariancePopulation, 4.0 / 3.0),
+            (VectorStatistic::CovarianceSample, 2.0),
+            (VectorStatistic::Correlation, 1.0),
+            (VectorStatistic::RegressionSlope, 2.0),
+            (VectorStatistic::RegressionIntercept, 1.0),
+            (VectorStatistic::RegressionR2, 1.0),
+        ] {
+            assert!((value(operation, &args) - expected).abs() < 1e-12);
+        }
+        assert!((value(VectorStatistic::PredictLinear, &[x.clone(), y, CalculationValue::Scalar(4.0)]) - 9.0).abs() < 1e-12);
+        let constant = vector(&[7.0, 7.0, 7.0]);
+        let args = [x, constant];
+        assert_eq!(value(VectorStatistic::CovarianceSample, &args), 0.0);
+        assert_eq!(value(VectorStatistic::RegressionSlope, &args), 0.0);
+        assert_eq!(value(VectorStatistic::RegressionIntercept, &args), 7.0);
+        assert!(VectorStatistic::RegressionR2.call(&args, &mut WorkBudget::default()).is_err());
+        assert!(VectorStatistic::Correlation.call(&args, &mut WorkBudget::default()).is_err());
+
+        let steep_x = vector(&[-1e-200, 1e-200]);
+        let steep_y = vector(&[-1e200, 1e200]);
+        assert!(VectorStatistic::RegressionSlope.call(&[steep_x.clone(), steep_y.clone()], &mut WorkBudget::default()).is_err());
+        assert_eq!(value(VectorStatistic::PredictLinear, &[steep_x, steep_y, CalculationValue::Scalar(0.0)]), 0.0);
+        let mixed_x = vector(&[1e200, -1e200, 1.0, -1.0]);
+        let mixed_y = vector(&[1.0, -1.0, 1e200, -1e200]);
+        assert!((value(VectorStatistic::CovariancePopulation, &[mixed_x, mixed_y]) / 1e200 - 1.0).abs() < 1e-12);
+        let extreme_x = vector(&[1e308, -1e308, 1e-200, -1e-200]);
+        let extreme_y = vector(&[1e-200, -1e-200, 1e308, -1e308]);
+        assert!((value(VectorStatistic::CovariancePopulation, &[extreme_x, extreme_y]) / 1e108 - 1.0).abs() < 1e-12);
+        let subnormal_x = vector(&[1e308, -1e308, 3e-16, -3e-16]);
+        let subnormal_y = vector(&[3e-16, -3e-16, 1e308, -1e308]);
+        assert!((value(VectorStatistic::CovariancePopulation, &[subnormal_x, subnormal_y]) / 3e292 - 1.0).abs() < 1e-12);
+        let centered_x = vector(&[-1.0, 0.0, 1.0]);
+        let cancellation_y = vector(&[1e16, 1.0, -1e16]);
+        let intercept = value(VectorStatistic::RegressionIntercept, &[centered_x.clone(), cancellation_y.clone()]);
+        let prediction = value(VectorStatistic::PredictLinear, &[centered_x, cancellation_y, CalculationValue::Scalar(0.0)]);
+        assert!((intercept - 1.0 / 3.0).abs() < 1e-15);
+        assert!((prediction - 1.0 / 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn paired_statistics_report_invalid_inputs_and_cancellation() {
+        let two = vector(&[1.0, 2.0]);
+        let one = vector(&[1.0]);
+        assert!(VectorStatistic::Correlation.call(&[two.clone(), one.clone()], &mut WorkBudget::default()).is_err());
+        assert!(VectorStatistic::CovarianceSample.call(&[one.clone(), one.clone()], &mut WorkBudget::default()).is_err());
+        assert_eq!(value(VectorStatistic::CovariancePopulation, &[one.clone(), one]), 0.0);
+        let constant = vector(&[1.0, 1.0]);
+        assert!(VectorStatistic::RegressionSlope.call(&[constant.clone(), two.clone()], &mut WorkBudget::default()).is_err());
+        assert_eq!(value(VectorStatistic::CovariancePopulation, &[constant, two.clone()]), 0.0);
+        let mut cancelled = WorkBudget::with_cancellation(Arc::new(AtomicBool::new(true)));
+        assert!(matches!(VectorStatistic::Correlation.call(&[two.clone(), two], &mut cancelled), Err(DiagnosticKind::Canceled)));
     }
 }

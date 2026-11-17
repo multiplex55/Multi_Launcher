@@ -316,6 +316,12 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Vectors",
         examples: &[
             CalculationExample {
+                title: "Fit and predict from paired vectors",
+                source: "x = [1, 2, 3]\ny = [3, 5, 7]\nslope = regression_slope(x, y)\nintercept = regression_intercept(x, y)\npredict_linear(x, y, 4)",
+                explanation: "The fitted line has slope 2 and intercept 1. Predictions outside the observed range are extrapolated estimates.",
+                expected: ExampleExpectation::Scalar(9.0),
+            },
+            CalculationExample {
                 title: "Quantiles and sample variance",
                 source: "values = [1, 2, 3, 4]\nlower_quartile = quantile(values, 0.25)\nmedian_value = percentile(values, 50)\nvariance_population(values)",
                 explanation: "The lower quartile is 1.75, the median is 2.5, and the population variance is 1.25. variance_sample and stdev_sample use the sample denominator.",

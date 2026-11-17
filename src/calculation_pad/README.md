@@ -305,13 +305,26 @@ as a loop iterable, while these operations require vectors.
   fewer than the number of values and require at least two. The existing
   `stdev(v)` remains the population standard deviation. Results that cannot
   be represented as finite scalars report an error.
+* `covariance_population(x, y)` and `covariance_sample(x, y)` use paired
+  equal-length vectors and divide by `n` and `n - 1`, respectively.
+  Population covariance needs one pair and sample covariance needs two.
+  `correlation(x, y)` returns Pearson's correlation and requires two
+  nonconstant vectors.
+* `regression_slope(x, y)`, `regression_intercept(x, y)`, and
+  `regression_r2(x, y)` describe a least-squares straight line with an
+  intercept. `predict_linear(x, y, x_new)` evaluates that line. Extrapolation
+  outside the observed X range is an estimate. A fit needs at least two pairs
+  and nonconstant X. Constant Y yields a zero slope and its constant value as
+  intercept and prediction, while correlation and R-squared are undefined.
 
 Previously declared local formula functions named `sort`, `sort_desc`,
 `unique`, `map`, `filter`, `count_if`, `find_indices`, `cumsum`,
 `cumprod`, `diff`, `percent_changes`, `rolling_sum`, `rolling_average`,
 `rolling_min`, `rolling_max`, `quantile`, `percentile`,
-`variance_population`, `variance_sample` or `stdev_sample` retain
-precedence for calls using the same spelling.
+`variance_population`, `variance_sample`, `stdev_sample`,
+`covariance_population`, `covariance_sample`, `correlation`,
+`regression_slope`, `regression_intercept`, `regression_r2` or
+`predict_linear` retain precedence for calls using the same spelling.
 
 Indexes must be finite, nonnegative integral ordinary scalars within the stated
 bounds. They are checked before conversion and are never clamped. Append,
