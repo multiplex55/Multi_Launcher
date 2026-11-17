@@ -5,6 +5,7 @@ use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
 pub(crate) mod distribution;
+pub(crate) mod options;
 
 use super::document::CalculationValue;
 use super::input::{InputKind, SampleNumber};
@@ -59,6 +60,8 @@ pub(crate) struct ChartDefinition {
     pub y_label: String,
     pub hidden: Vec<usize>,
     pub bar_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "options::ChartOptions::is_default")]
+    pub options: options::ChartOptions,
 }
 
 #[derive(Clone, Debug)]

@@ -21,7 +21,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M3-B | complete |
 | M3-C | complete, with interactive smoke pending |
 | M4-A | complete |
-| M4-B, M4-C | pending |
+| M4-B1 | complete |
+| M4-B2, M4-B3, M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -128,3 +129,10 @@ The initial and final frozen-source cargo nextest run --config-file target/produ
 M3-C was pushed at 785af3f491d612cec827fac592cc6c61d63c4185. Chart distribution data retains exact rational intervals, including a complete final requested-width bin even when its upper edge exceeds the finite scalar range. Count and automatic bins span the observed minimum and maximum. Each observation belongs to one bin. ECDF steps group duplicate observations and signed zero. Both accessible summaries and the future scene use the same counts and boundaries. UI integration remains M4-C.
 
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E with test(distribution_) | test(chart_empty_adapter_keeps_missing_mismatch_and_hidden_states_distinct) passed 5 of 5 on frozen source. Independent review found no substantive issue. Staged diff whitespace verification passed.
+
+
+## M4-B1 options model and compatibility
+
+M4-A was pushed at 2b4e3398525ea0bf3dee21eef0d6148290327ad0. M4-B is split into the persisted model, shared rendering, and runtime reference/rename integration. The typed additive chart options use finite numeric admission, stable monotonic reference-line IDs, and styles keyed to typed series identities. Default options are absent from serialized legacy charts and retain the previous configuration. Rendering and runtime option behavior are the next two parts.
+
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E with test(chart_options_roundtrip_with_legacy_defaults_and_reject_invalid_wires) | test(chart_reference_versions_preserve_physical_rows_and_validate_named_wire) | test(chart_bar_label_admission_matches_vector_capacity) | test(chart_definition_roundtrip_and_rename_history_keeps_independent_selection) | test(named_chart_references_follow_rename_history_and_independent_edits) | test(legacy_recovery_defaults_options_and_future_record_is_preserved) passed 6 of 6. Independent review found no substantive model or compatibility issue. Staged diff whitespace verification passed.

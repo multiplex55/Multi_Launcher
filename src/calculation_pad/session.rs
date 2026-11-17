@@ -2203,7 +2203,7 @@ mod tests {
         let (_dir, root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()] });
+        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()], options: Default::default() });
         session.set_view_metadata(view).unwrap();
         session.save_as("chart").unwrap();
         let id = session.current_id().unwrap();
@@ -2228,7 +2228,7 @@ mod tests {
         let ids = session.line_ids().unwrap().to_vec();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new() });
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new(), options: Default::default() });
         session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "z").unwrap();
         session.apply_rename(&preview).unwrap();
