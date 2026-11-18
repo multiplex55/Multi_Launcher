@@ -30,7 +30,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C1B | complete |
 | M4-C1C | complete |
 | M4-C2A1 | complete |
-| M4-C2A2, M4-C2B | pending |
+| M4-C2A2 | complete |
+| M4-C2B | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -212,3 +213,10 @@ The existing Jump Mode coordinator now recognizes docked and native Charts and r
 The new retained app fixture initially overflowed the Windows test stack, so it runs on a 16 MiB test thread and disables both Paste Sequence shortcuts before application construction. One follow-up fixture clicked the chart collapse control. Registration diagnostics showed the layer was correctly owned while the collapsing content clipped its controls. The corrected title interaction passes and temporary instrumentation was removed.
 
 Final frozen-source cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::render::tests::chart_jump_targets_follow_docked_and_native_owner) | test(gui::jump_mode::ui::tests::expanded_dialog_layer_inventory_matches_actual_window_ids) | test(calculation_pad::chart::tests::histogram_shared_edge_hover_prefers_right_bin) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(gui::calculation_chart_dialog::tests::chart_series_jump_identity_)' passed 5 of 5. Diff whitespace verification passed.
+
+
+## M4-C2A2 distribution controls and summaries
+
+M4-C2A1 was pushed at 5bce6c718b18e7d029c457ecfcedba2f16adb977. Histogram and Cumulative now have real controls within Charts. The selected numeric vector and validated bin/scale settings are persisted while ordinary selections remain available. Invalid current widths cannot replace committed bins. Summary rows are virtualized, owner-gated, snapshot-bound and keyboard-selectable. Drafts follow the owning Pad document. Two related follow-ups remain in C2B: retiring queued summary focus on collapse/owner loss and wrapped selected-row details at narrow widths.
+
+Initial Nextest passed 5 of 5. Final focused cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_distribution_) | test(gui::calculation_chart_dialog::tests::histogram_width_change_) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_) | test(gui::calculation_chart_dialog::tests::cumulative_adapter_) | test(gui::calculation_chart_dialog::tests::histogram_adapter_) | test(calculation_pad::chart::tests::cumulative_scene_)' passed 7 of 7 after review corrections. Diff whitespace verification passed.

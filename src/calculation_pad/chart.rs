@@ -267,6 +267,7 @@ impl ChartDataset {
                 point.raw_y = format!("{} of {} ({} at threshold)", step.cumulative_count, data.total, step.count);
             }
         }
+        dataset.distribution = Some(data);
         Ok(dataset)
     }
 

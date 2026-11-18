@@ -1,12 +1,35 @@
 //! Read-only chart companion; actions are committed by its retained utility host.
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::UtilityPresentation;
-use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
+use crate::calculation_pad::{ChartDataset, ChartDefinition, ChartKind, ChartScene, ChartSource, ChartVectorReference, ChartView, ChartReferenceValue, ChartFiniteValue, DistributionBins, DistributionDefinition, DistributionScale, ResolvedReferenceLine, DocumentId, DocumentIncarnation, EvaluationBasis, LineOutcome, ScenePrimitive, SensitivityBasis, SensitivityTable, SessionEvaluation};
 use eframe::egui;
 use std::sync::Arc;
 
-fn chart_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
-    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+fn chart_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) -> Option<super::jump_mode::ui::FocusDirective> {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BinMode { Auto, Count, Width }
+
+#[derive(Clone, PartialEq, Eq)]
+struct DistributionDraft { basis: DistributionDefinition, mode: BinMode, count: String, width: String, error: Option<String> }
+impl DistributionDraft {
+    fn new(basis: &DistributionDefinition) -> Self {
+        let (mode, count, width) = match basis.bins {
+            DistributionBins::Auto => (BinMode::Auto, "10".into(), "1".into()),
+            DistributionBins::Count { count } => (BinMode::Count, count.to_string(), "1".into()),
+            DistributionBins::Width { width } => (BinMode::Width, "10".into(), width.get().to_string()),
+        };
+        Self { basis: basis.clone(), mode, count, width, error: None }
+    }
+    fn bins(&self) -> Result<DistributionBins, &'static str> {
+        match self.mode {
+            BinMode::Auto => Ok(DistributionBins::Auto),
+            BinMode::Count => self.count.trim().parse::<u16>().ok().filter(|count| (1..=1024).contains(count)).map(|count| DistributionBins::Count { count }).ok_or("Bin count must be between 1 and 1024."),
+            BinMode::Width => self.width.trim().parse::<f64>().ok().filter(|value| value.is_finite() && *value > 0.0).and_then(|value| ChartFiniteValue::try_from(value).ok()).map(|width| DistributionBins::Width { width }).ok_or("Bin width must be finite and positive."),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +57,10 @@ pub(crate) struct CalculationChartDialog {
     bound: Option<(DocumentId, DocumentIncarnation)>,
     popup_anchors: Vec<(egui::Id, egui::LayerId)>,
     popup_viewport: Option<egui::ViewportId>,
+    distribution_draft: Option<DistributionDraft>,
+    summary_row: Option<usize>,
+    summary_focus: Option<usize>,
+    summary_stamp: Option<(ChartStamp, ChartKind, DistributionDefinition)>,
 }
 
 struct ChartCache {
@@ -59,18 +86,26 @@ pub(super) struct ChartActions {
     pub basis: Option<EvaluationBasis>,
     pub popup_anchors: Vec<(egui::Id, egui::LayerId)>,
     pub viewport: Option<egui::ViewportId>,
+    draft: Option<DistributionDraft>,
+    summary_row: Option<usize>,
+    summary_focus: Option<Option<usize>>,
+    summary_stamp: Option<(ChartStamp, ChartKind, DistributionDefinition)>,
     #[cfg(test)]
     pub controls: Vec<(String, egui::Rect)>,
 }
 
 impl CalculationChartDialog {
     pub(super) fn open(&mut self) { if !self.open { self.epoch = self.epoch.wrapping_add(1); self.open = true; self.close_requested = false; self.view.reset(); } }
-    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; *self.cache.borrow_mut() = None; }
+    pub(super) fn close(&mut self) { self.open = false; self.close_requested = false; self.view.reset(); self.bound = None; self.popup_anchors.clear(); self.popup_viewport = None; self.distribution_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
     pub(super) fn request_close(&mut self) { self.close_requested = true; }
     pub(super) fn epoch(&self) -> u64 { self.epoch }
     pub(super) fn commit(&mut self, actions: &ChartActions) {
-        if self.bound != actions.identity { self.view.reset(); self.bound = actions.identity; *self.cache.borrow_mut() = None; }
+        if self.bound != actions.identity { self.view.reset(); self.bound = actions.identity; self.distribution_draft = None; self.summary_row = None; self.summary_focus = None; self.summary_stamp = None; *self.cache.borrow_mut() = None; }
+        if let Some(stamp) = &actions.summary_stamp && self.summary_stamp.as_ref() != Some(stamp) { self.summary_row = None; self.summary_focus = None; self.summary_stamp = Some(stamp.clone()); }
         if let Some(view) = actions.view { self.view = view; }
+        if let Some(draft) = &actions.draft { self.distribution_draft = Some(draft.clone()); }
+        if let Some(row) = actions.summary_row { self.summary_row = Some(row); }
+        if let Some(focus) = actions.summary_focus { self.summary_focus = focus; }
         self.popup_anchors.clone_from(&actions.popup_anchors);
         self.popup_viewport = actions.viewport;
     }
@@ -117,15 +152,79 @@ impl CalculationChartDialog {
             let Some(identity) = runtime.identity else { ui.label("Open a Calculation Pad to view charts."); return; };
             let vectors = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis)
                 .map(|evaluation| vector_choices(evaluation)).unwrap_or_default();
+            let distribution_vectors = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis)
+                .map(|evaluation| distribution_vector_choices(evaluation)).unwrap_or_default();
             let mut definition = runtime.definition.clone().unwrap_or_else(|| ChartDefinition { source: ChartSource::Vectors { x: None, y: vectors.first().map(|row| vec![row.0.clone()]).unwrap_or_default() }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: Vec::new(), bar_labels: Vec::new(), distribution: None, options: Default::default() });
             let original = definition.clone();
+            let mut pending_bin_draft = false;
             ui.add_enabled_ui(owner, |ui| {
                 ui.horizontal(|ui| {
-                    for (kind, name) in [(ChartKind::Line, "Line"), (ChartKind::Bar, "Bar"), (ChartKind::Scatter, "Scatter")] {
-                        let response = ui.selectable_value(&mut definition.kind, kind, name);
+                    for (kind, name) in [(ChartKind::Line, "Line"), (ChartKind::Bar, "Bar"), (ChartKind::Scatter, "Scatter"), (ChartKind::Histogram, "Histogram"), (ChartKind::Cumulative, "Cumulative")] {
+                        let distribution_kind = matches!(kind, ChartKind::Histogram | ChartKind::Cumulative);
+                        let available = !distribution_kind || definition.distribution.is_some() || !distribution_vectors.is_empty();
+                        let response = ui.add_enabled(available, egui::Button::new(name).selected(definition.kind == kind));
                         chart_target(scope, ui, &response, &format!("kind/{name}"), name, TargetKind::Selectable, &mut order);
+                        #[cfg(test)] actions.controls.push((format!("kind/{name}"), response.rect));
+                        if response.clicked() && active {
+                            if distribution_kind && definition.distribution.is_none() {
+                                if let Some((vector, _)) = distribution_vectors.first() { definition.distribution = Some(DistributionDefinition { vector: vector.clone(), bins: DistributionBins::Auto, scale: DistributionScale::Count }); }
+                            }
+                            if !distribution_kind || definition.distribution.is_some() { definition.kind = kind; }
+                        }
                     }
                 });
+                if matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
+                    if let Some(distribution) = definition.distribution.as_mut() {
+                        let selected = distribution_vectors.iter().find(|(vector, _)| vector == &distribution.vector).map(|(_, label)| label.clone()).unwrap_or_else(|| format!("{} (unavailable)", reference_label(&distribution.vector)));
+                        let response = egui::ComboBox::from_id_salt("chart-distribution-vector").selected_text(selected).show_ui(ui, |ui| {
+                            for (reference, label) in &distribution_vectors {
+                                let response = ui.selectable_value(&mut distribution.vector, reference.clone(), label);
+                                #[cfg(test)] actions.controls.push((format!("distribution/{label}"), response.rect));
+                            }
+                        });
+                        chart_target(scope, ui, &response.response, "distribution/vector", "Distribution vector", TargetKind::Button, &mut order);
+                        #[cfg(test)] actions.controls.push(("distribution-menu".into(), response.response.rect));
+                        actions.popup_anchors.push((response.response.id, response.response.layer_id));
+                        if definition.kind == ChartKind::Histogram {
+                            let mut draft = self.distribution_draft.as_ref().filter(|draft| self.bound == runtime.identity && draft.basis.vector == distribution.vector && draft.basis.bins == distribution.bins).cloned().unwrap_or_else(|| DistributionDraft::new(distribution));
+                            ui.horizontal(|ui| {
+                                for (mode, name) in [(BinMode::Auto, "Auto bins"), (BinMode::Count, "Bin count"), (BinMode::Width, "Bin width")] {
+                                    let response = ui.selectable_value(&mut draft.mode, mode, name);
+                                    if response.changed() { draft.error = None; }
+                                    chart_target(scope, ui, &response, &format!("distribution/bins/{name}"), name, TargetKind::Selectable, &mut order);
+                                    #[cfg(test)] actions.controls.push((format!("bins/{name}"), response.rect));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                let field = match draft.mode { BinMode::Count => Some((&mut draft.count, "Count value")), BinMode::Width => Some((&mut draft.width, "Width value")), BinMode::Auto => None };
+                                if let Some((text, label)) = field {
+                                    let response = ui.add(egui::TextEdit::singleline(text).char_limit(40).desired_width(100.0));
+                                    if response.changed() { draft.error = None; }
+                                    chart_target(scope, ui, &response, "distribution/bin-value", label, TargetKind::TextEntry, &mut order);
+                                    #[cfg(test)] actions.controls.push(("bin-value".into(), response.rect));
+                                }
+                                let response = ui.button("Apply bins");
+                                chart_target(scope, ui, &response, "distribution/apply-bins", "Apply bins", TargetKind::Button, &mut order);
+                                #[cfg(test)] actions.controls.push(("apply-bins".into(), response.rect));
+                                if active && response.clicked() {
+                                    match draft.bins().map_err(str::to_owned).and_then(|bins| validate_histogram_bins(runtime, distribution, bins).map(|()| bins)) {
+                                        Ok(bins) => { distribution.bins = bins; draft.error = None; }
+                                        Err(error) => draft.error = Some(error),
+                                    }
+                                }
+                            });
+                            if let Err(error) = draft.bins() { ui.colored_label(ui.visuals().error_fg_color, error); }
+                            else if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
+                            pending_bin_draft = draft.bins().map_or(true, |bins| bins != distribution.bins);
+                            if active && self.distribution_draft.as_ref() != Some(&draft) { actions.draft = Some(draft); }
+                            ui.horizontal(|ui| for (scale, label) in [(DistributionScale::Count, "Count"), (DistributionScale::Percentage, "Percentage")] {
+                                let response = ui.selectable_value(&mut distribution.scale, scale, label);
+                                chart_target(scope, ui, &response, &format!("distribution/scale/{label}"), label, TargetKind::Selectable, &mut order);
+                                #[cfg(test)] actions.controls.push((format!("scale/{label}"), response.rect));
+                            });
+                        }
+                    }
+                } else {
                 ui.horizontal(|ui| {
                     let response = ui.selectable_label(matches!(&definition.source, ChartSource::Vectors { .. }), "Vectors");
                     chart_target(scope, ui, &response, "source/vectors", "Vectors", TargetKind::Selectable, &mut order);
@@ -165,6 +264,7 @@ impl CalculationChartDialog {
                     }
                     ChartSource::Sensitivity { outputs } => if let Some(table) = &runtime.table { let response = ui.menu_button("Y outputs", |ui| for name in &table.basis.definition.outputs { let mut selected = outputs.contains(name); let response = ui.checkbox(&mut selected, name); #[cfg(test)] actions.controls.push((format!("output/{name}"), response.rect)); if response.changed() { if selected && outputs.len() < 8 { outputs.push(name.clone()); } else if !selected { outputs.retain(|value| value != name); } } }); chart_target(scope, ui, &response.response, "source/outputs", "Y outputs", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push(("output-menu".into(), response.response.rect)); actions.popup_anchors.push((response.response.id, response.response.layer_id)); },
                 }
+                }
                 ui.horizontal(|ui| { ui.label("X label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.x_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/x", "X label", TargetKind::TextEntry, &mut order); ui.label("Y label"); let response = ui.add(egui::TextEdit::singleline(&mut definition.y_label).char_limit(129).desired_width(100.0)); chart_target(scope, ui, &response, "label/y", "Y label", TargetKind::TextEntry, &mut order); });
             });
             if definition.source != original.source {
@@ -175,6 +275,7 @@ impl CalculationChartDialog {
             }
             if definition != original && active { actions.definition = Some(definition.clone()); }
             let Some(stamp) = chart_stamp(runtime, &definition) else { ui.colored_label(ui.visuals().warn_fg_color, "Chart data is unavailable or outdated. Calculate or generate the current source."); return; };
+            if active && matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) && let Some(distribution) = &definition.distribution { actions.summary_stamp = Some((stamp.clone(), definition.kind, distribution.clone())); }
             let dataset = {
                 let mut cache = self.cache.borrow_mut();
                 if cache.as_ref().is_none_or(|cache| cache.stamp != stamp || cache.definition != definition) {
@@ -188,6 +289,46 @@ impl CalculationChartDialog {
                 }
                 cache.as_ref().map(|cache| Arc::clone(&cache.dataset)).unwrap()
             };
+            if matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) && let Some(data) = &dataset.distribution {
+                let rows = if definition.kind == ChartKind::Histogram { data.bins.len() } else { data.ecdf.len() };
+                let snapshot = (stamp.clone(), definition.kind, definition.distribution.as_ref().unwrap().clone());
+                let current_summary = self.bound == runtime.identity && self.summary_stamp.as_ref() == Some(&snapshot);
+                let snapshot_id = egui::Id::new(format!("{snapshot:?}")).value();
+                ui.label(format!("{} observations", data.total));
+                ui.add_enabled_ui(owner, |ui| {
+                let header = egui::CollapsingHeader::new("Distribution summary").default_open(true).show(ui, |ui| {
+                    let mut scroll = egui::ScrollArea::vertical().id_salt(("distribution-summary", snapshot_id)).max_height(150.0);
+                    if current_summary && let Some(index) = self.summary_focus { scroll = scroll.vertical_scroll_offset((index as f32 * (20.0 + ui.spacing().item_spacing.y) - 60.0).max(0.0)); }
+                    scroll.show_rows(ui, 20.0, rows, |ui, visible| {
+                        for index in visible {
+                            let text = if definition.kind == ChartKind::Histogram {
+                                let bin = &data.bins[index];
+                                format!("{} · count {} · {:.4}% · cumulative {}", bin.bounds.membership_label(), bin.count, bin.percentage(data.total), bin.cumulative_count)
+                            } else {
+                                let step = &data.ecdf[index];
+                                format!("≤ {:.17e} · count {} · cumulative {} / {} ({:.4}%)", step.threshold, step.count, step.cumulative_count, data.total, step.cumulative_rate(data.total) * 100.0)
+                            };
+                            let response = ui.push_id(("distribution-row", snapshot_id, index), |ui| ui.add_sized([ui.available_width(), 20.0], egui::Button::new(&text).selected(current_summary && self.summary_row == Some(index)).truncate())).inner.on_hover_text(text);
+                            let directive = chart_target(scope, ui, &response, &format!("distribution/summary/{snapshot_id:x}/{index}"), "Distribution summary row", TargetKind::Selectable, &mut order);
+                            #[cfg(test)] actions.controls.push((format!("summary/{index}"), response.rect));
+                            if active && current_summary && self.summary_focus == Some(index) {
+                                response.request_focus(); response.scroll_to_me(Some(egui::Align::Center)); actions.summary_focus = Some(None);
+                            }
+                            if active && (response.clicked() || directive == Some(super::jump_mode::ui::FocusDirective::Select)) {
+                                actions.summary_row = Some(index); response.request_focus(); response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if active && current_summary && response.has_focus() {
+                                ui.memory_mut(|memory| memory.set_focus_lock_filter(response.id, egui::EventFilter { vertical_arrows: true, ..Default::default() }));
+                                let next = if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) { Some((index + 1).min(rows - 1)) }
+                                    else if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) { Some(index.saturating_sub(1)) } else { None };
+                                if let Some(next) = next { actions.summary_row = Some(next); actions.summary_focus = Some(Some(next)); }
+                            }
+                        }
+                    });
+                });
+                chart_target(scope, ui, &header.header_response, "distribution/summary", "Distribution summary", TargetKind::Button, &mut order);
+                });
+            }
             if !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
                 ui.horizontal_wrapped(|ui| for (index, series) in dataset.series.iter().enumerate() { let mut visible = series.visible; let response = ui.add_enabled(owner, egui::Checkbox::new(&mut visible, &series.label)); chart_target(scope, ui, &response, &series_target_id(&definition.source, index), &format!("Series: {}", series.label), TargetKind::Checkbox, &mut order); if response.changed() && active { if visible { definition.hidden.retain(|i| *i != index); } else if !definition.hidden.contains(&index) { definition.hidden.push(index); } actions.definition = Some(definition.clone()); } });
             }
@@ -230,7 +371,7 @@ impl CalculationChartDialog {
                     if response.dragged() && active { let delta = response.drag_delta(); let _ = view.set(view.zoom_x, view.zoom_y, view.pan_x - f64::from(delta.x) / f64::from(width), view.pan_y + f64::from(delta.y) / f64::from(height)); }
                     if let Some(pointer) = response.hover_pos() && let Some(hit) = scene.hit([(pointer.x - rect.min.x), (pointer.y - rect.min.y)], 8.0) { let x = hit.bin_bounds.as_ref().map_or_else(|| hit.raw_x.clone(), |bounds| bounds.membership_label()); response.on_hover_text(format!("{} · {}{}", x, hit.raw_y, if hit.approximate { " (approximate)" } else { "" })); }
                     if scene.approximate || scene.coordinate_collisions { ui.label("Plot coordinates are approximate; exact values remain in tooltips."); }
-                    let response = ui.add_enabled(owner && actions.definition.is_none(), egui::Button::new("Copy Chart as Image")); chart_target(scope, ui, &response, "copy", "Copy Chart as Image", TargetKind::Button, &mut order); if active && response.clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
+                    let response = ui.add_enabled(owner && actions.definition.is_none() && !pending_bin_draft, egui::Button::new("Copy Chart as Image")); chart_target(scope, ui, &response, "copy", "Copy Chart as Image", TargetKind::Button, &mut order); #[cfg(test)] actions.controls.push((if response.enabled() { "copy-enabled" } else { "copy-disabled" }.into(), response.rect)); if active && response.clicked() { actions.copy = Some((stamp, definition.clone(), (*scene).clone())); }
                 }
                 Ok(None) => { ui.label("No data"); }
                 Err(error) => { ui.colored_label(ui.visuals().error_fg_color, error); }
@@ -347,6 +488,31 @@ fn vector_choices(evaluation: &SessionEvaluation) -> Vec<(ChartVectorReference, 
     named
 }
 
+fn distribution_vector_choices(evaluation: &SessionEvaluation) -> Vec<(ChartVectorReference, String)> {
+    let mut named = evaluation.final_bindings.iter().filter_map(|(name, binding)| match &binding.outcome {
+        LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) => Some((ChartVectorReference::Named { name: name.clone() }, format!("{name} ({} values)", vector.components().len()))),
+        _ => None,
+    }).collect::<Vec<_>>();
+    named.sort_by(|a, b| a.1.cmp(&b.1));
+    named.extend(evaluation.lines.iter().filter_map(|line| match &line.outcome {
+        LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) => {
+            let name = line.assignment_name.as_ref().map_or(String::new(), |name| format!(" · {name}"));
+            Some((ChartVectorReference::Physical(line.id), format!("r{}{name} ({} values)", line.line_index + 1, vector.components().len())))
+        }
+        _ => None,
+    }));
+    named
+}
+
+fn validate_histogram_bins(runtime: &ChartRuntime, definition: &DistributionDefinition, bins: DistributionBins) -> Result<(), String> {
+    if !matches!(bins, DistributionBins::Width { .. }) { return Ok(()); }
+    let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current distribution results are unavailable or outdated.")?;
+    let (label, outcome) = resolve_source(evaluation, &definition.vector)?;
+    let LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) = outcome else { return Err("The distribution source is not a numeric vector.".into()); };
+    let mut candidate = definition.clone(); candidate.bins = bins;
+    ChartDataset::from_histogram(label, vector.components(), &candidate).map(|_| ())
+}
+
 fn resolve_vector<'a>(evaluation: &'a SessionEvaluation, reference: &'a ChartVectorReference) -> Result<(&'a str, &'a [f64]), String> {
     let (label, outcome) = resolve_source(evaluation, reference)?;
     let values = vector_values(outcome).ok_or_else(|| format!("{} is not a vector or sequence.", reference_label(reference)))?;
@@ -446,6 +612,25 @@ mod tests {
     }
 
     #[test]
+    fn histogram_width_change_in_data_reports_error_without_blocking_cdf() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2]").unwrap(); session.evaluation();
+        let spec = DistributionDefinition { vector: ChartVectorReference::Named { name: "v".into() }, bins: DistributionBins::Width { width: ChartFiniteValue::try_from(1.0).unwrap() }, scale: DistributionScale::Count };
+        let mut definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(spec.clone()), options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
+        assert!(chart_data(&runtime, &definition).is_ok());
+        session.replace_source("v = [1, 2000]").unwrap(); runtime.basis = session.evaluation_basis();
+        assert!(chart_data(&runtime, &definition).is_err());
+        session.evaluation(); runtime.evaluation = session.shared_evaluation();
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("1024"));
+        assert_eq!(definition.distribution.as_ref().unwrap().bins, spec.bins);
+        definition.kind = ChartKind::Cumulative;
+        assert!(chart_data(&runtime, &definition).is_ok());
+    }
+
+    #[test]
     fn chart_named_reference_uses_current_evaluation_and_sensitivity_stamp() {
         use crate::calculation_pad::{ChartReferenceAxis, ChartReferenceLine, DocumentOptions, Sampling, SensitivityDefinition};
         let directory = tempfile::tempdir().unwrap();
@@ -504,6 +689,95 @@ mod tests {
             result = Some(chart_frame(ctx, dialog, runtime, vec![egui::Event::PointerMoved(point), egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]));
         }
         result.unwrap()
+    }
+
+    #[test]
+    fn chart_distribution_controls_preserve_source_and_stage_bins() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [1, 2, 2, 4]\nw = [3, 6]\ns = range(4)").unwrap(); session.evaluation();
+        let source = ChartSource::Vectors { x: None, y: vec![ChartVectorReference::Named { name: "v".into() }] };
+        let definition = ChartDefinition { source: source.clone(), kind: ChartKind::Bar, x_label: "X".into(), y_label: "Y".into(), hidden: vec![0], bar_labels: vec!["saved".into()], distribution: None, options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        let control = |actions: &ChartActions, name: &str| actions.controls.iter().find(|(key, _)| key == name).unwrap_or_else(|| panic!("missing {name}: {:?}", actions.controls)).1.center();
+        let mut actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        actions = chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "kind/Histogram"));
+        assert_eq!(runtime.definition.as_ref().unwrap().kind, ChartKind::Histogram);
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "distribution-menu"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(!actions.controls.iter().any(|(key, _)| key.starts_with("distribution/s ")));
+        actions = chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "distribution/w (2 values)"));
+        assert!(matches!(&runtime.definition.as_ref().unwrap().distribution.as_ref().unwrap().vector, ChartVectorReference::Named { name } if name == "w"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bins/Bin count"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bin-value"));
+        let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![key(egui::Key::A, ctrl), egui::Event::Text("0".into())]);
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(actions.controls.iter().any(|(name, _)| name == "copy-disabled"));
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "apply-bins"));
+        assert_eq!(runtime.definition.as_ref().unwrap().distribution.as_ref().unwrap().bins, DistributionBins::Auto);
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bin-value"));
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![key(egui::Key::A, ctrl), egui::Event::Text("2".into())]);
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "apply-bins"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert_eq!(runtime.definition.as_ref().unwrap().distribution.as_ref().unwrap().bins, DistributionBins::Count { count: 2 });
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bins/Bin width"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "bin-value"));
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![key(egui::Key::A, ctrl), egui::Event::Text("0.001".into())]);
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "apply-bins"));
+        assert_eq!(runtime.definition.as_ref().unwrap().distribution.as_ref().unwrap().bins, DistributionBins::Count { count: 2 });
+        assert!(dialog.distribution_draft.as_ref().unwrap().error.as_deref().is_some_and(|error| error.contains("1024")));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "scale/Percentage"));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "summary/0"));
+        chart_frame(&ctx, &mut dialog, &mut runtime, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert_eq!(dialog.summary_row, Some(1));
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        chart_click(&ctx, &mut dialog, &mut runtime, control(&actions, "kind/Cumulative"));
+        let chart = runtime.definition.as_ref().unwrap();
+        assert_eq!(chart.kind, ChartKind::Cumulative);
+        assert_eq!(chart.source, source); assert_eq!(chart.hidden, [0]); assert_eq!(chart.bar_labels, ["saved"]);
+        assert_eq!(chart.distribution.as_ref().unwrap().bins, DistributionBins::Count { count: 2 });
+        assert_eq!(chart.distribution.as_ref().unwrap().scale, DistributionScale::Percentage);
+        session.replace_source("v = [9]").unwrap(); runtime.basis = session.evaluation_basis();
+        actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(actions.copy.is_none());
+        assert!(!actions.controls.iter().any(|(name, _)| name == "copy-enabled"));
+    }
+
+    #[test]
+    fn chart_distribution_summary_keyboard_scrolls_virtual_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("v = [0, 100]").unwrap(); session.evaluation();
+        let definition = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![] }, kind: ChartKind::Histogram, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: ChartVectorReference::Named { name: "v".into() }, bins: DistributionBins::Count { count: 32 }, scale: DistributionScale::Count }), options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition), basis: session.evaluation_basis(), pad_host: Some(super::super::utility_host::HostIdentity { host: UtilityPresentation::Docked, generation: 1 }), pinned: false };
+        let ctx = egui::Context::default(); let mut dialog = CalculationChartDialog::default(); dialog.open();
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert!(actions.controls.iter().filter(|(name, _)| name.starts_with("summary/")).count() < 32);
+        let first = actions.controls.iter().find(|(name, _)| name == "summary/0").unwrap().1.center();
+        chart_click(&ctx, &mut dialog, &mut runtime, first);
+        for _ in 0..10 {
+            for pressed in [true, false] {
+                chart_frame(&ctx, &mut dialog, &mut runtime, vec![egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE }]);
+            }
+            chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        }
+        let actions = chart_frame(&ctx, &mut dialog, &mut runtime, Vec::new());
+        assert_eq!(dialog.summary_row, Some(10));
+        assert!(actions.controls.iter().any(|(name, _)| name == "summary/10"));
     }
 
     #[test]
