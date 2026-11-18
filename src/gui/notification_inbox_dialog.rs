@@ -12,7 +12,7 @@ use crate::gui::{
 };
 use crate::notifications::{
     Category, Content, FactId, InboxCommand, InboxServiceSnapshot, PersistenceStatus, Record,
-    RelatedItem, Settings, Source, Status,
+    RelatedItem, Settings, Source, Status, WindowsAccess,
 };
 use eframe::egui;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(super) enum Command {
     Closed,
+    RequestWindowsAccess,
     Submit(InboxCommand),
     OpenRelated(Record),
 }
@@ -30,6 +31,7 @@ pub(super) struct Runtime {
     /// Current Unix time for relative-date filtering.
     pub now_unix: Option<i64>,
     pub busy: bool,
+    pub windows_access: WindowsAccess,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ReadFilter {
@@ -120,6 +122,7 @@ enum Intent {
     CreateTodo,
     Snooze(u8),
     ApplySettings,
+    RequestWindowsAccess,
     BeginClear(ClearTarget),
     ConfirmClear,
     CancelClear,
@@ -273,6 +276,9 @@ impl HostedUtilityDialog for NotificationInboxDialog {
                     ClearTarget::All => InboxCommand::ClearAll,
                 })];
             }
+            Intent::RequestWindowsAccess => {
+                return vec![Command::RequestWindowsAccess];
+            }
             Intent::ApplySettings => {
                 let Some(snapshot) = actions.snapshot.as_ref() else {
                     return Vec::new();
@@ -405,6 +411,7 @@ impl NotificationInboxDialog {
             if snapshot.dropped_events > 0 { ui.label(format!("{} incoming notifications could not be retained.",snapshot.dropped_events)); }
             if snapshot.inbox.omitted() > 0 { ui.label(format!("Inbox capacity omitted {} notifications.", snapshot.inbox.omitted())); }
             if snapshot.calendar_warning { ui.label("Calendar reminders need attention."); }
+            ui.label(format!("Windows notifications · {}", runtime.windows_access.label()));
             let records=snapshot.inbox.records(); let unread=snapshot.inbox.unmuted_unread_count();
             ui.heading(format!("Inbox — {unread} unread"));
             let search=ui.add(egui::TextEdit::singleline(&mut actions.view.search).hint_text("Search notifications").char_limit(256)); target!(ui,search,"search","Search notifications",TargetKind::TextEntry); if search.changed(){actions.view.page=0;}
@@ -475,6 +482,31 @@ impl NotificationInboxDialog {
                 }
                 if let Some(name)=actions.view.selected.as_ref().and_then(|id| records.iter().find(|r| &r.id==id)).and_then(app) {
                     ui.horizontal(|ui| { ui.label(format!("App: {name}")); let mut muted=settings.muted_apps.contains(name); let b=ui.checkbox(&mut muted,"Mute app unread indicator"); target!(ui,b,"settings/app/mute","Mute selected app",TargetKind::Checkbox); if b.changed(){if muted {settings.muted_apps.insert(name.to_owned());}else{settings.muted_apps.remove(name);}} let mut excluded=settings.excluded_apps.contains(name); let b=ui.checkbox(&mut excluded,"Exclude app"); target!(ui,b,"settings/app/exclude","Exclude selected app",TargetKind::Checkbox); if b.changed(){if excluded {settings.excluded_apps.insert(name.to_owned());}else{settings.excluded_apps.remove(name);}} });
+                }
+                ui.separator();
+                ui.label("Windows notifications");
+                ui.weak("Coverage includes current toasts exposed by Windows and changes observed during collection.");
+                let enable = ui.checkbox(&mut settings.external_enabled, "Capture Windows notifications");
+                target!(ui, enable, "settings/windows/capture", "Capture Windows notifications", TargetKind::Checkbox);
+                let text = ui.checkbox(&mut settings.retain_external_text, "Keep notification title and body in this session");
+                target!(ui, text, "settings/windows/text", "Keep notification title and body in this session", TargetKind::Checkbox);
+                let persist = ui.checkbox(&mut settings.persist_external, "Keep Windows records across restarts");
+                target!(ui, persist, "settings/windows/persist", "Keep Windows records across restarts", TargetKind::Checkbox);
+                if settings.retain_external_text && settings.persist_external {
+                    ui.weak("Windows notification text can be saved to this profile.");
+                }
+                if matches!(runtime.windows_access, WindowsAccess::Off | WindowsAccess::SetupRequired | WindowsAccess::Unsupported) {
+                    ui.weak("Windows capture setup is documented in docs/notification-inbox-windows.md.");
+                }
+                if runtime.windows_access == WindowsAccess::Denied {
+                    ui.weak("You can review notification access in Windows privacy settings.");
+                }
+                let can_request = settings.external_enabled && snapshot.inbox.settings().external_enabled
+                    && matches!(runtime.windows_access, WindowsAccess::PermissionNotGranted | WindowsAccess::Denied);
+                let request = ui.add_enabled(!runtime.busy && can_request, egui::Button::new("Request Windows access"));
+                target!(ui, request, "settings/windows/request", "Request Windows access", TargetKind::Button);
+                if request.clicked() {
+                    actions.intent = Some(Intent::RequestWindowsAccess);
                 }
                 let b=ui.add_enabled(!runtime.busy && settings.valid(),egui::Button::new("Apply Inbox settings")); target!(ui,b,"settings/apply","Apply Inbox settings",TargetKind::Button); if b.clicked(){actions.intent=Some(Intent::ApplySettings);}
             }

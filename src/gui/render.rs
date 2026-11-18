@@ -16421,12 +16421,14 @@ impl eframe::App for LauncherApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
         self.wake_inbox_calendar_if_changed();
+        self.refresh_inbox_windows_access(ctx);
         self.begin_root_frame_logic(ctx, frame);
     }
 
     fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
         self.wake_inbox_calendar_if_changed();
+        self.refresh_inbox_windows_access(ctx);
         self.run_hidden_logic_tick(ctx, frame);
     }
 
@@ -16576,6 +16578,7 @@ impl eframe::App for LauncherApp {
         self.recording_dialog.retire_recording_outline();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
+        self.notification_windows_consent.stop();
         self.hotfolder_action_adapter.set_active(false);
         self.hotfolder_action_pump.set_active(false);
         self.hotfolder_runtime.shutdown_and_reap();

@@ -36,6 +36,19 @@ impl LauncherApp {
             .retain(|panel| *panel != Panel::NotificationInboxDialog);
     }
 
+    pub(super) fn refresh_inbox_windows_access(&mut self, ctx: &egui::Context) {
+        let enabled = self
+            .notification_inbox
+            .as_ref()
+            .is_some_and(|service| service.snapshot().inbox.settings().external_enabled);
+        if let Some(delay) = self
+            .notification_windows_consent
+            .tick(enabled, std::time::Instant::now())
+        {
+            ctx.request_repaint_after(delay);
+        }
+    }
+
     pub(super) fn wake_inbox_calendar_if_changed(&mut self) {
         let version = crate::plugins::calendar::calendar_version();
         if self.notification_calendar_version == version {
@@ -153,6 +166,7 @@ impl LauncherApp {
                 notice: self.notification_notice.clone(),
                 now_unix: Some(unix_now()),
                 busy: self.notification_request.is_some(),
+                windows_access: self.notification_windows_consent.access(),
             },
             HostInput {
                 first,
@@ -201,6 +215,18 @@ impl LauncherApp {
         }
         match command {
             Command::Closed => self.close_notification_inbox(),
+            Command::RequestWindowsAccess => {
+                let enabled = self
+                    .notification_inbox
+                    .as_ref()
+                    .is_some_and(|service| service.snapshot().inbox.settings().external_enabled);
+                let ctx = self.egui_ctx.clone();
+                self.notification_notice = self
+                    .notification_windows_consent
+                    .request(enabled, move || ctx.request_repaint())
+                    .err()
+                    .map(str::to_owned);
+            }
             Command::Submit(command) => {
                 let Some(inbox) = &self.notification_inbox else {
                     return;

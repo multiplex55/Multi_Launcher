@@ -81,7 +81,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M10-B | complete |
 | M11-A | complete |
 | M11-B | complete |
-| M11-C, M11-D | pending |
+| M11-C | in_progress |
+| M11-D | pending |
 | M12-A, M12-B | pending |
 | M13-A | pending |
 
@@ -621,3 +622,12 @@ A bounded profile worker adopts sanitized launcher, Timer, Calendar, Macro Notif
 The scoped Nextest run passed 34 checks (baaea902-7b62-45fa-8fdb-3fb550c58fb0). The expanded run passed 35 checks (including an actual Windows transfer copy and its single sanitized receipt). Its new GUI fixture initially supplied raw queries to the typed parser. Using the production query-to-plugin-action path, the exact follow-up test passed (7b57aa77-10a5-4c25-9c93-8ae1e7839b78). Independent review findings on session identity, shutdown order, Calendar profile identity, hidden-root navigation, mute and capacity disclosure were addressed.
 
 The ordinary fast-dev Windows build succeeded. In isolated profile `m11-b-native-9b475f2f` with both Paste Sequences shortcuts disabled and external capture off, the real Timer scheduler fired a synthetic alarm. Keyboard activation opened the docked Inbox, found one unread Timer event, selected it, and created exactly one Todo with visible confirmation. The retained event omitted the alarm label. The keyboard Pop Out command opened the native Inbox and persisted its preference. Native window accessibility exposed only its frame and Windows Graphics Capture timed out, so popped-out contents and the transfer-to-Inbox GUI sequence remain unverified. A real worker transfer and exact typed Inbox record were verified in the focused test.
+
+
+### M11-C Optional Windows identity and foreground consent
+
+The Inbox defaults to Off and initializes no WinRT access service while disabled. Explicit opt-in can reveal Setup required for the ordinary executable. The adapter checks the running package family and exact application user model ID. A retained request from the active foreground launcher thread invokes Windows consent asynchronously. The outcome and later permission checks remain distinct from capture status. Title and body, cross-session retention and collection have separate controls.
+
+The optional Windows SDK script copies the ordinary executable, retains an existing Win32 manifest when present, embeds the matching sparse identity, and packages the capability. Deployment and exact removal are documented separately. The script does not install the package, purchase signing or change trust. SDK version 10.0.26100.0 produced the expected unsigned package (`4FED825DBA98C4BCDE41250F1C09E6BFD2E8997A8D120502540CC40DC5F20E0C`) from the checked-in script with an unchanged ordinary executable. A separately staged native foreground probe verified its embedded manifest bytes. A disposable external synthetic sender is compiled for M11-D. Neither probe nor sender has been installed, trusted or run.
+
+Four scoped automated checks passed (cb62ed72-c818-4594-9992-b5c8c7920ab8), including unpackaged aliases, disabled WinRT behavior, exact identity validation and real internal transfer operation. Independent review found no actionable source issues. M11-C remains in progress because actual signed-package Win32 consent still needs authorized temporary certificate trust and native observation. Microsoft documents that some WinRT consent methods are unavailable in desktop processes. The unsigned package and tests do not prove that this listener's permission works on this host.
