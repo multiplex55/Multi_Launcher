@@ -66,10 +66,12 @@ pub(crate) enum NavigationDialogKind {
     HashGenerator,
     QrGenerator,
     ExplorerTabs,
+    FileLock,
+    FolderSize,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -100,6 +102,8 @@ impl NavigationDialogKind {
         Self::HashGenerator,
         Self::QrGenerator,
         Self::ExplorerTabs,
+        Self::FileLock,
+        Self::FolderSize,
     ];
 
     const fn index(self) -> usize {
@@ -134,6 +138,8 @@ impl NavigationDialogKind {
             Self::HashGenerator => 27,
             Self::QrGenerator => 28,
             Self::ExplorerTabs => 29,
+            Self::FileLock => 30,
+            Self::FolderSize => 31,
         }
     }
 
@@ -169,6 +175,8 @@ impl NavigationDialogKind {
             Self::HashGenerator => "hash-generator",
             Self::QrGenerator => "qr-generator",
             Self::ExplorerTabs => "explorer-tabs",
+            Self::FileLock => "file-lock",
+            Self::FolderSize => "folder-size",
         }
     }
 
@@ -207,6 +215,8 @@ impl NavigationDialogKind {
             Self::HashGenerator => egui::Id::new("hash_generator_dialog"),
             Self::QrGenerator => egui::Id::new("qr_generator_embedded"),
             Self::ExplorerTabs => egui::Id::new("explorer-tabs-window"),
+            Self::FileLock => egui::Id::new(Some("File Lock Inspector")),
+            Self::FolderSize => egui::Id::new(Some("Folder Size")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -507,6 +517,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::ZipExtractor
+                    | NavigationDialogKind::FileLock
+                    | NavigationDialogKind::FolderSize
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
@@ -4394,6 +4406,12 @@ mod tests {
                         egui::Window::new("ZIP Extractor")
                             .id(egui::Id::new("zip_extractor_dialog"))
                             .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FileLock => {
+                        egui::Window::new("File Lock Inspector").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FolderSize => {
+                        egui::Window::new("Folder Size").show(ctx, |_| {});
                     }
                     NavigationDialogKind::RegexTester => {
                         egui::Window::new("Regex Tester")

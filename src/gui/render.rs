@@ -9213,6 +9213,15 @@ impl LauncherApp {
         _owner_transition_pending: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::FolderSize;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FolderSize, instance } if !egui::Popup::is_any_open(ctx) => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("folder-size", instance), super::jump_mode::TargetGeneration(self.folder_size_dialog.jump_generation()), "folder-size", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
         let input_allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -9240,6 +9249,10 @@ impl LauncherApp {
             first_ui_pass,
             self.pinned_panels.contains(&super::Panel::FolderSizeDialog),
             !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -9292,6 +9305,15 @@ impl LauncherApp {
         _owner_transition_pending: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::FileLock;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FileLock, instance } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("file-lock", instance), super::jump_mode::TargetGeneration(self.file_lock_dialog.jump_generation()), "file-lock", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
         let input_allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
@@ -9317,6 +9339,10 @@ impl LauncherApp {
             first_ui_pass,
             self.pinned_panels.contains(&super::Panel::FileLockDialog),
             !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -10619,6 +10645,8 @@ impl LauncherApp {
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
                 self.zip_extractor_dialog.open,
             ),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FileLock, self.file_lock_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::FolderSize, self.folder_size_dialog.open),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
                 self.regex_tester_dialog.open,
@@ -10780,6 +10808,10 @@ impl LauncherApp {
                         self.duplicate_finder_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::ZipExtractor {
                         self.zip_extractor_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FileLock {
+                        self.file_lock_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FolderSize {
+                        self.folder_size_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -24320,6 +24352,56 @@ mod tests {
     }
 
     #[test]
+    fn file_lock_jump_focus_does_not_open_picker() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::FileLockDialog);
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.file_lock_dialog.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Choose file").cloned().unwrap();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Choose file");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 0);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn folder_size_jump_focus_does_not_open_picker() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::FolderSizeDialog);
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.folder_size_dialog.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] { run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas(); }
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let target = app.jump_mode_ui.retained_registry().targets().iter().find(|target| target.metadata().label() == "Choose folder").cloned().unwrap();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT), egui::Event::Text(" ".into())], false).drop_without_applying_deltas();
+            run_tool_dialog_frame(&ctx, &mut app, vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)], false).drop_without_applying_deltas();
+            let hint = dialog_hint_for_label(&app, "Choose folder");
+            run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false).drop_without_applying_deltas();
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(target.response_id()));
+            assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 0);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
     fn hash_jump_focus_does_not_calculate() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
@@ -30675,6 +30757,141 @@ mod tests {
         app.run_root_frame_for_test(ctx, input, false)
             .0
             .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn folder_size_keyboard_focus_and_activate_drills_selected_directory() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                ctx.all_styles_mut(|style| style.animation_time = 0.0);
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                let fixture = crate::folder_size::disposable_scan_fixture_root();
+                std::fs::create_dir_all(fixture.path().join("outer/inner")).unwrap();
+                std::fs::write(fixture.path().join("direct.txt"), b"direct contents").unwrap();
+                open_folder_size_through_plugin(&mut app);
+                let root = egui::ViewportId::ROOT;
+                app.folder_size_dialog
+                    .set_folder_choice_for_test(Some(fixture.path().to_path_buf()));
+                click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+                click_folder_size_host_control(&ctx, &mut app, root, "scan");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while app.folder_size_dialog.session_view_for_test().is_busy() {
+                    run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                click_folder_size_host_control(&ctx, &mut app, root, "sort/Name");
+                click_folder_size_host_control(&ctx, &mut app, root, "row/direct.txt");
+                run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+                assert_eq!(
+                    app.folder_size_dialog.test_selected_row_path(),
+                    Some(fixture.path().join("direct.txt")),
+                    "the file is the accepted selection before the arrow key",
+                );
+                let file_target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Entry direct.txt")
+                    .expect("the selected file is a current keyboard target");
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(file_target.response_id())
+                );
+                assert_eq!(
+                    app.folder_size_dialog.test_action_enabled("drill"),
+                    Some(false)
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    vec![key_release(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+                    false,
+                    false,
+                );
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert_eq!(
+                    app.folder_size_dialog.test_selected_row_path(),
+                    Some(fixture.path().join("outer")),
+                    "ArrowDown selects the next directory in the sorted current list",
+                );
+                assert_eq!(
+                    app.folder_size_dialog.test_action_enabled("drill"),
+                    Some(true)
+                );
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Open in Folder Size")
+                    .cloned()
+                    .expect("selected directory offers a Jump target");
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Open in Folder Size");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(app.folder_size_dialog.test_navigation_state().2.is_none());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.folder_size_dialog.test_navigation_state().3.as_deref(),
+                    Some(fixture.path().join("outer").as_path())
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

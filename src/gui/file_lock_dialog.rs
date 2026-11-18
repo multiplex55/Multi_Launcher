@@ -14,6 +14,10 @@ const WINDOW_TITLE: &str = "File Lock Inspector";
 const UTILITY_KEY: &str = "file-lock";
 const ROW_HEIGHT: f32 = 24.0;
 
+fn jump_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileLockRevealRequest {
     pub(crate) generation: u64,
@@ -50,6 +54,8 @@ enum FileLockAction {
         process_id: u32,
         creation_filetime: u64,
     },
+    MoveProcess { generation: u64, process_id: u32, creation_filetime: u64 },
+    FocusDelivered((u64, u32, u64)),
     CopySnapshot {
         generation: u64,
     },
@@ -123,6 +129,8 @@ pub(crate) struct FileLockDialogState {
     host: super::utility_host::UtilityHostState,
     presentation_prepared: bool,
     host_epoch: u64,
+    host_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    host_jump_frame: Option<u64>,
     host_focus: bool,
     host_os_close_pending: bool,
     external_pending: Option<PendingFileLockPass>,
@@ -130,6 +138,7 @@ pub(crate) struct FileLockDialogState {
     selected_path: Option<PathBuf>,
     submitted: Option<SubmittedInspection>,
     selected_process: Option<(u64, u32, u64)>,
+    keyboard_focus: Option<((u64, u32, u64), super::utility_host::HostIdentity, u64)>,
     pending: Option<PendingFileLockPass>,
     latest_pass: Option<FileLockOwnerPass>,
     notice: Option<String>,
@@ -151,6 +160,7 @@ pub(crate) struct FileLockDialogState {
 }
 
 impl FileLockDialogState {
+    pub(super) fn jump_generation(&self) -> u64 { self.session.view().generation() }
     pub(crate) fn new(ctx: &egui::Context) -> Self {
         ctx.add_plugin(super::utility_host::HostedCopyCapture::default());
         let wake_context = ctx.clone();
@@ -159,6 +169,8 @@ impl FileLockDialogState {
             host: super::utility_host::UtilityHostState::docked(),
             presentation_prepared: false,
             host_epoch: 0,
+            host_jump: Box::default(),
+            host_jump_frame: None,
             host_focus: false,
             host_os_close_pending: false,
             external_pending: None,
@@ -168,6 +180,7 @@ impl FileLockDialogState {
             selected_path: None,
             submitted: None,
             selected_process: None,
+            keyboard_focus: None,
             pending: None,
             latest_pass: None,
             notice: None,
@@ -299,6 +312,7 @@ impl FileLockDialogState {
         first_ui_pass: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: Option<super::utility_host::UtilityPresentation>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> (Vec<FileLockAction>, bool) {
         self.poll_reveal_work();
         if !self.open {
@@ -313,10 +327,14 @@ impl FileLockDialogState {
         let current_inspection = self.current_inspection(&view);
         let selected_path = self.selected_path.clone();
         let selected_process = self.selected_process;
+        let keyboard_focus = self.keyboard_focus.filter(|(key, host, epoch)| input_allowed && *host == self.host.identity() && *epoch == self.host_epoch && self.process_is_current(*key));
+        if keyboard_focus.is_none() { self.keyboard_focus = None; }
+        let mut focus_delivered = false;
         let notice = self.notice.clone();
         let reveal_busy = self.reveal_worker.is_some() || self.reveal_retirement_failed;
         let mut window_open = self.open;
         let mut actions = Vec::new();
+        let mut order = 0;
 
         let mut draw = |ui: &mut egui::Ui| {
             let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
@@ -327,6 +345,7 @@ impl FileLockDialogState {
                     input_allowed && ui.is_visible() && !ui.is_sizing_pass(),
                 );
                 self.record_action_rect("host-presentation", button.rect, ui.clip_rect());
+                jump_target(scope, ui, &button, "presentation", "Dock or pop out", super::jump_mode::TargetKind::Button, &mut order);
                 if controls_allowed && button.clicked() {
                     actions.push(FileLockAction::Host(next));
                 }
@@ -334,6 +353,7 @@ impl FileLockDialogState {
             ui.add_enabled_ui(input_allowed && ui.is_visible() && !ui.is_sizing_pass(), |ui| {
                         ui.horizontal_wrapped(|ui| {
                             let choose = ui.button("Choose file…");
+                            jump_target(scope, ui, &choose, "choose", "Choose file", super::jump_mode::TargetKind::Button, &mut order);
                             self.record_action_rect("choose_file", choose.rect, ui.clip_rect());
                             if choose.clicked() {
                                 actions.push(FileLockAction::ChooseFile);
@@ -343,6 +363,7 @@ impl FileLockDialogState {
                                 selected_path.is_some() && !view.is_busy(),
                                 egui::Button::new("Inspect"),
                             );
+                            jump_target(scope, ui, &inspect, "inspect", "Inspect", super::jump_mode::TargetKind::Button, &mut order);
                             self.record_action_rect("inspect", inspect.rect, ui.clip_rect());
                             if inspect.clicked()
                                 && let Some(path) = selected_path.clone()
@@ -354,6 +375,7 @@ impl FileLockDialogState {
                                 selected_path.is_some() && !view.is_busy(),
                                 egui::Button::new("Refresh"),
                             );
+                            jump_target(scope, ui, &refresh, "refresh", "Refresh", super::jump_mode::TargetKind::Button, &mut order);
                             self.record_action_rect("refresh", refresh.rect, ui.clip_rect());
                             #[cfg(test)]
                             {
@@ -372,6 +394,7 @@ impl FileLockDialogState {
                                 view.is_busy(),
                                 egui::Button::new("Cancel"),
                             );
+                            jump_target(scope, ui, &cancel, "cancel", "Cancel", super::jump_mode::TargetKind::Button, &mut order);
                             self.record_action_rect("cancel", cancel.rect, ui.clip_rect());
                             if cancel.clicked() {
                                 actions.push(FileLockAction::Cancel {
@@ -384,6 +407,7 @@ impl FileLockDialogState {
                                 can_copy,
                                 egui::Button::new("Copy snapshot"),
                             );
+                            jump_target(scope, ui, &copy, "copy", "Copy snapshot", super::jump_mode::TargetKind::Button, &mut order);
                             self.record_action_rect("copy_snapshot", copy.rect, ui.clip_rect());
                             if copy.clicked() {
                                 actions.push(FileLockAction::CopySnapshot {
@@ -429,6 +453,7 @@ impl FileLockDialogState {
                                     reveal_path.is_some() && !reveal_busy,
                                     egui::Button::new("Reveal executable"),
                                 );
+                                jump_target(scope, ui, &reveal, "reveal", "Reveal executable", super::jump_mode::TargetKind::Button, &mut order);
                                 self.record_action_rect("reveal", reveal.rect, ui.clip_rect());
                                 if reveal.clicked()
                                     && let Some(process) = selected
@@ -447,7 +472,7 @@ impl FileLockDialogState {
                                         (ui.available_height() - 52.0).max(ROW_HEIGHT * 3.0),
                                     )
                                     .show(ui, |ui| {
-                                        for process in &inspection.processes {
+                                        for (position, process) in inspection.processes.iter().enumerate() {
                                             let key = (
                                                 view.generation(),
                                                 process.process_id,
@@ -459,10 +484,29 @@ impl FileLockDialogState {
                                                 process.process_id,
                                                 process_label(process),
                                             );
-                                            let response = ui.add_sized(
+                                            let response = ui.push_id(key, |ui| ui.add_sized(
                                                 [ui.available_width(), ROW_HEIGHT],
                                                 egui::Button::selectable(selected, label),
-                                            );
+                                            )).inner;
+                                            jump_target(scope, ui, &response, &format!("process/{}/{}/{}", key.0, key.1, key.2), &format!("Process {}", key.1), super::jump_mode::TargetKind::Button, &mut order);
+                                            if controls_allowed && keyboard_focus.is_some_and(|(pending, _, _)| pending == key) {
+                                                response.request_focus();
+                                                response.scroll_to_me(None);
+                                                focus_delivered = true;
+                                            }
+                                            if controls_allowed && response.has_focus() {
+                                                ui.memory_mut(|memory| memory.set_focus_lock_filter(response.id, egui::EventFilter { vertical_arrows: true, ..Default::default() }));
+                                                let direction = ui.input_mut(|input| {
+                                                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) { 1isize }
+                                                    else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) { -1 }
+                                                    else { 0 }
+                                                });
+                                                if direction != 0 {
+                                                    let next = (position as isize + direction).clamp(0, inspection.processes.len().saturating_sub(1) as isize) as usize;
+                                                    let process = &inspection.processes[next];
+                                                    actions.push(FileLockAction::MoveProcess { generation: view.generation(), process_id: process.process_id, creation_filetime: process.creation_filetime });
+                                                }
+                                            }
                                             self.record_action_rect(
                                                 "process_row",
                                                 response.rect,
@@ -529,6 +573,7 @@ impl FileLockDialogState {
                     |ui| draw(ui),
                 );
         }
+        if focus_delivered && let Some((key, _, _)) = keyboard_focus { actions.push(FileLockAction::FocusDelivered(key)); }
         if !commit_allowed {
             actions.clear();
         }
@@ -594,6 +639,9 @@ impl FileLockDialogState {
         }
     }
     fn retire_host(&mut self, ctx: &egui::Context) {
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
+        self.keyboard_focus = None;
         if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
             let identity = self.native_identity(self.host.identity());
             super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -620,6 +668,10 @@ impl FileLockDialogState {
             first,
             false,
             true,
+            None,
+            None,
+            false,
+            None,
         );
     }
     pub(crate) fn show_hosted(
@@ -631,6 +683,10 @@ impl FileLockDialogState {
         first: bool,
         pinned: bool,
         shortcut_allowed: bool,
+        root_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        launcher_jump: Option<&super::jump_mode::ui::JumpModeUi>,
+        jump_enabled: bool,
+        instance: Option<u64>,
     ) {
         self.prepare_open_presentation(ctx);
         use super::utility_host::UtilityPresentation;
@@ -661,8 +717,8 @@ impl FileLockDialogState {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                             || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     });
-                let (actions, close) =
-                    self.render_host_body(ctx, allowed, first, None, Some(host.host));
+                let scope = root_scope.map(|scope| if first && !ctx.will_discard() { scope.clone() } else { scope.registration_only() });
+                let (actions, close) = self.render_host_body(ctx, allowed, first, None, Some(host.host), scope.as_ref());
                 staged = Some((actions, close || shortcut));
                 owner = Some(root);
             }
@@ -700,6 +756,33 @@ impl FileLockDialogState {
                 } else {
                     root_owner && !egui::Popup::is_any_open(&c)
                 };
+                let mut binding = None;
+                let mut navigation = super::jump_mode::ui::NavigationOwner::Blocked;
+                if is_native && let Some(jump) = launcher_jump {
+                    let (chord, alphabet) = jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    binding = instance.map(|instance| super::jump_mode::ui::NavigationViewportBinding {
+                        viewport,
+                        owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::FileLock, instance },
+                        base_layer: egui::LayerId::background(),
+                    });
+                    if let Some(bound) = binding {
+                        navigation = self.host_jump.update_navigation_owner_for_viewport(&c, bound, allowed && jump_enabled);
+                        self.host_jump.handle_viewport_input(&c, bound.owner == navigation, child_first, viewport);
+                    }
+                    self.host_jump.begin_ui_pass();
+                }
+                let native_scope = binding.filter(|b| b.owner == navigation).and_then(|b| self.host_jump.scope_for_viewport_binding(
+                    super::jump_mode::SurfaceId::dialog("file-lock", instance.unwrap_or_default()),
+                    super::jump_mode::TargetGeneration(self.session.view().generation()), "file-lock", b,
+                )).map(|s| if child_first && !c.will_discard() { s } else { s.registration_only() });
+                let embedded_scope = root_scope.map(|s| if child_first && !c.will_discard() { s.clone() } else { s.registration_only() });
                 owner_allowed = allowed;
                 if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
                     child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -710,6 +793,7 @@ impl FileLockDialogState {
                 let shortcut = child_first
                     && allowed
                     && !pinned
+                    && (!is_native || self.host_jump.active_session().is_none())
                     && (is_native || shortcut_allowed)
                     && c.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -733,6 +817,7 @@ impl FileLockDialogState {
                             child_first,
                             Some(ui),
                             Some(host.host),
+                            native_scope.as_ref(),
                         ));
                     });
                 } else {
@@ -742,7 +827,18 @@ impl FileLockDialogState {
                         child_first,
                         None,
                         Some(host.host),
+                        embedded_scope.as_ref(),
                     ));
+                }
+                if is_native && launcher_jump.is_some() {
+                    self.host_jump.finish_ui_pass();
+                    if let Some(bound) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(&c, bound, allowed && jump_enabled);
+                        if self.host_jump.prepare_pass_for_viewport(&c, bound, current, allowed && jump_enabled) {
+                            super::jump_mode::paint::paint(&c, &self.host_jump);
+                        }
+                        if !c.will_discard() { self.host_jump.complete_frame_for_viewport(&c, bound, current, allowed && jump_enabled); }
+                    }
                 }
                 if let Some((_, close)) = &mut staged {
                     *close |= shortcut || (is_native && !pinned && self.host_os_close_pending);
@@ -891,6 +987,9 @@ impl FileLockDialogState {
                     match action {
                         FileLockAction::Host(next) => {
                             if self.host.transition(next) {
+                                self.host_jump.cancel_all();
+                                self.host_jump_frame = None;
+                                self.keyboard_focus = None;
                                 let key =
                                     crate::settings::UtilityToolKey::parse("file-lock").expect("stable utility key");
                                 super::utility_host::remember_presentation(ctx, key, next);
@@ -1004,6 +1103,20 @@ impl FileLockDialogState {
                                     self.cancel_reveal();
                                 }
                                 self.selected_process = Some(key);
+                            }
+                        }
+                        FileLockAction::MoveProcess { generation, process_id, creation_filetime } => {
+                            let key = (generation, process_id, creation_filetime);
+                            if self.process_is_current(key) {
+                                if self.selected_process != Some(key) { self.cancel_reveal(); }
+                                self.selected_process = Some(key);
+                                self.keyboard_focus = Some((key, pending.host, pending.epoch));
+                                ctx.request_repaint_of(pending.owner.viewport_id);
+                            }
+                        }
+                        FileLockAction::FocusDelivered(key) => {
+                            if self.keyboard_focus.is_some_and(|(current, host, epoch)| current == key && host == pending.host && epoch == pending.epoch) {
+                                self.keyboard_focus = None;
                             }
                         }
                         FileLockAction::CopySnapshot { generation } => {

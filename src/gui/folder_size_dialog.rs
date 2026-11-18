@@ -18,6 +18,10 @@ const ROW_SHARE_WIDTH: f32 = 64.0;
 const ROW_STATUS_WIDTH: f32 = 166.0;
 const ROW_COLUMN_GAP: f32 = 10.0;
 
+fn jump_target(scope: Option<&super::jump_mode::ui::JumpModeScope>, ui: &egui::Ui, response: &egui::Response, id: &str, label: &str, kind: super::jump_mode::TargetKind, order: &mut u64) {
+    super::jump_mode::ui::register_and_apply_target(scope, ui, response, id, label, kind, order);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FolderSizeDialogEffect {
     CopyPath(String),
@@ -405,6 +409,9 @@ enum FolderSizeAction {
         generation: u64,
         index: usize,
     },
+    MoveSelection { generation: u64, index: usize },
+    FocusSelection { generation: u64, index: usize },
+    FocusDelivered { generation: u64, index: usize },
     Drill {
         generation: u64,
         index: usize,
@@ -501,6 +508,8 @@ pub(crate) struct FolderSizeDialogState {
     host: super::utility_host::UtilityHostState,
     presentation_prepared: bool,
     host_epoch: u64,
+    host_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    host_jump_frame: Option<u64>,
     host_focus: bool,
     host_os_close_pending: bool,
     prefill_pending: Option<PendingFolderSizePass>,
@@ -511,6 +520,8 @@ pub(crate) struct FolderSizeDialogState {
     current_directory: Option<(u64, usize)>,
     current_directory_path: Option<PathBuf>,
     selected_entry: Option<(u64, usize)>,
+    keyboard_focus: Option<(u64, usize, super::utility_host::HostIdentity, u64, Option<(u64, usize)>)>,
+    keyboard_reveal: bool,
     row_menu: Option<(ProjectionKey, usize, egui::Id, super::utility_host::HostIdentity, u64, Option<(u64, usize)>)>,
     projection: Option<Arc<FolderSizeProjection>>,
     sort_column: SortColumn,
@@ -533,6 +544,7 @@ pub(crate) struct FolderSizeDialogState {
 }
 
 impl FolderSizeDialogState {
+    pub(super) fn jump_generation(&self) -> u64 { self.session.view().generation() }
     pub(crate) fn new(ctx: &egui::Context) -> Self {
         Self::build(ctx, None)
     }
@@ -564,6 +576,8 @@ impl FolderSizeDialogState {
             host: super::utility_host::UtilityHostState::docked(),
             presentation_prepared: false,
             host_epoch: 0,
+            host_jump: Box::default(),
+            host_jump_frame: None,
             host_focus: false,
             host_os_close_pending: false,
             prefill_pending: None,
@@ -574,6 +588,8 @@ impl FolderSizeDialogState {
             current_directory: None,
             current_directory_path: None,
             selected_entry: None,
+            keyboard_focus: None,
+            keyboard_reveal: false,
             row_menu: None,
             projection: None,
             sort_column: SortColumn::Size,
@@ -697,6 +713,7 @@ impl FolderSizeDialogState {
         first_ui_pass: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: Option<super::utility_host::UtilityPresentation>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> (Vec<FolderSizeAction>, bool) {
         let view = self.session.view();
         self.sync_projection(&view);
@@ -717,6 +734,13 @@ impl FolderSizeDialogState {
         let scan_root = self.scan_root.clone();
         let selected_entry = self.selected_entry;
         let visible_indices = self.visible_rows.as_ref().map(|rows| Arc::clone(&rows.indices)).unwrap_or_default();
+        let keyboard_focus = self.keyboard_focus.filter(|(generation, index, host, epoch, directory)| {
+            input_allowed && !egui::Popup::is_any_open(ctx) && *host == self.host.identity()
+                && *epoch == self.host_epoch && *directory == self.current_directory
+                && *generation == view.generation() && visible_indices.contains(index)
+        }).map(|(generation, index, _, _, _)| (generation, index));
+        if keyboard_focus.is_none() { self.keyboard_focus = None; }
+        let mut focus_delivered = false;
         let sort_column = self.sort_column;
         let sort_direction = self.sort_direction;
         let filter = self.filter;
@@ -731,6 +755,8 @@ impl FolderSizeDialogState {
         let original_recursive = recursive;
         let notice = self.notice.clone();
         let mut staged_actions = Vec::new();
+        let mut order = 0;
+        let scope = scope.filter(|_| !egui::Popup::is_any_open(ctx));
 
         let mut draw = |ui: &mut egui::Ui| {
             let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
@@ -740,6 +766,7 @@ impl FolderSizeDialogState {
                     presentation,
                     input_allowed && ui.is_visible() && !ui.is_sizing_pass(),
                 );
+                jump_target(scope, ui, &button, "presentation", "Dock or pop out", super::jump_mode::TargetKind::Button, &mut order);
                 #[cfg(test)]
                 self.test_action_rects.push((
                     "host-presentation".into(),
@@ -758,6 +785,7 @@ impl FolderSizeDialogState {
                 |ui| {
                     ui.horizontal_wrapped(|ui| {
                         let choose = ui.button("Choose folder…");
+                        jump_target(scope, ui, &choose, "choose", "Choose folder", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         self.test_action_rects.push((
                             "choose_folder".into(),
@@ -769,6 +797,7 @@ impl FolderSizeDialogState {
                         }
                         let scan_enabled = selected_root.is_some();
                         let scan = ui.add_enabled(scan_enabled, egui::Button::new("Scan"));
+                        jump_target(scope, ui, &scan, "scan", "Scan", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         self.test_action_rects
                             .push(("scan".into(), scan.rect, ui.clip_rect()));
@@ -784,6 +813,7 @@ impl FolderSizeDialogState {
                             });
                         }
                         let refresh = ui.add_enabled(scan_enabled, egui::Button::new("Refresh"));
+                        jump_target(scope, ui, &refresh, "refresh", "Refresh", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         self.test_action_rects.push((
                             "refresh".into(),
@@ -803,6 +833,7 @@ impl FolderSizeDialogState {
                             });
                         }
                         let cancel = ui.add_enabled(view.is_busy(), egui::Button::new("Cancel"));
+                        jump_target(scope, ui, &cancel, "cancel", "Cancel scan", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         self.test_action_rects
                             .push(("cancel".into(), cancel.rect, ui.clip_rect()));
@@ -820,7 +851,31 @@ impl FolderSizeDialogState {
                             })
                         });
                         let can_copy_or_open = selected_target.is_some() || selected_root.is_some();
+                        let drill_target = selected_target.filter(|(_, index)| {
+                            projection
+                                .as_ref()
+                                .and_then(|projection| projection.row(*index))
+                                .is_some_and(|row| row.kind == FolderSizeEntryKind::Directory)
+                        });
+                        let drill = ui.add_enabled(
+                            drill_target.is_some(),
+                            egui::Button::new("Open in Folder Size"),
+                        );
+                        jump_target(
+                            scope, ui, &drill, "drill", "Open in Folder Size",
+                            super::jump_mode::TargetKind::Button, &mut order,
+                        );
+                        #[cfg(test)]
+                        {
+                            self.test_action_rects
+                                .push(("drill".into(), drill.rect, ui.clip_rect()));
+                            self.test_action_enabled.push(("drill", drill.enabled()));
+                        }
+                        if drill.clicked() && let Some((generation, index)) = drill_target {
+                            staged_actions.push(FolderSizeAction::Drill { generation, index });
+                        }
                         let copy = ui.add_enabled(can_copy_or_open, egui::Button::new("Copy Path"));
+                        jump_target(scope, ui, &copy, "copy", "Copy path", super::jump_mode::TargetKind::Button, &mut order);
                         #[cfg(test)]
                         self.test_action_rects
                             .push(("copy".into(), copy.rect, ui.clip_rect()));
@@ -832,10 +887,9 @@ impl FolderSizeDialogState {
                                 staged_actions.push(FolderSizeAction::CopyRoot(root));
                             }
                         }
-                        if ui
-                            .add_enabled(can_copy_or_open, egui::Button::new("Reveal in Explorer"))
-                            .clicked()
-                        {
+                        let reveal = ui.add_enabled(can_copy_or_open, egui::Button::new("Reveal in Explorer"));
+                        jump_target(scope, ui, &reveal, "reveal", "Reveal in Explorer", super::jump_mode::TargetKind::Button, &mut order);
+                        if reveal.clicked() {
                             if let Some((generation, index)) = selected_target {
                                 staged_actions
                                     .push(FolderSizeAction::OpenRow { generation, index });
@@ -844,6 +898,7 @@ impl FolderSizeDialogState {
                             }
                         }
                         let recursive_response = ui.checkbox(&mut recursive, "Include subfolders");
+                        jump_target(scope, ui, &recursive_response, "recursive", "Include subfolders", super::jump_mode::TargetKind::Checkbox, &mut order);
                         #[cfg(test)]
                         self.test_action_rects.push((
                             "recursive".into(),
@@ -906,6 +961,7 @@ impl FolderSizeDialogState {
                                 ("Both", FolderView::Both),
                             ] {
                                 let response = ui.selectable_label(folder_view == value, label);
+                                jump_target(scope, ui, &response, &format!("view/{label}"), label, super::jump_mode::TargetKind::Button, &mut order);
                                 #[cfg(test)]
                                 self.test_action_rects.push((
                                     format!("view/{label}"),
@@ -934,6 +990,11 @@ impl FolderSizeDialogState {
                                     commit_allowed,
                                     pass_allowed,
                                     $show,
+                                    scope,
+                                    &mut order,
+                                    keyboard_focus,
+                                    self.keyboard_reveal,
+                                    &mut focus_delivered,
                                     &mut staged_actions,
                                     #[cfg(test)]
                                     &mut self.test_action_rects,
@@ -960,6 +1021,8 @@ impl FolderSizeDialogState {
                                         owned_popup,
                                         commit_allowed,
                                         pass_allowed,
+                                        scope,
+                                        &mut order,
                                         &mut staged_actions,
                                         #[cfg(test)]
                                         &mut self.test_action_rects,
@@ -1027,6 +1090,9 @@ impl FolderSizeDialogState {
                     .with_maximum(ctx.content_rect().size()),
                     |ui| draw(ui),
                 );
+        }
+        if focus_delivered && let Some((generation, index)) = keyboard_focus {
+            staged_actions.push(FolderSizeAction::FocusDelivered { generation, index });
         }
         if !commit_allowed {
             staged_actions.retain(|action| pass_allowed && matches!(action, FolderSizeAction::RevealRow { .. }));
@@ -1110,6 +1176,9 @@ impl FolderSizeDialogState {
         }
     }
     fn retire_host(&mut self, ctx: &egui::Context) {
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
+        self.keyboard_focus = None;
         if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
             let identity = self.native_identity(self.host.identity());
             super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
@@ -1135,6 +1204,10 @@ impl FolderSizeDialogState {
             first,
             false,
             true,
+            None,
+            None,
+            false,
+            None,
         );
     }
     pub(crate) fn show_hosted(
@@ -1146,6 +1219,10 @@ impl FolderSizeDialogState {
         first: bool,
         pinned: bool,
         shortcut_allowed: bool,
+        root_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        launcher_jump: Option<&super::jump_mode::ui::JumpModeUi>,
+        jump_enabled: bool,
+        instance: Option<u64>,
     ) {
         self.prepare_open_presentation(ctx);
         use super::utility_host::UtilityPresentation;
@@ -1168,14 +1245,15 @@ impl FolderSizeDialogState {
                 let allowed = root_owner && (!egui::Popup::is_any_open(ctx) || self.owns_row_menu(ctx));
                 let shortcut = first
                     && allowed
+                    && !self.owns_row_menu(ctx)
                     && shortcut_allowed
                     && !pinned
                     && ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                             || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     });
-                let (actions, close) =
-                    self.render_host_body(ctx, allowed, first, None, Some(host.host));
+                let scope = root_scope.map(|scope| if first && !ctx.will_discard() { scope.clone() } else { scope.registration_only() });
+                let (actions, close) = self.render_host_body(ctx, allowed, first, None, Some(host.host), scope.as_ref());
                 staged = Some((actions, close || shortcut));
                 owner = Some(root);
             }
@@ -1213,6 +1291,34 @@ impl FolderSizeDialogState {
                 } else {
                     root_owner && (!egui::Popup::is_any_open(&c) || self.owns_row_menu(&c))
                 };
+                let mut binding = None;
+                let mut navigation = super::jump_mode::ui::NavigationOwner::Blocked;
+                let jump_allowed = allowed && !egui::Popup::is_any_open(&c);
+                if is_native && let Some(jump) = launcher_jump {
+                    let (chord, alphabet) = jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    binding = instance.map(|instance| super::jump_mode::ui::NavigationViewportBinding {
+                        viewport,
+                        owner: super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::FolderSize, instance },
+                        base_layer: egui::LayerId::background(),
+                    });
+                    if let Some(bound) = binding {
+                        navigation = self.host_jump.update_navigation_owner_for_viewport(&c, bound, jump_allowed && jump_enabled);
+                        self.host_jump.handle_viewport_input(&c, bound.owner == navigation, child_first, viewport);
+                    }
+                    self.host_jump.begin_ui_pass();
+                }
+                let native_scope = binding.filter(|b| b.owner == navigation).and_then(|b| self.host_jump.scope_for_viewport_binding(
+                    super::jump_mode::SurfaceId::dialog("folder-size", instance.unwrap_or_default()),
+                    super::jump_mode::TargetGeneration(self.session.view().generation()), "folder-size", b,
+                )).map(|s| if child_first && !c.will_discard() { s } else { s.registration_only() });
+                let embedded_scope = root_scope.map(|s| if child_first && !c.will_discard() { s.clone() } else { s.registration_only() });
                 if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
                     child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     if !pinned {
@@ -1221,7 +1327,9 @@ impl FolderSizeDialogState {
                 }
                 let shortcut = child_first
                     && allowed
+                    && !self.owns_row_menu(&c)
                     && !pinned
+                    && (!is_native || self.host_jump.active_session().is_none())
                     && (is_native || shortcut_allowed)
                     && c.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -1245,6 +1353,7 @@ impl FolderSizeDialogState {
                             child_first,
                             Some(ui),
                             Some(host.host),
+                            native_scope.as_ref(),
                         ));
                     });
                 } else {
@@ -1254,7 +1363,18 @@ impl FolderSizeDialogState {
                         child_first,
                         None,
                         Some(host.host),
+                        embedded_scope.as_ref(),
                     ));
+                }
+                if is_native && launcher_jump.is_some() {
+                    self.host_jump.finish_ui_pass();
+                    if let Some(bound) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(&c, bound, jump_allowed && jump_enabled);
+                        if self.host_jump.prepare_pass_for_viewport(&c, bound, current, jump_allowed && jump_enabled) {
+                            super::jump_mode::paint::paint(&c, &self.host_jump);
+                        }
+                        if !c.will_discard() { self.host_jump.complete_frame_for_viewport(&c, bound, current, jump_allowed && jump_enabled); }
+                    }
                 }
                 if let Some((_, close)) = &mut staged {
                     *close |= shortcut || (is_native && !pinned && self.host_os_close_pending);
@@ -1405,6 +1525,9 @@ impl FolderSizeDialogState {
             let row_action = matches!(
                 action,
                 FolderSizeAction::Select { .. }
+                    | FolderSizeAction::MoveSelection { .. }
+                    | FolderSizeAction::FocusSelection { .. }
+                    | FolderSizeAction::FocusDelivered { .. }
                     | FolderSizeAction::RevealRow { .. } | FolderSizeAction::OpenRowMenu { .. }
                     | FolderSizeAction::SetSort(_) | FolderSizeAction::SetFilter(_) | FolderSizeAction::TreemapPress(_) | FolderSizeAction::TreemapRelease(_, _)
                     | FolderSizeAction::Drill { .. }
@@ -1469,6 +1592,9 @@ impl FolderSizeDialogState {
                 FolderSizeAction::Host(next) => {
                     self.treemap_press = None;
                     if self.host.transition(next) {
+                        self.host_jump.cancel_all();
+                        self.host_jump_frame = None;
+                        self.keyboard_focus = None;
                         let key =
                             crate::settings::UtilityToolKey::parse("folder-size").expect("stable utility key");
                         super::utility_host::remember_presentation(ctx, key, next);
@@ -1623,6 +1749,29 @@ impl FolderSizeDialogState {
                     }
                 }
                 FolderSizeAction::Select { generation, index } => self.select_row(generation, index),
+                FolderSizeAction::MoveSelection { generation, index } => {
+                    if self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && self.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
+                        self.select_row(generation, index);
+                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.current_directory));
+                        self.keyboard_reveal = true;
+                        ctx.request_repaint_of(pending.owner.viewport_id);
+                    }
+                }
+                FolderSizeAction::FocusSelection { generation, index } => {
+                    if self.visible_rows.as_ref().is_some_and(|rows| rows.indices.contains(&index))
+                        && self.projection.as_ref().is_some_and(|projection| projection.contains_row(generation, index)) {
+                        self.select_row(generation, index);
+                        self.keyboard_focus = Some((generation, index, pending.host, pending.epoch, self.current_directory));
+                        self.keyboard_reveal = false;
+                        ctx.request_repaint_of(pending.owner.viewport_id);
+                    }
+                }
+                FolderSizeAction::FocusDelivered { generation, index } => {
+                    if self.keyboard_focus.is_some_and(|(g, i, host, epoch, directory)| g == generation && i == index && host == pending.host && epoch == pending.epoch && directory == self.current_directory) {
+                        self.keyboard_focus = None;
+                    }
+                }
                 FolderSizeAction::Drill { generation, index } => self.drill_row(generation, index),
                 FolderSizeAction::Back { generation, index } => {
                     if self.current_directory == Some((generation, index))
@@ -2078,6 +2227,12 @@ impl FolderSizeDialogState {
         )
     }
     #[cfg(test)]
+    pub(crate) fn test_selected_row_path(&self) -> Option<PathBuf> {
+        let (generation, index) = self.selected_entry?;
+        let projection = self.projection.as_ref()?;
+        projection.contains_row(generation, index).then(|| projection.source.path_at(index)).flatten()
+    }
+    #[cfg(test)]
     pub(crate) fn selected_root_for_test(&self) -> Option<&ExplicitDirectoryRoot> {
         self.selected_root.as_ref()
     }
@@ -2156,6 +2311,8 @@ fn show_treemap(
     owned_popup: Option<egui::Id>,
     input_allowed: bool,
     menu_allowed: bool,
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    order: &mut u64,
     actions: &mut Vec<FolderSizeAction>,
     #[cfg(test)] rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
@@ -2191,6 +2348,10 @@ fn show_treemap(
                 .with(("treemap", projection.key.generation, tile.row)),
             egui::Sense::click(),
         );
+        jump_target(scope, ui, &response, &format!("tile/{}/{}", projection.key.generation, tile.row), &format!("Tile {}", row.name), super::jump_mode::TargetKind::Button, order);
+        if input_allowed && response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)) {
+            actions.push(FolderSizeAction::Select { generation: projection.key.generation, index: tile.row });
+        }
         painter.rect_filled(
             rect,
             0.0,
@@ -2362,6 +2523,11 @@ fn show_folder_rows(
     commit_allowed: bool,
     menu_allowed: bool,
     show_table: bool,
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    order: &mut u64,
+    keyboard_focus: Option<(u64, usize)>,
+    keyboard_reveal: bool,
+    focus_delivered: &mut bool,
     staged_actions: &mut Vec<FolderSizeAction>,
     #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
@@ -2377,6 +2543,7 @@ fn show_folder_rows(
             && generation == projection.key.generation
         {
             let up = ui.button("Up");
+            jump_target(scope, ui, &up, "up", "Up", super::jump_mode::TargetKind::Button, order);
             #[cfg(test)] test_action_rects.push(("up".into(), up.rect, ui.clip_rect()));
             if up.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::Back { generation, index }); }
         }
@@ -2394,6 +2561,7 @@ fn show_folder_rows(
         ui.label("Show:");
         for (label, value) in [("All", KindFilter::All), ("Files", KindFilter::Files), ("Folders", KindFilter::Folders)] {
             let response = ui.selectable_label(filter == value, label);
+            jump_target(scope, ui, &response, &format!("filter/{label}"), label, super::jump_mode::TargetKind::Button, order);
             #[cfg(test)] test_action_rects.push((format!("filter/{label}"), response.rect, ui.clip_rect()));
             if response.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::SetFilter(value)); }
         }
@@ -2409,6 +2577,7 @@ fn show_folder_rows(
         ] {
             let arrow = if sort_column != column { "" } else if sort_direction == SortDirection::Ascending { " ↑" } else { " ↓" };
             let response = ui.add_sized(egui::vec2(width, ROW_HEIGHT), egui::Button::new(format!("{label}{arrow}")));
+            jump_target(scope, ui, &response, &format!("sort/{label}"), &format!("Sort by {label}"), super::jump_mode::TargetKind::Button, order);
             #[cfg(test)] test_action_rects.push((format!("sort/{label}"), response.rect, ui.clip_rect()));
             if response.clicked() && commit_allowed { staged_actions.push(FolderSizeAction::SetSort(column)); }
             ui.add_space(ROW_COLUMN_GAP);
@@ -2419,10 +2588,15 @@ fn show_folder_rows(
         return;
     }
 
-    egui::ScrollArea::vertical()
+    let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("folder-size-rows", generation, current_index))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, child_indices.len(), |ui, visible| {
+        .auto_shrink([false, false]);
+    if commit_allowed && keyboard_reveal && let Some((pending_generation, pending_index)) = keyboard_focus
+        && pending_generation == generation
+        && let Some(position) = child_indices.iter().position(|index| *index == pending_index) {
+        scroll = scroll.vertical_scroll_offset(position as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y));
+    }
+    scroll.show_rows(ui, ROW_HEIGHT, child_indices.len(), |ui, visible| {
             for position in visible {
                 let index = child_indices[position];
                 let Some(row) = projection.row(index) else {
@@ -2438,6 +2612,23 @@ fn show_folder_rows(
                                 egui::Button::selectable(selected, row.name.as_str()).truncate(),
                             )
                             .on_hover_text(&row.name);
+                        jump_target(scope, ui, &response, &format!("row/{generation}/{index}"), &format!("Entry {}", row.name), super::jump_mode::TargetKind::Button, order);
+                        if commit_allowed && keyboard_focus == Some((generation, index)) {
+                            response.request_focus();
+                            *focus_delivered = true;
+                        }
+                        if commit_allowed && response.has_focus() {
+                            ui.memory_mut(|memory| memory.set_focus_lock_filter(response.id, egui::EventFilter { vertical_arrows: true, ..Default::default() }));
+                            let direction = ui.input_mut(|input| {
+                                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) { 1isize }
+                                else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) { -1 }
+                                else { 0 }
+                            });
+                            if direction != 0 {
+                                let next = (position as isize + direction).clamp(0, child_indices.len().saturating_sub(1) as isize) as usize;
+                                staged_actions.push(FolderSizeAction::MoveSelection { generation, index: child_indices[next] });
+                            }
+                        }
                         #[cfg(test)]
                         test_action_rects.push((
                             format!("row/{}", row.name),
@@ -2445,7 +2636,9 @@ fn show_folder_rows(
                             ui.clip_rect(),
                         ));
                         if response.clicked() && commit_allowed {
-                            staged_actions.push(FolderSizeAction::Select { generation, index });
+                            // A pointer click does not give an egui button keyboard focus.
+                            // Transfer focus only after this selection's retained pass commits.
+                            staged_actions.push(FolderSizeAction::FocusSelection { generation, index });
                         }
                         folder_row_context(&response, row, generation, index, owned_popup,
                             commit_allowed, menu_allowed, staged_actions,
