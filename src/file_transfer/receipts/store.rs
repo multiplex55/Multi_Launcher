@@ -1,6 +1,5 @@
 //! Bounded durable receipt catalogue. Reading never creates the namespace.
 mod queue_snapshot;
-pub(in crate::file_transfer) use queue_snapshot::{QueueAction, QueuePreview, QueueSnapshotRead};
 use super::adapter::ReceiptProjection;
 use super::frames::{
     FrameProblem, FrameWriteError, FrameWriter, MAX_RECEIPT_BYTES, read_prefix_from_file,
@@ -18,6 +17,7 @@ use crate::file_transfer::{
     ApprovedTransferPlan, DirectoryAccess, HeldParent, SourceNodeId, TargetSnapshot,
 };
 use crate::platform::app_data::AppDataRoot;
+pub(in crate::file_transfer) use queue_snapshot::{QueueAction, QueuePreview, QueueSnapshotRead};
 use rand::TryRng;
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -118,6 +118,33 @@ struct ReceiptLocation {
 }
 
 impl ReceiptStore {
+    pub(in crate::file_transfer) fn has_receipt_name(
+        &self,
+        id: crate::file_transfer::TransferReceiptId,
+    ) -> Result<bool, ReceiptStoreError> {
+        let Some(location) = self.locate(false)? else {
+            return Ok(false);
+        };
+        let cancel = ScanCancellation::new();
+        location
+            .held
+            .check_chain(&cancel)
+            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+        let exists = match location
+            .held
+            .directory()
+            .open_relative_metadata(&receipt_name(ReceiptId(id.0)))
+        {
+            Ok(_) => true,
+            Err(error) if is_missing_relative_leaf(&error) => false,
+            Err(_) => return Err(ReceiptStoreError::IncompleteScan),
+        };
+        location
+            .held
+            .check_chain(&cancel)
+            .map_err(|_| ReceiptStoreError::UnsafeNamespace)?;
+        Ok(exists)
+    }
     pub fn new(root: &AppDataRoot) -> Self {
         Self {
             root: root.path().to_path_buf(),
@@ -205,14 +232,21 @@ impl ReceiptStore {
                 .checked_add(bytes)
                 .ok_or(ReceiptStoreError::Capacity)?;
             if queue_snapshot::parse_slot_name(&entry.name).is_some() {
-                if file.validate().is_err() || file.file().metadata().map(|m| m.len()).ok() != Some(bytes) {
+                if file.validate().is_err()
+                    || file.file().metadata().map(|m| m.len()).ok() != Some(bytes)
+                {
                     catalog.admission_blocked = true;
                     catalog.unavailable.push(entry.name);
                     continue;
                 }
                 catalog.queue_files += 1;
-                catalog.queue_bytes = catalog.queue_bytes.checked_add(bytes).ok_or(ReceiptStoreError::Capacity)?;
-                if catalog.queue_bytes > QUEUE_RESERVE || catalog.queue_files > QUEUE_FILE_RESERVE { catalog.admission_blocked = true; }
+                catalog.queue_bytes = catalog
+                    .queue_bytes
+                    .checked_add(bytes)
+                    .ok_or(ReceiptStoreError::Capacity)?;
+                if catalog.queue_bytes > QUEUE_RESERVE || catalog.queue_files > QUEUE_FILE_RESERVE {
+                    catalog.admission_blocked = true;
+                }
                 continue;
             }
             let (prefix, mut diagnostic) = if bytes > MAX_RECEIPT_BYTES {
@@ -417,7 +451,17 @@ impl ReceiptStore {
         if id == [0; 16] {
             return Err(ReceiptStoreError::Unavailable);
         }
-        let id = ReceiptId(id);
+        self.admit_with_id(plan, crate::file_transfer::TransferReceiptId(id))
+    }
+    pub(in crate::file_transfer) fn admit_with_id<'a>(
+        &'a mut self,
+        plan: &ApprovedTransferPlan,
+        requested: crate::file_transfer::TransferReceiptId,
+    ) -> Result<ReceiptSession<'a>, ReceiptStoreError> {
+        if requested.0 == [0; 16] {
+            return Err(ReceiptStoreError::InvalidRecord);
+        }
+        let id = ReceiptId(requested.0);
         let mut projection = ReceiptProjection::new(id, plan)?;
         let outline = projection.take_records();
         let mut encoded = Vec::with_capacity(outline.len());
@@ -458,9 +502,16 @@ impl ReceiptStore {
         }
         protect_recovery_relations(&mut catalog, plan.recovery_origin())?;
         let queue_remaining = QUEUE_RESERVE.saturating_sub(catalog.queue_bytes);
-        let reserved_needed = needed.checked_add(queue_remaining).ok_or(ReceiptStoreError::Capacity)?;
+        let reserved_needed = needed
+            .checked_add(queue_remaining)
+            .ok_or(ReceiptStoreError::Capacity)?;
         let receipt_entry_limit = MAX_CATALOG_ENTRIES.saturating_sub(QUEUE_FILE_RESERVE);
-        self.ensure_room(&location, &mut catalog, reserved_needed, receipt_entry_limit)?;
+        self.ensure_room(
+            &location,
+            &mut catalog,
+            reserved_needed,
+            receipt_entry_limit,
+        )?;
         let capacity = MAX_RECEIPT_BYTES
             .checked_sub(catalog.charged_bytes)
             .and_then(|n| n.checked_sub(queue_remaining))
@@ -1234,13 +1285,10 @@ mod tests {
     fn receipt_applied_storage_refusal_precedes_any_copy_effect() {
         use crate::activity::ActivityCenter;
         use crate::file_transfer::{
-            TransferAction, TransferDraft, TransferJobStatus, TransferJobs, inspect_source_tree,
+            TransferAction, TransferDraft, TransferJobError, TransferJobs, inspect_source_tree,
             review_transfer,
         };
-        use std::{
-            sync::Arc,
-            time::{Duration, Instant},
-        };
+        use std::sync::Arc;
         let temp = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(temp.path());
         let source = temp.path().join("source.txt");
@@ -1260,19 +1308,12 @@ mod tests {
         )
         .unwrap();
         let plan = review.approve(review.generation(), &cancel).unwrap();
-        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root);
-        jobs.enqueue(plan).unwrap();
-        jobs.start().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let info = loop {
-            let state = jobs.snapshot();
-            if let Some(info) = state.history.into_iter().next() {
-                break info;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        assert_eq!(info.status, TransferJobStatus::Failed);
+        let jobs = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        assert!(matches!(
+            jobs.enqueue(plan),
+            Err(TransferJobError::Persistence)
+        ));
+        assert!(jobs.snapshot().queued.is_empty());
         assert!(!target.join("source.txt").exists());
         assert_eq!(fs::read(source).unwrap(), b"original");
     }

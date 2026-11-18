@@ -74,7 +74,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C2A | complete |
 | M9-C2B | complete |
 | M9-C2C1 | complete |
-| M9-C2C2, M9-D | pending |
+| M9-C2C2 | complete |
+| M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -559,3 +560,8 @@ Retry prepares a fresh single-file review of an unchanged, untouched row with it
 ### M9-C2C1 ordered unstarted queue snapshots
 
 The pinned receipt namespace now stores display-only queue generations under exact create-new handles. Generations preserve a prior complete snapshot and retain torn files. Completion of a new generation survives failed cleanup of an older one. A 512 KiB and 64-entry reserve remains available inside the aggregate receipt limits. Held metadata accounting permits queue saves while an actual transfer receipt is open, with short shared coordination at initial admission. The final 15 targeted queue/store/recovery-action checks passed (`a569166a-b00c-4980-8d78-9ac391171ed0`). The worker integration and restart summary requests follow.
+
+
+### M9-C2C2 durable queue and recovery service
+
+Explicit Queue writes an ordered non-authorizing snapshot before acknowledgement. Accepted jobs keep the same durable identity through applied receipt admission and snapshot retirement before the first file effect. Restart previews appear as Interrupted and are never rearmed. Exact queue edits persist while a Copy is active. An uncertain retirement keeps later armed work untouched, with de-duplication on a positively observed applied receipt only. History, details and Retry/Undo preparation use bounded requests on the existing worker, so requests wait during active or paused transfers. The 34 scoped checks passed (`6b1013bc-b078-44c1-9669-2333435c0cd9`), including restart order/discard, stable handoff, real active edits, uncertainty fencing and prior native receipt cases. Three redundant mut bindings identified by that gate were removed. M9-D exposes the service in the launcher.

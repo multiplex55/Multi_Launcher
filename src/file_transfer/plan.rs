@@ -771,6 +771,9 @@ impl ApprovedTransferPlan {
     pub(super) fn claim_for_queue(&self) -> bool {
         !self.queued.swap(true, AtomicOrdering::AcqRel)
     }
+    pub(super) fn release_queue_claim(&self) {
+        self.queued.store(false, AtomicOrdering::Release);
+    }
 
     pub fn generation(&self) -> ReviewGeneration {
         self.generation

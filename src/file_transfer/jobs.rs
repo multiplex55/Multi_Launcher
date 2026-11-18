@@ -1,5 +1,7 @@
 //! App-owned worker for explicitly started, immutable transfer approvals.
 
+use super::receipts::store::{QueueAction, QueuePreview, ReceiptStore};
+use rand::TryRng;
 use std::collections::VecDeque;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -308,6 +310,63 @@ pub struct TransferQueueSnapshot {
     pub queued: Vec<TransferJobInfo>,
     pub active: Option<TransferJobInfo>,
     pub history: Vec<TransferJobInfo>,
+    pub interrupted: Vec<InterruptedTransfer>,
+    pub persistence_uncertain: bool,
+    pub newer_snapshot_incomplete: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct InterruptedTransfer {
+    pub receipt_id: TransferReceiptId,
+    pub action: InterruptedAction,
+    pub source: String,
+    pub destination: String,
+    pub item_count: u64,
+    pub verify_requested: bool,
+    pub truncated: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterruptedAction {
+    Copy,
+    Move,
+    Duplicate,
+}
+impl From<QueueAction> for InterruptedAction {
+    fn from(value: QueueAction) -> Self {
+        match value {
+            QueueAction::Copy => Self::Copy,
+            QueueAction::Move => Self::Move,
+            QueueAction::Duplicate => Self::Duplicate,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TransferHistoryQuery {
+    Interrupted,
+    Summaries,
+    Detail(TransferReceiptId),
+    Retry(TransferReceiptId, u32),
+    Undo(TransferReceiptId, u32),
+    Discard(TransferReceiptId),
+}
+pub enum TransferHistoryValue {
+    Interrupted(Vec<InterruptedTransfer>),
+    Summaries(Vec<super::ReceiptSummary>),
+    Detail(super::ReceiptDetail),
+    Retry(super::PreparedReceiptRetry),
+    Undo(super::PreparedReceiptUndo),
+    Discarded(bool),
+}
+pub struct TransferHistoryResponse {
+    pub request: u64,
+    pub result: Result<TransferHistoryValue, TransferHistoryError>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferHistoryError {
+    Busy,
+    Unavailable,
+    Refused,
 }
 
 #[derive(Debug)]
@@ -317,6 +376,7 @@ pub enum TransferJobError {
     Closed,
     IdentityExhausted,
     WorkerUnavailable(std::io::Error),
+    Persistence,
 }
 
 impl fmt::Display for TransferJobError {
@@ -326,6 +386,7 @@ impl fmt::Display for TransferJobError {
             Self::ApprovalAlreadyQueued => write!(f, "This review has already been queued."),
             Self::Closed => write!(f, "The transfer service is closing."),
             Self::IdentityExhausted => write!(f, "Transfer job identities are exhausted."),
+            Self::Persistence => write!(f, "Transfer queue persistence is unavailable."),
             Self::WorkerUnavailable(error) => {
                 write!(f, "The transfer worker could not start ({error}).")
             }
@@ -339,6 +400,7 @@ struct PendingJob {
     info: TransferJobInfo,
     plan: ApprovedTransferPlan,
     activity: Option<ActivityTask>,
+    preview: Option<QueuePreview>,
 }
 
 struct ActiveJob {
@@ -355,6 +417,14 @@ struct QueueState {
     queued: VecDeque<PendingJob>,
     active: Option<ActiveJob>,
     history: VecDeque<TransferJobInfo>,
+    persisted: Vec<QueuePreview>,
+    loaded: bool,
+    persistence_uncertain: bool,
+    newer_snapshot_incomplete: bool,
+    next_query: u64,
+    history_request: Option<(u64, TransferHistoryQuery)>,
+    history_running: bool,
+    history_response: Option<TransferHistoryResponse>,
 }
 
 #[cfg(test)]
@@ -364,11 +434,14 @@ type TransferProgressHook = Arc<dyn Fn(TransferJobId, ExecutionProgress) + Send 
 struct Shared {
     state: Mutex<QueueState>,
     ready: Condvar,
-    receipt_root: Option<crate::platform::app_data::AppDataRoot>,
+    receipt_store: Option<ReceiptStore>,
+    queue_mutation: Mutex<()>,
     #[cfg(test)]
     progress_hook: Option<TransferProgressHook>,
     #[cfg(test)]
     fail_terminal: bool,
+    #[cfg(test)]
+    fail_handoff_uncertain: bool,
 }
 
 impl Shared {
@@ -378,12 +451,67 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn cancel(&self, id: TransferJobId) -> bool {
+    // Caller holds queue_mutation; no QueueState lock spans disk I/O.
+    fn load_persisted(&self) -> Result<(), TransferJobError> {
+        if self.lock().loaded {
+            return Ok(());
+        }
+        let Some(store) = &self.receipt_store else {
+            self.lock().loaded = true;
+            return Ok(());
+        };
+        let snapshot = store
+            .load_queue_snapshot()
+            .map_err(|_| TransferJobError::Persistence)?;
+        let mut rows = Vec::new();
+        for row in snapshot.rows {
+            if !store
+                .has_receipt_name(row.receipt_id)
+                .map_err(|_| TransferJobError::Persistence)?
+            {
+                rows.push(row);
+            }
+        }
         let mut state = self.lock();
+        state.persisted = rows;
+        state.loaded = true;
+        state.newer_snapshot_incomplete = snapshot.newer_incomplete;
+        Ok(())
+    }
+    fn persist(&self, rows: &[QueuePreview]) -> Result<(), TransferJobError> {
+        if self.lock().persistence_uncertain {
+            return Err(TransferJobError::Persistence);
+        }
+        if let Some(store) = &self.receipt_store {
+            if let Err(error) = store.save_queue_snapshot(rows) {
+                if matches!(
+                    error,
+                    super::receipts::store::ReceiptStoreError::QueueCommitUncertain
+                ) {
+                    self.lock().persistence_uncertain = true;
+                }
+                return Err(TransferJobError::Persistence);
+            }
+        }
+        Ok(())
+    }
+
+    fn cancel(&self, id: TransferJobId) -> bool {
+        let state = self.lock();
         if let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) {
             if let Some(activity) = &job.activity {
                 activity.mark_cancelling();
             }
+            job.control.cancel();
+            return true;
+        }
+        drop(state);
+        let _mutation = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut state = self.lock();
+        if let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) {
             job.control.cancel();
             return true;
         }
@@ -409,6 +537,63 @@ pub struct TransferJobs {
     worker: Option<JoinHandle<()>>,
 }
 
+fn durable_preview(plan: &ApprovedTransferPlan) -> Result<QueuePreview, TransferJobError> {
+    let mut rng = rand::rngs::SysRng;
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(
+        &rng.try_next_u64()
+            .map_err(|_| TransferJobError::Persistence)?
+            .to_le_bytes(),
+    );
+    id[8..].copy_from_slice(
+        &rng.try_next_u64()
+            .map_err(|_| TransferJobError::Persistence)?
+            .to_le_bytes(),
+    );
+    if id == [0; 16] {
+        return Err(TransferJobError::Persistence);
+    }
+    fn text(path: &std::path::Path) -> (String, bool) {
+        let value = path.to_string_lossy();
+        let mut end = value.len().min(2048);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        (value[..end].to_owned(), end != value.len())
+    }
+    let source = plan
+        .source()
+        .entries()
+        .iter()
+        .find(|entry| entry.parent().is_none())
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let (source, source_truncated) = text(source);
+    let (action, destination) = match &plan.draft().action {
+        super::TransferAction::CopyTo(path) => (QueueAction::Copy, path.as_path()),
+        super::TransferAction::MoveTo(path) => (QueueAction::Move, path.as_path()),
+        super::TransferAction::Duplicate => (QueueAction::Duplicate, std::path::Path::new("")),
+    };
+    let (destination, destination_truncated) = text(destination);
+    Ok(QueuePreview {
+        receipt_id: TransferReceiptId(id),
+        action,
+        source,
+        destination,
+        item_count: plan.source().entries().len() as u64,
+        verify_requested: plan.draft().verify,
+        truncated: source_truncated
+            || destination_truncated
+            || plan
+                .source()
+                .entries()
+                .iter()
+                .filter(|entry| entry.parent().is_none())
+                .count()
+                > 1,
+    })
+}
+
 impl TransferJobs {
     pub fn new(activity: ActivityCenter) -> Self {
         Self {
@@ -424,7 +609,7 @@ impl TransferJobs {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
-                receipt_root: Some(root),
+                receipt_store: Some(ReceiptStore::new(&root)),
                 ..Shared::default()
             }),
             activity,
@@ -440,7 +625,13 @@ impl TransferJobs {
     }
 
     pub fn enqueue(&self, plan: ApprovedTransferPlan) -> Result<TransferJobId, TransferJobError> {
-        let mut state = self.shared.lock();
+        let _mutation = self
+            .shared
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.shared.load_persisted()?;
+        let state = self.shared.lock();
         if state.closing {
             return Err(TransferJobError::Closed);
         }
@@ -451,9 +642,27 @@ impl TransferJobs {
             .next_id
             .checked_add(1)
             .ok_or(TransferJobError::IdentityExhausted)?;
+        let preview = if self.shared.receipt_store.is_some() {
+            Some(durable_preview(&plan)?)
+        } else {
+            None
+        };
         if !plan.claim_for_queue() {
             return Err(TransferJobError::ApprovalAlreadyQueued);
         }
+        let mut persisted = state.persisted.clone();
+        if let Some(preview) = &preview {
+            persisted.push(preview.clone());
+        }
+        drop(state);
+        if let Err(error) = self.shared.persist(&persisted) {
+            if !self.shared.lock().persistence_uncertain {
+                plan.release_queue_claim();
+            }
+            return Err(error);
+        }
+        let mut state = self.shared.lock();
+        state.persisted = persisted;
         state.next_id = value;
         let id = TransferJobId(value);
         let activity = self.activity.observe_queued(
@@ -466,16 +675,18 @@ impl TransferJobs {
         if let Some(activity) = &activity {
             let shared = Arc::downgrade(&self.shared);
             activity.set_progress(Some(progress.activity()));
-            activity.set_cancel_handler(move || {
-                if let Some(shared) = shared.upgrade() {
-                    shared.cancel(id);
-                }
-            });
+            if self.shared.receipt_store.is_none() {
+                activity.set_cancel_handler(move || {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.cancel(id);
+                    }
+                });
+            }
         }
         let info = TransferJobInfo {
             id,
             activity: activity.as_ref().map(ActivityTask::key),
-            receipt_id: None,
+            receipt_id: preview.as_ref().map(|row| row.receipt_id),
             roots: plan
                 .source()
                 .entries()
@@ -495,6 +706,7 @@ impl TransferJobs {
             info,
             plan,
             activity,
+            preview,
         });
         Ok(id)
     }
@@ -505,6 +717,9 @@ impl TransferJobs {
         let mut state = self.shared.lock();
         if state.closing {
             return Err(TransferJobError::Closed);
+        }
+        if state.persistence_uncertain {
+            return Err(TransferJobError::Persistence);
         }
         let count = state.queued.iter().filter(|job| !job.info.armed).count();
         if count == 0 {
@@ -528,14 +743,27 @@ impl TransferJobs {
 
     /// Move an exact queued job without crossing the explicit Start boundary.
     pub fn reorder(&self, id: TransferJobId, before: Option<TransferJobId>) -> bool {
-        let mut state = self.shared.lock();
+        self.try_reorder(id, before).unwrap_or(false)
+    }
+    pub fn try_reorder(
+        &self,
+        id: TransferJobId,
+        before: Option<TransferJobId>,
+    ) -> Result<bool, TransferJobError> {
+        let _mutation = self
+            .shared
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.shared.load_persisted()?;
+        let state = self.shared.lock();
         let Some(from) = state.queued.iter().position(|job| job.info.id == id) else {
-            return false;
+            return Ok(false);
         };
         let to = match before {
             Some(before) => {
                 let Some(index) = state.queued.iter().position(|job| job.info.id == before) else {
-                    return false;
+                    return Ok(false);
                 };
                 index
             }
@@ -544,14 +772,37 @@ impl TransferJobs {
         let to = to - usize::from(from < to);
         let armed = state.queued.iter().take_while(|job| job.info.armed).count();
         if (from < armed) != (to < armed) {
-            return false;
+            return Ok(false);
         }
-        if from != to
-            && let Some(job) = state.queued.remove(from)
-        {
+        if from == to {
+            return Ok(true);
+        }
+        let mut persisted = state.persisted.clone();
+        if let Some(preview) = &state.queued[from].preview {
+            let Some(index) = persisted
+                .iter()
+                .position(|p| p.receipt_id == preview.receipt_id)
+            else {
+                return Err(TransferJobError::Persistence);
+            };
+            let item = persisted.remove(index);
+            let before_id = before
+                .and_then(|id| state.queued.iter().find(|job| job.info.id == id))
+                .and_then(|job| job.preview.as_ref())
+                .map(|p| p.receipt_id);
+            let index = before_id
+                .and_then(|id| persisted.iter().position(|p| p.receipt_id == id))
+                .unwrap_or(persisted.len());
+            persisted.insert(index, item);
+        }
+        drop(state);
+        self.shared.persist(&persisted)?;
+        let mut state = self.shared.lock();
+        state.persisted = persisted;
+        if let Some(job) = state.queued.remove(from) {
             state.queued.insert(to, job);
         }
-        true
+        Ok(true)
     }
 
     pub fn pause(&self, id: TransferJobId) -> bool {
@@ -573,7 +824,53 @@ impl TransferJobs {
     }
 
     pub fn cancel(&self, id: TransferJobId) -> bool {
-        self.shared.cancel(id)
+        self.try_cancel(id).unwrap_or(false)
+    }
+    pub fn try_cancel(&self, id: TransferJobId) -> Result<bool, TransferJobError> {
+        {
+            let state = self.shared.lock();
+            if let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) {
+                if let Some(activity) = &job.activity {
+                    activity.mark_cancelling();
+                }
+                job.control.cancel();
+                return Ok(true);
+            }
+        }
+        let _mutation = self
+            .shared
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.shared.load_persisted()?;
+        let state = self.shared.lock();
+        if let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) {
+            if let Some(activity) = &job.activity {
+                activity.mark_cancelling();
+            }
+            job.control.cancel();
+            return Ok(true);
+        }
+        let Some(index) = state.queued.iter().position(|job| job.info.id == id) else {
+            return Ok(false);
+        };
+        let mut persisted = state.persisted.clone();
+        if let Some(preview) = &state.queued[index].preview {
+            persisted.retain(|row| row.receipt_id != preview.receipt_id);
+        }
+        drop(state);
+        self.shared.persist(&persisted)?;
+        let mut state = self.shared.lock();
+        state.persisted = persisted;
+        if let Some(job) = state.queued.remove(index) {
+            retain_terminal(
+                &mut state,
+                job.info,
+                job.activity,
+                TransferJobResult::CancelledBeforeStart,
+            );
+        }
+        Ok(true)
     }
 
     pub fn snapshot(&self) -> TransferQueueSnapshot {
@@ -597,11 +894,78 @@ impl TransferJobs {
                 info
             }),
             history: state.history.iter().cloned().collect(),
+            interrupted: state
+                .persisted
+                .iter()
+                .filter(|row| {
+                    !state.queued.iter().any(|job| {
+                        job.preview
+                            .as_ref()
+                            .is_some_and(|p| p.receipt_id == row.receipt_id)
+                    }) && !state
+                        .active
+                        .as_ref()
+                        .is_some_and(|job| job.info.receipt_id == Some(row.receipt_id))
+                })
+                .map(|row| InterruptedTransfer {
+                    receipt_id: row.receipt_id,
+                    action: row.action.into(),
+                    source: row.source.clone(),
+                    destination: row.destination.clone(),
+                    item_count: row.item_count,
+                    verify_requested: row.verify_requested,
+                    truncated: row.truncated,
+                })
+                .collect(),
+            persistence_uncertain: state.persistence_uncertain,
+            newer_snapshot_incomplete: state.newer_snapshot_incomplete,
         }
+    }
+
+    /// Enqueue at most one bounded read-only history request for the existing worker.
+    pub fn request_history(
+        &mut self,
+        query: TransferHistoryQuery,
+    ) -> Result<u64, TransferHistoryError> {
+        let mut state = self.shared.lock();
+        if state.closing || self.shared.receipt_store.is_none() {
+            return Err(TransferHistoryError::Unavailable);
+        }
+        if state.history_request.is_some()
+            || state.history_running
+            || state.history_response.is_some()
+        {
+            return Err(TransferHistoryError::Busy);
+        }
+        let id = state
+            .next_query
+            .checked_add(1)
+            .ok_or(TransferHistoryError::Unavailable)?;
+        if self.worker.is_none() {
+            let shared = Arc::clone(&self.shared);
+            self.worker = Some(
+                thread::Builder::new()
+                    .name("file-transfer".into())
+                    .spawn(move || worker_loop(&shared))
+                    .map_err(|_| TransferHistoryError::Unavailable)?,
+            );
+        }
+        state.next_query = id;
+        state.history_request = Some((id, query));
+        self.shared.ready.notify_one();
+        Ok(id)
+    }
+    pub fn take_history_response(&self) -> Option<TransferHistoryResponse> {
+        self.shared.lock().history_response.take()
     }
 
     pub fn shutdown(&mut self) {
         {
+            let _mutation = self
+                .shared
+                .queue_mutation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let mut state = self.shared.lock();
             state.closing = true;
             while let Some(job) = state.queued.pop_front() {
@@ -633,24 +997,49 @@ impl Drop for TransferJobs {
 }
 
 fn worker_loop(shared: &Shared) {
-    let mut receipt_store = shared
-        .receipt_root
-        .as_ref()
-        .map(super::receipts::store::ReceiptStore::new);
+    let mut receipt_store = shared.receipt_store.clone();
     loop {
-        let (pending, control, preparing) = {
+        {
             let mut state = shared.lock();
-            loop {
-                if state.closing {
-                    return;
-                }
-                if state.queued.front().is_some_and(|job| job.info.armed) {
-                    break;
-                }
+            while !state.closing
+                && (state.persistence_uncertain
+                    || !state.queued.front().is_some_and(|job| job.info.armed))
+                && state.history_request.is_none()
+            {
                 state = shared
                     .ready
                     .wait(state)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            if state.closing {
+                return;
+            }
+            if let Some((id, query)) = state.history_request.take() {
+                state.history_running = true;
+                drop(state);
+                let result = run_history_query(shared, query);
+                let mut state = shared.lock();
+                state.history_running = false;
+                state.history_response = Some(TransferHistoryResponse {
+                    request: id,
+                    result,
+                });
+                continue;
+            }
+        }
+        let mutation = shared
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (pending, control, preparing) = {
+            let mut state = shared.lock();
+            if state.closing {
+                return;
+            }
+            if state.persistence_uncertain
+                || !state.queued.front().is_some_and(|job| job.info.armed)
+            {
+                continue;
             }
             let Some(pending) = state.queued.pop_front() else {
                 continue;
@@ -659,6 +1048,10 @@ fn worker_loop(shared: &Shared) {
             let started = Instant::now();
             let preparing = Arc::new(AtomicBool::new(true));
             if let Some(activity) = &pending.activity {
+                if shared.receipt_store.is_some() {
+                    let active_control = control.clone();
+                    activity.set_cancel_handler(move || active_control.cancel());
+                }
                 let pause = control.clone();
                 let preparing = preparing.clone();
                 activity.mark_running_with_status(started, move || match pause.pause_state() {
@@ -678,6 +1071,7 @@ fn worker_loop(shared: &Shared) {
             });
             (pending, control, preparing)
         };
+        drop(mutation);
         let result = catch_unwind(AssertUnwindSafe(|| {
             let mut report_progress = |event| {
                 #[cfg(test)]
@@ -708,10 +1102,31 @@ fn worker_loop(shared: &Shared) {
                 }
             };
             if let Some(store) = receipt_store.as_mut() {
-                let mut receipt = match store.admit(&pending.plan) {
+                let Some(preview) = pending.preview.as_ref() else {
+                    return TransferJobResult::ReceiptFailed {
+                        report: None,
+                        receipt_id: None,
+                        failure: TransferReceiptFailure::InvalidRecord,
+                    };
+                };
+                let requested_id = preview.receipt_id;
+                let mut receipt = match store.admit_with_id(&pending.plan, requested_id) {
                     Ok(receipt) => receipt,
                     Err(error) => {
-                        let receipt_id = error.receipt_id().map(TransferReceiptId);
+                        if error.receipt_id().is_some() {
+                            let _mutation = shared
+                                .queue_mutation
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            shared
+                                .lock()
+                                .persisted
+                                .retain(|row| row.receipt_id != requested_id);
+                        }
+                        let receipt_id = error
+                            .receipt_id()
+                            .map(TransferReceiptId)
+                            .or(Some(requested_id));
                         if let Some(job) = &mut shared.lock().active {
                             job.info.receipt_id = receipt_id;
                         }
@@ -725,6 +1140,45 @@ fn worker_loop(shared: &Shared) {
                 let receipt_id = TransferReceiptId(receipt.receipt_id());
                 if let Some(job) = &mut shared.lock().active {
                     job.info.receipt_id = Some(receipt_id);
+                }
+                {
+                    let _mutation = shared
+                        .queue_mutation
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let state = shared.lock();
+                    if !state
+                        .persisted
+                        .iter()
+                        .any(|row| row.receipt_id == receipt_id)
+                    {
+                        return TransferJobResult::ReceiptFailed {
+                            report: None,
+                            receipt_id: Some(receipt_id),
+                            failure: TransferReceiptFailure::InvalidRecord,
+                        };
+                    }
+                    let mut rows = state.persisted.clone();
+                    rows.retain(|row| row.receipt_id != receipt_id);
+                    drop(state);
+                    #[cfg(test)]
+                    let injected_uncertain = shared.fail_handoff_uncertain;
+                    #[cfg(not(test))]
+                    let injected_uncertain = false;
+                    if injected_uncertain {
+                        shared.lock().persistence_uncertain = true;
+                    }
+                    if injected_uncertain || shared.persist(&rows).is_err() {
+                        // The receipt already exists: hide its old preview in memory,
+                        // while leaving the last durable snapshot untouched for recovery.
+                        shared.lock().persisted = rows;
+                        return TransferJobResult::ReceiptFailed {
+                            report: None,
+                            receipt_id: Some(receipt_id),
+                            failure: TransferReceiptFailure::Unavailable,
+                        };
+                    }
+                    shared.lock().persisted = rows;
                 }
                 match super::execute::execute_with_journal(
                     &pending.plan,
@@ -837,6 +1291,93 @@ pub(super) fn finish_receipt(
         _ => JobOutcome::Failed,
     };
     receipt.finish_job(outcome)
+}
+
+fn run_history_query(
+    shared: &Shared,
+    query: TransferHistoryQuery,
+) -> Result<TransferHistoryValue, TransferHistoryError> {
+    let store = shared
+        .receipt_store
+        .as_ref()
+        .ok_or(TransferHistoryError::Unavailable)?;
+    match query {
+        TransferHistoryQuery::Interrupted | TransferHistoryQuery::Discard(_) => {
+            let _mutation = shared
+                .queue_mutation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            shared
+                .load_persisted()
+                .map_err(|_| TransferHistoryError::Unavailable)?;
+            let state = shared.lock();
+            let is_live = |id| {
+                state
+                    .queued
+                    .iter()
+                    .any(|job| job.info.receipt_id == Some(id))
+                    || state
+                        .active
+                        .as_ref()
+                        .is_some_and(|job| job.info.receipt_id == Some(id))
+            };
+            if let TransferHistoryQuery::Discard(id) = query {
+                if is_live(id) {
+                    return Err(TransferHistoryError::Refused);
+                }
+                if !state.persisted.iter().any(|row| row.receipt_id == id) {
+                    return Ok(TransferHistoryValue::Discarded(false));
+                }
+                let mut rows = state.persisted.clone();
+                rows.retain(|row| row.receipt_id != id);
+                drop(state);
+                if store
+                    .has_receipt_name(id)
+                    .map_err(|_| TransferHistoryError::Unavailable)?
+                {
+                    return Err(TransferHistoryError::Refused);
+                }
+                shared
+                    .persist(&rows)
+                    .map_err(|_| TransferHistoryError::Unavailable)?;
+                shared.lock().persisted = rows;
+                Ok(TransferHistoryValue::Discarded(true))
+            } else {
+                Ok(TransferHistoryValue::Interrupted(
+                    state
+                        .persisted
+                        .iter()
+                        .filter(|row| !is_live(row.receipt_id))
+                        .map(|row| InterruptedTransfer {
+                            receipt_id: row.receipt_id,
+                            action: row.action.into(),
+                            source: row.source.clone(),
+                            destination: row.destination.clone(),
+                            item_count: row.item_count,
+                            verify_requested: row.verify_requested,
+                            truncated: row.truncated,
+                        })
+                        .collect(),
+                ))
+            }
+        }
+        TransferHistoryQuery::Summaries => super::ReceiptHistory::from_store(store)
+            .summaries()
+            .map(TransferHistoryValue::Summaries)
+            .map_err(|_| TransferHistoryError::Unavailable),
+        TransferHistoryQuery::Detail(id) => super::ReceiptHistory::from_store(store)
+            .reconcile(id, &crate::file_operations::ScanCancellation::new())
+            .map(TransferHistoryValue::Detail)
+            .map_err(|_| TransferHistoryError::Unavailable),
+        TransferHistoryQuery::Retry(id, node) => super::ReceiptHistory::from_store(store)
+            .prepare_retry(id, node, &crate::file_operations::ScanCancellation::new())
+            .map(TransferHistoryValue::Retry)
+            .map_err(|_| TransferHistoryError::Refused),
+        TransferHistoryQuery::Undo(id, node) => super::ReceiptHistory::from_store(store)
+            .prepare_undo(id, node, &crate::file_operations::ScanCancellation::new())
+            .map(TransferHistoryValue::Undo)
+            .map_err(|_| TransferHistoryError::Refused),
+    }
 }
 
 fn retain_terminal(
@@ -1213,5 +1754,258 @@ mod tests {
             Err(TransferJobError::Closed)
         ));
         assert!(fs::read_dir(destination).unwrap().next().is_none());
+    }
+    fn history_response(jobs: &TransferJobs, request: u64) -> TransferHistoryResponse {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(value) = jobs.take_history_response() {
+                assert_eq!(value.request, request);
+                return value;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn transfer_jobs_durable_order_restart_and_explicit_discard() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        let jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        let first = jobs.enqueue(approve(&review(&a, &out))).unwrap();
+        let second = jobs.enqueue(approve(&review(&b, &out))).unwrap();
+        let before = jobs.snapshot();
+        let a_id = before.queued[0].receipt_id.unwrap();
+        let b_id = before.queued[1].receipt_id.unwrap();
+        assert!(jobs.try_reorder(second, Some(first)).unwrap());
+        drop(jobs);
+        let mut restored = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        assert_eq!(restored.start().unwrap(), 0);
+        let request = restored
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&restored, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert_eq!(
+            rows.iter().map(|row| row.receipt_id).collect::<Vec<_>>(),
+            [b_id, a_id]
+        );
+        let request = restored
+            .request_history(TransferHistoryQuery::Discard(b_id))
+            .unwrap();
+        assert!(matches!(
+            history_response(&restored, request).result,
+            Ok(TransferHistoryValue::Discarded(true))
+        ));
+        drop(restored);
+        let mut again = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        let request = again
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&again, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].receipt_id, a_id);
+        assert!(!out.join("a").exists() && !out.join("b").exists());
+    }
+    #[test]
+    fn transfer_jobs_durable_handoff_keeps_queued_receipt_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let source = temp.path().join("file");
+        let out = temp.path().join("out");
+        fs::write(&source, b"value").unwrap();
+        fs::create_dir(&out).unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        jobs.enqueue(approve(&review(&source, &out))).unwrap();
+        let id = jobs.snapshot().queued[0].receipt_id.unwrap();
+        jobs.start().unwrap();
+        let done = wait_terminal(&jobs, 1);
+        assert_eq!(done.history[0].receipt_id, Some(id));
+        assert_eq!(done.history[0].status, TransferJobStatus::Completed);
+        assert!(
+            temp.path()
+                .join("transfers/receipts")
+                .join(format!("{id}.receipt"))
+                .exists()
+        );
+        let request = jobs
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&jobs, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert!(rows.is_empty());
+    }
+    #[test]
+    fn transfer_jobs_durable_cancel_preserves_other_queued_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        let jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        let first = jobs.enqueue(approve(&review(&a, &out))).unwrap();
+        jobs.enqueue(approve(&review(&b, &out))).unwrap();
+        let remaining = jobs.snapshot().queued[1].receipt_id.unwrap();
+        assert!(jobs.try_cancel(first).unwrap());
+        drop(jobs);
+        let mut restored = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        let request = restored
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&restored, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].receipt_id, remaining);
+    }
+    #[test]
+    fn transfer_jobs_durable_queue_refuses_unsafe_store_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let source = temp.path().join("a");
+        fs::write(&source, b"a").unwrap();
+        fs::write(temp.path().join("transfers"), b"occupied").unwrap();
+        let jobs = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        assert!(matches!(
+            jobs.enqueue(approve(&review(&source, &out))),
+            Err(TransferJobError::Persistence)
+        ));
+        assert!(jobs.snapshot().queued.is_empty());
+        assert!(!out.join("a").exists());
+    }
+    #[test]
+    fn transfer_jobs_durable_uncertain_handoff_stops_remaining_armed_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        Arc::get_mut(&mut jobs.shared)
+            .unwrap()
+            .fail_handoff_uncertain = true;
+        jobs.enqueue(approve(&review(&a, &out))).unwrap();
+        let second = jobs.enqueue(approve(&review(&b, &out))).unwrap();
+        let snapshot = jobs.snapshot();
+        let first_receipt = snapshot.queued[0].receipt_id.unwrap();
+        let second_receipt = snapshot.queued[1].receipt_id.unwrap();
+        assert_eq!(jobs.start().unwrap(), 2);
+        let state = wait_terminal(&jobs, 1);
+        assert!(state.persistence_uncertain);
+        assert_eq!(state.queued.len(), 1);
+        assert_eq!(state.queued[0].id, second);
+        assert!(matches!(jobs.start(), Err(TransferJobError::Persistence)));
+        assert!(!out.join("a").exists() && !out.join("b").exists());
+        let receipts = temp.path().join("transfers/receipts");
+        assert!(receipts.join(format!("{first_receipt}.receipt")).exists());
+        assert!(!receipts.join(format!("{second_receipt}.receipt")).exists());
+        let request = jobs
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&jobs, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert!(rows.is_empty()); // The other row is still a live queued job.
+        let request = jobs
+            .request_history(TransferHistoryQuery::Summaries)
+            .unwrap();
+        let TransferHistoryValue::Summaries(rows) =
+            history_response(&jobs, request).result.unwrap()
+        else {
+            panic!("summaries")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, Some(first_receipt));
+    }
+
+    #[test]
+    fn transfer_jobs_durable_active_queue_edits_are_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let paths: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|name| temp.path().join(name))
+            .collect();
+        for path in &paths {
+            fs::write(path, vec![42; 256 * 1024]).unwrap();
+        }
+        let mut jobs = TransferJobs::with_data_root(ActivityCenter::new(), root.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Mutex::new(release_rx);
+        let once = std::sync::atomic::AtomicBool::new(false);
+        Arc::get_mut(&mut jobs.shared).unwrap().progress_hook = Some(Arc::new(move |_, event| {
+            if matches!(event, ExecutionProgress::Copying { .. })
+                && !once.swap(true, Ordering::SeqCst)
+            {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }));
+        jobs.enqueue(approve(&review(&paths[0], &out))).unwrap();
+        jobs.start().unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let b = jobs.enqueue(approve(&review(&paths[1], &out))).unwrap();
+        let c = jobs.enqueue(approve(&review(&paths[2], &out))).unwrap();
+        let d = jobs.enqueue(approve(&review(&paths[3], &out))).unwrap();
+        let ids = jobs
+            .snapshot()
+            .queued
+            .iter()
+            .map(|j| j.receipt_id.unwrap())
+            .collect::<Vec<_>>();
+        assert!(jobs.try_reorder(d, Some(b)).unwrap());
+        assert!(jobs.try_cancel(c).unwrap());
+        release_tx.send(()).unwrap();
+        wait_terminal(&jobs, 2); // The cancelled queued job and the active job.
+        drop(jobs);
+        let mut restored = TransferJobs::with_data_root(ActivityCenter::new(), root);
+        let request = restored
+            .request_history(TransferHistoryQuery::Interrupted)
+            .unwrap();
+        let TransferHistoryValue::Interrupted(rows) =
+            history_response(&restored, request).result.unwrap()
+        else {
+            panic!("interrupted")
+        };
+        assert_eq!(
+            rows.iter().map(|r| r.receipt_id).collect::<Vec<_>>(),
+            [ids[2], ids[0]]
+        );
+        assert!(out.join("a").exists());
+        assert!(!out.join("b").exists() && !out.join("c").exists() && !out.join("d").exists());
     }
 }

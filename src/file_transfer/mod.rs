@@ -32,9 +32,11 @@ pub use execute::{
     ExecutionRow, ExecutionState, execute_copy_plan,
 };
 pub use jobs::{
-    TRANSFER_QUEUE_LIMIT, TransferJobError, TransferJobId, TransferJobInfo, TransferJobPhase,
-    TransferJobProgress, TransferJobResult, TransferJobStatus, TransferJobs, TransferQueueSnapshot,
-    TransferReceiptFailure, TransferReceiptId,
+    InterruptedAction, InterruptedTransfer, TRANSFER_QUEUE_LIMIT, TransferHistoryError,
+    TransferHistoryQuery, TransferHistoryResponse, TransferHistoryValue, TransferJobError,
+    TransferJobId, TransferJobInfo, TransferJobPhase, TransferJobProgress, TransferJobResult,
+    TransferJobStatus, TransferJobs, TransferQueueSnapshot, TransferReceiptFailure,
+    TransferReceiptId,
 };
 pub use plan::{
     ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,
