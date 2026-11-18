@@ -33,6 +33,9 @@ where
             host.open_file_lock_dialog(path.as_deref())
         }
         Command::Dialog(DialogCommand::Activity) => host.open_activity_dialog(),
+        Command::Dialog(DialogCommand::FileOperationsCenter) => {
+            host.open_file_operations_center_dialog()
+        }
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
         Command::Shell(ShellCommand::Dialog) => host.open_shell_dialog(),

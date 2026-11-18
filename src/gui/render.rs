@@ -7811,6 +7811,7 @@ impl LauncherApp {
                 command @ (super::FileSearchUiCommand::OpenFolderSize(_)
                 | super::FileSearchUiCommand::InspectFileUsers(_)
                 | super::FileSearchUiCommand::OpenHash(_)
+                | super::FileSearchUiCommand::OpenFileOperations(_)
                 | super::FileSearchUiCommand::OpenPreview { .. }) => {
                     if let Some(origin) = completion.origin.clone() {
                         child_opens.push((origin, command));
@@ -11080,6 +11081,10 @@ impl LauncherApp {
         use egui::*;
 
         let ctx = ui.ctx().clone();
+        #[cfg(windows)]
+        {
+            self.activity_dialog.transfer_navigation = None;
+        }
         let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
         let first_ui_pass = frame_logic.ui_passes == 0;
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
@@ -13668,9 +13673,14 @@ impl LauncherApp {
             !self.screenshot_editors.is_empty(),
             || Some(self.pinboard_capture.pinboard().image_bytes() as u64),
         ) {
-            let super::activity_dialog::ActivityDialogAction::Navigate(owner) = action;
+            let super::activity_dialog::ActivityDialogAction::Navigate(key) = action;
+            #[cfg(windows)]
+            if key.owner() == crate::activity::ActivityOwner::FileTransfer {
+                self.activity_dialog.transfer_navigation = Some(key);
+                continue;
+            }
             self.force_close_panel(super::Panel::ActivityDialog);
-            let panel = match owner {
+            let panel = match key.owner() {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
                 crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
                 crate::activity::ActivityOwner::Recording => Some(super::Panel::RecordingDialog),
@@ -14686,6 +14696,32 @@ impl LauncherApp {
                 );
             }
             Err(error) => self.note_panels[panel_index].set_markdown_export_feedback(true, error),
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    #[cfg(windows)]
+    fn complete_transfer_activity_navigation(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.activity_dialog.transfer_navigation.take() else {
+            return;
+        };
+        if !self.activity_dialog.open {
+            return;
+        }
+        let snapshot = self.transfer_jobs.snapshot();
+        let exact_job = snapshot
+            .active
+            .iter()
+            .chain(&snapshot.queued)
+            .chain(&snapshot.history)
+            .find(|job| job.activity == Some(key))
+            .map(|job| job.id);
+        if let Some(job) = exact_job {
+            self.force_close_panel(super::Panel::ActivityDialog);
+            self.file_operations_center_dialog.focus_job(Some(job));
+            self.focus_panel(super::Panel::FileOperationsCenterDialog);
+        } else {
+            self.activity_dialog.transfer_job_expired = true;
         }
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
@@ -15776,6 +15812,15 @@ impl LauncherApp {
                 continue;
             }
             match command {
+                super::FileSearchUiCommand::OpenFileOperations(path) => {
+                    #[cfg(windows)]
+                    self.open_file_operations_from_origin(
+                        Some(vec![path]),
+                        &super::utility_host::ChildOpenOrigin::Parent(origin),
+                    );
+                    #[cfg(not(windows))]
+                    let _ = path;
+                }
                 super::FileSearchUiCommand::OpenHash(path) => {
                     let was_open = self.hash_generator_dialog.open;
                     self.hash_generator_dialog.open_with_file(path);
@@ -16351,7 +16396,10 @@ impl eframe::App for LauncherApp {
         self.complete_markdown_print(_ctx);
         self.complete_password_generator(_ctx);
         #[cfg(windows)]
-        self.complete_file_operations_center(_ctx);
+        {
+            self.complete_file_operations_center(_ctx);
+            self.complete_transfer_activity_navigation(_ctx);
+        }
         self.complete_quick_notes_dialog(_ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
@@ -21951,6 +21999,42 @@ mod tests {
         app.notes_dialog.close_from_app(&ctx);
         assert!(!app.notes_dialog.accepts_note_open(&origin));
         output.drop_without_applying_deltas();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_operations_center_activity_requires_a_retained_exact_job() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::activity::{ActivityIncarnation, ActivityOperation, ActivityOwner, ActivitySlot};
+
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, _profile) = new_prompt_app(&ctx);
+                let aged_out = app
+                    .activity_center
+                    .start(
+                        ActivityOwner::FileTransfer,
+                        ActivitySlot::Primary,
+                        ActivityIncarnation::new(1),
+                        ActivityOperation::TransferFiles,
+                    )
+                    .unwrap();
+                app.activity_dialog.open();
+                app.activity_dialog.transfer_navigation = Some(aged_out.key());
+                assert!(!app.activity_dialog.transfer_job_expired);
+
+                app.complete_transfer_activity_navigation(&ctx);
+
+                assert!(app.activity_dialog.open);
+                assert!(app.activity_dialog.transfer_job_expired);
+                assert!(app.activity_dialog.transfer_navigation.is_none());
+                assert!(!app.file_operations_center_dialog.open);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

@@ -76,7 +76,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C2C1 | complete |
 | M9-C2C2 | complete |
 | M9-D1 | complete |
-| M9-D2 | pending |
+| M9-D2 | complete |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -571,3 +571,10 @@ Explicit Queue writes an ordered non-authorizing snapshot before acknowledgement
 ### M9-D1 hosted File Operations Center
 
 The retained Windows utility captures exact picker, review, queue and recovery intents only after an accepted host frame. Review and durable queue edits use background work outside the frame callback. Draft revisions and source-tree identity fence stale pickers, scans and review selections. The center displays actual live job phases, sources, progress, ordered controls and paginated outcomes with retained paths, plus receipt details, interrupted previews and confirmed recovery queue actions. The 14-check worker/controller union passed (`eabc27d7-252a-484f-a87d-fdf9190b224d`). The final three controller/view checks passed (`48fce880-4534-423f-b353-46699fc942dc`), proving missing picker owner refusal, stale draft handling, and actual Review/Queue/Start separation in a disposable fixture. Launcher/File Search/Activity entry points and native-window smoke follow.
+
+
+### M9-D2 launcher, File Search and Activity entry points
+
+The Windows `fileops` command opens the existing center through the typed GUI command bus. File Search passes a single exact current row through its retained parent action. Activity resolves the full key only after a retained root frame, focuses the associated live/queued/completed job, and reports a job that has aged out while keeping the Activity window open. The final 11 focused checks passed (`88026e16-175c-407f-8a5e-096611b4dca2`), including exact current File Search handoff and aged-out Activity behavior. The ordinary fast-dev executable built before the Activity review repair, then the repaired Windows application code compiled in the final scoped test run.
+
+Native smoke used an isolated profile with both Paste Sequences shortcuts disabled. The real launcher returned and activated the File Operations command, displayed the draft and opened the Windows file picker from the docked panel using the keyboard. The first cancel returned to the center. Native path entry remained unverified because the owned chooser's edit control was unavailable to the automation, and restarted-window foreground selection failed. The exact disposable source hash stayed `46D8621A473CE45AAF4757BD7B14E60812D12E67CE3808450329D34561459B03` and the destination remained empty. Native acceptance of a picker, real copy through the window and Activity click-through remain for the bounded later smoke. The M9 worker tests already verify actual Copy/Move and the hosted controller separately verifies Review, Queue and Start.

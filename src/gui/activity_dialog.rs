@@ -1,7 +1,7 @@
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use std::time::{Duration, Instant};
 
-use crate::activity::{ActivityCenter, ActivityOwner, ActivityRow, ActivitySnapshot};
+use crate::activity::{ActivityCenter, ActivityKey, ActivityOwner, ActivityRow, ActivitySnapshot};
 use eframe::egui;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -9,13 +9,17 @@ pub(crate) const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_millis(250
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActivityDialogAction {
-    Navigate(ActivityOwner),
+    Navigate(ActivityKey),
 }
 
 #[derive(Default)]
 pub(crate) struct ActivityDialogState {
     pub(crate) open: bool,
     filter: String,
+    #[cfg(windows)]
+    pub(crate) transfer_navigation: Option<ActivityKey>,
+    #[cfg(windows)]
+    pub(crate) transfer_job_expired: bool,
     snapshot: ActivitySnapshot,
     current_process_working_set_bytes: Option<u64>,
     current_process_private_bytes: Option<u64>,
@@ -29,6 +33,10 @@ impl ActivityDialogState {
     pub(crate) fn open(&mut self) {
         self.open = true;
         self.last_refresh = None;
+        #[cfg(windows)]
+        {
+            self.transfer_job_expired = false;
+        }
     }
 
     pub(crate) fn close(&mut self) {
@@ -153,6 +161,12 @@ impl ActivityDialogState {
                             ctx.copy_text(sanitized_diagnostics(&self.snapshot));
                         }
                     });
+                    #[cfg(windows)]
+                    if self.transfer_job_expired {
+                        ui.label(
+                            "This transfer job has aged out of the File Operations queue history.",
+                        );
+                    }
                     ui.small(format!(
                         "Current process working set: {}",
                         format_bytes(self.current_process_working_set_bytes)
@@ -228,12 +242,12 @@ impl ActivityDialogState {
                                                 && !screenshot_editor_available
                                             {
                                                 ui.label("No screenshot editor is open");
-                                            } else if row.key.owner() != ActivityOwner::FileTransfer
+                                            } else if (cfg!(windows)
+                                                || row.key.owner() != ActivityOwner::FileTransfer)
                                                 && ui.button("Open owner tool").clicked()
                                             {
-                                                actions.push(ActivityDialogAction::Navigate(
-                                                    row.key.owner(),
-                                                ));
+                                                actions
+                                                    .push(ActivityDialogAction::Navigate(row.key));
                                             }
                                             if row.can_cancel
                                                 && ui.button("Cancel current operation").clicked()

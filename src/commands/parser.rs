@@ -625,6 +625,16 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("file_operations:") {
+        if s == "file_operations:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::FileOperationsCenter));
+        }
+        return Err(CommandError::new("file_operations", if action.args.is_some() {
+            "File Operations Center does not accept a path or content payload"
+        } else {
+            "unknown File Operations Center command"
+        }).with_gui_failure_policy());
+    }
     if s.starts_with("activity:") {
         if s == "activity:open" && action.args.is_none() {
             return Ok(Command::Dialog(DialogCommand::Activity));

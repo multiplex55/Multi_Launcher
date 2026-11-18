@@ -333,6 +333,7 @@ pub enum FileSearchContextMenuAction {
     OpenContainingDirectory,
     AnalyzeFolderSize,
     InspectFileUsers,
+    OpenFileOperations,
     CopyFullPath,
     CopyFilename,
     CalculateHash,
@@ -397,6 +398,7 @@ impl FileSearchHostActions {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
+    OpenFileOperations(PathBuf),
     OpenPreview { path: PathBuf, content_match: Option<ContentMatch> },
     OpenFolderSize(PathBuf),
     InspectFileUsers(PathBuf),
@@ -2173,6 +2175,39 @@ impl FileSearchDialogState {
                 self.request_selected_row_action(FileSearchRowAction::Activate, coordinator);
                 ui.ctx().request_repaint();
             }
+            #[cfg(windows)]
+            {
+                let selected = self.selected_result.as_ref().filter(|selected| {
+                    self.active_search_id == Some(selected.row_id.search_id)
+                        && !matches!(
+                            selected.payload,
+                            SelectedFileSearchResultPayload::Filename { kind: FileKind::Other, .. }
+                        )
+                }).map(|selected| selected.row_id.clone());
+                let transfer = ui.add_enabled(
+                    selected.is_some(),
+                    egui::Button::new("File Operations…"),
+                );
+                register_jump_mode_target(
+                    jump_mode_scope.as_ref(),
+                    ui,
+                    &transfer,
+                    "form/actions/file-operations",
+                    "Open selected item in File Operations",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut visual_order,
+                );
+                if transfer.clicked() && first_ui_pass && navigation_owner
+                    && let Some(row) = selected
+                {
+                    self.request_row_action(
+                        &row,
+                        FileSearchRowAction::Menu(FileSearchContextMenuAction::OpenFileOperations),
+                        coordinator,
+                        &mut commands,
+                    );
+                }
+            }
             let export_button = ui.button("Export");
             #[cfg(test)]
             self.record_test_native_popup_control(
@@ -3116,6 +3151,9 @@ impl FileSearchDialogState {
         if is_known_file {
             actions.push(FileSearchContextMenuAction::InspectFileUsers);
         }
+        if cfg!(windows) && (is_known_file || is_directory) {
+            actions.push(FileSearchContextMenuAction::OpenFileOperations);
+        }
         if content_match.is_some() {
             actions.push(FileSearchContextMenuAction::CopyMatchingLine);
         }
@@ -3222,6 +3260,7 @@ impl FileSearchDialogState {
                 true,
             ),
             ("Analyze folder size…", Action::AnalyzeFolderSize, directory),
+            ("File Operations…", Action::OpenFileOperations, cfg!(windows) && (directory || kind == FileKind::File)),
             ("Copy full path", Action::CopyFullPath, true),
             ("Copy filename", Action::CopyFilename, true),
             ("Calculate hash", Action::CalculateHash, !directory),
@@ -3404,6 +3443,7 @@ impl FileSearchDialogState {
             Action::InspectFileUsers => commands.push(FileSearchUiCommand::InspectFileUsers(path)),
             Action::AnalyzeFolderSize => commands.push(FileSearchUiCommand::OpenFolderSize(path)),
             Action::CalculateHash => commands.push(FileSearchUiCommand::OpenHash(path)),
+            Action::OpenFileOperations => commands.push(FileSearchUiCommand::OpenFileOperations(path)),
             Action::OpenContainingDirectory => {
                 self.run_result_action("open containing directory", || {
                     let dir = containing_directory(&path).ok_or_else(|| {
@@ -5156,6 +5196,40 @@ mod tests {
         state.active_search_id = Some(SearchId(42));
         state.execute_host_action(pending, &mut coordinator, &mut commands, None);
         assert_eq!(commands, vec![FileSearchUiCommand::OpenHash(row.path)]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_operations_center_file_search_handoff_is_exact_and_stale_safe() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(72)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        for path in [r"C:\fixtures\one.txt", r"C:\fixtures\two.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(72),
+                result: filename_search_result(path),
+            });
+        }
+        let selected = state.result_rows[1].id.clone();
+        let mut coordinator = SearchCoordinator::new();
+        let mut commands = Vec::new();
+        state.host_actions = Some(Vec::new());
+        state.request_row_action(
+            &selected,
+            FileSearchRowAction::Menu(FileSearchContextMenuAction::OpenFileOperations),
+            &mut coordinator,
+            &mut commands,
+        );
+        assert!(commands.is_empty());
+        let pending = state.host_actions.take().unwrap().pop().unwrap();
+        state.active_search_id = Some(SearchId(73));
+        state.execute_host_action(pending.clone(), &mut coordinator, &mut commands, None);
+        assert!(commands.is_empty());
+        state.active_search_id = Some(SearchId(72));
+        state.execute_host_action(pending, &mut coordinator, &mut commands, None);
+        assert_eq!(commands, vec![FileSearchUiCommand::OpenFileOperations(selected.path)]);
     }
 
     fn filename_search_result(path: &str) -> SearchResult {

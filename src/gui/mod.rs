@@ -2922,7 +2922,7 @@ impl LauncherApp {
     ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
-            FileSearchUiCommand::OpenPreview { .. } => {}
+            FileSearchUiCommand::OpenFileOperations(_) | FileSearchUiCommand::OpenPreview { .. } => {}
             FileSearchUiCommand::OpenFolderSize(path) => {
                 if ctx.viewport_id() == egui::ViewportId::ROOT {
                     self.folder_size_dialog.stage_prefill(ctx, path);

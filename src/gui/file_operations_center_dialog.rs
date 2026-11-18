@@ -137,6 +137,7 @@ pub(super) struct FileOperationsCenterDialog {
     destination: Option<PathBuf>,
     edit: Edit,
     review: Option<Arc<TransferReview>>,
+    focus_job: Option<TransferJobId>,
     notice: Option<String>,
 }
 impl FileOperationsCenterDialog {
@@ -148,6 +149,10 @@ impl FileOperationsCenterDialog {
             }
         }
     }
+    pub fn focus_job(&mut self, job: Option<TransferJobId>) {
+        self.focus_job = job;
+    }
+
     pub fn ensure_open(&mut self) {
         self.open();
     }
@@ -281,6 +286,7 @@ impl FileOperationsCenterDialog {
 
 #[derive(Default)]
 pub(super) struct Actions {
+    scrolled_job: Option<TransferJobId>,
     session: u64,
     revision: u64,
     edit: Edit,
@@ -390,6 +396,9 @@ impl HostedUtilityDialog for FileOperationsCenterDialog {
     fn complete_actions(&mut self, actions: Actions, hwnd: Option<usize>) -> Vec<Command> {
         if !self.open || actions.session != self.session || actions.revision != self.revision {
             return Vec::new();
+        }
+        if actions.scrolled_job.is_some() && actions.scrolled_job == self.focus_job {
+            self.focus_job = None;
         }
         if actions.close {
             self.close();
@@ -696,6 +705,14 @@ fn show_result(ui: &mut egui::Ui, result: &TransferJobResult, page: &mut usize) 
 }
 
 impl FileOperationsCenterDialog {
+    fn scroll_to_activity_job(&self, ui: &mut egui::Ui, actions: &mut Actions, job: TransferJobId) {
+        if self.focus_job == Some(job) {
+            ui.label(format!("Activity job {}", job.get()))
+                .scroll_to_me(Some(egui::Align::Center));
+            actions.scrolled_job = Some(job);
+        }
+    }
+
     fn contents(
         &self,
         ui: &mut egui::Ui,
@@ -946,6 +963,7 @@ impl FileOperationsCenterDialog {
                     actions.intent = Some(Intent::Start);
                 }
                 for (index, job) in runtime.queue.queued.iter().enumerate() {
+                    self.scroll_to_activity_job(ui, actions, job.id);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!("{:?} — {:?}", job.draft.action, job.status));
                         if let Some(path) = job.roots.first() {
@@ -1004,6 +1022,7 @@ impl FileOperationsCenterDialog {
                     });
                 }
                 if let Some(job) = &runtime.queue.active {
+                    self.scroll_to_activity_job(ui, actions, job.id);
                     job_details(ui, job);
                     ui.horizontal_wrapped(|ui| {
                         if matches!(job.status, TransferJobStatus::Paused | TransferJobStatus::PauseRequested) {
@@ -1018,6 +1037,7 @@ impl FileOperationsCenterDialog {
                     });
                 }
                 for job in &runtime.queue.history {
+                    self.scroll_to_activity_job(ui, actions, job.id);
                     ui.separator(); job_details(ui, job);
                     if let Some(result) = &job.result {
                         let mut page = actions.edit.terminal_page
