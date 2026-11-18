@@ -81,8 +81,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M10-B | complete |
 | M11-A | complete |
 | M11-B | complete |
-| M11-C | in_progress |
-| M11-D | in_progress |
+| M11-C | blocked |
+| M11-D | blocked |
 | M12-A1 | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
@@ -656,3 +656,10 @@ Six initial focused checks passed (49971aec-1802-4a41-ab65-9e66cf37f14e). Indepe
 In isolated Windows profile `m12-native-transfer-3050f698`, both Paste Sequences shortcuts were disabled before startup. Keyboard activation opened Downloads, selected and marked one synthetic file reviewed, and opened the prefilled Move draft using the stored synthetic destination. Review showed the exact one ready row. Queue left the source and destination untouched until explicit Start. The native transfer completed a 57-byte same-volume Move. The source was gone and the destination retained SHA-256 `02D034B6CB9AFF5F4277D6B4F9AD95C2FFFC883EEDB276ACE72039730AD1C881`, matching the recorded input. The native Inbox showed one completed transfer without retaining the path. Its Open related action and Activity's Open owner tool each focused the exact retained completed job in File Operations. Escape closed the File Operations child while leaving Downloads visible.
 
 This closes the earlier M9-D2, M10-B and M11-B representative native Move and related-navigation gaps. The original direct file picker acceptance remains unverified. A separate synthetic ZIP was staged, but foreground PID checks failed before extraction could be started after relaunch. Its archive remained present with no extracted output. Both owned launcher fixture processes exited. No user's Downloads directory was used.
+
+
+### M11-C/D final native deployment attempt
+
+An unregistered executable with valid embedded fixture metadata was launched without setup. The actual Windows process APIs returned `0x3d54` for no package and `0x3d57` for no application identity. The probe exited before requesting consent. This is native evidence for the unavailable identity path.
+
+The user separately authorized the same exact temporary public certificate in Local Computer Trusted People after Current User deployment returned `0x800B0109`. The normal Windows elevation request returned “The operation was canceled by the user” before the elevated helper started. No machine certificate was imported. Exact cleanup verified that the fixture package, Current User trust, Local Computer trust and the disposable Personal signer and its key were all absent. The synthetic sender was never registered and no test toast was emitted. The optional listener and its focused tests are implemented. Actual packaged permission, an external toast entering the Inbox, and native revoke behavior remain blocked in this environment. [Microsoft MSIX certificate troubleshooting](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
