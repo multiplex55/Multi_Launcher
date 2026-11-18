@@ -188,6 +188,7 @@ unicode-segmentation = "1.12"
 unicode-bidi = "=0.3.18"
 unicode-script = "=0.5.9"
 rustybuzz = "=0.20.1"
+krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
 epaint_default_fonts = "=0.36.2"
 unicode-general-category = "1.1.0"
 unicode_names2 = { version = "4.0.0", default-features = false }

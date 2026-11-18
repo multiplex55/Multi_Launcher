@@ -35,6 +35,28 @@ pub struct TextStyle {
     pub strike: bool,
     pub code: bool,
 }
+impl TextStyle {
+    pub const BOLD_STROKE: f32 = 0.25;
+    pub const ITALIC_SHEAR: f32 = 0.16;
+    /// Ink coordinates are relative to the baseline, with positive y upward.
+    pub fn styled_ink(self, shape: &ShapedText) -> Option<Rect> {
+        let ink = shape.ink?;
+        let pad = if self.bold {
+            Self::BOLD_STROKE * 0.5
+        } else {
+            0.0
+        };
+        let shear = if self.italic { Self::ITALIC_SHEAR } else { 0.0 };
+        let x = ink.x + shear * ink.y - pad * (1.0 + shear);
+        let right = ink.x + ink.width + shear * (ink.y + ink.height) + pad * (1.0 + shear);
+        Some(Rect {
+            x,
+            y: ink.y - pad,
+            width: right - x,
+            height: ink.height + 2.0 * pad,
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkDestination {
     External(Arc<str>),
@@ -385,7 +407,7 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
                         "Bidirectional text across mixed styles may not retain visual order.",
                     );
                 }
-                line_add(line, &shape);
+                line_add(line, &shape, style);
                 line.fragments.push(Fragment {
                     text: Arc::from(text),
                     style,
@@ -425,7 +447,7 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
             return Ok(());
         }
         let shape = self.shape(piece, span.style, size)?;
-        if shape_extent(&shape) > width {
+        if shape_extent(&shape, span.style) > width {
             for g in piece.graphemes(true) {
                 let shape = self.shape(g, span.style, size)?;
                 self.add_piece(lines, g, span, shape, width)?;
@@ -443,7 +465,7 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
         shape: Arc<ShapedText>,
         width: f32,
     ) -> Result<(), PrintError> {
-        if shape_extent(&shape) > width {
+        if shape_extent(&shape, span.style) > width {
             return Err(PrintError::Unplaceable(
                 "A grapheme is wider than the printable area.",
             ));
@@ -457,12 +479,12 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
             descent: previous.descent,
             fragments: Vec::new(),
         };
-        line_add(&mut candidate, &shape);
+        line_add(&mut candidate, &shape, span.style);
         if candidate.right - candidate.left > width && !previous.fragments.is_empty() {
             lines.push(Line::default());
         }
         let line = lines.last_mut().unwrap();
-        line_add(line, &shape);
+        line_add(line, &shape, span.style);
         line.fragments.push(Fragment {
             text: Arc::from(piece),
             style: span.style,
@@ -473,14 +495,17 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
     }
 }
 
-fn shape_extent(shape: &ShapedText) -> f32 {
-    let (left, right) = shape.ink.as_ref().map_or((0.0, shape.width), |r| {
-        (r.x.min(0.0), (r.x + r.width).max(shape.width))
-    });
+fn shape_extent(shape: &ShapedText, style: TextStyle) -> f32 {
+    let (left, right) = style
+        .styled_ink(shape)
+        .as_ref()
+        .map_or((0.0, shape.width), |r| {
+            (r.x.min(0.0), (r.x + r.width).max(shape.width))
+        });
     right - left
 }
-fn line_add(line: &mut Line, shape: &ShapedText) {
-    if let Some(ink) = &shape.ink {
+fn line_add(line: &mut Line, shape: &ShapedText, style: TextStyle) {
+    if let Some(ink) = style.styled_ink(shape) {
         line.left = line.left.min(line.width + ink.x);
         line.right = line.right.max(line.width + ink.x + ink.width);
         line.ascent = line.ascent.max(ink.y + ink.height);
@@ -1714,7 +1739,7 @@ pub fn paginate_with_assets(
                     y: y + ascent,
                 };
                 let band_height = settings.body_size * 1.5;
-                if shape_extent(&shape) > geometry.content.width
+                if shape_extent(&shape, TextStyle::default()) > geometry.content.width
                     || ink.is_some_and(|r| {
                         baseline.y - r.y - r.height < y - 0.001
                             || baseline.y - r.y > y + band_height + 0.001
@@ -1756,9 +1781,10 @@ pub fn paginate_with_assets(
             } else {
                 super::super::html::safe_link_destination(&target)
                     .filter(|uri| {
-                        uri.starts_with("http://")
-                            || uri.starts_with("https://")
-                            || uri.starts_with("mailto:")
+                        uri.len() <= 8192
+                            && (uri.starts_with("http://")
+                                || uri.starts_with("https://")
+                                || uri.starts_with("mailto:"))
                     })
                     .map(|uri| LinkDestination::External(Arc::from(uri)))
             };
@@ -1779,7 +1805,10 @@ pub fn paginate_with_assets(
                 continue;
             }
             if let Drawable::Text {
-                shape, baseline, ..
+                shape,
+                baseline,
+                style,
+                ..
             } = &b.pages[page].drawables[index]
             {
                 let ascent = shape.runs.iter().map(|r| r.ascent).fold(0.0_f32, f32::max);
@@ -1788,11 +1817,16 @@ pub fn paginate_with_assets(
                     .iter()
                     .map(|r| -r.descent)
                     .fold(0.0_f32, f32::max);
+                let ink = style.styled_ink(shape);
+                let left = ink.map_or(0.0, |r| r.x.min(0.0));
+                let right = ink.map_or(shape.width, |r| (r.x + r.width).max(shape.width));
+                let top = ink.map_or(-ascent, |r| (-r.y - r.height).min(-ascent));
+                let bottom = ink.map_or(descent, |r| (-r.y).max(descent));
                 let bounds = Rect {
-                    x: baseline.x,
-                    y: baseline.y - ascent,
-                    width: shape.width,
-                    height: ascent + descent,
+                    x: baseline.x + left,
+                    y: baseline.y + top,
+                    width: right - left,
+                    height: bottom - top,
                 };
                 b.shapes += 1;
                 if b.shapes > MAX_DRAWABLES {
@@ -1811,8 +1845,11 @@ pub fn paginate_with_assets(
         for drawable in &page.drawables {
             let rect = match drawable {
                 Drawable::Text {
-                    shape, baseline, ..
-                } => shape.ink.as_ref().map(|r| Rect {
+                    shape,
+                    baseline,
+                    style,
+                    ..
+                } => style.styled_ink(shape).as_ref().map(|r| Rect {
                     x: baseline.x + r.x,
                     y: baseline.y - r.y - r.height,
                     width: r.width,

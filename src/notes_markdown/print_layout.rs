@@ -2,6 +2,7 @@
 mod markdown;
 mod assets;
 mod document;
+pub mod pdf;
 pub use assets::PrintRaster;
 pub use document::{paginate_with_assets, paginate, Drawable, LinkDestination, Page, PaginatedDocument, PrintError, PrintWarning, TextStyle};
 
