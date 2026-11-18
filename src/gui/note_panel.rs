@@ -1,3 +1,6 @@
+use super::markdown_outline::{
+    OutlineAction, OutlineMoves, OutlineStamp, move_buttons, outline_row, owns_outline_input, sibling_requests,
+};
 use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
 use crate::diagram::{DiagramSourceCopy, DiagramSourceCopyOrigin};
@@ -483,11 +486,18 @@ struct BacklinkRow {
     todo_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NoteOutlinePosition {
+    revision: u64,
+    heading_start: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NoteOutlineRow {
     level: u8,
     title: String,
-    normalized_anchor: String,
+    heading_index: usize,
+    heading_start: usize,
     line_index: usize,
     char_index: usize,
     collapsible: bool,
@@ -1150,8 +1160,9 @@ pub struct NotePanel {
     outline_width: f32,
     split_ratio: f32,
     outline_filter: String,
-    selected_outline_heading: Option<String>,
-    pending_scroll_target: Option<String>,
+    selected_outline_heading: Option<NoteOutlinePosition>,
+    pending_scroll_target: Option<NoteOutlinePosition>,
+    outline_moves: OutlineMoves,
     image_cache: HashMap<std::path::PathBuf, egui::TextureHandle>,
     overwrite_prompt: bool,
     show_open_with_menu: bool,
@@ -1393,6 +1404,7 @@ struct NotePanelPendingHostActions {
     attachment_picker_requested: bool,
     screenshot_requested: bool,
     clipboard_image: Option<(egui::Id, RgbaImage)>,
+    outline_move: Option<OutlineAction>,
     open_note_slugs: Vec<String>,
     open_image_paths: Vec<PathBuf>,
     open_forms: Vec<super::note_form_dialog::FormOpenRequest>,
@@ -1424,6 +1436,8 @@ struct NotePanelDraftCheckpoint {
     saved_content_baseline: String,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
+    selected_outline_heading: Option<NoteOutlinePosition>,
+    pending_scroll_target: Option<NoteOutlinePosition>,
     retained_text_edit_history: Option<RetainedTextEditHistory>,
     replacement_undo_boundaries: Vec<ReplacementUndoBoundary>,
     replacement_redo_boundaries: Vec<ReplacementUndoBoundary>,
@@ -1438,6 +1452,8 @@ impl NotePanelDraftCheckpoint {
             saved_content_baseline: panel.saved_content_baseline.clone(),
             pending_selection: panel.pending_selection,
             pending_cursor_position: panel.pending_cursor_position,
+            selected_outline_heading: panel.selected_outline_heading,
+            pending_scroll_target: panel.pending_scroll_target,
             retained_text_edit_history: panel.retained_text_edit_history.clone(),
             replacement_undo_boundaries: panel.replacement_undo_boundaries.clone(),
             replacement_redo_boundaries: panel.replacement_redo_boundaries.clone(),
@@ -1450,6 +1466,8 @@ impl NotePanelDraftCheckpoint {
         panel.saved_content_baseline = self.saved_content_baseline;
         panel.pending_selection = self.pending_selection;
         panel.pending_cursor_position = self.pending_cursor_position;
+        panel.selected_outline_heading = self.selected_outline_heading;
+        panel.pending_scroll_target = self.pending_scroll_target;
         panel.retained_text_edit_history = self.retained_text_edit_history;
         panel.replacement_undo_boundaries = self.replacement_undo_boundaries;
         panel.replacement_redo_boundaries = self.replacement_redo_boundaries;
@@ -1678,9 +1696,10 @@ impl NotePanel {
         let filter = filter.trim().to_lowercase();
         headings
             .iter()
-            .filter(|heading| heading.level <= max_depth)
-            .filter(|heading| filter.is_empty() || heading.title.to_lowercase().contains(&filter))
-            .map(|heading| {
+            .enumerate()
+            .filter(|(_, heading)| heading.level <= max_depth)
+            .filter(|(_, heading)| filter.is_empty() || heading.title.to_lowercase().contains(&filter))
+            .map(|(heading_index, heading)| {
                 let section = sections.iter().find(|section| {
                     section.heading.line_index == heading.line_index
                         && section.heading.normalized_anchor == heading.normalized_anchor
@@ -1697,7 +1716,8 @@ impl NotePanel {
                 NoteOutlineRow {
                     level: heading.level,
                     title: heading.title.clone(),
-                    normalized_anchor: heading.normalized_anchor.clone(),
+                    heading_index,
+                    heading_start: heading.byte_range.start,
                     line_index: heading.line_index,
                     char_index: byte_to_char_index(content, heading.byte_range.start),
                     collapsible,
@@ -1841,6 +1861,7 @@ impl NotePanel {
             outline_filter: String::new(),
             selected_outline_heading: None,
             pending_scroll_target: None,
+            outline_moves: OutlineMoves::default(),
             image_cache: HashMap::new(),
             overwrite_prompt: false,
             show_open_with_menu: false,
@@ -3011,6 +3032,23 @@ impl NotePanel {
             );
         }
 
+        let outline_stamp = self.outline_stamp(frame.owner_viewport_id);
+        self.outline_moves.retire_stale(outline_stamp);
+        if let Some(action) = frame.actions.outline_move
+            && self.open
+            && app.note_settings.outline_sidebar_enabled
+            && self.outline_open
+            && frame.owner_modal_layer.is_none()
+            && !frame.close_requested
+            && !frame.os_close_requested
+            && !frame.actions.save_requested
+            && !frame.actions.save_and_close_requested
+            && frame.actions.conflict_action.is_none()
+            && frame.actions.host_request.is_none()
+        {
+            self.complete_outline_move(&frame.owner_context, frame.owner_viewport_id, action);
+            ctx.request_repaint_of(frame.owner_viewport_id);
+        }
         let effect = self.on_ui_frame_complete(&frame.owner_context);
         let mut show_root = false;
         if frame.actions.save_alias_metadata_requested {
@@ -3539,7 +3577,7 @@ impl NotePanel {
         let editor_id = matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
             .then_some(self.last_textedit_id)
             .flatten();
-        match self.apply_prepared_source_edit(ctx, editor_id, prepared, None) {
+        match self.apply_prepared_source_edit(ctx, editor_id, prepared, None, true) {
             Ok(true) => {
                 self.active_mermaid_origin = None;
                 self.pending_mermaid_origin = None;
@@ -4726,7 +4764,7 @@ impl NotePanel {
                 "the active note editor changed before the edit was applied",
             ));
         }
-        self.apply_prepared_source_edit(ctx, Some(id), prepared, selection_after)
+        self.apply_prepared_source_edit(ctx, Some(id), prepared, selection_after, true)
     }
 
     fn apply_prepared_source_edit(
@@ -4735,6 +4773,7 @@ impl NotePanel {
         editor_id: Option<egui::Id>,
         prepared: PreparedMarkdownEdit,
         selection_after: Option<std::ops::Range<usize>>,
+        focus_editor_after: bool,
     ) -> Result<bool, MarkdownEditError> {
         if editor_id.is_some_and(|id| self.last_textedit_id != Some(id)) {
             return Err(MarkdownEditError::InvalidParameter(
@@ -4785,8 +4824,8 @@ impl NotePanel {
             )
         });
         self.pending_cursor_position = None;
-        let should_focus_editor = editor_id.is_some()
-            || matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split);
+        let should_focus_editor = focus_editor_after
+            && (editor_id.is_some() || matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split));
         if self.applying_toolbar_markdown_action {
             // The top toolbar menu renders before TextEdit. Let the current
             // key event finish in the menu, then request editor focus from its
@@ -5845,6 +5884,7 @@ impl NotePanel {
                         self.outline_filter.clear();
                         self.selected_outline_heading = None;
                         self.pending_scroll_target = None;
+                        self.outline_moves.clear();
                     }
                     if self.fast_derived_dirty {
                         self.refresh_fast_derived();
@@ -6682,6 +6722,42 @@ impl NotePanel {
         }
     }
 
+    fn outline_stamp(&self, viewport: egui::ViewportId) -> OutlineStamp {
+        OutlineStamp {
+            document: egui::Id::new(("note-outline", self.prompt_identity, &self.note.slug, &self.note.path)),
+            revision: self.note_find.content_revision(),
+            host: self.host_state.identity(),
+            viewport,
+        }
+    }
+
+    fn outline_input_unblocked(&self) -> bool {
+        self.open
+            && !self.discard_unsaved_prompt
+            && !self.overwrite_prompt
+            && self.pending_plain_link_conversion.is_none()
+    }
+
+    fn complete_outline_move(&mut self, ctx: &egui::Context, viewport: egui::ViewportId, action: OutlineAction) {
+        if !self.outline_input_unblocked() {
+            return;
+        }
+        let stamp = self.outline_stamp(viewport);
+        let Some(prepared) = self.outline_moves.apply_action(stamp, &self.note.content, action) else { return; };
+        let moved = prepared.moved_selection.start;
+        match self.apply_prepared_source_edit(ctx, None, prepared.edit, Some(moved..moved), false) {
+            Ok(true) => {
+                let current = NoteOutlinePosition { revision: self.note_find.content_revision(), heading_start: moved };
+                self.selected_outline_heading = Some(current);
+                self.pending_scroll_target = Some(current);
+                let scope = self.outline_stamp(viewport);
+                self.outline_moves.record_move(scope, moved);
+            }
+            Ok(false) => {}
+            Err(error) => self.outline_moves.report_error(error),
+        }
+    }
+
     fn render_outline_sidebar(
         &mut self,
         ui: &mut egui::Ui,
@@ -6727,6 +6803,26 @@ impl NotePanel {
                     });
                     self.outline_width = self.outline_width.clamp(120.0, 360.0);
                     ui.text_edit_singleline(&mut self.outline_filter);
+                    let stamp = self.outline_stamp(ui.ctx().viewport_id());
+                    let owns_moves = self.defer_host_actions
+                        && self.outline_input_unblocked()
+                        && owns_outline_input(ui);
+                    if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves) {
+                        self.pending_host_actions.outline_move = Some(action);
+                    }
+                    let selection = self.selected_outline_heading
+                        .filter(|selected| selected.revision == stamp.revision)
+                        .and_then(|selected| analysis.headings.iter().position(|heading|
+                            heading.byte_range.start == selected.heading_start))
+                        .filter(|&index| rows.iter().any(|row| row.heading_index == index));
+                    let allow_moves = owns_moves && !self.outline_moves.has_review(stamp);
+                    let [up, down] = if allow_moves {
+                        sibling_requests(&analysis.headings, selection, stamp).map(|request|
+                            request.filter(|request| self.outline_moves.can_move(*request, &self.note.content)))
+                    } else { [None, None] };
+                    if let Some(action) = move_buttons(ui, up, down) {
+                        self.pending_host_actions.outline_move = Some(action);
+                    }
                     if rows.is_empty() {
                         if self.outline_filter.is_empty() {
                             ui.label("No headings in this note.");
@@ -6745,10 +6841,17 @@ impl NotePanel {
                                 };
                                 ui.small(marker);
                             }
-                            let selected = self.selected_outline_heading.as_deref()
-                                == Some(row.normalized_anchor.as_str());
-                            if ui.selectable_label(selected, &row.title).clicked() {
-                                self.handle_outline_row_click(&row, ui.ctx());
+                            let selected = selection == Some(row.heading_index);
+                            let (response, action) = outline_row(
+                                ui, &row.title, selected, stamp, row.heading_index, allow_moves,
+                                |request| self.outline_moves.can_move(request, &self.note.content),
+                            );
+                            if owns_moves { self.outline_moves.reveal_moved_row(stamp, row.heading_start, &response); }
+                            if response.clicked() {
+                                self.handle_outline_row_click(&row, ui.ctx(), response.clicked_by(egui::PointerButton::Primary));
+                            }
+                            if let Some(action) = action {
+                                self.pending_host_actions.outline_move = Some(action);
                             }
                         });
                     }
@@ -7062,10 +7165,15 @@ impl NotePanel {
         outcome
     }
 
-    fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context) {
-        self.selected_outline_heading = Some(row.normalized_anchor.clone());
-        self.pending_scroll_target = Some(row.normalized_anchor.clone());
+    fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context, pointer: bool) {
+        let selected = NoteOutlinePosition {
+            revision: self.note_find.content_revision(),
+            heading_start: row.heading_start,
+        };
+        self.selected_outline_heading = Some(selected);
+        self.pending_scroll_target = Some(selected);
 
+        if !pointer { return; }
         match self.view_mode {
             NoteViewMode::Edit => {
                 self.move_editor_cursor_to(row.char_index, ctx);
@@ -7783,12 +7891,13 @@ impl NotePanel {
         } else {
             self.collapsed_sections.clear();
         }
-        if let Some(target) = self.pending_scroll_target.clone()
+        if let Some(target) = self.pending_scroll_target
+            && target.revision == self.note_find.content_revision()
             && let Some(heading) = self
                 .markdown_analysis()
                 .headings
                 .iter()
-                .find(|heading| heading.normalized_anchor == target)
+                .find(|heading| heading.byte_range.start == target.heading_start)
                 .cloned()
         {
             if heading.byte_range.start > 0 {
@@ -8101,9 +8210,10 @@ impl NotePanel {
                 let visible_ranges = self.preview_visible_ranges(&block, app);
                 self.finish_find_preview_segment(ui, &heading_range, &visible_ranges, resp.rect);
             }
-            if self.pending_scroll_target.as_deref()
-                == Some(section.heading.normalized_anchor.as_str())
-            {
+            if self.pending_scroll_target == Some(NoteOutlinePosition {
+                revision: self.note_find.content_revision(),
+                heading_start: section.heading.byte_range.start,
+            }) {
                 ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
                 self.pending_scroll_target = None;
             }
@@ -17617,13 +17727,18 @@ mod tests {
     #[test]
     fn outline_state_is_hidden_and_pending_navigation_ignored_when_disabled() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = new_app_in_dir(&ctx, temp.path());
         app.note_settings.outline_sidebar_enabled = false;
         let mut panel = NotePanel::from_note(empty_note("# One\n\n## Two"));
         panel.outline_open = true;
         panel.outline_filter = "two".into();
-        panel.selected_outline_heading = Some("two".into());
-        panel.pending_scroll_target = Some("two".into());
+        let location = super::NoteOutlinePosition {
+            revision: panel.note_find.content_revision(),
+            heading_start: 7,
+        };
+        panel.selected_outline_heading = Some(location);
+        panel.pending_scroll_target = Some(location);
 
         render_panel_once(&ctx, &mut panel, &mut app);
 
@@ -18990,6 +19105,77 @@ More text.
                 .as_deref()
                 .is_some_and(|error| error.contains("Resolve the open Note dialog"))
         );
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+
+    #[test]
+    fn outline_move_note_keyboard_selection_preserves_outline_focus() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let source = "# A\n# B";
+        let mut panel = NotePanel::from_note(empty_note(source));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.focus_textedit_next_frame = false;
+        panel.last_textedit_id = Some(egui::Id::new("outline-selection-editor"));
+        let outline_row = egui::Id::new("outline-selection-row");
+        ctx.memory_mut(|memory| memory.request_focus(outline_row));
+        let analysis = analyze_markdown(source);
+        let rows = NotePanel::outline_rows_from_headings(
+            "note", source, &analysis.headings, &analysis.sections, &HashSet::new(), 6, false, "B",
+        );
+        assert_eq!(rows[0].heading_index, 1);
+        panel.handle_outline_row_click(&rows[0], &ctx, false);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(outline_row));
+        assert!(!panel.focus_textedit_next_frame);
+        assert_eq!(panel.selected_outline_heading.unwrap().heading_start, source.find("# B").unwrap());
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn outline_move_note_preserves_draft_and_native_undo() {
+        use super::super::markdown_outline::{MoveRequest, OutlineAction};
+        use crate::notes_markdown::section_move::SectionPlacement;
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let original = "Preamble\n\n# One\n## Child\nbody\n# Two\nlast";
+        let expected = "Preamble\n\n# Two\nlast\n# One\n## Child\nbody";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        let editor = egui::Id::new("outline-move-note-editor");
+        panel.last_textedit_id = Some(editor);
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+        state.store(&ctx, editor);
+        let stamp = panel.outline_stamp(egui::ViewportId::ROOT);
+        let action = OutlineAction::Prepare(MoveRequest {
+            stamp, selected: 0, destination: 2, placement: SectionPlacement::After,
+        });
+        panel.discard_unsaved_prompt = true;
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), original);
+        assert!(panel.replacement_undo_boundaries.is_empty());
+        panel.discard_unsaved_prompt = false;
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), expected);
+        assert!(panel.has_unsaved_changes());
+        assert!(!panel.focus_textedit_next_frame);
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        let functionally_selected = panel.selected_outline_heading.unwrap();
+        assert!(expected[functionally_selected.heading_start..].starts_with("# One"));
+        panel.complete_outline_move(&ctx, egui::ViewportId::ROOT, action);
+        assert_eq!(panel.note_content(), expected);
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, editor).unwrap();
+        let mut undoer = state.undoer();
+        let cursor = state.cursor.char_range().unwrap();
+        let (_, undo_source) = panel.replacement_history_step(&mut undoer, cursor, ReplacementUndoDirection::Undo).unwrap();
+        assert_eq!(undo_source, original);
+        panel.replacement_history_mutation = Some(ReplacementHistoryMutation::Undo);
+        panel.replace_content_from_mutation(undo_source, 1.0);
+        assert_eq!(panel.note_content(), original);
+        assert!(!panel.has_unsaved_changes());
         ctx.end_pass().drop_without_applying_deltas();
     }
 

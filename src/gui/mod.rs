@@ -66,6 +66,7 @@ pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 mod markdown_export;
 mod markdown_preview;
+mod markdown_outline;
 mod markdown_studio;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;

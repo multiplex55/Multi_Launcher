@@ -38,7 +38,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M5-B1 | complete |
 | M5-B | complete, with partial interactive smoke |
 | M6-A | complete |
-| M6-B | pending |
+| M6-B | implementation complete, native smoke pending |
 | M7-A, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
@@ -286,3 +286,12 @@ Native Windows smoke on 2026-11-17 Eastern built with cargo build -p multi_launc
 M5-B was pushed at 9e2148ba8e01d7b31767931b7989bc232f7311c7. The shared parser now recognizes top-level ATX and Setext headings with exact physical ranges. Section hierarchy is built in one pass. The prepared move rotates one bounded source span, consumes the selected subtree and admits only same-parent placements whose reparsed structure preserves parent identities. Unnamed structural sections keep their own boundaries without becoming public outline rows. Preamble, paired metadata, heading indentation, CRLF/LF, and final-newline presence survive moves. A review warning includes both renamed duplicate anchors and changes to the first resolved target of a colliding anchor.
 
 The initial targeted run exposed the empty-ATX regression. Later corrections handled real base-text seams, sparse hierarchy, unnamed boundaries, Unicode Setext and thematic rules. The final focused Windows Nextest run passed 26 of 26 using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::section_move::tests::) | test(notes_markdown::parse::tests::) | test(notes_markdown::headings::tests::)'. Independent review verified structural corrections and supplied the final Unicode classifier case, now covered. Diff whitespace verification passed. M6-B owns retained Notes and Studio controls.
+
+
+## M6-B Notes and Studio outline interactions
+
+M6-A was pushed at 44b8d27166346ddaec403da5333dafde4037cc4d. Both editors now render a drag insertion line only for an admitted same-parent slot and offer keyboard-accessible Move up and Move down. Invalid owned drops show the refusal reason. Moves use the complete source hierarchy, remain bound to the current document, source revision, host and viewport, and show an exact confirmation for changed heading links. The retained edit updates selection, reveals the moved row without taking editor focus, and creates one normal Undo boundary. Notes retains ordinary dirty and save behavior. Studio rejects a move if source editing later in the same retained frame changes the draft. Both editors preserve focus on keyboard outline selection.
+
+The initial targeted run passed 14 cases and exposed an idle Studio test fixture that supplied no pending action. The corrected retained fixture and reviewed adapters passed 16 of 16. The final prompt-ownership and isolated test-profile correction passed 16 of 16 in 0.948s using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(outline_move_) | test(notes_markdown::section_move::tests::) | test(outline_rows_respect_max_depth_filter) | test(outline_state_is_hidden_and_pending_navigation_ignored_when_disabled)'. Actual egui mouse press/drag/release exercises a valid slot, an invalid slot's feedback and rejection after revision change. Notes and Studio fixtures exercise normal Undo. A first-run generated default config was moved to the ignored evidence directory and the final test fixture generated no root file. Diff whitespace verification passed.
+
+Standalone Windows move and Undo in each editor, including a pop-out, remain pending. Combine that interaction with the M7-B Notes/Studio smoke to avoid a redundant standalone build and preserve explicit native evidence.

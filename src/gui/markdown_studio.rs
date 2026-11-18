@@ -1,5 +1,8 @@
 //! Retained-frame Markdown Studio editing and document lifecycle.
 
+use super::markdown_outline::{
+    OutlineAction, OutlineMoves, OutlineStamp, move_buttons, outline_row, owns_outline_input, sibling_requests,
+};
 use crate::diagram::{DiagramSourceCopy, DiagramSourceCopyOrigin};
 use crate::markdown_studio::{
     MarkdownDocument, MarkdownSaveOutcome, MarkdownTransitionDecision, MarkdownTransitionOutcome,
@@ -62,6 +65,12 @@ enum StudioIntent {
     },
     Undo,
     Redo,
+    OutlineMove(OutlineAction),
+}
+
+enum DeferredSelection {
+    Focus(Range<usize>),
+    PreserveFocus(Range<usize>),
 }
 
 struct RootEffects {
@@ -113,7 +122,8 @@ pub(crate) struct MarkdownStudioDialog {
     default_directory: PathBuf,
     mode: ViewMode,
     selection: Range<usize>,
-    deferred_selection: Option<Range<usize>>,
+    deferred_selection: Option<DeferredSelection>,
+    outline_moves: OutlineMoves,
     open_focus_pending: bool,
     cache: Option<MarkdownPreviewCache>,
     commonmark_cache: egui_commonmark::CommonMarkCache,
@@ -193,6 +203,7 @@ impl MarkdownStudioDialog {
             mode: ViewMode::Split,
             selection: 0..0,
             deferred_selection: None,
+            outline_moves: OutlineMoves::default(),
             open_focus_pending: false,
             cache: None,
             commonmark_cache: egui_commonmark::CommonMarkCache::default(),
@@ -457,7 +468,7 @@ impl MarkdownStudioDialog {
             Ok(applied) if applied.source != original => {
                 self.cache = None;
                 self.selection = applied.selection.clone();
-                self.deferred_selection = Some(applied.selection);
+                self.deferred_selection = Some(DeferredSelection::Focus(applied.selection));
                 self.mode = ViewMode::Source;
                 self.active_diagram_origin = None;
                 self.message = Some((false, "Diagram source applied to its Mermaid block.".into()));
@@ -851,12 +862,15 @@ impl MarkdownStudioDialog {
         }
         if let Some(selection) = effects.selection_to_install {
             self.selection = selection.clone();
-            self.deferred_selection = Some(selection);
+            self.deferred_selection = Some(DeferredSelection::Focus(selection));
         }
         if effects.focus_editor_after_open {
             self.open_focus_pending = false;
-            self.deferred_selection = Some(self.selection.clone());
+            self.deferred_selection = Some(DeferredSelection::Focus(self.selection.clone()));
             ctx.request_repaint_of(effects.owner_viewport_id);
+        }
+        if let Some(stamp) = self.outline_stamp(effects.owner_viewport_id) {
+            self.outline_moves.retire_stale(stamp);
         }
         let mut diagram_effect = None;
         let has_intent = effects.intent.is_some();
@@ -874,7 +888,7 @@ impl MarkdownStudioDialog {
             {
                 self.picker_owner = Some((effects.owner_context.clone(), native_identity));
             }
-            diagram_effect = self.apply_intent(intent, &effects.owner_context);
+            diagram_effect = self.apply_intent(intent, &effects.owner_context, effects.owner_viewport_id);
             #[cfg(windows)]
             {
                 self.picker_owner = None;
@@ -917,7 +931,7 @@ impl MarkdownStudioDialog {
             if self.host_state.transition(requested) {
                 let key = crate::settings::UtilityToolKey::parse("markdown-studio").expect("stable Markdown Studio key");
                 super::utility_host::remember_presentation(ctx, key, requested);
-                self.deferred_selection = Some(self.selection.clone());
+                self.deferred_selection = Some(DeferredSelection::Focus(self.selection.clone()));
                 if requested == UtilityPresentation::Docked {
                     self.show_root_after_host_change = true;
                 }
@@ -1316,6 +1330,36 @@ impl MarkdownStudioDialog {
         });
     }
 
+    fn outline_stamp(&self, viewport: egui::ViewportId) -> Option<OutlineStamp> {
+        Some(OutlineStamp {
+            document: egui::Id::new(("studio-outline", self.host_epoch, self.document.path())),
+            revision: self.document.revision()?,
+            host: self.host_state.identity(),
+            viewport,
+        })
+    }
+
+    fn complete_outline_move(&mut self, viewport: egui::ViewportId, action: OutlineAction) {
+        if !self.open || self.document.pending_transition().is_some() {
+            return;
+        }
+        let Some(stamp) = self.outline_stamp(viewport) else { return; };
+        let Some(source) = self.document.source() else { return; };
+        let Some(prepared) = self.outline_moves.apply_action(stamp, source, action) else { return; };
+        match self.document.apply_prepared_edit(&prepared.edit) {
+            Ok(_) => {
+                self.selection = prepared.moved_selection.start..prepared.moved_selection.start;
+                self.deferred_selection = Some(DeferredSelection::PreserveFocus(self.selection.clone()));
+                self.cache = None;
+                self.message = None;
+                if let Some(owner) = self.outline_stamp(viewport) {
+                    self.outline_moves.record_move(owner, self.selection.start);
+                }
+            }
+            Err(error) => self.outline_moves.report_error(error),
+        }
+    }
+
     fn editor_panel(
         &mut self,
         ui: &mut egui::Ui,
@@ -1352,8 +1396,11 @@ impl MarkdownStudioDialog {
                 }
             });
         }
-        if let Some(range) = self.deferred_selection.take() {
-            install_selection(ctx, id, source, range);
+        if let Some(deferred) = self.deferred_selection.take() {
+            match deferred {
+                DeferredSelection::Focus(range) => install_selection(ctx, id, source, range, true),
+                DeferredSelection::PreserveFocus(range) => install_selection(ctx, id, source, range, false),
+            }
         }
         let _response = ui
             .add_enabled_ui(enabled, |ui| {
@@ -1395,24 +1442,45 @@ impl MarkdownStudioDialog {
         {
             *selection = range;
         }
-        if let Some(analysis) = self.cache.as_ref().and_then(MarkdownPreviewCache::analysis)
-            && !analysis.headings.is_empty()
-        {
-            ui.collapsing("Outline", |ui| {
-                for heading in &analysis.headings {
-                    if ui
-                        .selectable_label(
-                            heading.byte_range.contains(&selection.start),
-                            &heading.title,
-                        )
-                        .clicked()
-                    {
-                        *selection_to_install = Some(heading.byte_range.clone());
+        let Some(stamp) = self.outline_stamp(ui.ctx().viewport_id()) else { return; };
+        let Some(analysis) = self.cache.as_ref().filter(|cache| cache.matches(
+            stamp.revision, source, self.document.path().and_then(Path::parent),
+        )).and_then(MarkdownPreviewCache::analysis).filter(|analysis| !analysis.headings.is_empty()) else { return; };
+        ui.collapsing("Outline", |ui| {
+            let owns_moves = enabled && owns_outline_input(ui);
+            if let Some(action) = self.outline_moves.ui(ui, stamp, &analysis.headings, owns_moves) {
+                *intent = Some(StudioIntent::OutlineMove(action));
+            }
+            let selected = analysis.headings.iter().position(|heading|
+                heading.byte_range.contains(&selection.start));
+            let allow_moves = owns_moves && !self.outline_moves.has_review(stamp);
+            let [up, down] = if allow_moves {
+                sibling_requests(&analysis.headings, selected, stamp).map(|request|
+                    request.filter(|request| self.outline_moves.can_move(*request, source)))
+            } else { [None, None] };
+            if let Some(action) = move_buttons(ui, up, down) {
+                *intent = Some(StudioIntent::OutlineMove(action));
+            }
+            for (index, heading) in analysis.headings.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(f32::from(heading.level.saturating_sub(1)) * 12.0);
+                    let (response, action) = outline_row(
+                        ui, &heading.title, selected == Some(index), stamp, index, allow_moves,
+                        |request| self.outline_moves.can_move(request, source),
+                    );
+                    if owns_moves { self.outline_moves.reveal_moved_row(stamp, heading.byte_range.start, &response); }
+                    if response.clicked() {
                         *selection = heading.byte_range.clone();
+                        if response.clicked_by(egui::PointerButton::Primary) {
+                            *selection_to_install = Some(heading.byte_range.clone());
+                        }
                     }
-                }
-            });
-        }
+                    if let Some(action) = action {
+                        *intent = Some(StudioIntent::OutlineMove(action));
+                    }
+                });
+            }
+        });
     }
 
     fn preview_panel(
@@ -1532,6 +1600,7 @@ impl MarkdownStudioDialog {
         &mut self,
         intent: StudioIntent,
         ctx: &egui::Context,
+        owner_viewport: egui::ViewportId,
     ) -> Option<MarkdownStudioEffect> {
         match intent {
             StudioIntent::New => match self.document.request_new() {
@@ -1619,6 +1688,7 @@ impl MarkdownStudioDialog {
                     Err(error) => self.set_error(error.to_string()),
                 }
             }
+            StudioIntent::OutlineMove(action) => self.complete_outline_move(owner_viewport, action),
             StudioIntent::Undo => match self.document.undo() {
                 Ok(true) => self.cache = None,
                 Ok(false) => {}
@@ -1640,10 +1710,11 @@ impl MarkdownStudioDialog {
                 self.host_epoch = self.host_epoch.wrapping_add(1);
                 self.cache = None;
                 self.selection = 0..0;
-                self.deferred_selection = Some(0..0);
+                self.deferred_selection = Some(DeferredSelection::Focus(0..0));
                 self.message = None;
                 self.open = !closes && self.document.source().is_some();
                 self.active_diagram_origin = None;
+                self.outline_moves.clear();
                 self.pending_diagram_origin = None;
             }
             MarkdownTransitionOutcome::DecisionRequired => self.message = None,
@@ -1948,7 +2019,7 @@ fn apply_prepared(
     Ok(())
 }
 
-fn install_selection(ctx: &egui::Context, id: egui::Id, source: &str, range: Range<usize>) {
+fn install_selection(ctx: &egui::Context, id: egui::Id, source: &str, range: Range<usize>, focus: bool) {
     let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
     state
         .cursor
@@ -1957,7 +2028,7 @@ fn install_selection(ctx: &egui::Context, id: egui::Id, source: &str, range: Ran
             egui::text::CCursor::new(byte_to_char(source, range.end.min(source.len()))),
         )));
     state.store(ctx, id);
-    ctx.memory_mut(|memory| memory.request_focus(id));
+    if focus { ctx.memory_mut(|memory| memory.request_focus(id)); }
 }
 
 fn keyboard_close_requested(ctx: &egui::Context, allowed: bool) -> bool {
@@ -2191,7 +2262,7 @@ mod tests {
         let omega = source.find('Ω').unwrap();
         dialog.selection = omega..omega + 'Ω'.len_utf8();
         let original_selection = dialog.selection.clone();
-        dialog.deferred_selection = Some(original_selection.clone());
+        dialog.deferred_selection = Some(DeferredSelection::Focus(original_selection.clone()));
         let original_revision = dialog.document.revision();
         let original_undo_depth = dialog.document.undo_depth();
         let original_dirty = dialog.document.is_dirty();
@@ -2382,6 +2453,7 @@ mod tests {
         let _ = dialog.apply_intent(
             StudioIntent::Decision(MarkdownTransitionDecision::Cancel),
             &ctx,
+            egui::ViewportId::ROOT,
         );
         assert_eq!(dialog.document.pending_transition(), None);
         assert!(dialog.open);
@@ -2473,7 +2545,7 @@ mod tests {
         let ctx = egui::Context::default();
         frame(&mut dialog, &ctx);
         let editor_id = dialog.test_editor_id.unwrap();
-        install_selection(&ctx, editor_id, source, 1..3);
+        install_selection(&ctx, editor_id, source, 1..3, true);
         frame(&mut dialog, &ctx);
         assert_eq!(dialog.selection, 1..3);
 
@@ -2504,7 +2576,7 @@ mod tests {
         frame(&mut dialog, &ctx);
         frame(&mut dialog, &ctx);
         let editor_id = dialog.test_editor_id.unwrap();
-        install_selection(&ctx, editor_id, source, 1..3);
+        install_selection(&ctx, editor_id, source, 1..3, true);
         frame(&mut dialog, &ctx);
         assert_eq!(dialog.selection, 1..3);
 
@@ -2550,7 +2622,7 @@ mod tests {
             frame_at_size(&mut dialog, &ctx, screen.size(), Vec::new());
         }
         let editor_id = dialog.test_editor_id.unwrap();
-        install_selection(&ctx, editor_id, source, 1..3);
+        install_selection(&ctx, editor_id, source, 1..3, true);
         frame_at_size(&mut dialog, &ctx, screen.size(), Vec::new());
         assert_eq!(dialog.selection, 1..3);
 
@@ -2592,6 +2664,73 @@ mod tests {
         let formatted = dialog.document.source().unwrap();
         assert_eq!(formatted, "A**é**B");
         assert_eq!(&formatted[dialog.selection.clone()], "**é**");
+    }
+
+
+    #[test]
+    fn outline_move_studio_retains_one_undo_and_rejects_a_changed_draft() {
+        use super::super::markdown_outline::{MoveRequest, OutlineAction};
+        use crate::notes_markdown::section_move::SectionPlacement;
+        let original = "# A\n## Child\nfirst\n# B\nsecond";
+        let expected = "# B\nsecond\n# A\n## Child\nfirst";
+        let ctx = egui::Context::default();
+        let mut dialog = dialog_with_source(original);
+        frame(&mut dialog, &ctx);
+        frame(&mut dialog, &ctx);
+
+        let stage = |dialog: &mut MarkdownStudioDialog, source: Option<String>| {
+            let stamp = dialog.outline_stamp(egui::ViewportId::ROOT).unwrap();
+            let action = OutlineAction::Prepare(MoveRequest {
+                stamp, selected: 0, destination: 2, placement: SectionPlacement::After,
+            });
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))),
+                focused: true,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let pass = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+                dialog.pending_effects = Some(RootEffects {
+                    root_pass: pass,
+                    host: dialog.host_state.identity(),
+                    owner_pass: None,
+                    owner_viewport_id: egui::ViewportId::ROOT,
+                    owner_pass_accepted: true,
+                    owner_context: ui.ctx().clone(),
+                    callback_observed: true,
+                    callback_class: egui::ViewportClass::Root,
+                    native_viewport: None,
+                    os_close_requested: false,
+                    focus_host: false,
+                    embedded_root_layer: None,
+                    embedded_root_focused_id: None,
+                    source: source.clone(),
+                    selection: None,
+                    selection_to_install: None,
+                    focus_editor_after_open: false,
+                    view_mode: None,
+                    intent: Some(StudioIntent::OutlineMove(action)),
+                    host_request: None,
+                });
+            });
+            dialog.on_ui_frame_complete(&ctx);
+            output.drop_without_applying_deltas();
+        };
+        let depth = dialog.document.undo_depth();
+        stage(&mut dialog, None);
+        assert_eq!(dialog.document.source(), Some(expected));
+        assert_eq!(dialog.document.undo_depth(), depth + 1);
+        assert!(expected[dialog.selection.start..].starts_with("# A"));
+        assert!(matches!(dialog.deferred_selection.as_ref(), Some(DeferredSelection::PreserveFocus(range)) if *range == dialog.selection));
+        assert!(dialog.document.undo().unwrap());
+        assert_eq!(dialog.document.source(), Some(original));
+
+        let edited = format!("{original} draft");
+        stage(&mut dialog, Some(edited.clone()));
+        assert_eq!(dialog.document.source(), Some(edited.as_str()));
+        assert_eq!(dialog.document.undo_depth(), depth + 1);
+        assert!(dialog.document.undo().unwrap());
+        assert_eq!(dialog.document.source(), Some(original));
     }
 
     #[test]

@@ -307,6 +307,12 @@ checkboxes, headings can appear in the outline sidebar, and sections can be
 collapsed while reading or editing longer notes. Callouts use blockquote-style
 markers such as `> [!NOTE]` or `> [!WARNING]`.
 
+In Notes or Markdown Studio, use the **Outline** to move a heading and its
+subsections together. Drag to the insertion line beside another sibling, or
+select a heading and use **Move up** or **Move down**. Review any changes to
+heading links before confirming. The move stays in the current draft and one
+Undo restores the previous order.
+
 Within an open note, use **Ctrl+F** or the toolbar's **Find** button for literal,
 case-insensitive search of its current Markdown, including unsaved edits.
 **Enter** advances and **Shift+Enter** goes back, wrapping through the matches;
