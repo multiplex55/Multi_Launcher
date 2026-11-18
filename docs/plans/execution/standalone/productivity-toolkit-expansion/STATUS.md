@@ -27,7 +27,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-B3A | complete |
 | M4-B3B | complete |
 | M4-C1A | complete |
-| M4-C1B, M4-C2 | pending |
+| M4-C1B | complete |
+| M4-C1C, M4-C2 | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -184,3 +185,10 @@ Both focused Nextest runs used cargo nextest run --config-file target/productivi
 M4-B was pushed at 21d1ab7d893dbfc36e5ee1bdff7c9fc4da3bea55. The additive distribution definition owns one typed vector reference and retains ordinary chart selections. Its rename/undo scope works even while dormant. ECDF data is independent of whether a histogram width would be feasible. Under this checkpoint, the new distribution kinds have no controls and their renderer is pending; they are not yet delivered features.
 
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::distribution::tests::) | test(calculation_pad::persistence::tests::distribution_definition_) | test(calculation_pad::persistence::tests::chart_options_roundtrip_) | test(calculation_pad::session::tests::chart_distribution_source_)' passed 8 of 8. Independent read-only review found no substantive compatibility or ownership defect. Diff whitespace verification passed.
+
+
+## M4-C1B cumulative distribution scene
+
+M4-C1A was pushed at 5b8ef82e544697c35495c4ab588cddd80b6dd425. The cumulative distribution scene uses the real current vector, groups duplicate thresholds, renders the zero and one plateaus and exact empirical jumps, and shares raster output and evaluation freshness with Charts. Plot hits expose group and cumulative counts. Histogram rendering and controls remain subsequent slices. Style admission for a distribution source separate from the ordinary source still needs integration in controls.
+
+cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::chart::tests::cumulative_scene_) | test(gui::calculation_chart_dialog::tests::cumulative_adapter_) | test(calculation_pad::chart::tests::chart_options_) | test(gui::calculation_chart_dialog::tests::chart_named_)' passed 9 of 9. Independent review found no substantive cumulative scene, evaluated data or copy issue. Diff whitespace verification passed.

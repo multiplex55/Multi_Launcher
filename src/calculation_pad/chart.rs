@@ -234,6 +234,22 @@ fn record_collision(seen: &mut HashMap<u64, BigRational>, value: &Numeric) -> bo
 }
 
 impl ChartDataset {
+    pub(crate) fn from_cumulative(label: &str, values: &[f64]) -> Result<Self, String> {
+        let data = distribution::DistributionData::cumulative(values)?;
+        let x = data.ecdf.iter().map(|step| step.threshold).collect::<Vec<_>>();
+        let y = data.ecdf.iter().map(|step| step.cumulative_rate(data.total)).collect::<Vec<_>>();
+        let mut dataset = Self::from_vectors(Some(&x), &[(label, &y)])?;
+        dataset.x_label = bounded_label(label);
+        dataset.y_label = "Cumulative proportion".into();
+        for (point, step) in dataset.series[0].points.iter_mut().zip(&data.ecdf) {
+            if let Some(point) = point {
+                point.raw_x = step.threshold.to_string();
+                point.raw_y = format!("{} of {} ({} at threshold)", step.cumulative_count, data.total, step.count);
+            }
+        }
+        Ok(dataset)
+    }
+
     /// A missing X vector uses indexes 0 through N−1. Every series shares X.
     pub(crate) fn from_vectors(
         x: Option<&[f64]>,
@@ -484,6 +500,30 @@ mod tests {
             min: options::FiniteValue::try_from(min).unwrap(),
             max: options::FiniteValue::try_from(max).unwrap(),
         }
+    }
+
+    #[test]
+    fn cumulative_scene_renders_grouped_steps_and_log_constraints() {
+        use distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        let mut definition = chart_definition_for(ChartKind::Cumulative);
+        definition.distribution = Some(DistributionDefinition { vector: ChartVectorReference::Named { name: "values".into() }, bins: DistributionBins::Count { count: 1 }, scale: DistributionScale::Count });
+        let dataset = ChartDataset::from_cumulative("values", &[1.0, 2.0, 2.0, 4.0]).unwrap();
+        let scene = dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().unwrap();
+        assert_eq!(scene.hits.len(), 3);
+        assert!(scene.hits[1].raw_y.contains("3 of 4 (2 at threshold)"));
+        let lines = scene.primitives.iter().filter_map(|p| match p { ScenePrimitive::Line { start, end, color, .. } if *color == COLORS[0] => Some((start, end)), _ => None }).collect::<Vec<_>>();
+        assert!(lines.iter().any(|(a, b)| a[0] == b[0] && a[1] != b[1]));
+        assert!(lines.iter().any(|(a, b)| a[1] == b[1] && a[0] != b[0]));
+        assert!(scene.rasterize().is_ok());
+        definition.options.y.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap_err().contains("zero baseline"));
+        definition.options.y.scale = options::AxisScale::Linear;
+        definition.options.x.scale = options::AxisScale::Log10;
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).is_ok());
+        let invalid = ChartDataset::from_cumulative("values", &[0.0, 1.0]).unwrap();
+        assert!(invalid.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap_err().contains("positive"));
+        let empty = ChartDataset::from_cumulative("values", &[]).unwrap();
+        assert!(empty.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().is_none());
     }
 
     #[test]
@@ -1345,7 +1385,7 @@ impl ChartDataset {
     ) -> Result<Option<ChartScene>, String> {
         definition.options.validate(&definition.source)?;
         definition.validate_distribution()?;
-        if definition.options.is_default() {
+        if definition.options.is_default() && !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
             return self.scene(definition.kind, view, width, height);
         }
         self.scene_inner(definition.kind, Some(definition), resolved, view, width, height)
@@ -1360,8 +1400,11 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
-        if matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) {
+        if kind == ChartKind::Histogram {
             return Err("Distribution chart rendering is unavailable.".into());
+        }
+        if kind == ChartKind::Cumulative && definition.is_none() {
+            return Err("A cumulative chart requires a distribution definition.".into());
         }
         validate_dimensions(width, height)?;
         let options = definition.map(|definition| &definition.options);
@@ -1445,20 +1488,20 @@ impl ChartDataset {
         let plot_width = bounds[2] - bounds[0];
         let bar_width = (plot_width / expected.max(1) as f32 * 0.75 / visible.len() as f32).min(32.0);
         let default_axis = options::AxisOptions::default();
-        let custom_axes = options.filter(|options| options.x != default_axis || options.y != default_axis || options.grid || !references.is_empty());
+        let custom_axes = options.filter(|options| kind == ChartKind::Cumulative || options.x != default_axis || options.y != default_axis || options.grid || !references.is_empty());
         let inset = if kind == ChartKind::Bar && custom_axes.is_none_or(|options| matches!(options.x.bounds, options::AxisBounds::Auto)) {
             f64::from(bar_width * visible.len() as f32 / (2.0 * plot_width))
         } else {
             0.0
         };
         let axes = custom_axes.map(|options| -> Result<PlotAxes, &'static str> {
-            if kind == ChartKind::Bar && options.y.scale == options::AxisScale::Log10 {
-                return Err("Bar charts require a linear Y axis for the zero baseline.");
+            if matches!(kind, ChartKind::Bar | ChartKind::Cumulative) && options.y.scale == options::AxisScale::Log10 {
+                return Err("This chart requires a linear Y axis for the zero baseline.");
             }
             let x = AxisTransform::new(&options.x, points.iter().map(|point| point.x).chain(references.iter().filter(|(axis, _, _)| *axis == 0).map(|(_, value, _)| *value)))?;
             let y = AxisTransform::new(
                 &options.y,
-                points.iter().map(|point| point.y).chain((kind == ChartKind::Bar).then_some(0.0)).chain(references.iter().filter(|(axis, _, _)| *axis == 1).map(|(_, value, _)| *value)),
+                points.iter().map(|point| point.y).chain(matches!(kind, ChartKind::Bar | ChartKind::Cumulative).then_some(0.0)).chain((kind == ChartKind::Cumulative).then_some(1.0)).chain(references.iter().filter(|(axis, _, _)| *axis == 1).map(|(_, value, _)| *value)),
             )?;
             Ok(PlotAxes::new([x, y], checked, inset))
         }).transpose()?;
@@ -1672,10 +1715,12 @@ impl ChartDataset {
             .filter(|(_, series)| series.visible)
             .enumerate()
         {
-            let key = definition.and_then(|definition| match &definition.source {
+            let key = definition.and_then(|definition| if kind == ChartKind::Cumulative {
+                definition.distribution.as_ref().map(|distribution| options::SeriesKey::Vector(distribution.vector.clone()))
+            } else { match &definition.source {
                 ChartSource::Vectors { y, .. } => y.get(series_index).cloned().map(options::SeriesKey::Vector),
                 ChartSource::Sensitivity { outputs } => outputs.get(series_index).cloned().map(options::SeriesKey::Sensitivity),
-            });
+            }});
             let style = options.and_then(|options| options.styles.iter().find(|style| Some(&style.key) == key.as_ref()));
             let color = style.map_or(COLORS[series_index % COLORS.len()], |style| style.color);
             let line_style = style.map_or(options::LineStyle::Solid, |style| style.line);
@@ -1695,7 +1740,27 @@ impl ChartDataset {
                 }
                 let mut hit_position = position;
                 match kind {
-                    ChartKind::Histogram | ChartKind::Cumulative => unreachable!("distribution kinds are rejected before rendering"),
+                    ChartKind::Histogram => unreachable!("histograms are rejected before rendering"),
+                    ChartKind::Cumulative => {
+                        let axes = axes.ok_or("Cumulative axes are unavailable.")?;
+                        let x = axes.position(0, point.x);
+                        let y = axes.position(1, point.y);
+                        let (old_x, old_y) = previous.map_or((point.x, 0.0), |(_, raw): ([f32; 2], [f64; 2])| (raw[0], raw[1]));
+                        if previous.is_none() {
+                            let baseline = axes.position(1, 0.0);
+                            if (0.0..=1.0).contains(&baseline) && x >= 0.0 {
+                                styled_line(&mut primitives, pixels([0.0, baseline]), pixels([x.min(1.0), baseline]), color, thickness, line_style, &mut dash_phase)?;
+                            }
+                        } else if let Some((start, end)) = axes.clip_segment([old_x, old_y], [point.x, old_y], &mut exact_crossings)? {
+                            styled_line(&mut primitives, pixels(start), pixels(end), color, thickness, line_style, &mut dash_phase)?;
+                        }
+                        if let Some((start, end)) = axes.clip_segment([point.x, old_y], [point.x, point.y], &mut exact_crossings)? {
+                            styled_line(&mut primitives, pixels(start), pixels(end), color, thickness, line_style, &mut dash_phase)?;
+                        }
+                        if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) && marker != options::MarkerStyle::Auto {
+                            styled_marker(&mut primitives, position, 3.0, bounds, color, thickness, marker);
+                        }
+                    }
                     ChartKind::Line => {
                         if let Some((before, raw)) = previous {
                             let clipped = if let Some(axes) = axes {
@@ -1769,6 +1834,13 @@ impl ChartDataset {
                     });
                 }
                 previous = Some((position, [point.x, point.y]));
+            }
+            if kind == ChartKind::Cumulative && let (Some(axes), Some((_, raw))) = (axes, previous) {
+                let x = axes.position(0, raw[0]);
+                let y = axes.position(1, raw[1]);
+                if x <= 1.0 && (0.0..=1.0).contains(&y) {
+                    styled_line(&mut primitives, pixels([x.max(0.0), y]), pixels([1.0, y]), color, thickness, line_style, &mut dash_phase)?;
+                }
             }
             let slot_width = (width as f32 - 16.0) / legend_columns as f32;
             if legend != options::LegendPlacement::Hidden { primitives.push(ScenePrimitive::Text {

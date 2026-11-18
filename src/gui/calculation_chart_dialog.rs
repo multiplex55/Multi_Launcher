@@ -169,7 +169,9 @@ impl CalculationChartDialog {
                 }
                 cache.as_ref().map(|cache| Arc::clone(&cache.dataset)).unwrap()
             };
-            ui.horizontal_wrapped(|ui| for (index, series) in dataset.series.iter().enumerate() { let mut visible = series.visible; if ui.checkbox(&mut visible, &series.label).changed() && active { if visible { definition.hidden.retain(|i| *i != index); } else if !definition.hidden.contains(&index) { definition.hidden.push(index); } actions.definition = Some(definition.clone()); } });
+            if !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
+                ui.horizontal_wrapped(|ui| for (index, series) in dataset.series.iter().enumerate() { let mut visible = series.visible; if ui.checkbox(&mut visible, &series.label).changed() && active { if visible { definition.hidden.retain(|i| *i != index); } else if !definition.hidden.contains(&index) { definition.hidden.push(index); } actions.definition = Some(definition.clone()); } });
+            }
             if definition.kind == ChartKind::Bar {
                 egui::CollapsingHeader::new("Bar labels").show(ui, |ui| {
                     egui::ScrollArea::vertical().max_height(120.0).id_salt("chart-bar-labels").show_rows(ui, 24.0, dataset.bar_labels.len(), |ui, range| {
@@ -226,6 +228,9 @@ impl CalculationChartDialog {
 
 pub(super) fn chart_stamp(runtime: &ChartRuntime, definition: &ChartDefinition) -> Option<ChartStamp> {
     let evaluation = || runtime.evaluation.as_ref().filter(|value| Some(value.basis) == runtime.basis);
+    if matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
+        return evaluation().map(|value| ChartStamp::Evaluation(value.basis));
+    }
     match &definition.source {
         ChartSource::Vectors { .. } => evaluation().map(|value| ChartStamp::Evaluation(value.basis)),
         ChartSource::Sensitivity { .. } => {
@@ -263,7 +268,17 @@ pub(super) fn actions_current(actions: &ChartActions, runtime: &ChartRuntime) ->
 pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -> Result<(ChartStamp, ChartDataset), String> {
     let stamp = chart_stamp(runtime, definition).ok_or("Chart data is unavailable or outdated.")?;
     resolve_references(runtime, definition)?;
-    let mut dataset = match &definition.source {
+    let mut dataset = if matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
+        definition.validate_distribution()?;
+        let distribution = definition.distribution.as_ref().ok_or("Choose a distribution vector.")?;
+        let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current distribution results are unavailable or outdated.")?;
+        let (label, outcome) = resolve_source(evaluation, &distribution.vector)?;
+        let LineOutcome::Value(crate::calculation_pad::CalculationValue::Vector(vector)) = outcome else {
+            return Err(format!("{} is not a numeric vector.", reference_label(&distribution.vector)));
+        };
+        if definition.kind == ChartKind::Histogram { return Err("Histogram chart rendering is unavailable.".into()); }
+        ChartDataset::from_cumulative(label, vector.components())?
+    } else { match &definition.source {
         ChartSource::Vectors { x, y } => {
             let evaluation = runtime.evaluation.as_ref().filter(|evaluation| Some(evaluation.basis) == runtime.basis).ok_or("Current vector results are unavailable or outdated.")?;
             let x = x.as_ref().map(|reference| resolve_vector(evaluation, reference)).transpose().map_err(|error| format!("X vector: {error}"))?.map(|(_, values)| values);
@@ -275,11 +290,13 @@ pub(super) fn chart_data(runtime: &ChartRuntime, definition: &ChartDefinition) -
             let columns = outputs.iter().map(|name| table.basis.definition.outputs.iter().position(|output| output == name)).collect::<Option<Vec<_>>>().ok_or("A selected sensitivity output is unavailable.")?;
             ChartDataset::from_sensitivity(table, &columns)?
         }
-    };
+    }};
     if !definition.x_label.is_empty() { dataset.x_label = definition.x_label.clone(); }
     if !definition.y_label.is_empty() { dataset.y_label = definition.y_label.clone(); }
-    for (generated, saved) in dataset.bar_labels.iter_mut().zip(&definition.bar_labels) { generated.clone_from(saved); }
-    for (index, series) in dataset.series.iter_mut().enumerate() { series.visible = !definition.hidden.contains(&index); }
+    if !matches!(definition.kind, ChartKind::Histogram | ChartKind::Cumulative) {
+        for (generated, saved) in dataset.bar_labels.iter_mut().zip(&definition.bar_labels) { generated.clone_from(saved); }
+        for (index, series) in dataset.series.iter_mut().enumerate() { series.visible = !definition.hidden.contains(&index); }
+    }
     Ok((stamp, dataset))
 }
 
@@ -311,6 +328,12 @@ fn vector_choices(evaluation: &SessionEvaluation) -> Vec<(ChartVectorReference, 
 }
 
 fn resolve_vector<'a>(evaluation: &'a SessionEvaluation, reference: &'a ChartVectorReference) -> Result<(&'a str, &'a [f64]), String> {
+    let (label, outcome) = resolve_source(evaluation, reference)?;
+    let values = vector_values(outcome).ok_or_else(|| format!("{} is not a vector or sequence.", reference_label(reference)))?;
+    Ok((label, values))
+}
+
+fn resolve_source<'a>(evaluation: &'a SessionEvaluation, reference: &'a ChartVectorReference) -> Result<(&'a str, &'a LineOutcome), String> {
     let (label, outcome) = match reference {
         ChartVectorReference::Named { name } => {
             let binding = evaluation.final_bindings.get(name).ok_or_else(|| format!("named source '{name}' is unavailable."))?;
@@ -324,8 +347,7 @@ fn resolve_vector<'a>(evaluation: &'a SessionEvaluation, reference: &'a ChartVec
     if matches!(outcome, LineOutcome::Error(_)) {
         return Err(format!("{} failed.", reference_label(reference)));
     }
-    let values = vector_values(outcome).ok_or_else(|| format!("{} is not a vector or sequence.", reference_label(reference)))?;
-    Ok((label, values))
+    Ok((label, outcome))
 }
 
 fn series_keys(source: &ChartSource) -> Vec<String> {
@@ -347,6 +369,28 @@ fn paint_scene(ui: &egui::Ui, origin: egui::Pos2, scene: &ChartScene) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cumulative_adapter_uses_current_vector_even_with_dormant_sensitivity() {
+        use crate::calculation_pad::{DistributionBins, DistributionDefinition, DistributionScale};
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::platform::app_data::AppDataRoot::from_path(directory.path().to_path_buf());
+        let mut session = crate::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("samples = [1, 2, 2]\nother = 3").unwrap(); session.evaluation();
+        let mut definition = ChartDefinition { source: ChartSource::Sensitivity { outputs: vec!["other".into()] }, kind: ChartKind::Cumulative, x_label: String::new(), y_label: String::new(), hidden: vec![0], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: ChartVectorReference::Named { name: "samples".into() }, bins: DistributionBins::Width { width: crate::calculation_pad::ChartFiniteValue::try_from(0.001).unwrap() }, scale: DistributionScale::Count }), options: Default::default() };
+        let mut runtime = ChartRuntime { identity: session.current_id().zip(session.document_incarnation()), evaluation: session.shared_evaluation(), table: None, definition: Some(definition.clone()), basis: session.evaluation_basis(), pad_host: None, pinned: false };
+        assert!(matches!(chart_stamp(&runtime, &definition), Some(ChartStamp::Evaluation(_))));
+        let dataset = chart_data(&runtime, &definition).unwrap().1;
+        assert_eq!(dataset.series[0].points.len(), 2);
+        assert!(dataset.series[0].visible);
+        assert!(dataset.scene_for_definition(&definition, ChartView::default(), 640, 400).unwrap().is_some());
+        definition.distribution.as_mut().unwrap().vector = ChartVectorReference::Named { name: "other".into() };
+        assert!(chart_data(&runtime, &definition).unwrap_err().contains("not a numeric vector"));
+        definition.distribution.as_mut().unwrap().vector = ChartVectorReference::Named { name: "samples".into() };
+        session.replace_source("samples = [2, 3]\nother = 3").unwrap(); runtime.basis = session.evaluation_basis();
+        assert!(chart_stamp(&runtime, &definition).is_none());
+        assert!(chart_data(&runtime, &definition).is_err());
+    }
 
     #[test]
     fn chart_named_reference_uses_current_evaluation_and_sensitivity_stamp() {
