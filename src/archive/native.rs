@@ -3093,6 +3093,15 @@ pub(crate) mod print_publication {
         io::Error::new(error.kind, format!("{error:?}"))
     }
     pub(crate) struct Directory(Arc<HeldDirectory>);
+    pub(crate) struct ReadFile {
+        file: File,
+        _parent: Arc<HeldDirectory>,
+    }
+    impl io::Read for ReadFile {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.file.read(buffer)
+        }
+    }
     pub(crate) struct Leaf {
         file: File,
         identity: NativeFileIdentity,
@@ -3139,6 +3148,71 @@ pub(crate) mod print_publication {
                 }
                 Ok(Self(current))
             }
+        }
+        /// Open a plain asset relative to the held root, retaining every parent
+        /// handle until the caller finishes reading.
+        pub(crate) fn read_relative_file(&self, path: &Path) -> io::Result<ReadFile> {
+            let mut components = path.components().peekable();
+            let mut parent = Arc::clone(&self.0);
+            while let Some(component) = components.next() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid asset path",
+                    ));
+                };
+                if components.peek().is_some() {
+                    parent = parent.open_child(name, false).map_err(error)?;
+                    continue;
+                }
+                validate_single_component(name, "print asset leaf").map_err(error)?;
+                let (file, _) = open_relative(
+                    &parent,
+                    name,
+                    FILE_READ_ATTRIBUTES
+                        | windows::Win32::Storage::FileSystem::FILE_READ_DATA
+                        | SYNCHRONIZE,
+                    FILE_SHARE_READ,
+                    FILE_OPEN,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    FILE_ATTRIBUTE_NORMAL,
+                    "open print asset",
+                    || Ok(()),
+                )
+                .map_err(error)?;
+                let metadata = file.metadata()?;
+                let attributes = metadata.file_attributes();
+                if !metadata.is_file()
+                    || attributes
+                        & (FILE_ATTRIBUTE_REPARSE_POINT.0
+                            | FILE_ATTRIBUTE_DIRECTORY.0
+                            | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_OFFLINE.0)
+                        != 0
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "print asset is not an available ordinary file",
+                    ));
+                }
+                if native_file_identity(&file)?.volume_serial_number()
+                    != parent.identity.volume_serial_number()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "print asset changed volume",
+                    ));
+                }
+                return Ok(ReadFile {
+                    file,
+                    _parent: parent,
+                });
+            }
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty asset path",
+            ))
         }
         pub(crate) fn identity(&self) -> io::Result<NativeFileIdentity> {
             self.0.verify_identity().map_err(error)

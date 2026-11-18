@@ -24,6 +24,18 @@ pub enum PrintError {
     Limit(&'static str),
     Unplaceable(&'static str),
 }
+impl std::fmt::Display for PrintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Preview cancelled."),
+            Self::InvalidSettings(message) => write!(f, "Invalid print settings: {message}"),
+            Self::InvalidMarkdown => f.write_str("Unable to parse Markdown for printing."),
+            Self::Limit(message) => write!(f, "Print limit exceeded: {message}"),
+            Self::Unplaceable(message) => write!(f, "Unable to fit print content: {message}"),
+        }
+    }
+}
+impl std::error::Error for PrintError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrintWarning {
     pub message: String,

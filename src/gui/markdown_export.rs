@@ -56,7 +56,7 @@ struct OwnedRaster {
 }
 
 #[derive(Default)]
-struct NoteRasterAssets {
+pub(super) struct NoteRasterAssets {
     by_destination: HashMap<String, usize>,
     width_by_destination: HashMap<String, Option<f32>>,
     files: Vec<OwnedRaster>,
@@ -78,6 +78,37 @@ impl NoteRasterAssets {
         per_image_read_limit: usize,
         aggregate_read_limit: usize,
     ) -> Self {
+        Self::load_cancellable(
+            source,
+            assets_root,
+            per_image_read_limit,
+            aggregate_read_limit,
+            false,
+            || false,
+        )
+    }
+    pub(super) fn load_for_print(
+        source: &str,
+        assets_root: &Path,
+        cancel: impl FnMut() -> bool,
+    ) -> Self {
+        Self::load_cancellable(
+            source,
+            assets_root,
+            MAX_LOCAL_RASTER_BYTES,
+            MAX_LOCAL_RASTER_AGGREGATE_BYTES,
+            true,
+            cancel,
+        )
+    }
+    fn load_cancellable(
+        source: &str,
+        assets_root: &Path,
+        per_image_read_limit: usize,
+        aggregate_read_limit: usize,
+        strict: bool,
+        mut cancel: impl FnMut() -> bool,
+    ) -> Self {
         let options = Options::ENABLE_TABLES
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_STRIKETHROUGH
@@ -86,6 +117,9 @@ impl NoteRasterAssets {
         let mut seen = HashSet::new();
         let mut image_count = 0usize;
         for (event, _) in Parser::new_ext(source, options).into_offset_iter() {
+            if cancel() {
+                return Self::default();
+            }
             if let Event::Start(Tag::Image { dest_url, .. }) = event {
                 image_count = image_count.saturating_add(1);
                 if image_count > MAX_MARKDOWN_HTML_IMAGES {
@@ -100,18 +134,34 @@ impl NoteRasterAssets {
         if destinations.is_empty() {
             return Self::default();
         }
-        let Ok(root) = fs::canonicalize(assets_root) else {
-            return Self::default();
+        let strict_root = if strict {
+            match super::markdown_print::PrintAssetRoot::open(assets_root) {
+                Ok(root) => Some(root),
+                Err(_) => return Self::default(),
+            }
+        } else {
+            None
         };
-        if !root.is_dir() {
-            return Self::default();
-        }
+        let root = if strict {
+            assets_root.to_owned()
+        } else {
+            let Ok(root) = fs::canonicalize(assets_root) else {
+                return Self::default();
+            };
+            if !root.is_dir() {
+                return Self::default();
+            }
+            root
+        };
 
         let mut result = Self::default();
         let mut paths = HashMap::<PathBuf, usize>::new();
         let mut rejected_paths = HashSet::<PathBuf>::new();
         let mut aggregate_read_bytes = 0usize;
         for destination in destinations {
+            if cancel() {
+                return Self::default();
+            }
             let parsed = parse_note_image_target(&destination, assets_root);
             result
                 .width_by_destination
@@ -120,8 +170,13 @@ impl NoteRasterAssets {
                 continue;
             };
             let candidate = root.join(relative);
-            let Ok(path) = fs::canonicalize(candidate) else {
-                continue;
+            let path = if strict {
+                candidate
+            } else {
+                let Ok(path) = fs::canonicalize(candidate) else {
+                    continue;
+                };
+                path
             };
             if !path.starts_with(&root) {
                 continue;
@@ -133,11 +188,13 @@ impl NoteRasterAssets {
             if rejected_paths.contains(&path) {
                 continue;
             }
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if !metadata.file_type().is_file() {
-                continue;
+            if !strict {
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !metadata.file_type().is_file() {
+                    continue;
+                }
             }
             let remaining = aggregate_read_limit.saturating_sub(aggregate_read_bytes);
             let read_limit = per_image_read_limit.saturating_add(1).min(remaining);
@@ -145,13 +202,20 @@ impl NoteRasterAssets {
                 rejected_paths.insert(path);
                 continue;
             }
-            let Ok(file) = File::open(&path) else {
-                continue;
+            let (bytes, attempted, complete) = if let Some(root) = &strict_root {
+                let read = root.read(relative, read_limit, &mut cancel);
+                (read.bytes, read.attempted, read.complete)
+            } else {
+                let Ok(file) = File::open(&path) else {
+                    continue;
+                };
+                let mut bytes = Vec::new();
+                let result = file.take(read_limit as u64).read_to_end(&mut bytes);
+                let len = bytes.len();
+                (bytes, len, result.is_ok())
             };
-            let mut bytes = Vec::new();
-            let read_result = file.take(read_limit as u64).read_to_end(&mut bytes);
-            aggregate_read_bytes = aggregate_read_bytes.saturating_add(bytes.len());
-            if read_result.is_err()
+            aggregate_read_bytes = aggregate_read_bytes.saturating_add(attempted);
+            if !complete
                 || bytes.is_empty()
                 || bytes.len() > per_image_read_limit
                 // Reaching the per-image or remaining aggregate cap leaves

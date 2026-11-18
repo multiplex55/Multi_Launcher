@@ -20,6 +20,7 @@ use eframe::egui;
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -2072,27 +2073,67 @@ struct OwnedAsset {
     format: crate::notes_markdown::LocalRasterFormat,
 }
 
-struct LocalAssets(Vec<OwnedAsset>);
+pub(super) struct LocalAssets(Vec<OwnedAsset>);
 
 impl LocalAssets {
     fn new(base: Option<&Path>, source: &str) -> Self {
+        Self::load_cancellable(base, source, false, || false)
+    }
+    pub(super) fn load_for_print(
+        base: Option<&Path>,
+        source: &str,
+        cancel: impl FnMut() -> bool,
+    ) -> Self {
+        Self::load_cancellable(base, source, true, cancel)
+    }
+    fn load_cancellable(
+        base: Option<&Path>,
+        source: &str,
+        strict: bool,
+        mut cancel: impl FnMut() -> bool,
+    ) -> Self {
         let Some(base) = base else {
             return Self(Vec::new());
         };
-        let mut destinations = HashSet::new();
+        let mut destinations = Vec::new();
+        let mut seen = HashSet::new();
         for (event, _) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
+            if cancel() {
+                return Self(Vec::new());
+            }
             if let Event::Start(Tag::Image { dest_url, .. }) = event
-                && destinations.len() < MAX_LOCAL_ASSET_COUNT
+                && seen.len() < MAX_LOCAL_ASSET_COUNT
+                && seen.insert(dest_url.to_string())
+                && strict
             {
-                destinations.insert(dest_url.to_string());
+                destinations.push(dest_url.to_string());
             }
         }
-        let Ok(base) = fs::canonicalize(base) else {
-            return Self(Vec::new());
+        if !strict {
+            destinations = seen.into_iter().collect();
+        }
+        let strict_root = if strict {
+            match super::markdown_print::PrintAssetRoot::open(base) {
+                Ok(root) => Some(root),
+                Err(_) => return Self(Vec::new()),
+            }
+        } else {
+            None
+        };
+        let base = if strict {
+            base.to_owned()
+        } else {
+            let Ok(base) = fs::canonicalize(base) else {
+                return Self(Vec::new());
+            };
+            base
         };
         let mut total = 0usize;
         let mut assets = Vec::new();
         for destination in destinations {
+            if cancel() {
+                return Self(Vec::new());
+            }
             if destination.contains(':') || destination.starts_with(['/', '\\']) {
                 continue;
             }
@@ -2103,22 +2144,53 @@ impl LocalAssets {
             {
                 continue;
             }
-            let Ok(path) = fs::canonicalize(base.join(relative)) else {
-                continue;
+            let candidate = base.join(relative);
+            let path = if strict {
+                candidate
+            } else {
+                let Ok(path) = fs::canonicalize(candidate) else {
+                    continue;
+                };
+                path
             };
             if !path.starts_with(&base) {
                 continue;
             }
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if !metadata.file_type().is_file()
-                || metadata.len() > crate::notes_markdown::MAX_LOCAL_RASTER_BYTES as u64
-            {
+            if !strict {
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !metadata.file_type().is_file()
+                    || metadata.len() > crate::notes_markdown::MAX_LOCAL_RASTER_BYTES as u64
+                {
+                    continue;
+                }
+            }
+            let remaining = MAX_LOCAL_ASSET_AGGREGATE_BYTES.saturating_sub(total);
+            if remaining == 0 {
                 continue;
             }
-            let Ok(bytes) = fs::read(&path) else { continue };
-            if total.saturating_add(bytes.len()) > MAX_LOCAL_ASSET_AGGREGATE_BYTES {
+            let limit = crate::notes_markdown::MAX_LOCAL_RASTER_BYTES.min(remaining) + 1;
+            let (bytes, attempted, complete) = if let Some(root) = &strict_root {
+                let read = root.read(relative, limit, &mut cancel);
+                (read.bytes, read.attempted, read.complete)
+            } else {
+                let Ok(file) = fs::File::open(&path) else {
+                    continue;
+                };
+                let mut bytes = Vec::new();
+                let result = file.take(limit as u64).read_to_end(&mut bytes);
+                let len = bytes.len();
+                (bytes, len, result.is_ok())
+            };
+            if strict {
+                total = total.saturating_add(attempted.min(remaining));
+            }
+            if !complete
+                || bytes.is_empty()
+                || bytes.len() > remaining
+                || bytes.len() > crate::notes_markdown::MAX_LOCAL_RASTER_BYTES
+            {
                 continue;
             }
             let format = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -2132,7 +2204,9 @@ impl LocalAssets {
             } else {
                 continue;
             };
-            total += bytes.len();
+            if !strict {
+                total = total.saturating_add(bytes.len());
+            }
             assets.push(OwnedAsset {
                 destination,
                 bytes,
@@ -2790,6 +2864,19 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(error, message)| { *error && message.contains("source changed") })
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn markdown_studio_print_assets_charge_attempts_without_changing_legacy_accounting() {
+        use crate::notes_markdown::LocalRasterResolver;
+        let dir=tempfile::tempdir().unwrap();
+        for index in 0..4 { std::fs::write(dir.path().join(format!("bad{index}.png")),vec![42u8;1024*1024]).unwrap(); }
+        let image=image_025::DynamicImage::ImageRgba8(image_025::ImageBuffer::from_pixel(2,2,image_025::Rgba([1,2,3,255])));
+        let mut png=std::io::Cursor::new(Vec::new()); image.write_to(&mut png,image_025::ImageFormat::Png).unwrap(); std::fs::write(dir.path().join("good.png"),png.into_inner()).unwrap();
+        let source=(0..4).map(|i|format!("![bad](bad{i}.png)\n\n")).collect::<String>()+"![good](good.png)";
+        let legacy=LocalAssets::new(Some(dir.path()),&source); assert!(legacy.resolve("good.png").is_some());
+        let strict=LocalAssets::load_for_print(Some(dir.path()),&source,||false); assert!(strict.resolve("good.png").is_none());
     }
 
     #[test]

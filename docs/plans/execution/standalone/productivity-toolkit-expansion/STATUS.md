@@ -46,7 +46,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-A2A | complete |
 | M7-A2B | complete |
 | M7-B1A | complete |
-| M7-B1B, M7-B2 | pending |
+| M7-B1B1A | complete |
+| M7-B1B1B, M7-B1B2, M7-B2 | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -353,3 +354,10 @@ Independent reviews found and closed source sharing, ACL-before-bytes and pre-op
 M7-A2B was pushed at e5d6cd47ed2a37d0e73be8c4bb5c6e9e9149e705. The shared renderer consumes the exact point scene used by PDF and returns one bounded opaque top-down RGBA page with its actual scale. It creates paths from the same embedded face and glyph IDs, applies prepared glyph positions and the same round bold stroke and italic shear, and respects contour winding. It composites immutable raster assets in scene order and draws rules and strike geometry once. The renderer checks dimensions and cumulative pixel/work limits, meters both bold paint passes, and checks cancellation through text runs and pixel preparation.
 
 Independent review confirmed PDF alignment, outline support for all three fonts, compositing and transform conventions. The corrected focused run passed 3 of 3 after a 3m 01s compile in 0.220s using cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::print_layout::raster::tests::)'. Tests exercise glyph counters, styled margin bounds, top-down asymmetric alpha, capped scale, invalid inputs and cancellation during replay. Diff whitespace verification passed. M7-B1B connects retained editor preview and Save PDF. M7-B2 submits the same pages to a real Windows device.
+
+
+## M7-B1B1A retained preview worker and asset loading
+
+M7-B1A was pushed at 126a18999faa19e78b5de0cf651bb94651e2ada0. The shared worker keeps one serial-linearized running request, one latest pending slot and one result. Current scene receipts hold the typed editor stamp, exact draft, allowed asset base, settings and date. Page or zoom rendering reuses the accepted scene. New requests and retirement cancel obsolete work, and completion requests repaint of the owner and root. The worker validates source size and geometry before filesystem work. Windows print assets walk retained local directories relative to the opened root, then read the same validated ordinary file through the held chain with byte limits and cancellation. The Studio legacy loader retains accepted-format byte accounting. Its bounded read closes file growth races.
+
+Independent review addressed lost latest requests, read and metadata races, cancellation during chunked reads and legacy HTML compatibility. The first compile found PrintError needed Display; the domain now owns its readable form. The corrected focused run passed 10 of 10 after a 4m compile in 0.461s using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(markdown_print_worker_) | test(note_html_export_reads_bounded_assets_and_preserves_width_and_warnings) | test(note_html_export_budgets_bytes_read_even_for_rejected_assets) | test(markdown_studio_preview_uses_bounded_document_relative_assets) | test(markdown_studio_print_assets_charge_attempts_without_changing_legacy_accounting)'. Diff whitespace verification passed. The forthcoming retained host will create the worker lazily, keep its slot across reopen, and accept exact current receipts.
