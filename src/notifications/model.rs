@@ -46,14 +46,16 @@ pub(crate) enum FactId {
         occurrence: i64,
         reminder_offset: i64,
         revision: u64,
+        #[serde(default)]
+        delivery: u64,
     },
     HotFolder {
         rule: String,
         event: [u8; 16],
     },
     Transfer {
-        receipt: [u8; 16],
-        event: u64,
+        session: [u8; 16],
+        job: u64,
     },
     Windows {
         app: String,
@@ -86,7 +88,7 @@ impl FactId {
             Self::HotFolder { rule, event } => {
                 crate::hotfolder::RuleId::parse(rule.clone()).is_ok() && *event != [0; 16]
             }
-            Self::Transfer { receipt, .. } => *receipt != [0; 16],
+            Self::Transfer { session, job } => *session != [0; 16] && *job != 0,
             Self::Windows { app, .. } => {
                 !app.is_empty() && app.len() <= MAX_APP_ID && !app.chars().any(char::is_control)
             }
@@ -128,12 +130,17 @@ pub(crate) enum InternalFact {
     MacroFailed,
     ActivityCompleted,
     ActivityFailed,
+    ActivityCancelled,
+    ActivityPartial,
     CalendarDue,
     HotFolderCompleted,
     HotFolderFailed,
+    HotFolderCancelled,
+    HotFolderPartial,
     TransferCompleted,
     TransferPartial,
     TransferFailed,
+    TransferCancelled,
 }
 impl InternalFact {
     fn source(self) -> Source {
@@ -143,12 +150,19 @@ impl InternalFact {
             Self::MacroNotificationSubmitted | Self::MacroCompleted | Self::MacroFailed => {
                 Source::Macro
             }
-            Self::ActivityCompleted | Self::ActivityFailed => Source::Activity,
+            Self::ActivityCompleted
+            | Self::ActivityFailed
+            | Self::ActivityCancelled
+            | Self::ActivityPartial => Source::Activity,
             Self::CalendarDue => Source::Calendar,
-            Self::HotFolderCompleted | Self::HotFolderFailed => Source::HotFolder,
-            Self::TransferCompleted | Self::TransferPartial | Self::TransferFailed => {
-                Source::Transfer
-            }
+            Self::HotFolderCompleted
+            | Self::HotFolderFailed
+            | Self::HotFolderCancelled
+            | Self::HotFolderPartial => Source::HotFolder,
+            Self::TransferCompleted
+            | Self::TransferPartial
+            | Self::TransferFailed
+            | Self::TransferCancelled => Source::Transfer,
         }
     }
     pub(crate) fn summary(self) -> &'static str {
@@ -162,12 +176,17 @@ impl InternalFact {
             Self::MacroFailed => "Macro failed",
             Self::ActivityCompleted => "Activity completed",
             Self::ActivityFailed => "Activity failed",
+            Self::ActivityCancelled => "Activity cancelled",
+            Self::ActivityPartial => "Activity partially completed",
             Self::CalendarDue => "Calendar reminder",
             Self::HotFolderCompleted => "Hot folder task completed",
             Self::HotFolderFailed => "Hot folder task failed",
+            Self::HotFolderCancelled => "Hot folder task cancelled",
+            Self::HotFolderPartial => "Hot folder task needs attention",
             Self::TransferCompleted => "Transfer completed",
             Self::TransferPartial => "Transfer partially completed",
             Self::TransferFailed => "Transfer failed",
+            Self::TransferCancelled => "Transfer cancelled",
         }
     }
 }
@@ -194,7 +213,8 @@ pub(crate) enum RelatedItem {
         rule: String,
     },
     Transfer {
-        receipt: [u8; 16],
+        session: [u8; 16],
+        job: u64,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +269,11 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    fn is_muted(&self, id: &FactId) -> bool {
+        self.muted.contains(&id.source())
+            || matches!(id, FactId::Windows { app, .. } if self.muted_apps.contains(app))
+    }
+
     pub(crate) fn valid(&self) -> bool {
         (1..=90).contains(&self.retention_days)
             && (1..=5000).contains(&self.max_records)
@@ -331,6 +356,13 @@ impl Inbox {
     pub(crate) fn records(&self) -> &[Record] {
         &self.records
     }
+    pub(crate) fn unmuted_unread_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| !record.read && !self.settings.is_muted(&record.id))
+            .count()
+    }
+
     pub(crate) fn omitted(&self) -> u64 {
         self.omitted
     }
@@ -423,11 +455,7 @@ impl Inbox {
         related: Option<RelatedItem>,
         now: i64,
     ) -> Ingest {
-        if !id.valid()
-            || id.source() != fact.source()
-            || matches!(id, FactId::Windows { .. })
-            || related.as_ref().is_some_and(|r| !related_matches(&id, r))
-        {
+        if !internal_event_valid(&id, fact, related.as_ref()) {
             return Ingest::Invalid;
         }
         self.ingest(
@@ -520,8 +548,7 @@ impl Inbox {
             return Ingest::Cleared;
         }
         self.prune(now);
-        let present = !self.settings.muted.contains(&source)
-            && !matches!(&incoming.id, FactId::Windows { app, .. } if self.settings.muted_apps.contains(app));
+        let present = !self.settings.is_muted(&incoming.id);
         if let Some(existing) = self.records.iter_mut().find(|r| r.id == incoming.id) {
             // The source generation orders Windows updates even when the
             // system wall clock moves backward. Internal facts are immutable.
@@ -750,6 +777,16 @@ fn severity(category: Category, status: Status) -> Severity {
         Severity::Info
     }
 }
+pub(crate) fn internal_event_valid(
+    id: &FactId,
+    fact: InternalFact,
+    related: Option<&RelatedItem>,
+) -> bool {
+    id.valid()
+        && id.source() == fact.source()
+        && !matches!(id, FactId::Windows { .. })
+        && related.is_none_or(|item| related_matches(id, item))
+}
 fn related_matches(id: &FactId, related: &RelatedItem) -> bool {
     match (id, related) {
         (FactId::Timer { session, id, .. }, RelatedItem::Timer { session: s, id: i })
@@ -771,7 +808,9 @@ fn related_matches(id: &FactId, related: &RelatedItem) -> bool {
             },
         ) => calendar == c && event == e && occurrence == o,
         (FactId::HotFolder { rule, .. }, RelatedItem::HotFolder { rule: r }) => rule == r,
-        (FactId::Transfer { receipt, .. }, RelatedItem::Transfer { receipt: r }) => receipt == r,
+        (FactId::Transfer { session, job }, RelatedItem::Transfer { session: s, job: j }) => {
+            session == s && job == j
+        }
         _ => false,
     }
 }

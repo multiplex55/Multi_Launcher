@@ -1866,6 +1866,45 @@ mod tests {
         assert!(!out.join("a").exists() && !out.join("b").exists());
     }
     #[test]
+    fn notification_inbox_transfer_records_real_terminal_copy_without_paths() {
+        use crate::notifications::{
+            FactId, InboxService, InternalFact, RelatedItem, Status, attach_activity_inbox,
+        };
+
+        let fixture = tempfile::tempdir().unwrap();
+        let profile = crate::platform::app_data::AppDataRoot::from_path(fixture.path());
+        let mut inbox = InboxService::start(profile.clone(), Arc::new(|| {})).unwrap();
+        let activity = ActivityCenter::new();
+        let session = [17; 16];
+        attach_activity_inbox(&activity, inbox.publisher(), session);
+        let source = fixture.path().join("private-path-sentinel.txt");
+        let destination = fixture.path().join("out");
+        fs::write(&source, b"synthetic transfer fixture").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let mut jobs = TransferJobs::with_data_root(activity, profile);
+        let job = jobs.enqueue(approve(&review(&source, &destination))).unwrap();
+        jobs.start().unwrap();
+        let done = wait_terminal(&jobs, 1);
+        assert_eq!(done.history[0].status, TransferJobStatus::Completed);
+        assert_eq!(
+            fs::read(destination.join(source.file_name().unwrap())).unwrap(),
+            b"synthetic transfer fixture"
+        );
+        jobs.shutdown();
+        inbox.shutdown();
+        let snapshot = inbox.snapshot();
+        let [record] = snapshot.inbox.records() else {
+            panic!("Expected one terminal transfer fact.");
+        };
+        assert_eq!(record.id, FactId::Transfer { session, job: job.get() });
+        assert_eq!(record.related, Some(RelatedItem::Transfer { session, job: job.get() }));
+        assert_eq!(record.status, Status::Completed);
+        assert_eq!(record.content, crate::notifications::Content::Internal(InternalFact::TransferCompleted));
+        let persisted = fs::read_to_string(fixture.path().join(crate::notifications::HISTORY_FILE)).unwrap();
+        assert!(!persisted.contains("private-path-sentinel"));
+    }
+
+    #[test]
     fn transfer_jobs_durable_handoff_keeps_queued_receipt_identity() {
         let temp = tempfile::tempdir().unwrap();
         let root = crate::platform::app_data::AppDataRoot::from_path(temp.path());

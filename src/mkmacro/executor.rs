@@ -1358,6 +1358,10 @@ pub enum ExecutionEvent {
         variables: RuntimeVariables,
         reason: DebugSnapshotReason,
     },
+    /// A physical notification was submitted successfully; contains no payload.
+    NotificationSubmitted {
+        step_id: u64,
+    },
     StepStarted(u64),
     /// Kept as a single-field event for observers that only track lifecycle.
     StepFinished(u64),

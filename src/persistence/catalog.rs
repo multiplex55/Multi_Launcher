@@ -614,7 +614,7 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             Replaceable,
             Sensitive,
             Moderate,
-            true,
+            false,
             ProbeKind::NotificationHistory,
         ),
         Id::PasteSequences => s(

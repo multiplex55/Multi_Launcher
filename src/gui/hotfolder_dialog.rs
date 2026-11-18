@@ -549,6 +549,17 @@ impl HotFolderDialog {
         self.error = None;
     }
 
+    pub(super) fn open_inbox_rule(&mut self, revision: u64, rule: HotFolderRule) -> bool {
+        if let Some(editor) = &self.editor {
+            return editor.draft.id == rule.id;
+        }
+        if self.pending.is_some() {
+            return false;
+        }
+        self.begin_edit(revision, rule);
+        true
+    }
+
     fn begin_edit(&mut self, revision: u64, rule: HotFolderRule) {
         self.editor = Some(RuleEditor::new(
             self.allocate_editor_id(),

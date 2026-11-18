@@ -475,6 +475,7 @@ struct Shared {
     summary_history: Mutex<SummaryHistory>,
     admission: Mutex<Option<ActiveAdmission>>,
     activity_center: Mutex<Option<ActivityCenter>>,
+    inbox_macro: Mutex<Option<(crate::notifications::InboxPublisher, [u8; 16])>>,
     next_run_id: AtomicU64,
     operations: Arc<SharedOperationGuard>,
     #[cfg(test)]
@@ -586,6 +587,20 @@ fn wait_on_test_barrier(slot: &Mutex<Option<Arc<TestWorkerBarrierInner>>>) {
 }
 
 impl MacroRuntime {
+    pub(crate) fn attach_inbox_macro(
+        &self,
+        publisher: crate::notifications::InboxPublisher,
+        session: [u8; 16],
+    ) {
+        if session != [0; 16] {
+            *self
+                .shared
+                .inbox_macro
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((publisher, session));
+        }
+    }
+
     pub(crate) fn attach_activity_center(&self, center: ActivityCenter) {
         let mut admission = self.shared.admission.lock().unwrap();
         *self.shared.activity_center.lock().unwrap() = Some(center.clone());
@@ -800,6 +815,7 @@ impl MacroRuntime {
             summary_history: Mutex::new(SummaryHistory::new()),
             admission: Mutex::new(None),
             activity_center: Mutex::new(None),
+            inbox_macro: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
             operations,
             #[cfg(test)]
@@ -1648,6 +1664,7 @@ fn apply_execution_event(
                 CompletedStepOutcome::Failure(diagnostic),
             );
         }
+        ExecutionEvent::NotificationSubmitted { .. } => {}
         ExecutionEvent::Paused | ExecutionEvent::Resumed => {
             // Shared control, read before publication, is authoritative.
         }
@@ -1917,7 +1934,43 @@ fn run_one(
                 };
             });
             drop(admission);
+            let inbox_macro = shared
+                .inbox_macro
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let occurrence = AtomicU64::new(0);
             let observer = |context: ExecutionFrameContext, event: ExecutionEvent| {
+                if matches!(&event, ExecutionEvent::NotificationSubmitted { .. }) {
+                    if let Some((publisher, session)) = &inbox_macro {
+                        if let Ok(occurrence) =
+                            occurrence.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                n.checked_add(1)
+                            })
+                        {
+                            use crate::notifications::{
+                                Category, FactId, InternalEvent, InternalFact, RelatedItem, Status,
+                            };
+                            let _ = publisher.try_publish(InternalEvent {
+                                id: FactId::Macro {
+                                    session: *session,
+                                    id: context.macro_id,
+                                    run: run_id,
+                                    occurrence,
+                                },
+                                occurred_at: chrono::Utc::now().timestamp(),
+                                category: Category::Information,
+                                status: Status::Completed,
+                                fact: InternalFact::MacroNotificationSubmitted,
+                                related: Some(RelatedItem::Macro {
+                                    session: *session,
+                                    id: context.macro_id,
+                                }),
+                            });
+                        }
+                    }
+                    return;
+                }
                 #[cfg(test)]
                 if context.depth == 1
                     && !matches!(
@@ -2438,6 +2491,16 @@ pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
 
+pub(crate) fn attach_inbox_macro(
+    publisher: crate::notifications::InboxPublisher,
+    session: [u8; 16],
+) {
+    let runtime = RUNTIME.read().unwrap().clone();
+    if let Some(runtime) = runtime {
+        runtime.attach_inbox_macro(publisher, session);
+    }
+}
+
 pub(crate) fn attach_activity_center(center: ActivityCenter) {
     let runtime = RUNTIME.read().unwrap().clone();
     if let Some(runtime) = runtime {
@@ -2557,21 +2620,32 @@ pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
     RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
 }
 #[cfg(test)]
-pub(crate) fn replace_recorder_for_test(recorder: Option<Arc<RecorderRuntime>>) -> Option<Arc<RecorderRuntime>> {
+pub(crate) fn replace_recorder_for_test(
+    recorder: Option<Arc<RecorderRuntime>>,
+) -> Option<Arc<RecorderRuntime>> {
     std::mem::replace(&mut *RECORDER.write().unwrap(), recorder)
 }
 pub(crate) fn record_pause_for(recording_id: u64) -> Result<u64> {
-    RECORDER.read().unwrap().clone()
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .pause_for_recording(Some(recording_id), Vec::new())
 }
 pub(crate) fn record_resume_for(recording_id: u64, pause_id: u64) -> Result<()> {
-    RECORDER.read().unwrap().clone()
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .resume_for_recording(Some(recording_id), Some(pause_id), Vec::new())
 }
 pub(crate) fn record_annotation_for(recording_id: u64, text: String) -> Result<()> {
-    RECORDER.read().unwrap().clone()
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .annotation_for_recording(Some(recording_id), text)
 }
@@ -2593,11 +2667,21 @@ pub fn record_annotation(text: String) -> Result<()> {
 }
 pub(crate) fn set_recording_annotation_active(recording_id: u64, active: bool) -> Result<()> {
     if active {
-        let recorder = RECORDER.read().unwrap().clone()
+        let recorder = RECORDER
+            .read()
+            .unwrap()
+            .clone()
             .ok_or_else(|| anyhow!("macro runtime is not initialized"))?;
-        recorder.with_active_recording(recording_id, || RECORDING_ANNOTATION_ACTIVE.store(recording_id, Ordering::Release))?;
+        recorder.with_active_recording(recording_id, || {
+            RECORDING_ANNOTATION_ACTIVE.store(recording_id, Ordering::Release)
+        })?;
     } else {
-        let _ = RECORDING_ANNOTATION_ACTIVE.compare_exchange(recording_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        let _ = RECORDING_ANNOTATION_ACTIVE.compare_exchange(
+            recording_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     Ok(())
 }

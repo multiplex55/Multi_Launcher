@@ -457,6 +457,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::FileLock { .. }) => {
             anyhow::bail!("File Lock Inspector requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::NotificationInbox) => {
+            anyhow::bail!("The Notification Inbox requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::DownloadsTriage) => {
             anyhow::bail!("Downloads Triage requires the launcher interface")
         }

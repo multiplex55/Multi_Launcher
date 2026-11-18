@@ -625,6 +625,17 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("notification_inbox:") {
+        if s == "notification_inbox:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::NotificationInbox));
+        }
+        let error = if action.args.is_some() {
+            "The Notification Inbox accepts no command payload"
+        } else {
+            "Unknown Notification Inbox command"
+        };
+        return Err(CommandError::new("notification_inbox", error).with_gui_failure_policy());
+    }
     if s.starts_with("downloads_triage:") {
         if s == "downloads_triage:open" && action.args.is_none() {
             return Ok(Command::Dialog(DialogCommand::DownloadsTriage));

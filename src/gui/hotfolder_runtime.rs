@@ -6,7 +6,7 @@
 use crate::hotfolder::{
     ActionCapability, ActionEnablement, ConfigurationFingerprint, HotFolderCapabilityContext,
     HotFolderEnableRequest, HotFolderEventKind, HotFolderExecutionControl,
-    HotFolderExecutionEngine, HotFolderExecutionProgress, HotFolderExecutionSnapshot,
+    HotFolderExecutionEngine, HotFolderExecutionProgress, HotFolderExecutionSnapshot, HotFolderRunDisposition,
     HotFolderRule, HotFolderRuntimeSnapshot, HotFolderStoreError, HotFolderWatchService,
     RootAvailability, RuleAction, RuleId, StrongActionConfirmation, evaluate_action_capability,
     evaluate_rule_conditions,
@@ -201,21 +201,23 @@ impl HotFolderRuntimeDriver {
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
     ) -> Self {
-        Self::new_with_optional_activity(data_root, adapter, None)
+        Self::new_with_optional_activity(data_root, adapter, None, None)
     }
 
     pub(crate) fn new_with_activity(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
         activity_center: crate::activity::ActivityCenter,
+        inbox: Option<crate::notifications::InboxPublisher>,
     ) -> Self {
-        Self::new_with_optional_activity(data_root, adapter, Some(activity_center))
+        Self::new_with_optional_activity(data_root, adapter, Some(activity_center), inbox)
     }
 
     fn new_with_optional_activity(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
         activity_center: Option<crate::activity::ActivityCenter>,
+        inbox: Option<crate::notifications::InboxPublisher>,
     ) -> Self {
         let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
@@ -237,6 +239,7 @@ impl HotFolderRuntimeDriver {
                     worker_shutdown,
                     worker_snapshot,
                     activity_center,
+                    inbox,
                 )
             })
             .expect("Hot Folder app driver thread must start");
@@ -783,6 +786,7 @@ fn driver_main(
     shutdown_requested: Arc<AtomicBool>,
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
     activity_center: Option<crate::activity::ActivityCenter>,
+    inbox: Option<crate::notifications::InboxPublisher>,
 ) {
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
@@ -880,8 +884,14 @@ fn driver_main(
                     engine.run_next_ready(watcher, &store, &context)
                 })
             });
-            if let Err(error) = result {
-                last_error = Some(format!("Hot Folder execution failed: {error:?}"));
+            match result {
+                Ok(Some(HotFolderRunDisposition::Executed(receipt))) => {
+                    if let Some(inbox) = &inbox {
+                        crate::notifications::publish_hot_folder(inbox, &receipt);
+                    }
+                }
+                Err(error) => last_error = Some(format!("Hot Folder execution failed: {error:?}")),
+                _ => {}
             }
         }
         publish_driver_snapshot(

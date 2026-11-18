@@ -2225,6 +2225,7 @@ impl LauncherApp {
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer(),
             Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer(),
             Panel::DownloadsTriageDialog => self.downloads_triage_root_layer(),
+            Panel::NotificationInboxDialog => self.notification_inbox_host.root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self
                 .mkmacro_dialog
@@ -5069,6 +5070,7 @@ impl LauncherApp {
                 || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
                 || self.file_operations_center_needs_root_ui()
                 || self.downloads_triage_needs_root_ui()
+                || self.notification_inbox_host.needs_root_ui_when_hidden(self.notification_inbox_dialog.open)
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -9478,7 +9480,7 @@ impl LauncherApp {
         Ok(true)
     }
 
-    fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+    pub(super) fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         root_visible
             && self.visible_flag.load(Ordering::Relaxed)
             && !self.pin_list_open
@@ -9491,7 +9493,7 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
-    fn native_ui_application_input_allowed(&self, ctx: &egui::Context) -> bool {
+    pub(super) fn native_ui_application_input_allowed(&self, ctx: &egui::Context) -> bool {
         self.native_ui_application_input_allowed_for_snippet_prompt(ctx, false)
     }
 
@@ -10467,6 +10469,7 @@ impl LauncherApp {
                         | super::Panel::CalculationChartDialog
                         | super::Panel::PasswordGeneratorDialog
                         | super::Panel::DownloadsTriageDialog
+                        | super::Panel::NotificationInboxDialog
                         | super::Panel::FileOperationsCenterDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
@@ -10556,6 +10559,8 @@ impl LauncherApp {
             ),
             (crate::gui::jump_mode::ui::NavigationDialogKind::DownloadsTriage,
                 self.downloads_triage_is_open() && self.downloads_triage_root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::NotificationInbox,
+                self.notification_inbox_dialog.open && self.notification_inbox_host.root_layer().is_some()),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
                 self.markdown_print_dialog.current_stamp().is_some() && self.markdown_print_host.root_layer().is_some(),
@@ -10695,6 +10700,7 @@ impl LauncherApp {
                     NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
                     NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
                     NavigationDialogKind::DownloadsTriage => self.downloads_triage_root_layer(),
+                    NavigationDialogKind::NotificationInbox => self.notification_inbox_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10734,6 +10740,8 @@ impl LauncherApp {
                         self.json_utility_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::PasswordGenerator {
                         self.password_generator_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::NotificationInbox {
+                        self.notification_inbox_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DownloadsTriage {
                         self.downloads_triage_root_layer().and(current)
                     } else if kind == NavigationDialogKind::FileOperations {
@@ -11048,7 +11056,7 @@ impl LauncherApp {
         (candidate, supported_dialog_visibility_changed, combo_popup)
     }
 
-    fn resolve_jump_mode_navigation_owner(
+    pub(super) fn resolve_jump_mode_navigation_owner(
         &mut self,
         ctx: &egui::Context,
         root_visible: bool,
@@ -11458,6 +11466,7 @@ impl LauncherApp {
             self.show_file_operations_center(&ctx, first_ui_pass, false);
             #[cfg(windows)]
             self.show_downloads_triage(&ctx, first_ui_pass, false);
+            self.show_notification_inbox(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -13890,6 +13899,7 @@ impl LauncherApp {
         self.show_file_operations_center(&ctx, first_ui_pass, frame_logic.should_be_visible);
         #[cfg(windows)]
         self.show_downloads_triage(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_notification_inbox(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
@@ -16410,11 +16420,13 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        self.wake_inbox_calendar_if_changed();
         self.begin_root_frame_logic(ctx, frame);
     }
 
     fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.guard_overlay_app_exit(ctx);
+        self.wake_inbox_calendar_if_changed();
         self.run_hidden_logic_tick(ctx, frame);
     }
 
@@ -16433,6 +16445,7 @@ impl eframe::App for LauncherApp {
             || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
                 || self.file_operations_center_needs_root_ui()
                 || self.downloads_triage_needs_root_ui()
+                || self.notification_inbox_host.needs_root_ui_when_hidden(self.notification_inbox_dialog.open)
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -16540,6 +16553,7 @@ impl eframe::App for LauncherApp {
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_markdown_print(_ctx);
         self.complete_password_generator(_ctx);
+        self.complete_notification_inbox(_ctx);
         #[cfg(windows)]
         {
             self.complete_file_operations_center(_ctx);
@@ -16655,6 +16669,9 @@ impl eframe::App for LauncherApp {
             }
         } else if let Err(error) = usage::save_usage(USAGE_FILE, &self.usage) {
             self.report_error("usage.save_on_exit", error);
+        }
+        if let Some(inbox) = &mut self.notification_inbox {
+            inbox.shutdown();
         }
     }
 }
@@ -16796,6 +16813,7 @@ impl LauncherApp {
         self.complete_file_operations_center(ctx);
         #[cfg(windows)]
         self.complete_downloads_triage(ctx);
+        self.complete_notification_inbox(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);
@@ -22147,6 +22165,42 @@ mod tests {
         app.notes_dialog.close_from_app(&ctx);
         assert!(!app.notes_dialog.accepts_note_open(&origin));
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn notification_inbox_both_commands_open_the_same_retained_host_without_setup() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (mut app, _profile) = new_prompt_app(&ctx);
+                let inbox_plugin = crate::plugins::notification_inbox::NotificationInboxPlugin;
+                for alias in ["inbox", "notifications"] {
+                    let action = crate::plugin::Plugin::search(&inbox_plugin, alias).pop().unwrap();
+                    let invocation = crate::commands::parse_command(
+                        action,
+                        None,
+                        crate::commands::ActivationSource::Enter,
+                    )
+                    .unwrap();
+                    assert!(matches!(
+                        invocation.command,
+                        crate::commands::Command::Dialog(crate::commands::DialogCommand::NotificationInbox)
+                    ));
+                    app.dispatch_command_invocation(invocation);
+                    assert!(app.notification_inbox_dialog.open);
+                }
+                let session = app.notification_inbox_dialog.session();
+                assert!(app.notification_inbox.is_some());
+                app.close_notification_inbox();
+                assert!(!app.notification_inbox_dialog.open);
+                app.open_notification_inbox();
+                assert_ne!(app.notification_inbox_dialog.session(), session);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[cfg(windows)]

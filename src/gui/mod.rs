@@ -49,6 +49,8 @@ mod file_operations_center_dialog;
 mod downloads_triage_dialog;
 #[cfg(windows)]
 mod downloads_triage_runtime;
+mod notification_inbox_dialog;
+mod notification_inbox_runtime;
 #[cfg(windows)]
 mod file_operations_center_runtime;
 pub(crate) mod hotfolder_dialog;
@@ -764,6 +766,7 @@ pub enum Panel {
     PasswordGeneratorDialog,
     FileOperationsCenterDialog,
     DownloadsTriageDialog,
+    NotificationInboxDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -845,6 +848,7 @@ impl Panel {
             Self::PasswordGeneratorDialog => "Password Generator",
             Self::FileOperationsCenterDialog => "File Operations Center",
             Self::DownloadsTriageDialog => "Downloads Triage",
+            Self::NotificationInboxDialog => "Notification Inbox",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -927,6 +931,7 @@ struct PanelStates {
     password_generator_dialog: bool,
     file_operations_center_dialog: bool,
     downloads_triage_dialog: bool,
+    notification_inbox_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -1313,6 +1318,14 @@ pub struct LauncherApp {
     downloads_triage_host: utility_window_host::UtilityWindowHost<downloads_triage_dialog::DownloadsTriageDialog>,
     #[cfg(windows)]
     downloads_triage_runtime: downloads_triage_runtime::DownloadsTriageRuntime,
+    notification_inbox_dialog: notification_inbox_dialog::NotificationInboxDialog,
+    notification_inbox_host: utility_window_host::UtilityWindowHost<notification_inbox_dialog::NotificationInboxDialog>,
+    notification_inbox: Option<crate::notifications::InboxService>,
+    notification_session: [u8; 16],
+    notification_alert_sequence: u64,
+    notification_calendar_version: u64,
+    notification_request: Option<u64>,
+    notification_notice: Option<String>,
     file_preview_host: utility_window_host::FilePreviewWindowHost,
     note_templates_host: utility_window_host::NoteTemplatesWindowHost,
     unused_assets_host: utility_window_host::UnusedAssetsWindowHost,
@@ -1918,14 +1931,20 @@ impl LauncherApp {
             .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
+        self.record_launcher_notification(toast.kind);
+        self.present_toast(toast);
+    }
+
+    fn present_toast(&mut self, toast: Toast) {
         #[cfg(test)]
         self.test_toast_messages.push(toast.text.text().to_string());
         push_toast(&mut self.toasts, toast);
     }
 
     pub fn add_error_toast(&mut self, msg: impl Into<String>) {
+        self.record_launcher_notification(ToastKind::Error);
         if self.enable_toasts && self.show_error_toasts {
-            self.add_toast(Toast {
+            self.present_toast(Toast {
                 text: msg.into().into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -2151,6 +2170,7 @@ impl LauncherApp {
     }
 
     pub fn report_error_message(&mut self, context: &'static str, msg: impl Into<String>) {
+        self.record_launcher_notification(ToastKind::Error);
         let msg = msg.into();
         tracing::error!(context, error = %msg);
         append_toast_log(&format!("[error:{context}] {msg}"));
@@ -2158,7 +2178,7 @@ impl LauncherApp {
             self.set_inline_error(msg.clone());
         }
         if self.enable_toasts && self.show_error_toasts {
-            self.add_toast(Toast {
+            self.present_toast(Toast {
                 text: msg.into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
@@ -3998,6 +4018,32 @@ impl LauncherApp {
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
         let activity_center = crate::activity::ActivityCenter::new();
+        let inbox_ctx = ctx.clone();
+        let notification_inbox = crate::notifications::InboxService::start(
+            data_root.clone(),
+            Arc::new(move || inbox_ctx.request_repaint_of(egui::ViewportId::ROOT)),
+        ).ok();
+        #[cfg(test)]
+        let production_notifications = matches!(init_policy, LauncherInitPolicy::Production);
+        #[cfg(not(test))]
+        let production_notifications = true;
+        let notification_session = if production_notifications {
+            rand::random::<u128>().max(1).to_le_bytes()
+        } else {
+            [0; 16]
+        };
+        let inbox_publisher = notification_inbox.as_ref()
+            .filter(|_| production_notifications)
+            .map(crate::notifications::InboxService::publisher);
+        if let Some(publisher) = &inbox_publisher {
+            crate::notifications::attach_activity_inbox(&activity_center, publisher.clone(), notification_session);
+            crate::plugins::timer::attach_inbox_timer(publisher.clone(), notification_session);
+            crate::mkmacro::runtime::attach_inbox_macro(publisher.clone(), notification_session);
+        }
+        if let Some(inbox) = &notification_inbox && production_notifications {
+            inbox.enable_calendar();
+        }
+
         let recording_repaint_ctx = ctx.clone();
         let recording_controller = crate::recording::RecordingController::new(
             Arc::new(crate::recording::WindowsRecordingBackend),
@@ -4011,6 +4057,7 @@ impl LauncherApp {
                     data_root.clone(),
                     hotfolder_action_adapter.clone(),
                     activity_center.clone(),
+                    inbox_publisher.clone(),
                 )
             }
             LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
@@ -4022,6 +4069,7 @@ impl LauncherApp {
             data_root.clone(),
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
+            inbox_publisher,
         );
         let settings_save_workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
         let utility_dialog_size_manager = utility_dialog_size::UtilityDialogSizeManager::new(
@@ -4276,6 +4324,14 @@ impl LauncherApp {
             downloads_triage_host: Default::default(),
             #[cfg(windows)]
             downloads_triage_runtime: Default::default(),
+            notification_inbox_dialog: Default::default(),
+            notification_inbox_host: Default::default(),
+            notification_inbox,
+            notification_session,
+            notification_alert_sequence: 0,
+            notification_calendar_version: crate::plugins::calendar::calendar_version(),
+            notification_request: None,
+            notification_notice: None,
             file_preview_host: Default::default(),
             note_templates_host: Default::default(),
             unused_assets_host: Default::default(),
@@ -5116,7 +5172,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 76] = [
+    const TRACKED_PANELS: [Panel; 77] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -5133,6 +5189,7 @@ impl LauncherApp {
         Panel::PasswordGeneratorDialog,
         Panel::FileOperationsCenterDialog,
         Panel::DownloadsTriageDialog,
+        Panel::NotificationInboxDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -5213,6 +5270,7 @@ impl LauncherApp {
             Panel::PasswordGeneratorDialog => self.password_generator_dialog.open,
             Panel::FileOperationsCenterDialog => self.file_operations_center_is_open(),
             Panel::DownloadsTriageDialog => self.downloads_triage_is_open(),
+            Panel::NotificationInboxDialog => self.notification_inbox_dialog.open,
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -5302,6 +5360,7 @@ impl LauncherApp {
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer().is_some(),
             Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer().is_some(),
             Panel::DownloadsTriageDialog => self.downloads_triage_root_layer().is_some(),
+            Panel::NotificationInboxDialog => self.notification_inbox_host.root_layer().is_some(),
             Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
             Panel::ImagePanel => self
@@ -5706,6 +5765,7 @@ impl LauncherApp {
                 #[cfg(windows)]
                 self.close_file_operations_center();
             }
+            Panel::NotificationInboxDialog => self.close_notification_inbox(),
             Panel::DownloadsTriageDialog => {
                 #[cfg(windows)]
                 self.close_downloads_triage();
@@ -6072,6 +6132,7 @@ impl LauncherApp {
                 #[cfg(windows)]
                 self.close_file_operations_center();
             }
+            Panel::NotificationInboxDialog => self.close_notification_inbox(),
             Panel::DownloadsTriageDialog => {
                 #[cfg(windows)]
                 self.close_downloads_triage();
@@ -6420,6 +6481,7 @@ impl LauncherApp {
                 self.file_operations_center_dialog.ensure_open();
             }
             Panel::DownloadsTriageDialog => {}
+            Panel::NotificationInboxDialog => {}
             Panel::FileSearchPreviewDialog => {}
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
@@ -6877,6 +6939,8 @@ impl LauncherApp {
             self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::TodoViewDialog {
             self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::NotificationInboxDialog {
+            self.open_notification_inbox();
         } else if panel == Panel::DownloadsTriageDialog {
             #[cfg(windows)]
             {
@@ -7122,6 +7186,7 @@ impl LauncherApp {
         check!(file_operations_center_dialog, Panel::FileOperationsCenterDialog);
         #[cfg(windows)]
         check!(downloads_triage_dialog, Panel::DownloadsTriageDialog);
+        check!(notification_inbox_dialog, Panel::NotificationInboxDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);

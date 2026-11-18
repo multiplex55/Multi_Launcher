@@ -426,15 +426,29 @@ struct Registry {
     omissions_by_owner: BTreeMap<ActivityOwner, ActivityOmissionCounts>,
 }
 
+type TerminalObserver = Arc<dyn Fn(ActivityKey, ActivityOutcome) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ActivityCenter {
     registry: Arc<Mutex<Registry>>,
+    terminal_observer: Arc<Mutex<Option<TerminalObserver>>>,
 }
 
 impl ActivityCenter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_terminal_observer(&self, observe: TerminalObserver) {
+        *self.terminal_observer.lock().unwrap_or_else(|error| error.into_inner()) = Some(observe);
+    }
+
+    fn report_terminal(&self, key: ActivityKey, outcome: ActivityOutcome) {
+        let observe = self.terminal_observer.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        if let Some(observe) = observe {
+            let _ = catch_unwind(AssertUnwindSafe(|| observe(key, outcome)));
+        }
     }
 
     /// Start a new immutable operation identity in one owner slot. The owner
@@ -707,6 +721,8 @@ impl ActivityCenter {
                 let counts = registry.omissions_by_owner.entry(key.owner).or_default();
                 counts.active = counts.active.saturating_sub(1);
                 counts.terminal = counts.terminal.saturating_add(1);
+                drop(registry);
+                self.report_terminal(key, outcome);
             }
             return;
         };
@@ -743,6 +759,8 @@ impl ActivityCenter {
                 counts.terminal = counts.terminal.saturating_add(1);
             }
         }
+        drop(registry);
+        self.report_terminal(key, outcome);
     }
 }
 

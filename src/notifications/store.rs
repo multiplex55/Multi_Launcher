@@ -75,6 +75,7 @@ pub(crate) fn probe_history(path: &Path) -> StoreHealth {
 pub(crate) struct InboxStore {
     path: Option<PathBuf>,
     inbox: Inbox,
+    write_generation: u64,
 }
 
 impl InboxStore {
@@ -93,6 +94,7 @@ impl InboxStore {
         Ok(Self {
             path: Some(path),
             inbox,
+            write_generation: 0,
         })
     }
 
@@ -101,11 +103,16 @@ impl InboxStore {
         Self {
             path: None,
             inbox: Inbox::default(),
+            write_generation: 0,
         }
     }
 
     pub(crate) fn inbox(&self) -> &Inbox {
         &self.inbox
+    }
+
+    pub(super) fn write_generation(&self) -> u64 {
+        self.write_generation
     }
 
     pub(crate) fn transact<T>(&mut self, change: impl FnOnce(&mut Inbox) -> T) -> Result<T> {
@@ -136,6 +143,7 @@ impl InboxStore {
                     "Notification history reached its size limit."
                 );
                 save(path, &bytes).context("Save notification history")?;
+                self.write_generation = self.write_generation.saturating_add(1);
             }
         }
         self.inbox = candidate;

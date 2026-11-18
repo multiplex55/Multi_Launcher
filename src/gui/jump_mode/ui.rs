@@ -61,10 +61,11 @@ pub(crate) enum NavigationDialogKind {
     PasswordGenerator,
     FileOperations,
     DownloadsTriage,
+    NotificationInbox,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 25] = [
+    pub(crate) const ALL: [Self; 26] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -90,6 +91,7 @@ impl NavigationDialogKind {
         Self::PasswordGenerator,
         Self::FileOperations,
         Self::DownloadsTriage,
+        Self::NotificationInbox,
     ];
 
     const fn index(self) -> usize {
@@ -119,6 +121,7 @@ impl NavigationDialogKind {
             Self::PasswordGenerator => 22,
             Self::FileOperations => 23,
             Self::DownloadsTriage => 24,
+            Self::NotificationInbox => 25,
         }
     }
 
@@ -149,6 +152,7 @@ impl NavigationDialogKind {
             Self::PasswordGenerator => "password-generator",
             Self::FileOperations => "file-operations-center",
             Self::DownloadsTriage => "downloads-triage",
+            Self::NotificationInbox => "notification-inbox",
         }
     }
 
@@ -182,6 +186,7 @@ impl NavigationDialogKind {
             Self::PasswordGenerator => egui::Id::new("password-generator-window"),
             Self::FileOperations => egui::Id::new("file-operations-center-window"),
             Self::DownloadsTriage => egui::Id::new("downloads-triage-window"),
+            Self::NotificationInbox => egui::Id::new("notification-inbox-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -469,6 +474,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
+                    | NavigationDialogKind::NotificationInbox
                     | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
@@ -514,6 +520,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
+                    | NavigationDialogKind::NotificationInbox
                     | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets),
@@ -4321,6 +4328,9 @@ mod tests {
                     }
                     NavigationDialogKind::CalculationChart => {
                         egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::NotificationInbox => {
+                        egui::Window::new("Notification Inbox").id(egui::Id::new("notification-inbox-window")).show(ctx, |_| {});
                     }
                     NavigationDialogKind::DownloadsTriage => {
                         egui::Window::new("Downloads Triage").id(egui::Id::new("downloads-triage-window")).show(ctx, |_| {});

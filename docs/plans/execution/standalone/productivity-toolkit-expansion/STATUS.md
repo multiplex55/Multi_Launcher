@@ -80,7 +80,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M10-A | complete |
 | M10-B | complete |
 | M11-A | complete |
-| M11-B, M11-C, M11-D | pending |
+| M11-B | complete |
+| M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
 | M13-A | pending |
 
@@ -609,3 +610,14 @@ The profile-owned Inbox stores typed source and event identity, timestamps, seve
 Exact local action tickets bind the current fact, status and source generation. A typed Create Todo request uses the existing Todo transaction and a deterministic fact-derived ID so an explicit retry returns the same task. Wrong or stale tickets fail without running text from any source. Calendar and Timer related owner adapters follow in M11-B; external installation and native capture remain in M11-C/D.
 
 The initial 10 scoped checks passed (`46ce3a5b-f99b-49ae-ade6-c930c8834f74`). Independent review prompted generation freshness across clock rollback, same-time action invalidation, and count-eviction disclosure. The final 12 checks passed (`f3aae19e-13ca-4936-9f48-676f303f4570`), including typed durability, corrupt/failed write preservation, isolated session payload exclusion, backup policy and exactly one stored Todo after retry.
+
+
+### M11-B Internal producers and hosted Notification Inbox
+
+The ordinary launcher opens the same retained Inbox from either `inbox` or `notifications`. It provides searchable and grouped history, read/date/source/category/app filters, pin, exact related navigation, source and app mute or exclusion, explicit local clear, and actionable capacity and write feedback. Muting suppresses the unread indicator while retaining browsable records. Dock and pop out use the same retained owner and accepted action pass.
+
+A bounded profile worker adopts sanitized launcher, Timer, Calendar, Macro Notify, Hot Folder and Activity/transfer facts. Transfer job IDs include the launcher session so restarting cannot merge prior or current job numbers. Calendar reads the same profile events, publishes due reminders once after durable Inbox adoption, and supports bounded current-occurrence snoozes without editing the event. Timer snooze uses the existing owner. Related actions verify exact owner state. Shutdown retires owned producers before draining admitted Inbox work.
+
+The scoped Nextest run passed 34 checks (baaea902-7b62-45fa-8fdb-3fb550c58fb0). The expanded run passed 35 checks (including an actual Windows transfer copy and its single sanitized receipt). Its new GUI fixture initially supplied raw queries to the typed parser. Using the production query-to-plugin-action path, the exact follow-up test passed (7b57aa77-10a5-4c25-9c93-8ae1e7839b78). Independent review findings on session identity, shutdown order, Calendar profile identity, hidden-root navigation, mute and capacity disclosure were addressed.
+
+The ordinary fast-dev Windows build succeeded. In isolated profile `m11-b-native-9b475f2f` with both Paste Sequences shortcuts disabled and external capture off, the real Timer scheduler fired a synthetic alarm. Keyboard activation opened the docked Inbox, found one unread Timer event, selected it, and created exactly one Todo with visible confirmation. The retained event omitted the alarm label. The keyboard Pop Out command opened the native Inbox and persisted its preference. Native window accessibility exposed only its frame and Windows Graphics Capture timed out, so popped-out contents and the transfer-to-Inbox GUI sequence remain unverified. A real worker transfer and exact typed Inbox record were verified in the focused test.
