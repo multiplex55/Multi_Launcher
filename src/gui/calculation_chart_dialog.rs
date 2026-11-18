@@ -152,6 +152,7 @@ impl CalculationChartDialog {
                 let old = series_keys(&original.source);
                 let new = series_keys(&definition.source);
                 definition.hidden = definition.hidden.iter().filter_map(|index| old.get(*index)).filter_map(|key| new.iter().position(|candidate| candidate == key)).collect();
+                definition.options.retain_selected_styles(&definition.source);
             }
             if definition != original && active { actions.definition = Some(definition.clone()); }
             let Some(stamp) = chart_stamp(runtime, &definition) else { ui.colored_label(ui.visuals().warn_fg_color, "Chart data is unavailable or outdated. Calculate or generate the current source."); return; };

@@ -25,7 +25,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-B2A | complete |
 | M4-B2B | complete |
 | M4-B3A | complete |
-| M4-B3B, M4-C | pending |
+| M4-B3B | complete |
+| M4-C | pending |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -168,3 +169,10 @@ M4-B2B was pushed at 721334455e155cb5b633cca37eb3b4e3aa006029. Its initial and f
 The Charts companion now resolves labeled named lines from current committed evaluation bindings, passes resolved IDs into the shared scene, and includes the matching evaluation basis when a sensitivity chart uses named values. Cached scene and Copy actions are fenced against stale data, definitions and ownership. The default and literal-only routes retain their existing behavior. Rename and style lifetimes remain M4-B3B.
 
 cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_)' passed 9 of 9. Independent review found no substantive freshness issue. Diff whitespace verification passed.
+
+
+## M4-B3B chart identity and rename
+
+M4-B3A was pushed at de7fe59f9a3e7491b481df8ec028567bdce93788. Document rename and replay rekey styles by exact chart output identity and bind named reference edits to admitted reference-line IDs. Independently edited styles and labels retain their values. Collision-hidden styles follow the document/output identity across history entries. Source-kind replacement and chart deletion retire hidden identities. This closes the M4-B option model, render and runtime work. Controls and distribution display remain M4-C.
+
+Both focused Nextest runs used cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::session::tests::chart_) | test(calculation_pad::session::tests::named_chart_references_) | test(gui::calculation_chart_dialog::tests::chart_owned_popup_menus_)'. Initial 6 of 6 and final 7 of 7 passed. The final run covered the two resolved review findings for chained rename and source replacement/deletion. Diff whitespace verification passed.

@@ -175,6 +175,14 @@ impl Default for ChartOptions {
 impl ChartOptions {
     pub(crate) fn is_default(&self) -> bool { self == &Self::default() }
 
+    pub(crate) fn retain_selected_styles(&mut self, source: &ChartSource) {
+        self.styles.retain(|style| match (&style.key, source) {
+            (SeriesKey::Vector(reference), ChartSource::Vectors { y, .. }) => y.contains(reference),
+            (SeriesKey::Sensitivity(name), ChartSource::Sensitivity { outputs }) => outputs.contains(name),
+            _ => false,
+        });
+    }
+
     pub(crate) fn allocate_reference_id(&mut self) -> Result<u64, &'static str> {
         let id = self.next_reference_id;
         if id == 0 { return Err("invalid chart reference identity"); }
