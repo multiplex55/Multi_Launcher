@@ -1,6 +1,8 @@
 //! Retained Notes and Studio preview over the shared page scene.
 
-use super::{AssetBase, DocumentStamp, PreviewWorker, SceneReceipt, Snapshot, output::PdfOutput};
+use super::{
+    AssetBase, DocumentStamp, PreviewWorker, SceneReceipt, Snapshot, output::MarkdownOutput,
+};
 use crate::gui::{
     jump_mode::{
         TargetKind,
@@ -12,6 +14,8 @@ use crate::gui::{
     utility_host::{UtilityPresentation, presentation_button},
     utility_window_host::HostedUtilityDialog,
 };
+#[cfg(windows)]
+use crate::notes_markdown::print_layout::printer::PrintScale;
 use crate::notes_markdown::print_layout::{
     MAX_TEXT_BYTES, Margins, Orientation, Paper, PrintSettings,
 };
@@ -66,6 +70,8 @@ struct Controls {
     page: usize,
     fit: bool,
     zoom: u16,
+    #[cfg(windows)]
+    print_scale: PrintScale,
 }
 
 impl Default for Controls {
@@ -76,6 +82,8 @@ impl Default for Controls {
             page: 0,
             fit: true,
             zoom: 100,
+            #[cfg(windows)]
+            print_scale: PrintScale::Fit,
         }
     }
 }
@@ -150,7 +158,7 @@ pub(in crate::gui) struct PrintDialog {
     raster_scale: f32,
     display_metrics: DisplayMetrics,
     focus_pending: bool,
-    pub(in crate::gui) pdf_output: PdfOutput,
+    pub(in crate::gui) output: MarkdownOutput,
 }
 
 impl PrintDialog {
@@ -190,14 +198,14 @@ impl PrintDialog {
         if !previous.stamp.same_document(&draft.stamp) {
             self.close();
         } else if previous.stamp != draft.stamp || previous.base != draft.base {
-            self.pdf_output.retire();
+            self.output.retire();
             self.draft = Some(draft.into());
             self.invalidate_scene(ctx, viewport);
         }
     }
 
     pub fn close(&mut self) {
-        self.pdf_output.retire();
+        self.output.retire();
         if let Some(worker) = &self.worker {
             worker.retire();
         }
@@ -323,21 +331,26 @@ pub(in crate::gui) struct Actions {
     display_metrics: DisplayMetrics,
     focus_control: Option<(egui::LayerId, egui::Id)>,
     confirmation_focus: Option<(egui::LayerId, egui::Id, egui::Id)>,
-    pdf_intent: Option<PdfIntent>,
+    output_intent: Option<OutputIntent>,
 }
 
 pub(in crate::gui) enum Command {
     Closed,
-    Pdf {
-        intent: PdfIntent,
+    Output {
+        intent: OutputIntent,
         scene: Option<Arc<SceneReceipt>>,
         hwnd: Option<usize>,
     },
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::gui) enum PdfIntent {
-    Choose,
+pub(in crate::gui) enum OutputIntent {
+    ChoosePdf,
+    #[cfg(windows)]
+    ChoosePrinter {
+        current_page: usize,
+        mode: PrintScale,
+    },
     Confirm,
     Cancel,
 }
@@ -417,7 +430,7 @@ impl HostedUtilityDialog for PrintDialog {
             display_metrics: DisplayMetrics::for_viewport(ctx),
             focus_control: None,
             confirmation_focus: None,
-            pdf_intent: None,
+            output_intent: None,
         };
         let mut open = true;
         let mut show = |ui: &mut egui::Ui| {
@@ -448,21 +461,21 @@ impl HostedUtilityDialog for PrintDialog {
         matches!(command, Command::Closed)
     }
     fn accept_close(&mut self, keyboard: bool) -> bool {
-        if keyboard && self.pdf_output.confirming() {
-            self.pdf_output.cancel();
+        if keyboard && self.output.confirming() {
+            self.output.cancel();
             return false;
         }
-        self.pdf_output.retire();
+        self.output.retire();
         true
     }
     fn complete_actions(&mut self, actions: Actions, hwnd: Option<usize>) -> Vec<Command> {
         if actions.close {
-            self.pdf_output.retire();
+            self.output.retire();
             return vec![Command::Closed];
         }
         if let Some((layer, cancel, replace)) = actions.confirmation_focus {
             if actions.viewport != egui::ViewportId::ROOT {
-                self.pdf_output.finish_confirmation_focus();
+                self.output.finish_confirmation_focus();
             } else if crate::gui::jump_mode::ui::visible_top_middle_layer(&actions.ctx)
                 == Some(layer)
             {
@@ -471,7 +484,7 @@ impl HostedUtilityDialog for PrintDialog {
                         memory.request_focus(cancel);
                     }
                 });
-                self.pdf_output.finish_confirmation_focus();
+                self.output.finish_confirmation_focus();
             }
         }
         if self.focus_pending
@@ -493,7 +506,7 @@ impl HostedUtilityDialog for PrintDialog {
                 .raster_scale(&actions.controls, actions.display_scale)
                 != self.raster_scale;
         if layout_changed || actions.host_request.is_some() {
-            self.pdf_output.retire();
+            self.output.retire();
         }
         self.controls = actions.controls;
         self.display_scale = actions.display_scale;
@@ -503,12 +516,12 @@ impl HostedUtilityDialog for PrintDialog {
         } else if raster_changed {
             self.schedule(&actions.ctx, actions.viewport);
         }
-        if let Some(intent) = actions.pdf_intent
+        if let Some(intent) = actions.output_intent
             && actions.host_request.is_none()
         {
             let scene = self.output_scene();
-            if matches!(intent, PdfIntent::Cancel) || scene.is_some() {
-                return vec![Command::Pdf {
+            if matches!(intent, OutputIntent::Cancel) || scene.is_some() {
+                return vec![Command::Output {
                     intent,
                     scene,
                     hwnd,
@@ -646,7 +659,7 @@ mod tests {
             display_metrics: DisplayMetrics::for_viewport(&ctx),
             focus_control: None,
             confirmation_focus: None,
-            pdf_intent: None,
+            output_intent: None,
         };
         assert!(dialog.complete_actions(actions, None).is_empty());
         assert!(Arc::ptr_eq(&wait_for_receipt(&mut dialog, &ctx), &ready));
@@ -660,26 +673,121 @@ mod tests {
     }
 }
 
+#[cfg(windows)]
+fn page_list(pages: impl IntoIterator<Item = usize>) -> String {
+    let mut pages = pages.into_iter().peekable();
+    let mut labels = Vec::new();
+    while let Some(first) = pages.next() {
+        let mut last = first;
+        while pages.next_if(|page| *page == last + 1).is_some() {
+            last += 1;
+        }
+        if first == last {
+            labels.push(first.to_string());
+        } else {
+            labels.push(format!("{first}–{last}"));
+        }
+    }
+    labels.join(", ")
+}
+
+#[cfg(windows)]
+fn printer_review_ui(ui: &mut egui::Ui, review: &super::output::PrinterReview) {
+    let device = review.layout.device;
+    let pages = &review.layout.pages;
+    let x_inches = |px| f64::from(px) / f64::from(device.dpi_x);
+    let y_inches = |px| f64::from(px) / f64::from(device.dpi_y);
+    ui.strong("Review print job");
+    ui.label(
+        review
+            .device_label
+            .as_deref()
+            .unwrap_or("Selected Windows printer"),
+    );
+    ui.label(format!(
+        "Pages {}",
+        page_list(pages.iter().map(|page| page.page))
+    ));
+    ui.label(format!(
+        "Device paper {:.2} × {:.2} in, printable area {:.2} × {:.2} in",
+        x_inches(device.physical_width_px),
+        y_inches(device.physical_height_px),
+        x_inches(device.printable_width_px),
+        y_inches(device.printable_height_px),
+    ));
+    let right = device.physical_width_px - device.offset_x_px - device.printable_width_px;
+    let bottom = device.physical_height_px - device.offset_y_px - device.printable_height_px;
+    ui.label(format!(
+        "Hard margins {:.2} in left, {:.2} in right, {:.2} in top, {:.2} in bottom",
+        x_inches(device.offset_x_px),
+        x_inches(right),
+        y_inches(device.offset_y_px),
+        y_inches(bottom),
+    ));
+    match review.mode {
+        PrintScale::ActualSize => {
+            ui.label("Actual size (100%)");
+        }
+        PrintScale::Fit => {
+            if let Some(first) = pages.first() {
+                let (minimum, maximum) = pages.iter().fold(
+                    (first.fit_percent, first.fit_percent),
+                    |(min, max), page| (min.min(page.fit_percent), max.max(page.fit_percent)),
+                );
+                let scale = if (minimum - maximum).abs() < 0.05 {
+                    format!("{minimum:.1}%")
+                } else {
+                    format!("{minimum:.1}%–{maximum:.1}%")
+                };
+                ui.label(format!("Fit to printable area ({scale})"));
+            }
+        }
+    }
+    let mismatch = page_list(
+        pages
+            .iter()
+            .filter(|page| page.paper_mismatch)
+            .map(|page| page.page),
+    );
+    if !mismatch.is_empty() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("Preview paper differs from printer paper on pages {mismatch}."),
+        );
+    }
+    let clipped = page_list(
+        pages
+            .iter()
+            .filter(|page| page.painted_clipped)
+            .map(|page| page.page),
+    );
+    if !clipped.is_empty() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("Printer hard margins clip content on pages {clipped}."),
+        );
+    }
+}
+
 impl PrintDialog {
-    fn replacement_ui(
+    fn confirmation_buttons(
         &self,
         ui: &mut egui::Ui,
         actions: &mut Actions,
         scope: Option<&JumpModeScope>,
-        path: &std::path::Path,
+        confirm_key: &'static str,
+        confirm_label: &'static str,
     ) {
-        ui.strong("Replace the existing PDF?");
-        ui.label(path.display().to_string());
         ui.horizontal_wrapped(|ui| {
             let cancel = ui.button("Cancel");
-            let replace = ui.button("Replace PDF");
+            let confirm = ui.button(confirm_label);
             if !ui.is_enabled() {
                 return;
             }
             let mut order = 0;
             for (response, key, label) in [
-                (&cancel, "cancel-pdf-replace", "Cancel PDF replacement"),
-                (&replace, "replace-pdf", "Replace PDF"),
+                (&cancel, "cancel-output-review", "Cancel output review"),
+                (&confirm, confirm_key, confirm_label),
             ] {
                 register_and_apply_target(
                     scope,
@@ -691,19 +799,19 @@ impl PrintDialog {
                     &mut order,
                 );
             }
-            if self.pdf_output.confirmation_needs_focus() && !ui.ctx().will_discard() {
+            if self.output.confirmation_needs_focus() && !ui.ctx().will_discard() {
                 if actions.viewport != egui::ViewportId::ROOT
                     && !cancel.has_focus()
-                    && !replace.has_focus()
+                    && !confirm.has_focus()
                 {
                     cancel.request_focus();
                 }
-                actions.confirmation_focus = Some((ui.layer_id(), cancel.id, replace.id));
+                actions.confirmation_focus = Some((ui.layer_id(), cancel.id, confirm.id));
             }
             if cancel.clicked() {
-                actions.pdf_intent = Some(PdfIntent::Cancel);
-            } else if replace.clicked() {
-                actions.pdf_intent = Some(PdfIntent::Confirm);
+                actions.output_intent = Some(OutputIntent::Cancel);
+            } else if confirm.clicked() {
+                actions.output_intent = Some(OutputIntent::Confirm);
             }
         });
     }
@@ -725,8 +833,16 @@ impl PrintDialog {
                 }
             };
         }
-        if let Some(path) = self.pdf_output.target_path() {
-            self.replacement_ui(ui, actions, scope, &path);
+        if let Some(path) = self.output.target_path() {
+            ui.strong("Replace the existing PDF?");
+            ui.label(path.display().to_string());
+            self.confirmation_buttons(ui, actions, scope, "replace-pdf", "Replace PDF");
+            return;
+        }
+        #[cfg(windows)]
+        if let Some(review) = self.output.printer_review() {
+            printer_review_ui(ui, review);
+            self.confirmation_buttons(ui, actions, scope, "submit-print-job", "Submit print job");
             return;
         }
         ui.horizontal_wrapped(|ui| {
@@ -745,34 +861,45 @@ impl PrintDialog {
             let close = ui.button("Close");
             target!(ui, close, "close", "Close preview", TargetKind::Button);
             actions.close |= close.clicked();
-            let save = ui.add_enabled(
-                self.output_scene().is_some()
-                    && !self.pdf_output.busy()
-                    && !self.pdf_output.confirming(),
-                egui::Button::new("Save PDF…"),
-            );
+            let can_choose = !self.output.busy() && self.output_scene().is_some();
+            let save = ui.add_enabled(can_choose, egui::Button::new("Save PDF…"));
             target!(ui, save, "save-pdf", "Save PDF", TargetKind::Button);
             if save.clicked() {
-                actions.pdf_intent = Some(PdfIntent::Choose);
+                actions.output_intent = Some(OutputIntent::ChoosePdf);
             }
-            if self.pdf_output.busy() {
-                let cancel = ui.add_enabled(
-                    self.pdf_output.can_cancel_job(),
-                    egui::Button::new("Cancel PDF save"),
-                );
-                target!(
-                    ui,
-                    cancel,
-                    "cancel-pdf-save",
-                    "Cancel PDF save",
-                    TargetKind::Button
-                );
+            #[cfg(windows)]
+            {
+                let print = ui.add_enabled(can_choose, egui::Button::new("Print…"));
+                target!(ui, print, "choose-printer", "Print", TargetKind::Button);
+                if print.clicked() {
+                    actions.output_intent = Some(OutputIntent::ChoosePrinter {
+                        current_page: actions.controls.page + 1,
+                        mode: actions.controls.print_scale,
+                    });
+                }
+            }
+            if let Some(label) = self.output.cancel_job_label() {
+                let cancel = ui.add_enabled(self.output.can_cancel_job(), egui::Button::new(label));
+                target!(ui, cancel, "cancel-output-job", label, TargetKind::Button);
                 if cancel.clicked() {
-                    actions.pdf_intent = Some(PdfIntent::Cancel);
+                    actions.output_intent = Some(OutputIntent::Cancel);
                 }
             }
         });
-        if let Some((error, feedback)) = self.pdf_output.feedback() {
+        #[cfg(windows)]
+        ui.add_enabled_ui(!self.output.busy(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Printer scaling");
+                for (mode, key, label) in [
+                    (PrintScale::Fit, "printer-fit", "Fit to printable area"),
+                    (PrintScale::ActualSize, "printer-actual", "Actual size"),
+                ] {
+                    let response = ui.radio_value(&mut actions.controls.print_scale, mode, label);
+                    target!(ui, response, key, label, TargetKind::Selectable);
+                }
+            });
+        });
+        if let Some((error, feedback)) = self.output.feedback() {
             if error {
                 ui.colored_label(ui.visuals().error_fg_color, feedback);
             } else {

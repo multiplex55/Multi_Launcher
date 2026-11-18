@@ -38,7 +38,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M5-B1 | complete |
 | M5-B | complete, with partial interactive smoke |
 | M6-A | complete |
-| M6-B | implementation complete, native smoke pending |
+| M6-B | implementation complete, live docked moves and Undo verified in both editors, popped-out move unverified |
 | M7-A1A | complete |
 | M7-A1B1 | complete |
 | M7-A1B2 | complete |
@@ -48,9 +48,9 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-B1A | complete |
 | M7-B1B1A | complete |
 | M7-B1B1B | complete |
-| M7-B1B2 | implementation complete, native editor smoke pending |
+| M7-B1B2 | implementation complete, both live Save As and Cancel verified, live file acceptance unverified |
 | M7-B2A | complete, real Windows virtual print verified |
-| M7-B2B | pending |
+| M7-B2B | implementation complete, live chooser and Cancel verified, live device acceptance unverified |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -387,3 +387,14 @@ The first compile exposed an import through the private publication module; corr
 M7-B1B2 was pushed at 91250e64c7d566893624542aa0d934e24321a999. The native adapter owns a unique printer DC and the exact immutable prepared scene. It validates device capabilities, page selection and dimensions. Actual Size uses the device hard-margin offsets. Fit centers a uniform physical scale in the printable rectangle and calculates potential clipping from the rounded destination GDI receives. It renders one bounded top-down opaque BGRA page at a time from the same scene as preview and PDF, and admits the job immediately before StartDoc. It reports Windows submission after successful EndDoc. Cancellation checks span raster preparation and native page boundaries, and failure after StartDoc attempts AbortDoc once. The scoped callback reports spool exhaustion and user/application cancellation accurately.
 
 The independent review identified drawable clipping, device capability, late source revocation and GDI callback issues. Initial focused verification passed 3 of 3 with real Microsoft Print to PDF job 2. The corrected run passed 4 of 4 after 1m 59s including a real worker-thread DC handoff and job 3. Exact focused command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast --run-ignored all --success-output immediate -E 'test(notes_markdown::print_layout::printer::tests::)' with MULTI_LAUNCHER_TEST_PRINTER_PDF set to a fresh absolute synthetic workspace path. The Windows driver produced target/productivity-toolkit-expansion-evidence/m7-b2a/virtual-1dabe0c47728414c8cc01ca86e72fb58.pdf, 303382 bytes, SHA256 0C35E709364052E78F2D91B4789ABD035A7A5C2FDB2767119C1AEDFCAD172156. Poppler and the strict PDF parser found two Letter pages. Both pages rendered with the expected distinct synthetic text and were visually inspected. This proves direct spooling at the adapter boundary. B2B adds accepted chooser ownership, app confirmation and native editor workflows. Diff whitespace verification passed.
+
+
+## M7-B2B integrated Windows print and editor smoke
+
+M7-B2A was pushed at 480bf760f68d3112ba40a4ff038966e819ca85e6. The retained preview owns Windows printer selection and validates the HWND and exact scene around native modal completion. Options preserve the selected device, page ranges, driver copies and collation. The same worker holds the configured DC through an explicit review with actual paper dimensions, hard margins, physical scaling and clipping warnings. Print and Save PDF share one output slot. Cancel and source or host retirement revoke unapproved work. The worker reports a submitted Windows job ID and any relevant late failure. The independent review led to revalidation of the native HWND after the modal and exclusion of duplicate Copies and Collate controls in driver property pages.
+
+The first compile exposed one stale test-helper type name. The corrected focused run passed 20 of 20 in 1.968s after a 4m 51s compile using cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(markdown_print_) | test(printer_chooser_) | test(printer_placement_) | test(printer_callback_)'. The ordinary desktop build succeeded in 3m 50s with cargo build -p multi_launcher --bin multi_launcher --profile fast-dev --locked. Binary SHA256 F124D734A76307EC10D866A373A0C07AA76EFA8C08E9864774C08F9733A5413C. Diff whitespace verification passed.
+
+Actual Windows Notes and Studio smoke used only the synthetic profile with Paste Sequences Next and Cancel disabled. In Notes, the real launcher command opened Print Smoke Note. An extra unsaved sentence remained present through keyboard Move down of Brief past Appendix and Ctrl+Z returned the original section order. In Studio, the real launcher command opened an unsaved two-page draft. Its outline moved First Section after Second Section and Ctrl+Z restored the original sequence and earlier text. Both moves and undo were performed in docked editors. Studio also opened an actual native Markdown Studio window. The accessible native window exposed only its frame and the launcher inventory did not expose its controls. Moving a section in a popped-out editor remains unverified.
+
+Both dirty editors opened their live two-page Export / Print previews and a Windows Save As dialog with the PDF filter. Escape canceled both. Notes also opened the live Windows printer chooser with the installed Microsoft Print to PDF device, All/Current Page/range settings and one driver copy. Escape closed the chooser and returned to the preview. The filename and device controls were visible in accessibility text but unavailable as targetable owned windows. Indexed filename input could not resolve the embedded element, keyboard focus stayed outside the editable modal controls, and modal window capture timed out. Full native file acceptance and app-driven print submission remain unverified. M7-B2A independently proved actual two-page Windows virtual print job 3. The renderer and native PDF publication focused tests independently verified file output from the retained scene. The synthetic original Note stayed at SHA256 C07195B435E4C9351DD6A7B11BFE2EED94AF5DC4A13CE1FF67B73622A75D230B and the output folder stayed empty after cancellation. All disposable launcher processes used for the smoke were stopped.

@@ -1,8 +1,12 @@
 //! Shared retained preview worker for the current Markdown draft.
 
 mod dialog;
+#[cfg(windows)]
+mod printer_dialog;
+#[cfg(windows)]
+pub(super) use printer_dialog::choose_printer;
 mod output;
-pub(super) use dialog::{Command as PrintHostCommand, DraftRef, PdfIntent, PrintDialog};
+pub(super) use dialog::{Command as PrintHostCommand, DraftRef, OutputIntent, PrintDialog};
 pub(super) use output::choose_pdf_destination;
 
 #[derive(Debug)]
