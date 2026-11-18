@@ -1,7 +1,9 @@
 //! Bounded point geometry and reusable, embedded-font shaping for print output.
 mod markdown;
+mod assets;
 mod document;
-pub use document::{paginate, Drawable, LinkDestination, Page, PaginatedDocument, PrintError, PrintWarning, TextStyle};
+pub use assets::PrintRaster;
+pub use document::{paginate_with_assets, paginate, Drawable, LinkDestination, Page, PaginatedDocument, PrintError, PrintWarning, TextStyle};
 
 use std::ops::Range;
 use unicode_bidi::BidiInfo;

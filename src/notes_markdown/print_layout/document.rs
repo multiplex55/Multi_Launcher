@@ -2,11 +2,13 @@
 use std::{collections::HashMap, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::assets::{AssetFailure, Assets, PrintRaster};
 use super::markdown::{self, ColumnAlignment, NodeKind, ParsedMarkdown};
 use super::{
     MAX_PAGES, PageGeometry, Point, PrintSettings, Rect, ShapedText, TextRole, line_height,
     render_template, shape_line,
 };
+use crate::notes_markdown::html::LocalRasterResolver;
 
 const MAX_DRAWABLES: usize = 120_000;
 const MAX_SHAPES: usize = 100_000;
@@ -52,6 +54,10 @@ pub enum Drawable {
         to: Point,
         width: f32,
     },
+    Image {
+        asset: usize,
+        bounds: Rect,
+    },
     Link {
         bounds: Rect,
         destination: LinkDestination,
@@ -67,6 +73,7 @@ pub struct Page {
 pub struct PaginatedDocument {
     pub pages: Vec<Page>,
     pub warnings: Vec<PrintWarning>,
+    pub assets: Vec<PrintRaster>,
 }
 
 #[derive(Clone)]
@@ -98,6 +105,33 @@ struct Table {
     alignment: Vec<ColumnAlignment>,
     rows: Vec<Vec<Vec<Span>>>,
 }
+struct TablePlan {
+    rows: Vec<Vec<Cell>>,
+    indent: f32,
+    cell_width: f32,
+    height: f32,
+    header_height: f32,
+    fallback: Option<&'static str>,
+    fallback_first: Option<f32>,
+}
+impl TablePlan {
+    fn first_height(&self) -> Option<f32> {
+        if self.fallback.is_some() {
+            self.fallback_first
+        } else if self.rows.is_empty() {
+            None
+        } else {
+            Some(
+                self.header_height
+                    + if self.rows.len() > 1 {
+                        self.height
+                    } else {
+                        0.0
+                    },
+            )
+        }
+    }
+}
 enum Block {
     Text {
         spans: Vec<Span>,
@@ -109,9 +143,31 @@ enum Block {
     Table {
         table: Table,
         indent: f32,
+        plan: Option<TablePlan>,
     },
     Rule {
         indent: f32,
+    },
+    Image {
+        destination: String,
+        alt: String,
+        link: Option<Arc<str>>,
+        indent: f32,
+        heading: Option<String>,
+        heading_size: Option<f32>,
+    },
+    Mermaid {
+        source: String,
+        indent: f32,
+    },
+    Raster {
+        asset: usize,
+        width: f32,
+        height: f32,
+        indent: f32,
+        link: Option<Arc<str>>,
+        heading: Option<String>,
+        keep_next: bool,
     },
     Break,
 }
@@ -534,6 +590,92 @@ fn inline(
     }
     Ok(())
 }
+fn paragraph_parts(
+    parsed: &ParsedMarkdown,
+    index: usize,
+    style: TextStyle,
+    link: Option<Arc<str>>,
+    skip: Option<&std::ops::Range<usize>>,
+    spans: &mut Vec<Span>,
+    blocks: &mut Vec<Block>,
+    indent: f32,
+    body: f32,
+    work: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), PrintError> {
+    if cancelled() {
+        return Err(PrintError::Cancelled);
+    }
+    *work += 1;
+    if *work > MAX_SHAPES {
+        return Err(PrintError::Limit("print content limit exceeded"));
+    }
+    let node = &parsed.nodes[index];
+    if skip.is_some_and(|s| node.source.start >= s.start && node.source.end <= s.end) {
+        return Ok(());
+    }
+    let mut style = style;
+    let mut link = link;
+    match &node.kind {
+        NodeKind::Image { destination, .. } => {
+            if !spans.is_empty() {
+                blocks.push(Block::Text {
+                    spans: std::mem::take(spans),
+                    indent,
+                    heading: None,
+                    size: body,
+                    keep_next: false,
+                });
+            }
+            let mut alt = Vec::new();
+            for &child in &node.children {
+                inline(
+                    parsed,
+                    child,
+                    TextStyle::default(),
+                    None,
+                    None,
+                    &mut alt,
+                    work,
+                    cancelled,
+                )?;
+            }
+            blocks.push(Block::Image {
+                destination: destination.clone(),
+                alt: alt.into_iter().map(|span| span.text).collect(),
+                link,
+                indent,
+                heading: None,
+                heading_size: None,
+            });
+            return Ok(());
+        }
+        NodeKind::Emphasis => style.italic = true,
+        NodeKind::Strong => style.bold = true,
+        NodeKind::Strike => style.strike = true,
+        NodeKind::Link { destination, .. } => {
+            link = (destination.len() <= 8192).then(|| Arc::from(destination.as_str()))
+        }
+        NodeKind::Paragraph | NodeKind::Heading { .. } => {}
+        _ => return inline(parsed, index, style, link, skip, spans, work, cancelled),
+    }
+    for &child in &node.children {
+        paragraph_parts(
+            parsed,
+            child,
+            style,
+            link.clone(),
+            skip,
+            spans,
+            blocks,
+            indent,
+            body,
+            work,
+            cancelled,
+        )?;
+    }
+    Ok(())
+}
 fn collect(
     parsed: &ParsedMarkdown,
     index: usize,
@@ -553,21 +695,107 @@ fn collect(
     }
     let node = &parsed.nodes[index];
     match &node.kind {
-        NodeKind::Paragraph
-        | NodeKind::Heading { .. }
-        | NodeKind::CodeBlock { .. }
-        | NodeKind::Unsupported(_) => {
+        NodeKind::Paragraph => {
+            let mut spans = Vec::new();
+            paragraph_parts(
+                parsed,
+                index,
+                TextStyle::default(),
+                None,
+                skip,
+                &mut spans,
+                blocks,
+                indent,
+                body,
+                work,
+                cancelled,
+            )?;
+            if !spans.is_empty() {
+                blocks.push(Block::Text {
+                    spans,
+                    indent,
+                    heading: None,
+                    size: body,
+                    keep_next: false,
+                });
+            }
+        }
+        NodeKind::Heading { level, anchor } => {
+            let size = (body * (1.6 - (*level as f32 - 1.0) * 0.1)).clamp(6.0, 48.0);
+            let first = blocks.len();
+            let mut spans = Vec::new();
+            paragraph_parts(
+                parsed,
+                index,
+                TextStyle {
+                    bold: true,
+                    ..Default::default()
+                },
+                None,
+                skip,
+                &mut spans,
+                blocks,
+                indent,
+                size,
+                work,
+                cancelled,
+            )?;
+            if !spans.is_empty() {
+                blocks.push(Block::Text {
+                    spans,
+                    indent,
+                    heading: None,
+                    size,
+                    keep_next: false,
+                });
+            }
+            if let Some(block) = blocks.get_mut(first) {
+                match block {
+                    Block::Text {
+                        heading, keep_next, ..
+                    } => {
+                        *heading = anchor.clone();
+                        *keep_next = true;
+                    }
+                    Block::Image {
+                        heading,
+                        heading_size,
+                        ..
+                    } => {
+                        *heading = anchor.clone();
+                        *heading_size = Some(size);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        NodeKind::CodeBlock {
+            language: Some(language),
+        } if language
+            .split_whitespace()
+            .next()
+            .is_some_and(|part| part.eq_ignore_ascii_case("mermaid")) =>
+        {
+            let mut spans = Vec::new();
+            inline(
+                parsed,
+                index,
+                TextStyle::default(),
+                None,
+                skip,
+                &mut spans,
+                work,
+                cancelled,
+            )?;
+            blocks.push(Block::Mermaid {
+                source: spans.into_iter().map(|span| span.text).collect(),
+                indent,
+            });
+        }
+        NodeKind::CodeBlock { .. } | NodeKind::Unsupported(_) => {
             let mut spans = Vec::new();
             let mut style = TextStyle::default();
             let (heading, size, keep_next) = match &node.kind {
-                NodeKind::Heading { level, anchor } => {
-                    style.bold = true;
-                    (
-                        anchor.clone(),
-                        (body * (1.6 - (*level as f32 - 1.0) * 0.1)).clamp(6.0, 48.0),
-                        true,
-                    )
-                }
                 NodeKind::CodeBlock { .. } => {
                     style.code = true;
                     (None, body, false)
@@ -655,13 +883,16 @@ fn collect(
                                     link: None,
                                 });
                             }
-                            inline(
+                            paragraph_parts(
                                 parsed,
                                 part,
                                 TextStyle::default(),
                                 None,
                                 skip,
                                 &mut spans,
+                                blocks,
+                                indent + 12.0,
+                                body,
                                 work,
                                 cancelled,
                             )?;
@@ -714,13 +945,16 @@ fn collect(
                                     link: None,
                                 });
                             }
-                            inline(
+                            paragraph_parts(
                                 parsed,
                                 part,
                                 TextStyle::default(),
                                 None,
                                 skip,
                                 &mut spans,
+                                blocks,
+                                indent + 12.0,
+                                body,
                                 work,
                                 cancelled,
                             )?;
@@ -774,6 +1008,7 @@ fn collect(
                     rows,
                 },
                 indent,
+                plan: None,
             });
         }
         NodeKind::FootnoteDefinition(label) => {
@@ -850,70 +1085,83 @@ impl<F: FnMut() -> bool> Builder<'_, F> {
         self.y += GAP;
         Ok(())
     }
-    fn table(&mut self, table: &Table, indent: f32) -> Result<(), PrintError> {
-        if table.rows.is_empty() || table.alignment.is_empty() {
-            return Ok(());
-        }
+    fn prepare_table(&mut self, table: &Table, indent: f32) -> Result<TablePlan, PrintError> {
         let indent =
             indent.min((self.geometry.content.width - self.settings.body_size * 4.0).max(0.0));
-        let count = table.alignment.len();
-        let width = self.geometry.content.width - indent;
-        let cell_width = width / count as f32;
         let size = self.settings.body_size;
         let height = line_height(TextRole::Body, size).map_err(PrintError::Unplaceable)?;
-        if cell_width < size * 3.0 || 2.0 * height > self.geometry.content.height {
-            return self.table_fallback(
-                table,
-                indent,
-                size,
-                "Table columns are too narrow; displayed as labeled rows.",
-            );
+        let count = table.alignment.len();
+        let mut plan = TablePlan {
+            rows: Vec::new(),
+            indent,
+            cell_width: 0.0,
+            height,
+            header_height: 0.0,
+            fallback: None,
+            fallback_first: None,
+        };
+        if table.rows.is_empty() || count == 0 {
+            return Ok(plan);
         }
-        let mut rows = Vec::new();
+        plan.cell_width = (self.geometry.content.width - indent) / count as f32;
+        if plan.cell_width < size * 3.0 || 2.0 * height > self.geometry.content.height {
+            plan.fallback = Some("Table columns are too narrow; displayed as labeled rows.");
+            return Ok(plan);
+        }
         for row in &table.rows {
             self.check()?;
             let mut cells = Vec::new();
             for column in 0..count {
                 let lines = match self.wrap(
                     row.get(column).map_or(&[], Vec::as_slice),
-                    cell_width - 4.0,
+                    plan.cell_width - 4.0,
                     size,
                 ) {
                     Ok(lines) => lines,
                     Err(PrintError::Unplaceable(_)) => {
-                        return self.table_fallback(
-                            table,
-                            indent,
-                            size,
-                            "Table content is too wide; displayed as labeled rows.",
-                        );
+                        plan.fallback =
+                            Some("Table content is too wide; displayed as labeled rows.");
+                        return Ok(plan);
                     }
                     Err(error) => return Err(error),
                 };
                 cells.push(Cell { lines });
             }
-            rows.push(cells);
+            plan.rows.push(cells);
         }
-        let height = rows
+        plan.height = plan
+            .rows
             .iter()
             .flat_map(|row| row.iter())
             .flat_map(|cell| cell.lines.iter())
             .map(|line| line.ascent + line.descent)
             .fold(height, f32::max);
-        let header_height = rows[0]
+        plan.header_height = plan.rows[0]
             .iter()
-            .map(|c| c.lines.len())
+            .map(|cell| cell.lines.len())
             .max()
             .unwrap_or(1)
             .max(1) as f32
-            * height;
-        if header_height + height > self.geometry.content.height {
-            return self.table_fallback(
-                table,
-                indent,
-                size,
-                "Table header is too tall to repeat; displayed as labeled rows.",
-            );
+            * plan.height;
+        if plan.header_height + plan.height > self.geometry.content.height {
+            plan.fallback = Some("Table header is too tall to repeat; displayed as labeled rows.");
+        }
+        Ok(plan)
+    }
+    fn table(&mut self, table: &Table, plan: TablePlan) -> Result<(), PrintError> {
+        if let Some(message) = plan.fallback {
+            return self.table_fallback(table, plan.indent, self.settings.body_size, message);
+        }
+        let TablePlan {
+            rows,
+            indent,
+            cell_width,
+            height,
+            header_height,
+            ..
+        } = plan;
+        if rows.is_empty() {
+            return Ok(());
         }
         if rows.len() == 1 {
             self.fit(header_height)?;
@@ -1069,11 +1317,30 @@ fn bounds_union(a: Option<Rect>, b: Rect) -> Option<Rect> {
     })
 }
 
+fn asset_message(error: AssetFailure) -> String {
+    match error {
+        AssetFailure::Cancelled => "Cancelled".into(),
+        AssetFailure::Unavailable(message) => message.into(),
+        AssetFailure::Mermaid(message) => message,
+    }
+}
+
 /// Build an immutable page model; no printer, image decoding, or PDF work occurs here.
 pub fn paginate(
     source: &str,
     settings: &PrintSettings,
     date: &str,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PaginatedDocument, PrintError> {
+    paginate_with_assets(source, settings, date, None, cancelled)
+}
+
+/// Prepare local raster and resource-free Mermaid assets in this bounded job.
+pub fn paginate_with_assets(
+    source: &str,
+    settings: &PrintSettings,
+    date: &str,
+    resolver: Option<&dyn LocalRasterResolver>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PaginatedDocument, PrintError> {
     let geometry = settings
@@ -1122,6 +1389,15 @@ pub fn paginate(
             &mut cancelled,
         )?;
     }
+    let image_nodes = parsed
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Image { .. }))
+        .count();
+    let image_blocks = blocks
+        .iter()
+        .filter(|block| matches!(block, Block::Image { .. }))
+        .count();
     let mut b = Builder {
         settings,
         geometry,
@@ -1135,6 +1411,9 @@ pub fn paginate(
         anchors: HashMap::new(),
         links: Vec::new(),
     };
+    if image_nodes > image_blocks {
+        b.warn("Some images in nested content are represented by alt text.");
+    }
     for warning in parsed.warnings {
         b.warn(warning.message);
     }
@@ -1143,14 +1422,137 @@ pub fn paginate(
     ) {
         b.warn("A link destination exceeds the supported length.");
     }
-    if parsed.nodes.iter().any(|node| matches!(&node.kind, NodeKind::CodeBlock { language: Some(language) } if language.split_whitespace().next().is_some_and(|part| part.eq_ignore_ascii_case("mermaid")))) { b.warn("Mermaid diagrams are printed as source; diagram rendering is not yet available."); }
-    if parsed
-        .nodes
-        .iter()
-        .any(|node| matches!(node.kind, NodeKind::Image { .. }))
-    {
-        b.warn("Images are represented by their alt text; image rendering is not yet available.");
+    let mut in_table = Vec::new();
+    for node in &parsed.nodes {
+        if matches!(node.kind, NodeKind::Table { .. }) {
+            in_table.extend(node.children.iter().copied());
+        }
     }
+    while let Some(index) = in_table.pop() {
+        b.check()?;
+        let node = &parsed.nodes[index];
+        if matches!(node.kind, NodeKind::Image { .. }) {
+            b.warn("Table images are represented by alt text.");
+            break;
+        }
+        in_table.extend(node.children.iter().copied());
+    }
+    let mut assets = Assets::new(resolver);
+    let mut prepared = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        b.check()?;
+        match block {
+            Block::Image {
+                destination,
+                alt,
+                link,
+                indent,
+                heading,
+                heading_size,
+            } => match assets.local(&destination, &mut b.cancelled) {
+                Ok(image) => {
+                    let raster = &assets.rasters[image.index];
+                    let width = image.width_hint.unwrap_or(raster.width as f32) * 0.75;
+                    let height = width * raster.height as f32 / raster.width as f32;
+                    prepared.push(Block::Raster {
+                        asset: image.index,
+                        width,
+                        height,
+                        indent,
+                        link,
+                        keep_next: heading_size.is_some(),
+                        heading,
+                    });
+                }
+                Err(AssetFailure::Cancelled) => return Err(PrintError::Cancelled),
+                Err(error) => {
+                    b.warn(format!("Image {destination}: {}", asset_message(error)));
+                    prepared.push(Block::Text {
+                        spans: vec![Span {
+                            text: format!("[Image: {alt}]"),
+                            style: TextStyle {
+                                bold: heading_size.is_some(),
+                                ..Default::default()
+                            },
+                            link,
+                        }],
+                        indent,
+                        size: heading_size.unwrap_or(settings.body_size),
+                        keep_next: heading_size.is_some(),
+                        heading,
+                    });
+                }
+            },
+            Block::Mermaid { source, indent } => match assets.mermaid(&source, &mut b.cancelled) {
+                Ok(index) => {
+                    let raster = &assets.rasters[index];
+                    prepared.push(Block::Raster {
+                        asset: index,
+                        width: raster.width as f32 * 0.75,
+                        height: raster.height as f32 * 0.75,
+                        indent,
+                        link: None,
+                        heading: None,
+                        keep_next: false,
+                    });
+                }
+                Err(AssetFailure::Cancelled) => return Err(PrintError::Cancelled),
+                Err(error) => {
+                    b.warn(format!("Mermaid diagram: {}", asset_message(error)));
+                    prepared.push(Block::Text {
+                        spans: vec![Span {
+                            text: source,
+                            style: TextStyle {
+                                code: true,
+                                ..Default::default()
+                            },
+                            link: None,
+                        }],
+                        indent,
+                        heading: None,
+                        size: settings.body_size,
+                        keep_next: false,
+                    });
+                }
+            },
+            Block::Table { table, indent, .. } => {
+                let mut plan = b.prepare_table(&table, indent)?;
+                if plan.fallback.is_some() {
+                    let spans = if table.rows.len() == 1 {
+                        table.rows[0].first().cloned().unwrap_or_default()
+                    } else if let Some(row) = table.rows.get(1) {
+                        let mut spans = table.rows[0].first().cloned().unwrap_or_default();
+                        spans.push(Span {
+                            text: ": ".into(),
+                            style: TextStyle::default(),
+                            link: None,
+                        });
+                        if let Some(cell) = row.first() {
+                            spans.extend(cell.clone());
+                        }
+                        spans
+                    } else {
+                        Vec::new()
+                    };
+                    if !spans.is_empty() {
+                        let width = geometry.content.width - plan.indent;
+                        let lines = b.wrap(&spans, width, settings.body_size)?;
+                        plan.fallback_first = lines.first().map(|line| {
+                            (line.ascent + line.descent)
+                                .max(line_height(TextRole::Body, settings.body_size).unwrap_or(0.0))
+                        });
+                    }
+                }
+                prepared.push(Block::Table {
+                    table,
+                    indent,
+                    plan: Some(plan),
+                });
+            }
+            other => prepared.push(other),
+        }
+    }
+    let blocks = prepared;
     b.page()?;
     let mut blocks = blocks.into_iter().peekable();
     while let Some(block) = blocks.next() {
@@ -1177,6 +1579,26 @@ pub fn paginate(
                             (line.ascent + line.descent)
                                 .max(line_height(TextRole::Body, *size).unwrap_or(0.0))
                         })
+                    } else if let Some(Block::Raster {
+                        width,
+                        height,
+                        indent,
+                        ..
+                    }) = blocks.peek()
+                    {
+                        let indent = indent
+                            .min((geometry.content.width - settings.body_size * 4.0).max(0.0));
+                        Some(
+                            height
+                                * ((geometry.content.width - indent) / width)
+                                    .min(geometry.content.height / height)
+                                    .min(1.0),
+                        )
+                    } else if let Some(Block::Table {
+                        plan: Some(plan), ..
+                    }) = blocks.peek()
+                    {
+                        plan.first_height()
                     } else {
                         None
                     }
@@ -1185,7 +1607,12 @@ pub fn paginate(
                 };
                 b.text_block(&spans, indent, heading.as_deref(), size, next_height)?;
             }
-            Block::Table { table, indent } => b.table(&table, indent)?,
+            Block::Table {
+                table,
+                plan: Some(plan),
+                ..
+            } => b.table(&table, plan)?,
+            Block::Table { .. } => return Err(PrintError::InvalidMarkdown),
             Block::Rule { indent } => {
                 b.fit(8.0)?;
                 b.push(Drawable::Line {
@@ -1203,6 +1630,64 @@ pub fn paginate(
                 })?;
                 b.y += 8.0;
             }
+            Block::Raster {
+                asset,
+                width,
+                height,
+                indent,
+                link,
+                heading,
+                keep_next,
+            } => {
+                let indent =
+                    indent.min((geometry.content.width - settings.body_size * 4.0).max(0.0));
+                let scale = ((geometry.content.width - indent) / width)
+                    .min(geometry.content.height / height)
+                    .min(1.0);
+                let bounds = Rect {
+                    x: geometry.content.x + indent,
+                    y: 0.0,
+                    width: width * scale,
+                    height: height * scale,
+                };
+                if keep_next
+                    && let Some(Block::Text {
+                        spans,
+                        indent,
+                        size,
+                        ..
+                    }) = blocks.peek()
+                {
+                    let indent = indent.min((geometry.content.width - size * 4.0).max(0.0));
+                    let lines = b.wrap(spans, geometry.content.width - indent, *size)?;
+                    if let Some(line) = lines.first() {
+                        let next = (line.ascent + line.descent).max(
+                            line_height(TextRole::Body, *size).map_err(PrintError::Unplaceable)?,
+                        );
+                        let combined = bounds.height + GAP + next;
+                        if combined <= geometry.content.height {
+                            b.fit(combined)?;
+                        }
+                    }
+                }
+                b.fit(bounds.height)?;
+                let bounds = Rect { y: b.y, ..bounds };
+                if let Some(anchor) = heading {
+                    b.anchors.entry(anchor).or_insert((
+                        b.pages.len() - 1,
+                        Point {
+                            x: bounds.x,
+                            y: bounds.y,
+                        },
+                    ));
+                }
+                let index = b.push(Drawable::Image { asset, bounds })?;
+                if let Some(link) = link {
+                    b.links.push((b.pages.len() - 1, index, link));
+                }
+                b.y += bounds.height + GAP;
+            }
+            Block::Image { .. } | Block::Mermaid { .. } => return Err(PrintError::InvalidMarkdown),
             Block::Break => b.page()?,
         }
     }
@@ -1281,6 +1766,18 @@ pub fn paginate(
             result
         };
         if let Some(destination) = destination {
+            if let Drawable::Image { bounds, .. } = &b.pages[page].drawables[index] {
+                let bounds = *bounds;
+                b.shapes += 1;
+                if b.shapes > MAX_DRAWABLES {
+                    return Err(PrintError::Limit("print drawable limit exceeded"));
+                }
+                b.pages[page].drawables.push(Drawable::Link {
+                    bounds,
+                    destination,
+                });
+                continue;
+            }
             if let Drawable::Text {
                 shape, baseline, ..
             } = &b.pages[page].drawables[index]
@@ -1327,6 +1824,7 @@ pub fn paginate(
                     width: (to.x - from.x).abs(),
                     height: (to.y - from.y).abs() + width,
                 }),
+                Drawable::Image { bounds, .. } => Some(*bounds),
                 Drawable::Link { .. } => None,
             };
             if let Some(rect) = rect {
@@ -1337,6 +1835,7 @@ pub fn paginate(
     Ok(PaginatedDocument {
         pages: b.pages,
         warnings: b.warnings,
+        assets: assets.rasters,
     })
 }
 
@@ -1529,6 +2028,279 @@ mod tests {
                 .collect::<String>()
                 .contains("W")
         );
+    }
+
+    #[test]
+    fn paginate_local_images_deduplicate_preserve_width_and_inline_order() {
+        struct Resolver(Vec<u8>);
+        impl LocalRasterResolver for Resolver {
+            fn resolve<'a>(
+                &'a self,
+                destination: &str,
+            ) -> Option<crate::notes_markdown::html::LocalRasterAsset<'a>> {
+                destination.starts_with("pic.png").then_some(
+                    crate::notes_markdown::html::LocalRasterAsset {
+                        format: crate::notes_markdown::html::LocalRasterFormat::Png,
+                        bytes: &self.0,
+                    },
+                )
+            }
+            fn width_hint_px(&self, destination: &str) -> Option<f32> {
+                destination.ends_with("%7C40").then_some(40.0)
+            }
+        }
+        let image = image_025::DynamicImage::ImageRgba8(image_025::ImageBuffer::from_pixel(
+            20,
+            10,
+            image_025::Rgba([10, 20, 30, 128]),
+        ));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image_025::ImageFormat::Png)
+            .unwrap();
+        let resolver = Resolver(bytes.into_inner());
+        let doc = paginate_with_assets(
+            "before ![first](pic.png) middle ![second](pic.png%7C40) after",
+            &PrintSettings::default(),
+            "",
+            Some(&resolver),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(doc.assets.len(), 1);
+        let images: Vec<_> = doc
+            .pages
+            .iter()
+            .flat_map(|p| &p.drawables)
+            .filter_map(|d| {
+                if let Drawable::Image { asset, bounds } = d {
+                    Some((*asset, *bounds))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].0, images[1].0);
+        assert!((images[0].1.width - 15.0).abs() < 0.001);
+        assert!((images[1].1.width - 30.0).abs() < 0.001);
+        assert!((images[0].1.width / images[0].1.height - 2.0).abs() < 0.001);
+        let page = &doc.pages[0];
+        let before = page
+            .drawables
+            .iter()
+            .position(|d| matches!(d,Drawable::Text { text,.. } if text.contains("before")))
+            .unwrap();
+        let after = page
+            .drawables
+            .iter()
+            .position(|d| matches!(d,Drawable::Text { text,.. } if text.contains("after")))
+            .unwrap();
+        let first = page
+            .drawables
+            .iter()
+            .position(|d| matches!(d, Drawable::Image { .. }))
+            .unwrap();
+        assert!(before < first && first < after);
+        let lists = paginate_with_assets(
+            "- tight ![x](pic.png) after\n- another ![x](pic.png)",
+            &PrintSettings::default(),
+            "",
+            Some(&resolver),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            lists
+                .pages
+                .iter()
+                .flat_map(|p| &p.drawables)
+                .filter(|d| matches!(d, Drawable::Image { .. }))
+                .count(),
+            2
+        );
+        let loose = paginate_with_assets(
+            "- loose\n\n  ![x](pic.png)\n\n  last",
+            &PrintSettings::default(),
+            "",
+            Some(&resolver),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            loose
+                .pages
+                .iter()
+                .flat_map(|p| &p.drawables)
+                .filter(|d| matches!(d, Drawable::Image { .. }))
+                .count(),
+            1
+        );
+        let mut settings = PrintSettings::default();
+        settings.paper = super::super::Paper::Custom {
+            width: 240.0,
+            height: 160.0,
+        };
+        settings.margins = super::super::Margins {
+            top: 10.0,
+            bottom: 10.0,
+            left: 10.0,
+            right: 10.0,
+        };
+        let mut migrated = None;
+        for count in 1..20 {
+            let prefix = format!("{}\n\n", "line  \n".repeat(count));
+            let only = paginate_with_assets(
+                &format!("{prefix}# Title"),
+                &settings,
+                "",
+                Some(&resolver),
+                || false,
+            )
+            .unwrap();
+            let combined = paginate_with_assets(
+                &format!("{prefix}# Title\n\n![x](pic.png%7C40)"),
+                &settings,
+                "",
+                Some(&resolver),
+                || false,
+            )
+            .unwrap();
+            let only_page = only
+                .pages
+                .iter()
+                .position(|p| strings(p).contains("Title"))
+                .unwrap();
+            let combined_page = combined
+                .pages
+                .iter()
+                .position(|p| strings(p).contains("Title"))
+                .unwrap();
+            if combined_page > only_page {
+                assert!(
+                    combined.pages[combined_page]
+                        .drawables
+                        .iter()
+                        .any(|d| matches!(d, Drawable::Image { .. }))
+                );
+                migrated = Some(combined_page);
+                break;
+            }
+        }
+        assert!(
+            migrated.is_some(),
+            "heading and image should move together when their measured combined height exceeds the remaining area"
+        );
+        let mut raster_heading_migrated = false;
+        for count in 1..20 {
+            let prefix = format!("{}\n\n", "line  \n".repeat(count));
+            let only = paginate_with_assets(
+                &format!("{prefix}# ![head](pic.png%7C40)"),
+                &settings,
+                "",
+                Some(&resolver),
+                || false,
+            )
+            .unwrap();
+            let both = paginate_with_assets(
+                &format!("{prefix}# ![head](pic.png%7C40)\n\nnext paragraph"),
+                &settings,
+                "",
+                Some(&resolver),
+                || false,
+            )
+            .unwrap();
+            let page_of = |doc: &PaginatedDocument| {
+                doc.pages
+                    .iter()
+                    .position(|p| {
+                        p.drawables
+                            .iter()
+                            .any(|d| matches!(d, Drawable::Image { .. }))
+                    })
+                    .unwrap()
+            };
+            let old = page_of(&only);
+            let new = page_of(&both);
+            if new > old {
+                assert!(strings(&both.pages[new]).contains("next paragraph"));
+                raster_heading_migrated = true;
+                break;
+            }
+        }
+        assert!(
+            raster_heading_migrated,
+            "image-first heading should keep its next measured line"
+        );
+        let heading_image = paginate_with_assets(
+            "# ![head](pic.png)\n\n[go](#headpicpng)",
+            &PrintSettings::default(),
+            "",
+            Some(&resolver),
+            || false,
+        )
+        .unwrap();
+        assert!(
+            heading_image
+                .pages
+                .iter()
+                .flat_map(|p| &p.drawables)
+                .any(|d| matches!(
+                    d,
+                    Drawable::Link {
+                        destination: LinkDestination::Internal { .. },
+                        ..
+                    }
+                ))
+        );
+    }
+    #[test]
+    fn paginate_unavailable_images_and_mermaid_have_readable_fallbacks() {
+        let src = "![alt text](https://example.test/x.png)\n\n```mermaid\ninvalid diagram @@@\n```";
+        let doc = paginate(src, &PrintSettings::default(), "", || false).unwrap();
+        let text = doc.pages.iter().map(strings).collect::<String>();
+        assert!(text.contains("alt text") && text.contains("invalid diagram"));
+        assert!(doc.warnings.len() >= 2);
+        let valid = paginate(
+            "```mermaid\nflowchart TD\nA --> B\n```",
+            &PrintSettings::default(),
+            "",
+            || false,
+        )
+        .unwrap();
+        assert!(
+            valid
+                .pages
+                .iter()
+                .flat_map(|p| &p.drawables)
+                .any(|d| matches!(d, Drawable::Image { .. }))
+        );
+    }
+    #[test]
+    fn paginate_table_and_image_keep_heading_when_they_fit() {
+        let mut settings = PrintSettings::default();
+        settings.paper = super::super::Paper::Custom {
+            width: 240.0,
+            height: 160.0,
+        };
+        settings.margins = super::super::Margins {
+            top: 10.0,
+            bottom: 10.0,
+            left: 10.0,
+            right: 10.0,
+        };
+        let source = format!(
+            "{}\n\n# Title\n\n| Header | H2 |\n| --- | --- |\n| row | x |",
+            "line  \n".repeat(6)
+        );
+        let doc = paginate(&source, &settings, "", || false).unwrap();
+        let heading = doc
+            .pages
+            .iter()
+            .position(|p| strings(p).contains("Title"))
+            .unwrap();
+        assert!(strings(&doc.pages[heading]).contains("Header"));
+        assert!(strings(&doc.pages[heading]).contains("row"));
     }
 
     #[test]

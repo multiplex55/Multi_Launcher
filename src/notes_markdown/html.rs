@@ -14,8 +14,8 @@ pub const MAX_MARKDOWN_HTML_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_LOCAL_RASTER_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_LOCAL_RASTER_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MARKDOWN_HTML_IMAGES: usize = 512;
-const MAX_LOCAL_RASTER_DIMENSION: u32 = 8_192;
-const MAX_LOCAL_RASTER_PIXELS: u64 = 16_777_216;
+pub(crate) const MAX_LOCAL_RASTER_DIMENSION: u32 = 8_192;
+pub(crate) const MAX_LOCAL_RASTER_PIXELS: u64 = 16_777_216;
 const MAX_MARKDOWN_HTML_EVENTS: usize = 1_000_000;
 const MAX_LOCAL_RASTER_DISPLAY_WIDTH: f32 = 4_096.0;
 const MAX_MERMAID_SVG_AGGREGATE_BYTES: usize = 2 * 1024 * 1024;
@@ -93,7 +93,7 @@ impl LocalRasterFormat {
         }
     }
 
-    fn signature_matches(self, bytes: &[u8]) -> bool {
+    pub(crate) fn signature_matches(self, bytes: &[u8]) -> bool {
         match self {
             Self::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
             Self::Jpeg => bytes.starts_with(&[0xff, 0xd8, 0xff]),
@@ -543,20 +543,11 @@ fn raster_dimensions_within_limits(format: LocalRasterFormat, bytes: &[u8]) -> b
         LocalRasterFormat::Gif => image_025::ImageFormat::Gif,
         LocalRasterFormat::WebP => image_025::ImageFormat::WebP,
     };
-    let Ok((width, height)) =
-        image_025::ImageReader::with_format(std::io::Cursor::new(bytes), image_format)
-            .into_dimensions()
-    else {
-        return false;
-    };
-    width > 0
-        && height > 0
-        && width <= MAX_LOCAL_RASTER_DIMENSION
-        && height <= MAX_LOCAL_RASTER_DIMENSION
-        && u64::from(width).saturating_mul(u64::from(height)) <= MAX_LOCAL_RASTER_PIXELS
+    let Ok((width, height)) = image_025::ImageReader::with_format(std::io::Cursor::new(bytes), image_format).into_dimensions() else { return false; };
+    width > 0 && height > 0 && width <= MAX_LOCAL_RASTER_DIMENSION && height <= MAX_LOCAL_RASTER_DIMENSION && u64::from(width).saturating_mul(u64::from(height)) <= MAX_LOCAL_RASTER_PIXELS
 }
 
-fn is_local_relative_destination(destination: &str) -> bool {
+pub(crate) fn is_local_relative_destination(destination: &str) -> bool {
     if destination.is_empty()
         || destination.len() > 8192
         || destination.starts_with(['/', '\\'])

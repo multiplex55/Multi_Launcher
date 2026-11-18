@@ -42,7 +42,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-A1A | complete |
 | M7-A1B1 | complete |
 | M7-A1B2 | complete |
-| M7-A1B3, M7-A2, M7-B | pending |
+| M7-A1B3 | complete |
+| M7-A2A, M7-A2B, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -319,3 +320,10 @@ Independent review identified an overlapping-delimiter panic, empty named anchor
 M7-A1B1 was pushed at e4d53751b85f96688c9f3ad4b438b4a088b6576b. The shared point-based page scene now places selectable shaped text, links, rules, title, headers and footers with actual page counters. It wraps code with its own configured font size, uses translated glyph ink and common line baselines, and records heading destinations after actual placement. The layout preserves ordered list children and constrained nesting, formats callouts from the existing header evidence, repeats continuation table headers and splits long cell rows. Tables that cannot fit use a readable labeled fallback, including header-only tables. Work, retained shape payloads and link annotations are bounded, share immutable glyph/data payloads, and check cancellation. Unsupported font, link, asset and mixed or wrapped directional cases disclose their limitations.
 
 Two read-only reviews found and rechecked memory, exact-fit rounding, ordering, ink, decoration, and link-placement defects. The final correction passed 7 of 7 after a 4m 12s compile with 1.353s of tests using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(notes_markdown::print_layout::document::tests::paginate_)'. Diff whitespace verification passed. Real local images, Mermaid and completing keep-with-next for compatible following tables and raster blocks remain in M7-A1B3.
+
+
+## M7-A1B3 bounded local images and Mermaid in the page scene
+
+M7-A1B2 was pushed at 80237609eef648f17908075760294baf19acc86f. The same page model holds immutable straight-alpha raster data and exact figure/link rectangles. It admits only existing local-relative raster destinations through the supplied editor resolver. It checks occurrences and resource budgets before expensive operations, charges failed encoded and decoded attempts, caches outcomes for borrowed aliases and SHA-256 plus exact-byte matches, and caches admitted width per destination. PNG decode starts with explicit limits. A bounded chunk walk checks the existing CRC and omits unused ICC metadata only from decoder input to avoid inflation before allocation accounting. Original asset bytes remain untouched. Mermaid uses the existing resource-free bounded renderer. Unsupported images, table images, and Mermaid errors have readable fallback and warnings. Inline figures stay ordered in paragraphs, headings, and tight and loose lists. Heading fit uses the actual following table or raster size and keeps image-first headings with their following text where space permits. Labeled table fallback streams rows and measures only its first line for keep behavior.
+
+The initial focused run passed 5 and failed one fixture whose filler did not force a page migration. The corrected layout and asset suite passed 11 of 11 after a 2m 02s compile in 4.627s with cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::print_layout::document::tests::paginate_) | test(notes_markdown::print_layout::assets::tests::)'. Independent reviews verified and drove additional encoded/decoded-work, table expansion, PNG metadata, and image-first heading corrections. The final two changed-case tests passed after a 2m 01s compile in 0.810s using the same flags and -E 'test(png_icc_chunk_is_checked_and_removed_before_decoding) | test(paginate_local_images_deduplicate_preserve_width_and_inline_order)'. Diff whitespace verification passed. Actual PDF encoding, publication and native preview/print follow.
