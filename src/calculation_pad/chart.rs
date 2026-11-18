@@ -38,6 +38,8 @@ pub(crate) enum ChartKind {
     Line,
     Bar,
     Scatter,
+    Histogram,
+    Cumulative,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -63,8 +65,27 @@ pub(crate) struct ChartDefinition {
     pub y_label: String,
     pub hidden: Vec<usize>,
     pub bar_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<distribution::DistributionDefinition>,
     #[serde(default, skip_serializing_if = "options::ChartOptions::is_default")]
     pub options: options::ChartOptions,
+}
+
+impl ChartDefinition {
+    pub(crate) fn validate_distribution(&self) -> Result<(), &'static str> {
+        if matches!(self.kind, ChartKind::Histogram | ChartKind::Cumulative) && self.distribution.is_none() {
+            return Err("A distribution chart requires a vector source.");
+        }
+        if let Some(distribution) = &self.distribution {
+            distribution.bins.validate()?;
+            let valid = match &distribution.vector {
+                ChartVectorReference::Physical(id) => id.get() != 0,
+                ChartVectorReference::Named { name } => super::document::watch_name(&format!("{{{name}}}")).as_deref() == Some(name),
+            };
+            if !valid { return Err("Invalid distribution vector reference."); }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -453,6 +474,7 @@ mod tests {
             y_label: String::new(),
             hidden: Vec::new(),
             bar_labels: Vec::new(),
+            distribution: None,
             options: options::ChartOptions::default(),
         }
     }
@@ -1322,6 +1344,7 @@ impl ChartDataset {
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
         definition.options.validate(&definition.source)?;
+        definition.validate_distribution()?;
         if definition.options.is_default() {
             return self.scene(definition.kind, view, width, height);
         }
@@ -1337,6 +1360,9 @@ impl ChartDataset {
         width: u32,
         height: u32,
     ) -> Result<Option<ChartScene>, String> {
+        if matches!(kind, ChartKind::Histogram | ChartKind::Cumulative) {
+            return Err("Distribution chart rendering is unavailable.".into());
+        }
         validate_dimensions(width, height)?;
         let options = definition.map(|definition| &definition.options);
         let mut references = Vec::new();
@@ -1669,6 +1695,7 @@ impl ChartDataset {
                 }
                 let mut hit_position = position;
                 match kind {
+                    ChartKind::Histogram | ChartKind::Cumulative => unreachable!("distribution kinds are rejected before rendering"),
                     ChartKind::Line => {
                         if let Some((before, raw)) = previous {
                             let clipped = if let Some(axes) = axes {

@@ -4,11 +4,65 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::{ToPrimitive, Zero};
 
-use super::MAX_POINTS;
+use super::{ChartVectorReference, MAX_POINTS};
+use super::options::FiniteValue;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_BINS: usize = 1024;
 pub(crate) const BOUNDARY_NOTE: &str =
     "≈ marks a rounded boundary. Exact boundaries determine bin membership.";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum DistributionBins {
+    #[default]
+    Auto,
+    Count { count: u16 },
+    Width { width: FiniteValue },
+}
+
+impl DistributionBins {
+    pub(crate) fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::Auto => Ok(()),
+            Self::Count { count } if (1..=MAX_BINS as u16).contains(&count) => Ok(()),
+            Self::Width { width } if width.get() > 0.0 => Ok(()),
+            _ => Err("Invalid distribution bin settings."),
+        }
+    }
+
+    pub(crate) fn histogram_bins(self) -> HistogramBins {
+        match self {
+            Self::Auto => HistogramBins::Auto,
+            Self::Count { count } => HistogramBins::Count(count as usize),
+            Self::Width { width } => HistogramBins::Width(width.get()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DistributionScale {
+    #[default]
+    Count,
+    Percentage,
+}
+
+impl From<DistributionScale> for HistogramScale {
+    fn from(value: DistributionScale) -> Self {
+        match value { DistributionScale::Count => Self::Count, DistributionScale::Percentage => Self::Percentage }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DistributionDefinition {
+    pub vector: ChartVectorReference,
+    #[serde(default)]
+    pub bins: DistributionBins,
+    #[serde(default)]
+    pub scale: DistributionScale,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum HistogramBins {
@@ -106,6 +160,31 @@ pub(crate) struct DistributionData {
 }
 
 impl DistributionData {
+    /// Build the empirical CDF without consulting histogram bin settings.
+    pub(crate) fn cumulative(values: &[f64]) -> Result<Self, String> {
+        if values.len() > MAX_POINTS {
+            return Err("Distribution exceeds the vector point limit.".into());
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err("Distribution requires finite values.".into());
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|left, right| {
+            if left == right { std::cmp::Ordering::Equal } else { left.total_cmp(right) }
+        });
+        let mut ecdf: Vec<EcdfStep> = Vec::new();
+        for value in sorted {
+            if let Some(last) = ecdf.last_mut().filter(|last| last.threshold == value) {
+                last.count += 1;
+                last.cumulative_count += 1;
+            } else {
+                let cumulative_count = ecdf.last().map_or(1, |last| last.cumulative_count + 1);
+                ecdf.push(EcdfStep { threshold: value, count: 1, cumulative_count });
+            }
+        }
+        Ok(Self { total: values.len(), scale: HistogramScale::Count, bins: Vec::new(), ecdf })
+    }
+
     pub(crate) fn build(
         values: &[f64],
         bins: HistogramBins,
@@ -118,30 +197,16 @@ impl DistributionData {
                 return Err("Bin width must be finite and positive.".into()),
             _ => {}
         }
-        if values.len() > MAX_POINTS {
-            return Err("Distribution exceeds the vector point limit.".into());
-        }
-        if values.iter().any(|value| !value.is_finite()) {
-            return Err("Distribution requires finite values.".into());
-        }
+        let cumulative = Self::cumulative(values)?;
         let total = values.len();
         if total == 0 {
-            return Ok(Self { total, scale, bins: Vec::new(), ecdf: Vec::new() });
+            return Ok(Self { scale, ..cumulative });
         }
         let mut sorted = values.to_vec();
         sorted.sort_by(|left, right| {
             if left == right { std::cmp::Ordering::Equal } else { left.total_cmp(right) }
         });
-        let mut ecdf: Vec<EcdfStep> = Vec::new();
-        for value in sorted.iter().copied() {
-            if let Some(last) = ecdf.last_mut().filter(|last| last.threshold == value) {
-                last.count += 1;
-                last.cumulative_count += 1;
-            } else {
-                let cumulative_count = ecdf.last().map_or(1, |last| last.cumulative_count + 1);
-                ecdf.push(EcdfStep { threshold: value, count: 1, cumulative_count });
-            }
-        }
+        let ecdf = cumulative.ecdf;
         let minimum = sorted[0];
         let maximum = sorted[total - 1];
         if minimum == maximum {
@@ -273,5 +338,15 @@ mod tests {
         let BinBounds::Interval { upper, .. } = &data.bins[0].bounds else { panic!("interval expected"); };
         assert!(upper > &exact(f64::MAX).unwrap());
         assert!(data.bins[0].bounds.label().contains("finite scalar range") || data.bins[0].bounds.label().contains('≈'));
+    }
+
+    #[test]
+    fn cumulative_distribution_is_independent_of_histogram_width() {
+        let values = [0.0, 1.0, 1.0, 2048.0];
+        assert!(DistributionData::build(&values, HistogramBins::Width(1.0), HistogramScale::Count).is_err());
+        let cdf = DistributionData::cumulative(&values).unwrap();
+        assert!(cdf.bins.is_empty());
+        assert_eq!(cdf.ecdf.iter().map(|step| (step.threshold, step.count, step.cumulative_count)).collect::<Vec<_>>(), [(0.0, 1, 1), (1.0, 2, 3), (2048.0, 1, 4)]);
+        assert!(DistributionData::cumulative(&[f64::NAN]).is_err());
     }
 }

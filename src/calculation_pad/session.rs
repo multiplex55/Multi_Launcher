@@ -217,6 +217,7 @@ struct HistoryEntry {
     sensitivity_outputs: Vec<WatchReplay>,
     chart_outputs: Vec<WatchReplay>,
     chart_x_live: bool,
+    chart_distribution_live: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +231,7 @@ pub(crate) struct RelatedReferenceEdits {
     pub sensitivity_outputs: Vec<RelatedWatchRename>,
     pub chart_outputs: Vec<RelatedWatchRename>,
     pub chart_x: Option<RelatedWatchRename>,
+    pub chart_distribution: Option<RelatedWatchRename>,
     pub chart_references: Vec<RelatedChartReferenceRename>,
 }
 
@@ -257,6 +259,7 @@ impl RelatedReferenceEdits {
             .chain(self.sensitivity_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_outputs.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_x.iter().map(|item| item.before.len() + item.after.len()))
+            .chain(self.chart_distribution.iter().map(|item| item.before.len() + item.after.len()))
             .chain(self.chart_references.iter().map(|item| item.before.len() + item.after.len() + std::mem::size_of::<u64>()))
             .fold(0usize, usize::saturating_add)
     }
@@ -320,6 +323,12 @@ impl RelatedReferenceEdits {
             }
         }
         if let Some(chart) = result.chart.as_mut() {
+            if let Some(item) = &self.chart_distribution {
+                let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
+                if let Some(distribution) = chart.distribution.as_mut() && matches!(&distribution.vector, super::ChartVectorReference::Named { name } if name == from) {
+                    distribution.vector = super::ChartVectorReference::Named { name: to.clone() };
+                } else if strict { return Err("The distribution source changed before the edit was applied."); }
+            }
             for item in &self.chart_outputs {
                 let (from, to) = if reverse { (&item.after, &item.before) } else { (&item.before, &item.after) };
                 for style in &mut chart.options.styles {
@@ -343,7 +352,7 @@ impl RelatedReferenceEdits {
 
 impl HistoryEntry {
     fn replay(&mut self, view: &PadViewMetadata, ids: &[u64], hidden: &HashSet<u64>, sensitivity_ids: &[u64], sensitivity_hidden: &HashSet<u64>, chart_ids: &[u64], chart_hidden: &HashSet<u64>, hidden_styles: &HashMap<u64, super::chart::options::SeriesStyle>, reverse: bool) -> Result<(PadViewMetadata, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, Vec<u64>, HashSet<u64>, HashMap<u64, super::chart::options::SeriesStyle>), &'static str> {
-        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live), chart_references: self.related.chart_references.clone() };
+        let inputs = RelatedReferenceEdits { inputs: self.related.inputs.clone(), watches: Vec::new(), sensitivity_input: self.related.sensitivity_input.clone().filter(|_| self.sensitivity_input_live), sensitivity_outputs: Vec::new(), chart_outputs: Vec::new(), chart_x: self.related.chart_x.clone().filter(|_| self.chart_x_live), chart_distribution: self.related.chart_distribution.clone().filter(|_| self.chart_distribution_live), chart_references: self.related.chart_references.clone() };
         let mut result = inputs.apply(view, reverse, false)?;
         let mut sensitivity_ids = sensitivity_ids.to_vec();
         let mut sensitivity_hidden = sensitivity_hidden.clone();
@@ -437,7 +446,8 @@ impl EditHistory {
         let sensitivity_outputs = sensitivity_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
         let chart_outputs = chart_ids.into_iter().map(|id| WatchReplay { id, chart_was_hidden: false }).collect();
         let chart_x_live = related.chart_x.is_some();
-        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live });
+        let chart_distribution_live = related.chart_distribution.is_some();
+        self.undo.push_back(HistoryEntry { before, after, related, watches, sensitivity_input_live, sensitivity_outputs, chart_outputs, chart_x_live, chart_distribution_live });
         self.trim();
     }
 
@@ -501,6 +511,10 @@ fn chart_x(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
         Some(super::ChartSource::Vectors { x, .. }) => x.as_ref(),
         _ => None,
     }
+}
+
+fn chart_distribution(view: &PadViewMetadata) -> Option<&super::ChartVectorReference> {
+    view.chart.as_ref()?.distribution.as_ref().map(|distribution| &distribution.vector)
 }
 
 struct ActiveDocument {
@@ -781,6 +795,9 @@ impl CalculationPadSession {
             }
             if matches!(chart_x(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
                 related.chart_x = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
+            }
+            if matches!(chart_distribution(&current.view), Some(super::ChartVectorReference::Named { name }) if name == &preview.plan.old_name) {
+                related.chart_distribution = Some(RelatedWatchRename { before: preview.plan.old_name.clone(), after: preview.plan.new_name.clone() });
             }
             if let Some(chart) = &current.view.chart {
                 for reference in &chart.options.references {
@@ -1069,6 +1086,7 @@ impl CalculationPadSession {
             for entry in self.history.undo.iter_mut().chain(self.history.redo.iter_mut()) {
                 for state in &mut entry.chart_outputs { if state.id.is_some_and(|id| removed.contains(&id)) { state.id = None; } }
                 if chart_x(&current.view) != chart_x(&view) { entry.chart_x_live = false; }
+                if chart_distribution(&current.view) != chart_distribution(&view) { entry.chart_distribution_live = false; }
             }
             (ids, next)
         } else { return Err("No document is open."); };
@@ -2279,7 +2297,7 @@ mod tests {
         let (_dir, root, mut session) = fixture();
         session.replace_source("x = 2\nx + 1").unwrap();
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()], options: Default::default() });
+        view.chart = Some(super::super::ChartDefinition { source: super::super::ChartSource::Sensitivity { outputs: vec!["x".into()] }, kind: super::super::ChartKind::Bar, x_label: "Input".into(), y_label: "Output".into(), hidden: Vec::new(), bar_labels: vec!["first".into()], distribution: None, options: Default::default() });
         session.set_view_metadata(view).unwrap();
         session.save_as("chart").unwrap();
         let id = session.current_id().unwrap();
@@ -2304,7 +2322,7 @@ mod tests {
         let ids = session.line_ids().unwrap().to_vec();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new(), options: Default::default() });
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: Some(named("x")), y: vec![Ref::Physical(ids[0]), named("x"), named("y")] }, kind: ChartKind::Bar, x_label: "custom".into(), y_label: String::new(), hidden: vec![1], bar_labels: Vec::new(), distribution: None, options: Default::default() });
         session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "z").unwrap();
         session.apply_rename(&preview).unwrap();
@@ -2349,7 +2367,7 @@ mod tests {
         session.replace_source("x = 2\ny = 3").unwrap();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], options: Default::default() };
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
         chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [1, 2, 3, 255], line: LineStyle::Dashed, marker: MarkerStyle::Square, thickness: FiniteValue::try_from(2.0).unwrap() });
         chart.options.references.push(ReferenceLine { id: 1, axis: ReferenceAxis::Y, value: ReferenceValue::Named("x".into()), label: "original".into() });
         chart.options.next_reference_id = 2;
@@ -2391,13 +2409,40 @@ mod tests {
     }
 
     #[test]
+    fn chart_distribution_source_follows_rename_and_preserves_independent_edits() {
+        use super::super::chart::distribution::{DistributionBins, DistributionDefinition, DistributionScale};
+        use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = [1, 2]\ny = [3]").unwrap();
+        let named = |name: &str| Ref::Named { name: name.into() };
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart = Some(ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: Some(DistributionDefinition { vector: named("x"), bins: DistributionBins::Count { count: 2 }, scale: DistributionScale::Percentage }), options: Default::default() });
+        session.set_view_metadata(view).unwrap();
+        let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
+        assert_eq!(super::chart_distribution(session.view_metadata().unwrap()), Some(&named("z")));
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart.as_mut().unwrap().distribution.as_mut().unwrap().bins = DistributionBins::Count { count: 3 };
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        let chart = session.view_metadata().unwrap().chart.as_ref().unwrap();
+        assert_eq!(chart.distribution.as_ref().unwrap().vector, named("x"));
+        assert_eq!(chart.distribution.as_ref().unwrap().bins, DistributionBins::Count { count: 3 });
+        assert!(session.redo());
+        let mut view = session.view_metadata().unwrap().clone();
+        view.chart.as_mut().unwrap().distribution.as_mut().unwrap().vector = named("y");
+        session.set_view_metadata(view).unwrap();
+        assert!(session.undo());
+        assert_eq!(super::chart_distribution(session.view_metadata().unwrap()), Some(&named("y")));
+    }
+
+    #[test]
     fn chart_source_change_prunes_removed_styles() {
         use super::super::{ChartDefinition, ChartKind, ChartSource, ChartVectorReference as Ref};
         use super::super::chart::options::{FiniteValue, LineStyle, MarkerStyle, SeriesKey, SeriesStyle};
         let (_dir, _root, mut session) = fixture();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], options: Default::default() };
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x"), named("y")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
         chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [1, 2, 3, 255], line: LineStyle::Solid, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
         view.chart = Some(chart); session.set_view_metadata(view).unwrap();
         let mut view = session.view_metadata().unwrap().clone();
@@ -2414,7 +2459,7 @@ mod tests {
         session.replace_source("x = 2").unwrap();
         let named = |name: &str| Ref::Named { name: name.into() };
         let mut view = session.view_metadata().unwrap().clone();
-        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], options: Default::default() };
+        let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
         chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [9, 8, 7, 255], line: LineStyle::Dashed, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
         view.chart = Some(chart); session.set_view_metadata(view).unwrap();
         let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
@@ -2438,7 +2483,7 @@ mod tests {
             let (_dir, _root, mut session) = fixture();
             session.replace_source("x = 2").unwrap();
             let mut view = session.view_metadata().unwrap().clone();
-            let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], options: Default::default() };
+            let mut chart = ChartDefinition { source: ChartSource::Vectors { x: None, y: vec![named("x")] }, kind: ChartKind::Line, x_label: String::new(), y_label: String::new(), hidden: vec![], bar_labels: vec![], distribution: None, options: Default::default() };
             chart.options.styles.push(SeriesStyle { key: SeriesKey::Vector(named("x")), color: [9, 8, 7, 255], line: LineStyle::Dashed, marker: MarkerStyle::Auto, thickness: FiniteValue::try_from(2.0).unwrap() });
             view.chart = Some(chart); session.set_view_metadata(view).unwrap();
             let preview = session.preview_rename(0, "z").unwrap(); session.apply_rename(&preview).unwrap();
