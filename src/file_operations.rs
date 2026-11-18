@@ -1883,7 +1883,7 @@ fn directory_proof_path_bytes(chain: &[DirectoryProof]) -> usize {
     })
 }
 
-fn has_cloud_placeholder_attributes(attributes: u32) -> bool {
+pub(crate) fn has_cloud_placeholder_attributes(attributes: u32) -> bool {
     attributes
         & (FILE_ATTRIBUTE_OFFLINE_BITS
             | FILE_ATTRIBUTE_RECALL_ON_OPEN_BITS

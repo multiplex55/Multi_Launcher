@@ -43,6 +43,8 @@ pub mod explorer_tabs;
 pub mod file_lock;
 pub mod file_operations;
 pub mod file_search;
+#[cfg(windows)]
+pub mod file_transfer;
 pub mod folder_size;
 pub mod help_window;
 pub mod history;

@@ -14,6 +14,8 @@ mod native;
 #[cfg(windows)]
 pub(crate) use native::print_publication;
 #[cfg(windows)]
+pub(crate) use native::transfer_native;
+#[cfg(windows)]
 mod native_io;
 mod plan;
 #[cfg(windows)]

@@ -328,6 +328,13 @@ impl HeldDirectory {
     fn open_child_with_access(
         self: &Arc<Self>, component: &OsStr, require_add_file: bool, require_add_subdirectory: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
+        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false)
+    }
+
+    fn open_child_with_options(
+        self: &Arc<Self>, component: &OsStr, require_add_file: bool,
+        require_add_subdirectory: bool, no_recall: bool,
+    ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         let access = windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
             | windows::Win32::Storage::FileSystem::FILE_TRAVERSE
@@ -342,8 +349,13 @@ impl HeldDirectory {
             access,
             shared_directory_access(),
             windows::Wdk::Storage::FileSystem::FILE_OPEN,
-            windows::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
-                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
+            // FILE_DIRECTORY_FILE cannot be combined with FILE_OPEN_NO_RECALL.
+            // The transfer open validates the returned directory handle below.
+            (if no_recall {
+                windows::Wdk::Storage::FileSystem::FILE_OPEN_NO_RECALL
+            } else {
+                windows::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
+            }) | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
                 | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
             windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
             "NtCreateFile(FILE_OPEN child directory)",
@@ -1302,7 +1314,7 @@ fn shared_directory_access() -> windows::Win32::Storage::FileSystem::FILE_SHARE_
         | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE
 }
 
-fn split_local_absolute_path(path: &Path) -> Result<(PathBuf, Vec<OsString>), NativeArchiveError> {
+pub(crate) fn split_local_absolute_path(path: &Path) -> Result<(PathBuf, Vec<OsString>), NativeArchiveError> {
     let mut components = path.components();
     let drive = match components.next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {
@@ -1389,6 +1401,12 @@ fn open_volume_root(path: &Path, require_add_file: bool) -> Result<Arc<HeldDirec
 fn open_volume_root_with_access(
     path: &Path, require_add_file: bool, require_add_subdirectory: bool,
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
+    open_volume_root_with_options(path, require_add_file, require_add_subdirectory, false)
+}
+
+fn open_volume_root_with_options(
+    path: &Path, require_add_file: bool, require_add_subdirectory: bool, no_recall: bool,
+) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
@@ -1426,7 +1444,8 @@ fn open_volume_root_with_access(
             shared_directory_access(),
             None,
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+                | if no_recall { windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_NO_RECALL } else { windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0) },
             HANDLE::default(),
         )
     }
@@ -2993,6 +3012,54 @@ mod tests {
     }
 
     #[test]
+    fn transfer_admission_refuses_a_retagged_parent_and_never_descends() {
+        use crate::file_operations::ScanCancellation;
+        use crate::file_transfer::{
+            AdmissionError, TargetOccupancy, TransferLeaf, inspect_parent, inspect_source,
+            inspect_target, recheck_target_metadata,
+        };
+
+        let (_temp, selected, _held, outside) = fixture_tree();
+        let sentinel = outside.join("sentinel.txt");
+        fs::write(&sentinel, b"outside sentinel").unwrap();
+        let cancellation = ScanCancellation::new();
+        let parent = inspect_parent(&selected, &cancellation).unwrap();
+        let leaf = TransferLeaf::new(OsStr::new("sentinel.txt")).unwrap();
+        let approved = inspect_target(&parent, &leaf, &cancellation).unwrap();
+        assert_eq!(approved.occupancy(), &TargetOccupancy::Vacant);
+
+        let mut junction =
+            set_junction_on_existing_directory(&selected, parent.identity(), &outside).unwrap();
+        assert!(matches!(
+            inspect_source(&selected.join(leaf.as_os_str()), &cancellation),
+            Err(AdmissionError::ReparsePoint)
+        ));
+        assert!(matches!(
+            recheck_target_metadata(&approved, &cancellation),
+            Err(AdmissionError::ReparsePoint)
+        ));
+        junction.clear().unwrap();
+        assert_eq!(fs::read(sentinel).unwrap(), b"outside sentinel");
+        recheck_target_metadata(&approved, &cancellation).unwrap();
+    }
+
+    #[test]
+    fn transfer_admission_distinguishes_definitive_leaf_absence_from_other_failures() {
+        use windows::Win32::Foundation::{
+            STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+            STATUS_SHARING_VIOLATION,
+        };
+
+        let refusal = |status| NativeArchiveError::from_ntstatus("transfer test", status, None);
+        assert!(transfer_native::is_missing_relative_leaf(&refusal(
+            STATUS_OBJECT_NAME_NOT_FOUND
+        )));
+        for status in [STATUS_OBJECT_PATH_NOT_FOUND, STATUS_ACCESS_DENIED, STATUS_SHARING_VIOLATION] {
+            assert!(!transfer_native::is_missing_relative_leaf(&refusal(status)));
+        }
+    }
+
+    #[test]
     fn c06_reparse_destination_and_source_ancestors_are_rejected_without_escape() {
         let (root_temp, selected, _held, root_outside) = fixture_tree();
         let archive_path = root_outside.join("source.zip");
@@ -3084,6 +3151,74 @@ mod tests {
                 && child_cleanup_ok,
             "reparse admission or owned cleanup failed: destination={destination_failure:?}, source={source_failure:?}, descendant={descendant_failure:?}, root_names={root_names:?}, child_names={child_names:?}, sentinels={root_sentinel:?}/{child_sentinel:?}, cleanup={root_cleanup_ok}/{child_cleanup_ok}"
         );
+    }
+}
+
+/// Narrow read-only handle-relative primitives for transfer metadata proofs.
+pub(crate) mod transfer_native {
+    use super::*;
+
+    pub(crate) use super::{NativeArchiveError, split_local_absolute_path};
+
+    pub(crate) struct TransferDirectory(Arc<HeldDirectory>);
+
+    impl TransferDirectory {
+        pub(crate) fn open_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            let (validated_root, components) = split_local_absolute_path(root)?;
+            if !components.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&validated_root, false, false, true).map(Self)
+        }
+
+        pub(crate) fn file(&self) -> &File {
+            &self.0.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.0.identity
+        }
+        pub(crate) fn verify_identity(&self) -> Result<NativeFileIdentity, NativeArchiveError> {
+            self.0.verify_identity()
+        }
+        pub(crate) fn open_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true)
+                .map(Self)
+        }
+        pub(crate) fn open_relative_metadata(
+            &self,
+            name: &OsStr,
+        ) -> Result<File, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer relative metadata name")?;
+            open_relative(
+                &self.0,
+                name,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                shared_directory_access(),
+                FILE_OPEN,
+                FILE_OPEN_REPARSE_POINT | FILE_OPEN_NO_RECALL | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer metadata)",
+                || Ok(()),
+            )
+            .map(|(file, _)| file)
+        }
+    }
+
+    pub(crate) fn is_missing_relative_leaf(error: &NativeArchiveError) -> bool {
+        error.primary.nt_status
+            == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
     }
 }
 

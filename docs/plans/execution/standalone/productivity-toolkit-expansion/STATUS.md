@@ -55,7 +55,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M8-A2 | implementation complete, focused admission verified, live clipboard persistence unverified |
 | M8-A3 | complete |
 | M8-B | implementation complete, live generation/reveal/restart verified, live clipboard unavailable |
-| M9-A, M9-B, M9-C, M9-D | pending |
+| M9-A1 | complete |
+| M9-A2, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -437,3 +438,12 @@ The Random plugin exposes an exact password entry and a payload-free typed dialo
 The scoped Nextest expression was test(password_generator) | test(password_dialog_) | test(password_preferences_) | test(expanded_dialog_layer_inventory_matches_actual_window_ids). All 10 passed. The retained test exercised keyboard focus and generation, Reveal, the exact result ID at the injected Copy writer, rejection of a discarded Copy click, preference persistence and real detached-viewport registration. The AccessKit test inspected nodes without printing generated output.
 
 The ordinary Windows build completed with SHA-256 9D86C819CAB27C93D38306D58ACA2DCACBD48012A8603B0342A56057AA4BE818. With only the Random plugin enabled in an isolated profile, the live app opened from search, generated a masked password, revealed and concealed it, invalidated that result on the mode change and generated a masked passphrase. A separate Password Generator window opened and its presentation was saved. Windows automation exposed only its frame in this session. The profile had exactly the mode and two option sets under password_generator. For the restart observation, the fixture's saved presentation alone was set back to docked. The live app loaded the saved passphrase mode with Copy disabled and no result. Both test processes were closed. Live Copy and history ingestion across restart remain unverified because the isolated profile shares the desktop clipboard and the separate window-station preflight failed in M8-A2.
+
+
+## M9-A1 read-only Windows transfer admission
+
+The new transfer domain captures an exact local parent and ancestor chain, a reviewed source entry or a destination occupant. Windows opens each validated component relative to a still-held parent and uses no-reparse/no-recall flags. Only STATUS_OBJECT_NAME_NOT_FOUND on the requested leaf proves vacancy. A fresh probe compares the exact ancestor and entry identities and captured metadata. Target observations release their read-only handles on return. The worker must later acquire its own held guards and apply stream/content checks before write or deletion. Case-insensitive ordinal comparisons preserve ordinary case-only collisions, and the Windows case-sensitive directory flag is checked for both parents and selected directory entries.
+
+The first native run passed six checks and identified STATUS_INVALID_PARAMETER for the combination of FILE_DIRECTORY_FILE and FILE_OPEN_NO_RECALL. The corrected transfer path keeps no-recall and verifies directory type on the opened handle. The existing ZIP methods retain their prior flags. All ten focused Windows cases passed after review corrections. The filter included transfer_admission_ and the three shared c06 junction tests. These cases exercised a late occupant, a replaced parent, a real hard link and case-only collision, a real retagged junction, cancellation, cloud attribute classification, invalid paths, and exact NTSTATUS separation. Enabling case sensitivity in a separate empty test directory returned Access Denied, so the positive case-sensitive fixture was unavailable. C: and G: both report local NTFS and distinct mounted volume identifiers. This enables a later cross-volume test in disposable roots.
+
+Sources: [Windows NtCreateFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile), [case-sensitive directories on Windows](https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity), [Windows file timestamps](https://learn.microsoft.com/en-us/windows/win32/sysinfo/file-times).
