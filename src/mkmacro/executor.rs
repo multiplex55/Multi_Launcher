@@ -1044,9 +1044,29 @@ impl ScreenshotFileSystem for HostScreenshotFileSystem {
 struct ProductionClipboard;
 impl ClipboardBackend for ProductionClipboard {
     fn snapshot_text(&self) -> ExecResult<String> {
-        arboard::Clipboard::new()
-            .and_then(|mut c| c.get_text())
-            .map_err(|e| clipboard_error("read text", e))
+        use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard};
+
+        match read_clipboard() {
+            Ok(ClipboardRead::Ordinary(text)) => Ok(text),
+            Ok(ClipboardRead::Private) => Err(clipboard_status(
+                "read text",
+                "protected",
+                "clipboard item was copied privately",
+            )),
+            Ok(ClipboardRead::NonText) => Err(clipboard_error(
+                "read text",
+                arboard::Error::ContentNotAvailable,
+            )),
+            Err(error) if error.is_busy() => Err(clipboard_error(
+                "read text",
+                arboard::Error::ClipboardOccupied,
+            )),
+            Err(_) => Err(clipboard_status(
+                "read text",
+                "unknown",
+                "clipboard operation could not be completed",
+            )),
+        }
     }
     fn set_text(&self, text: &str) -> ExecResult {
         arboard::Clipboard::new()
@@ -1083,6 +1103,14 @@ fn clipboard_error(operation: &'static str, error: arboard::Error) -> ExecutionD
         // clipboard content in that string.
         _ => ("unknown", "clipboard operation could not be completed"),
     };
+    clipboard_status(operation, reason, message)
+}
+
+fn clipboard_status(
+    operation: &'static str,
+    reason: &'static str,
+    message: &'static str,
+) -> ExecutionDiagnostic {
     ExecutionDiagnostic::new(
         DiagnosticKind::Backend,
         format!("clipboard {operation} failed: {message}"),
@@ -1100,6 +1128,7 @@ fn safe_clipboard_backend_error(
         Some("content_unavailable") => Some("content_unavailable"),
         Some("unsupported") => Some("unsupported"),
         Some("busy") => Some("busy"),
+        Some("protected") => Some("protected"),
         Some("conversion_failed") => Some("conversion_failed"),
         Some("unknown") => Some("unknown"),
         _ if error.kind == DiagnosticKind::UnsupportedOperation => Some("backend_unsupported"),
@@ -1110,6 +1139,7 @@ fn safe_clipboard_backend_error(
         Some("unsupported") => "clipboard access is not supported by this system",
         Some("backend_unsupported") => "clipboard access is not supported by this backend",
         Some("busy") => "clipboard is currently in use",
+        Some("protected") => "clipboard item was copied privately",
         Some("conversion_failed") => "clipboard content could not be converted",
         Some("unknown") => "clipboard operation could not be completed",
         // Injected or future backends are not trusted to keep error text free

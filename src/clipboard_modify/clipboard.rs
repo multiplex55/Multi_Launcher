@@ -1,3 +1,4 @@
+use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard};
 use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ pub const RETRY_TOTAL_DEADLINE: Duration = Duration::from_millis(750);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardError {
     NonText,
+    ProtectedItem,
     InvalidContent(String),
     Transient(String),
     Busy(String),
@@ -56,6 +58,9 @@ impl ClipboardError {
 }
 impl std::fmt::Display for ClipboardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if matches!(self, Self::ProtectedItem) {
+            return f.write_str("This clipboard item was copied privately.");
+        }
         write!(f, "{:?}", self)
     }
 }
@@ -75,8 +80,13 @@ pub trait ClipboardBackend: Send + Sync {
 pub struct ArboardClipboardBackend;
 impl ClipboardBackend for ArboardClipboardBackend {
     fn read_text(&self) -> Result<String, ClipboardError> {
-        let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;
-        cb.get_text().map_err(classify_arboard)
+        match read_clipboard() {
+            Ok(ClipboardRead::Ordinary(text)) => Ok(text),
+            Ok(ClipboardRead::NonText) => Err(ClipboardError::NonText),
+            Ok(ClipboardRead::Private) => Err(ClipboardError::ProtectedItem),
+            Err(error) if error.is_busy() => Err(ClipboardError::Busy(error.to_string())),
+            Err(error) => Err(ClipboardError::Permanent(error.to_string())),
+        }
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
         let mut cb = arboard::Clipboard::new().map_err(classify_arboard)?;

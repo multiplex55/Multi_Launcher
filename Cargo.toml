@@ -116,6 +116,7 @@ windows = { version = "0.58", features = [
     "Media_Ocr",
     "System_UserProfile",
     "Foundation_Collections",
+    "ApplicationModel_DataTransfer",
     "Storage_Streams",
     "Security_Cryptography",
     "Data_Xml_Dom",

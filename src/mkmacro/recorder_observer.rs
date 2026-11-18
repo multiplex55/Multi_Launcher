@@ -309,9 +309,10 @@ impl ClickInspector for super::UiaWorker {
 struct SystemClipboard;
 impl ClipboardReader for SystemClipboard {
     fn read_text(&self) -> anyhow::Result<Option<String>> {
-        match arboard::Clipboard::new()?.get_text() {
-            Ok(text) => Ok(Some(text)),
-            Err(_) => Ok(None),
+        use crate::platform::protected_clipboard::{ClipboardRead, read_clipboard};
+        match read_clipboard()? {
+            ClipboardRead::Ordinary(text) => Ok(Some(text)),
+            ClipboardRead::Private | ClipboardRead::NonText => Ok(None),
         }
     }
 }
