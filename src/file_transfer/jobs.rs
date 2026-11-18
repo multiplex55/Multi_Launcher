@@ -163,7 +163,7 @@ impl TransferJobResult {
         let mut failed = false;
         for row in &report.rows {
             match &row.state {
-                ExecutionState::Copied(_) => retained = true,
+                ExecutionState::Copied(_) | ExecutionState::Moved(_) => retained = true,
                 ExecutionState::CreatedDirectory(directory) => {
                     retained = true;
                     incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);

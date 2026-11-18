@@ -63,7 +63,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B2A | complete |
 | M9-B2B | complete |
 | M9-B3A | complete |
-| M9-B3B+, M9-C, M9-D | pending |
+| M9-B3B | complete |
+| M9-B3C+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -501,3 +502,6 @@ M9-B2B passed 40 focused Windows Nextest tests after independent review. A singl
 
 
 M9-B3A passed 37 focused Windows Nextest tests after the native review and NTFS timestamp fix. The private journal-required Replace path retains the exact old object, preserves a late foreign winner, restores the incumbent's original spelling on safe cancellation and stops later writes when a receipt fails. Fixed, distinct creation times verified that the exact held published object preserves the approved copy times even with NTFS filename tunneling. An injected rename-result ambiguity after a real rename retained the published bytes and file ID. Ordinary queue activation remains deferred to durable receipts in M9-C.
+
+
+M9-B3B passed 44 focused Windows Nextest tests after independent review. Native same-volume Move to an approved vacant name retains the file ID and streams, verifies the currently named Zone Identifier when requested, and keeps an exact relocation receipt after a late journal failure. A late competitor blocks admission, unknown streams remain intact on unverified atomic rename, and explicit verification refuses unsupported streams. Real attribute-only edits after Move rename and Replace publication survive guarded creation-time repair. Normal queue activation remains deferred to the durable recorder.

@@ -10,6 +10,7 @@ mod execute;
 mod jobs;
 mod journal;
 mod plan;
+mod relocate;
 mod tree;
 
 pub use copy::{
@@ -29,6 +30,7 @@ pub use plan::{
     ReviewChoice, ReviewError, ReviewGeneration, ReviewRow, ReviewState, TransferAction,
     TransferDraft, TransferReview, review_transfer,
 };
+pub use relocate::{MoveEffect, MoveLocation, MoveSourceDisposition, MovedFile};
 
 pub use tree::{
     SourceNodeId, SourceObservation, SourceTree, SourceTreeEntry, SourceTreeError,

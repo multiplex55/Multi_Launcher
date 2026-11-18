@@ -3520,25 +3520,78 @@ pub(crate) mod transfer_native {
             leaf: &OsStr,
             expected: NativeFileIdentity,
         ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, false, false)
+        }
+        pub(crate) fn open_move_relocation(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            verify_content: bool,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            self.open_relocation_inner(leaf, expected, true, verify_content)
+        }
+        fn open_relocation_inner(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            moving: bool,
+            verify_content: bool,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
             use windows::Wdk::Storage::FileSystem::{
                 FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
-                FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_SYNCHRONOUS_IO_NONALERT, NTCREATEFILE_CREATE_OPTIONS,
             };
             use windows::Win32::Storage::FileSystem::{
-                DELETE, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, SYNCHRONIZE,
+                DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES,
+                FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
             };
             validate_single_component(leaf, "transfer relocation source")?;
+            let access = DELETE
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE
+                | if moving {
+                    FILE_WRITE_ATTRIBUTES
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                }
+                | if verify_content {
+                    FILE_READ_DATA
+                } else {
+                    FILE_ACCESS_RIGHTS(0)
+                };
+            let options = FILE_OPEN_NO_RECALL
+                | FILE_OPEN_REPARSE_POINT
+                | if verify_content {
+                    NTCREATEFILE_CREATE_OPTIONS(0)
+                } else {
+                    FILE_SYNCHRONOUS_IO_NONALERT
+                };
             let (file, _) = open_relative(
                 &self.0,
                 leaf,
-                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                access,
                 FILE_SHARE_READ,
                 FILE_OPEN,
-                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                options,
                 FILE_ATTRIBUTE_NORMAL,
                 "NtCreateFile(transfer relocation)",
                 || Ok(()),
             )?;
+            let file = if verify_content {
+                let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+                    NativeArchiveError::validation(
+                        "transfer relocation is not verified overlapped",
+                        io::ErrorKind::InvalidData,
+                        Some(expected),
+                    )
+                })?;
+                RelocationFile::Data(TransferFile {
+                    file,
+                    identity: expected,
+                })
+            } else {
+                RelocationFile::Metadata(file)
+            };
             let relocation = TransferRelocation {
                 file,
                 identity: expected,
@@ -3669,12 +3722,27 @@ pub(crate) mod transfer_native {
             leaf: &OsStr,
             expected: NativeFileIdentity,
         ) -> Result<TransferFile, NativeArchiveError> {
+            self.open_source_zone_inner(leaf, expected, false)
+        }
+        pub(crate) fn open_move_source_zone(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            self.open_source_zone_inner(leaf, expected, true)
+        }
+        fn open_source_zone_inner(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+            moving: bool,
+        ) -> Result<TransferFile, NativeArchiveError> {
             use windows::Wdk::Storage::FileSystem::{
                 FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
             };
             use windows::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
-                SYNCHRONIZE,
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+                FILE_SHARE_MODE, FILE_SHARE_READ, SYNCHRONIZE,
             };
             let name = zone_name(leaf)?;
             verify_base(&self.0, leaf, expected)?;
@@ -3682,7 +3750,12 @@ pub(crate) mod transfer_native {
                 &self.0,
                 &name,
                 FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                FILE_SHARE_READ,
+                FILE_SHARE_READ
+                    | if moving {
+                        FILE_SHARE_DELETE
+                    } else {
+                        FILE_SHARE_MODE(0)
+                    },
                 FILE_OPEN,
                 FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
                 FILE_ATTRIBUTE_NORMAL,
@@ -3816,15 +3889,28 @@ pub(crate) mod transfer_native {
         })
     }
 
+    enum RelocationFile {
+        Metadata(File),
+        Data(TransferFile),
+    }
     /// Owns the exact source handle and its parent; dropping never deletes it.
     pub(crate) struct TransferRelocation {
-        file: File,
+        file: RelocationFile,
         identity: NativeFileIdentity,
         parent: Arc<HeldDirectory>,
     }
     impl TransferRelocation {
         pub(crate) fn file(&self) -> &File {
-            &self.file
+            match &self.file {
+                RelocationFile::Metadata(file) => file,
+                RelocationFile::Data(file) => file.file(),
+            }
+        }
+        pub(crate) fn data_file(&self) -> Option<&TransferFile> {
+            match &self.file {
+                RelocationFile::Data(file) => Some(file),
+                RelocationFile::Metadata(_) => None,
+            }
         }
         pub(crate) fn identity(&self) -> NativeFileIdentity {
             self.identity
@@ -3835,20 +3921,20 @@ pub(crate) mod transfer_native {
                 FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
             };
             self.parent.verify_identity()?;
-            let actual = native_file_identity(&self.file).map_err(|e| {
+            let actual = native_file_identity(self.file()).map_err(|e| {
                 NativeArchiveError::from_io(
                     "FILE_ID_INFO(transfer relocation)",
                     e,
                     Some(self.identity),
                 )
             })?;
-            let metadata = self.file.metadata().map_err(|e| {
+            let metadata = self.file().metadata().map_err(|e| {
                 NativeArchiveError::from_io("File::metadata(transfer relocation)", e, Some(actual))
             })?;
             let mut standard = FILE_STANDARD_INFO::default();
             unsafe {
                 GetFileInformationByHandleEx(
-                    HANDLE(self.file.as_raw_handle() as _),
+                    HANDLE(self.file().as_raw_handle() as _),
                     FileStandardInfo,
                     std::ptr::from_mut(&mut standard).cast(),
                     std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
@@ -3897,11 +3983,10 @@ pub(crate) mod transfer_native {
                     Some(self.identity),
                 ));
             }
-            rename_open_file_relative_no_replace(&self.file, &target.0, leaf, self.identity)
+            rename_open_file_relative_no_replace(self.file(), &target.0, leaf, self.identity)
                 .map_err(|primary| {
-                    let confirmed_collision = primary.nt_status == Some(
-                        windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0,
-                    );
+                    let confirmed_collision = primary.nt_status
+                        == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0);
                     NativeArchiveError {
                         primary,
                         cleanup_attempted: false,

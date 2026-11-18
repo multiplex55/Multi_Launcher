@@ -5,6 +5,26 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub(super) enum TransferJournalEvent {
+    MoveRenameIntent {
+        source: PathBuf,
+        target: PathBuf,
+        source_parent: NativeFileIdentity,
+        target_parent: NativeFileIdentity,
+        identity: NativeFileIdentity,
+        original: super::EntryMetadata,
+    },
+    MoveRenameObserved {
+        effect: super::relocate::MoveEffect,
+    },
+    MoveMetadataIntent {
+        effect: super::relocate::MoveEffect,
+    },
+    MoveMetadataObserved {
+        effect: super::relocate::MoveEffect,
+    },
+    MoveVerified {
+        effect: super::relocate::MoveEffect,
+    },
     StageIntent {
         path: PathBuf,
         parent: NativeFileIdentity,

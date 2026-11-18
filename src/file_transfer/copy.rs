@@ -203,6 +203,7 @@ impl From<NativeArchiveError> for CopyFailure {
 #[derive(Debug)]
 pub enum CopyRecoveryArtifact {
     Owned(CopyArtifact),
+    Relocation(Box<super::relocate::MoveEffect>),
     UncertainPublication {
         stage: PathBuf,
         target: PathBuf,
@@ -385,9 +386,9 @@ impl<'a> GuardedCopy<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StreamInventory {
-    data: u64,
-    zone: Option<u64>,
+pub(super) struct StreamInventory {
+    pub(super) data: u64,
+    pub(super) zone: Option<u64>,
 }
 
 fn query_stream_records(file: &File) -> windows::core::Result<Vec<u64>> {
@@ -420,7 +421,7 @@ fn volume_has_no_named_streams(file: &File) -> bool {
     volume.is_ok() && capabilities & FILE_NAMED_STREAMS == 0
 }
 
-fn stream_inventory(file: &File, length: u64) -> Result<StreamInventory, CopyFailure> {
+pub(super) fn stream_inventory(file: &File, length: u64) -> Result<StreamInventory, CopyFailure> {
     match query_stream_records(file) {
         Ok(words) => parse_stream_inventory(&words, length),
         Err(_) if volume_has_no_named_streams(file) => Ok(StreamInventory {
@@ -842,16 +843,18 @@ fn copy_file_bound(
         identity: published.identity(),
         state: CopyArtifactState::Published,
     };
+    let named_revision = observe_entry_metadata(published.file()).map_err(CopyFailure::from);
     after_publication();
     verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
-    let verification =
-        finish_publication(&copy, &published, &artifact, staged, control).map_err(|failure| {
-            CopyError {
-                failure,
-                artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
-                recovery_error: None,
-                replacement: None,
-            }
+    let verification = named_revision
+        .and_then(|revision| {
+            finish_publication(&copy, &published, &artifact, staged, control, revision)
+        })
+        .map_err(|failure| CopyError {
+            failure,
+            artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+            recovery_error: None,
+            replacement: None,
         })?;
     Ok(CopiedFile {
         source: copy.source.identity(),
@@ -926,10 +929,11 @@ fn finish_publication(
     artifact: &CopyArtifact,
     staged: StagedCopy,
     control: &CopyControl,
+    named_revision: EntryMetadata,
 ) -> Result<CopyVerification, CopyFailure> {
     let file = published.file();
     let source = copy.source.metadata();
-    loop {
+    let output_revision = loop {
         control.check()?;
         let Some(epoch) = control.admission_epoch()? else {
             continue;
@@ -937,25 +941,30 @@ fn finish_publication(
         copy.target_parent.check_chain(control.cancellation())?;
         checked_final_path(file, &artifact.path)?;
         let current = observe_entry_metadata(file)?;
-        if current.created == source.created && current.modified == source.modified {
-            break;
+        if current != named_revision {
+            return Err(AdmissionError::StaleEntry.into());
+        }
+        if current.modified != source.modified {
+            return Err(CopyFailure::UnsupportedMetadata);
+        }
+        if current.created == source.created {
+            break current;
         }
         // NTFS can inherit the former occupant's creation time on rename.
-        // Restore the approved times on the still-held published object.
+        // Restore the approved creation time on the held output.
         if let Some(claim) = control.try_claim(epoch)? {
             let result = set_replace_basic_info(
                 file,
                 FILE_BASIC_INFO {
                     CreationTime: source.created,
-                    LastWriteTime: source.modified,
                     ..Default::default()
                 },
             );
             drop(claim);
             result?;
-            break;
+            break observe_entry_metadata(file)?;
         }
-    }
+    };
     file.sync_all()?;
     let streams = copy.streams();
     check_output(file, source, streams)?;
@@ -984,13 +993,16 @@ fn finish_publication(
         CopyVerification::NotRequested
     };
     copy.check_source(control)?;
-    copy.target_parent.check_chain(&control.cancellation)?;
-    check_output(published.file(), copy.source.metadata(), streams)?;
+    copy.target_parent.check_chain(control.cancellation())?;
+    check_output(file, source, streams)?;
+    if observe_entry_metadata(file)? != output_revision {
+        return Err(AdmissionError::StaleEntry.into());
+    }
     control.check()?;
     Ok(verification)
 }
 
-fn hash_file(
+pub(super) fn hash_file(
     file: &TransferFile,
     length: u64,
     control: &CopyControl,
@@ -1601,6 +1613,7 @@ pub(super) fn copy_to_replacement_reporting(
         identity: published.identity(),
         state: CopyArtifactState::Published,
     };
+    let named_revision = observe_entry_metadata(published.file()).map_err(CopyFailure::from);
     if let Err(error) = journal.record(Event::PublicationObserved {
         target: final_path.clone(),
         parent,
@@ -1614,14 +1627,15 @@ pub(super) fn copy_to_replacement_reporting(
         });
     }
     verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
-    let verification =
-        finish_publication(&copy, &published, &artifact, staged, control).map_err(|failure| {
-            CopyError {
-                failure,
-                artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
-                recovery_error: None,
-                replacement: Some(backup.clone()),
-            }
+    let verification = named_revision
+        .and_then(|revision| {
+            finish_publication(&copy, &published, &artifact, staged, control, revision)
+        })
+        .map_err(|failure| CopyError {
+            failure,
+            artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+            recovery_error: None,
+            replacement: Some(backup.clone()),
         })?;
     journal
         .record(Event::Verified {
@@ -1647,12 +1661,9 @@ pub(super) fn copy_to_replacement_reporting(
     })
 }
 
-fn exact_held_leaf(file: &File, expected: &Path) -> bool {
-    checked_final_path(file, expected).is_ok()
-        && crate::file_operations::final_path_for_handle(file)
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_os_string()))
-            == expected.file_name().map(|s| s.to_os_string())
+pub(super) fn exact_held_leaf(file: &File, expected: &Path) -> bool {
+    checked_final_path(file, expected)
+        .is_ok_and(|actual| actual.file_name() == expected.file_name())
 }
 
 fn abort_stage(stage: TransferStage, artifact: CopyArtifact, failure: CopyFailure) -> CopyError {

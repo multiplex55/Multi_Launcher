@@ -1,4 +1,4 @@
-//! Sequential execution of approved copy and duplicate entries.
+//! Sequential execution of approved transfer entries.
 
 use std::io;
 use std::path::Path;
@@ -15,6 +15,7 @@ use super::copy::{
     require_no_directory_streams,
 };
 use super::journal::TransferJournal;
+use super::relocate::{MovedFile, move_same_volume_file};
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
     CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact,
@@ -60,6 +61,7 @@ pub struct DirectoryCopy {
 #[derive(Debug)]
 pub enum ExecutionState {
     Copied(CopiedFile),
+    Moved(MovedFile),
     CreatedDirectory(DirectoryCopy),
     MergedDirectory(ParentSnapshot),
     Skipped,
@@ -104,15 +106,27 @@ fn execute_copy_with_hooks(
     mut before_directory_create: impl FnMut(&Path),
     mut journal: Option<&mut dyn TransferJournal>,
 ) -> Result<CopyExecution, CopyFailure> {
-    if matches!(plan.draft().action, TransferAction::MoveTo(_))
-        || (journal.is_none()
-            && plan
-                .entries()
-                .iter()
-                .any(|entry| matches!(entry.destination(), ApprovedTarget::Replace(_))))
-    {
-        return Err(CopyFailure::UnsupportedPlan);
-    }
+    let strategy = match plan.draft().action {
+        TransferAction::MoveTo(_) => {
+            if journal.is_none() || !plan.entries().iter().all(supports_same_volume_move) {
+                return Err(CopyFailure::UnsupportedPlan);
+            }
+            ExecutionStrategy::SameVolumeMove {
+                verify: plan.draft().verify,
+            }
+        }
+        TransferAction::CopyTo(_) | TransferAction::Duplicate => {
+            if journal.is_none()
+                && plan
+                    .entries()
+                    .iter()
+                    .any(|entry| matches!(entry.destination(), ApprovedTarget::Replace(_)))
+            {
+                return Err(CopyFailure::UnsupportedPlan);
+            }
+            ExecutionStrategy::Copy
+        }
+    };
 
     let mut rows: Vec<_> = plan
         .source()
@@ -139,6 +153,7 @@ fn execute_copy_with_hooks(
             progress(ExecutionProgress::Preparing(id));
             match execute_entry(
                 entry,
+                strategy,
                 &rows,
                 control,
                 &mut progress,
@@ -177,8 +192,25 @@ fn execute_copy_with_hooks(
     })
 }
 
+#[derive(Clone, Copy)]
+enum ExecutionStrategy {
+    Copy,
+    SameVolumeMove { verify: bool },
+}
+
+fn supports_same_volume_move(entry: &ApprovedTransferEntry) -> bool {
+    let ApprovedTarget::CreateAt(target) = entry.destination() else {
+        return false;
+    };
+    entry.source().metadata().kind == EntryKind::File
+        && matches!(target.occupancy(), TargetOccupancy::Vacant)
+        && entry.source().identity().volume_serial_number()
+            == target.parent().identity().volume_serial_number()
+}
+
 fn execute_entry(
     entry: &ApprovedTransferEntry,
+    strategy: ExecutionStrategy,
     rows: &[ExecutionRow],
     control: &CopyControl,
     progress: &mut impl FnMut(ExecutionProgress),
@@ -186,6 +218,28 @@ fn execute_entry(
     journal: &mut Option<&mut dyn TransferJournal>,
 ) -> Result<ExecutionState, CopyError> {
     let id = entry.id();
+    if let ExecutionStrategy::SameVolumeMove { verify } = strategy {
+        let Some(journal) = journal else {
+            return Err(CopyFailure::UnsupportedPlan.into());
+        };
+        let moved = move_same_volume_file(
+            entry,
+            control,
+            verify,
+            |verification_requested| {
+                progress(ExecutionProgress::Verifying {
+                    entry: id,
+                    verification_requested,
+                });
+            },
+            &mut **journal,
+        )?;
+        progress(ExecutionProgress::FileCompleted {
+            entry: id,
+            bytes: moved.bytes,
+        });
+        return Ok(ExecutionState::Moved(moved));
+    }
     if let ApprovedTarget::Merge { target, directory } = entry.destination() {
         return admit_merge(entry.source(), target, directory, control)
             .map(ExecutionState::MergedDirectory)
@@ -435,7 +489,7 @@ fn finalize_directory_times(
         let index = entry.id().index();
         let state = &mut rows[index].state;
         let complete = match state {
-            ExecutionState::Copied(_) | ExecutionState::Skipped => true,
+            ExecutionState::Copied(_) | ExecutionState::Moved(_) | ExecutionState::Skipped => true,
             ExecutionState::CreatedDirectory(created) => {
                 created.times = if incomplete[index] || control.is_cancelled() {
                     DirectoryTimes::Incomplete
@@ -1206,6 +1260,346 @@ mod tests {
         assert!(error.unresolved.is_none());
         assert_eq!(fs::read(&candidate).unwrap(), b"foreign candidate");
         assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
+
+    struct SameVolumeMoveFixture {
+        _temp: tempfile::TempDir,
+        source: std::path::PathBuf,
+        target: std::path::PathBuf,
+        plan: ApprovedTransferPlan,
+    }
+
+    fn same_volume_move_fixture(verify: bool, alternate_stream: &str) -> SameVolumeMoveFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let from = temp.path().join("from");
+        let into = temp.path().join("into");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&into).unwrap();
+        let source = from.join("report.txt");
+        let target = into.join("report.txt");
+        fs::write(&source, vec![73; 160 * 1024]).unwrap();
+        fs::write(
+            alternate_stream_path(&source, alternate_stream),
+            b"preserved ADS",
+        )
+        .unwrap();
+        fs::write(&target, b"former target").unwrap();
+        for (path, seconds) in [(&source, 1_010_000_000), (&target, 1_410_000_000)] {
+            let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+            let timestamp = (11_644_473_600_i64 + seconds) * 10_000_000;
+            set_replace_basic_info(
+                &file,
+                FILE_BASIC_INFO {
+                    CreationTime: timestamp,
+                    LastWriteTime: timestamp,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        fs::remove_file(&target).unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = inspect_source_tree(std::slice::from_ref(&source), &cancel).unwrap();
+        let review = review_transfer(
+            Arc::new(tree),
+            TransferDraft {
+                action: TransferAction::MoveTo(into),
+                verify,
+            },
+            &cancel,
+        )
+        .unwrap();
+        SameVolumeMoveFixture {
+            _temp: temp,
+            source,
+            target,
+            plan: approve(&review),
+        }
+    }
+
+    fn alternate_stream_path(path: &Path, stream: &str) -> std::path::PathBuf {
+        let mut full = path.as_os_str().to_os_string();
+        full.push(stream);
+        full.into()
+    }
+
+    fn run_same_volume_move(
+        fixture: &SameVolumeMoveFixture,
+        control: &CopyControl,
+        journal: &mut dyn TransferJournal,
+    ) -> CopyExecution {
+        execute_copy_with_hooks(&fixture.plan, control, |_| {}, |_| {}, Some(journal)).unwrap()
+    }
+
+    #[test]
+    fn transfer_move_native_same_volume_preserves_identity_times_and_verified_zone() {
+        let stream = ":Zone.Identifier:$DATA";
+        let fixture = same_volume_move_fixture(true, stream);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let original = fixture.plan.entries()[0].source();
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Moved(moved) = &report.rows[0].state else {
+            panic!("expected an exact native move, got {:?}", report.rows[0]);
+        };
+        assert_eq!(moved.bytes, 160 * 1024);
+        assert!(matches!(
+            moved.effect.verification,
+            Some(CopyVerification::Verified {
+                zone_sha256: Some(_),
+                ..
+            })
+        ));
+        assert!(!fixture.source.exists());
+        assert_eq!(fs::read(&fixture.target).unwrap(), vec![73; 160 * 1024]);
+        assert_eq!(
+            fs::read(alternate_stream_path(&fixture.target, stream)).unwrap(),
+            b"preserved ADS"
+        );
+        let output =
+            super::super::inspect_source(&fixture.target, &ScanCancellation::new()).unwrap();
+        assert_eq!(output.identity(), original.identity());
+        assert_eq!(output.metadata().created, original.metadata().created);
+        assert_eq!(output.metadata().modified, original.metadata().modified);
+        assert!(matches!(
+            journal.accepted.as_slice(),
+            [
+                JournalEvent::MoveRenameIntent { .. },
+                JournalEvent::MoveRenameObserved { .. },
+                JournalEvent::MoveVerified { .. }
+            ] | [
+                JournalEvent::MoveRenameIntent { .. },
+                JournalEvent::MoveRenameObserved { .. },
+                JournalEvent::MoveMetadataIntent { .. },
+                JournalEvent::MoveMetadataObserved { .. },
+                JournalEvent::MoveVerified { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn transfer_move_native_unverified_atomic_move_keeps_unsupported_streams() {
+        let stream = ":FixtureAlternate:$DATA";
+        let fixture = same_volume_move_fixture(false, stream);
+        let original = fixture.plan.entries()[0].source();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::Moved(_)),
+            "{:?}",
+            report.rows[0]
+        );
+        assert!(!fixture.source.exists());
+        assert_eq!(
+            fs::read(alternate_stream_path(&fixture.target, stream)).unwrap(),
+            b"preserved ADS"
+        );
+        assert_eq!(
+            super::super::inspect_source(&fixture.target, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            original.identity(),
+        );
+    }
+
+    #[test]
+    fn transfer_move_native_late_winner_survives_and_exact_source_stays() {
+        let fixture = same_volume_move_fixture(false, ":FixtureAlternate:$DATA");
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::MoveRenameIntent { .. }) {
+                    fs::write(&fixture.target, b"late foreign winner").unwrap();
+                }
+                Ok(())
+            },
+        };
+        let original = fixture.plan.entries()[0].source();
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::Failed(error)
+            if matches!(error.failure, CopyFailure::DestinationOccupied) && error.artifact.is_none()),
+            "{:?}",
+            report.rows[0]
+        );
+        assert_eq!(fs::read(&fixture.target).unwrap(), b"late foreign winner");
+        assert_eq!(
+            super::super::inspect_source(&fixture.source, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            original.identity(),
+        );
+        assert!(matches!(
+            journal.accepted.as_slice(),
+            [JournalEvent::MoveRenameIntent { .. }]
+        ));
+    }
+
+    #[test]
+    fn transfer_move_native_refused_post_rename_receipt_retains_destination_identity() {
+        let fixture = same_volume_move_fixture(false, ":FixtureAlternate:$DATA");
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::MoveRenameObserved { .. }) {
+                    return Err(io::Error::other("fixture failed after native rename"));
+                }
+                Ok(())
+            },
+        };
+        let original = fixture.plan.entries()[0].source();
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!(
+                "expected post-rename receipt failure, got {:?}",
+                report.rows[0]
+            );
+        };
+        assert!(
+            matches!(error.failure, CopyFailure::Journal(_)),
+            "{error:?}"
+        );
+        let Some(CopyRecoveryArtifact::Relocation(effect)) = &error.artifact else {
+            panic!("expected the retained native move");
+        };
+        let ApprovedTarget::CreateAt(target) = fixture.plan.entries()[0].destination() else {
+            panic!("expected a vacant target");
+        };
+        assert_eq!(effect.source, fixture.source);
+        assert_eq!(effect.destination, fixture.target);
+        assert_eq!(effect.source_parent, original.parent().identity());
+        assert_eq!(effect.destination_parent, target.parent().identity());
+        assert_eq!(effect.identity, original.identity());
+        assert_eq!(effect.location, super::super::MoveLocation::Destination);
+        assert_eq!(
+            effect.source_disposition,
+            super::super::MoveSourceDisposition::Vacant
+        );
+        assert!(!fixture.source.exists());
+        assert_eq!(
+            super::super::inspect_source(&fixture.target, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            original.identity(),
+        );
+        assert_eq!(fs::read(&fixture.target).unwrap(), vec![73; 160 * 1024]);
+    }
+
+    fn edit_held_file_creation_for_fixture(path: &Path, creation: i64) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        };
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(path)?;
+        set_replace_basic_info(
+            &file,
+            FILE_BASIC_INFO {
+                CreationTime: creation,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn transfer_move_native_preserves_metadata_edited_after_rename() {
+        let fixture = same_volume_move_fixture(false, ":FixtureAlternate:$DATA");
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::MoveRenameObserved { .. }) {
+                    edit_held_file_creation_for_fixture(&fixture.target, edited_time)?;
+                }
+                Ok(())
+            },
+        };
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::Failed(error)
+            if matches!(error.failure, CopyFailure::Admission(AdmissionError::StaleEntry))
+                && matches!(error.artifact, Some(CopyRecoveryArtifact::Relocation(_)))),
+            "{:?}",
+            report.rows[0]
+        );
+        let target =
+            super::super::inspect_source(&fixture.target, &ScanCancellation::new()).unwrap();
+        assert_eq!(target.metadata().created, edited_time);
+        assert!(!fixture.source.exists());
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::MoveRenameObserved { .. })
+        ));
+    }
+
+    #[test]
+    fn transfer_replace_native_preserves_metadata_edited_after_publication() {
+        let fixture = replacement_fixture(false);
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if let JournalEvent::PublicationObserved { target, .. } = event {
+                    edit_held_file_creation_for_fixture(target, edited_time)?;
+                }
+                Ok(())
+            },
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected stale output metadata, got {:?}", report.rows[0]);
+        };
+        assert!(
+            matches!(
+                error.failure,
+                CopyFailure::Admission(AdmissionError::StaleEntry)
+            ),
+            "{error:?}"
+        );
+        let Some(CopyRecoveryArtifact::Owned(artifact)) = &error.artifact else {
+            panic!("expected a published artifact");
+        };
+        let target =
+            super::super::inspect_source(&artifact.path, &ScanCancellation::new()).unwrap();
+        assert_eq!(target.metadata().created, edited_time);
+        assert_eq!(
+            fs::read(&error.replacement.as_ref().unwrap().backup).unwrap(),
+            b"original incumbent"
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::PublicationObserved { .. })
+        ));
+    }
+
+    #[test]
+    fn transfer_move_native_requested_verification_refuses_unsupported_stream() {
+        let stream = ":FixtureAlternate:$DATA";
+        let fixture = same_volume_move_fixture(true, stream);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_same_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::Failed(error)
+            if matches!(error.failure, CopyFailure::UnsupportedStreams) && error.artifact.is_none()),
+            "{:?}",
+            report.rows[0]
+        );
+        assert!(journal.accepted.is_empty());
+        assert!(!fixture.target.exists());
+        assert_eq!(
+            fs::read(alternate_stream_path(&fixture.source, stream)).unwrap(),
+            b"preserved ADS"
+        );
     }
 
     #[test]
