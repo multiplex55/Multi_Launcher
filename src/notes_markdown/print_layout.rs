@@ -1,4 +1,6 @@
 //! Bounded point geometry and reusable, embedded-font shaping for print output.
+mod markdown;
+
 use std::ops::Range;
 use unicode_bidi::BidiInfo;
 use unicode_script::{Script, UnicodeScript};

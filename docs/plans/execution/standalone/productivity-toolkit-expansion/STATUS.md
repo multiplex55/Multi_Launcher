@@ -40,7 +40,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M6-A | complete |
 | M6-B | implementation complete, native smoke pending |
 | M7-A1A | complete |
-| M7-A1B, M7-A2, M7-B | pending |
+| M7-A1B1 | complete |
+| M7-A1B2, M7-A1B3, M7-A2, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -303,3 +304,10 @@ Standalone Windows move and Undo in each editor, including a pop-out, remain pen
 M6-B was pushed at 5c973f5e7ecd66669735e8ef1b0ba8fadcb83d85. The shared print foundation validates point-based paper, orientation, margins, text sizes and single-line header and footer templates. The author supplies exact date and page counts. Shaping reuses the launcher's embedded Ubuntu Light, Hack and Noto Emoji via epaint_default_fonts and Rustybuzz, with explicit bidi and script handling. Font IDs, actual glyph positions, ink bounds and original UTF-8 clusters are available to the shared paginator and output adapters. Missing graphemes produce visible replacement and an exact range warning. The calling layout expands tabs before shaping.
 
 The initial focused offline run passed 2 of 2 and confirmed all dependency versions were already in Cargo.lock. After independent review, canonical coverage, nonprinting bidi controls, original cluster ranges, ink overhang and primary line-height checks were verified again by independent inspection. The final focused run passed 2 of 2 after a 1m 57s compile. Command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::print_layout::tests::)'. Diff whitespace verification passed. M7-A1B adds the shared Markdown page scene and actual pagination.
+
+
+## M7-A1B1 bounded print Markdown parser
+
+M7-A1A was pushed at 61fdcaef2bf17db0aca3df25ff53f51a2b63ffd3. The print parser uses a flat bounded arena from the existing offset-aware Markdown event stream. It retains rich block and inline structure, source ranges and existing anchor identities. It applies the shared Notes callout normalization and returns the exact consumed header source range. Print page breaks require a canonical physical source line authenticated by a complete top-level HTML block. Existing paired metadata and nested, inline, escaped, fenced and larger HTML/comment constructs cannot introduce breaks. Renderable unsupported HTML remains readable warned source. Source bytes, events, nesting, owned text and cancellation are checked.
+
+Independent review identified an overlapping-delimiter panic, empty named anchors and divergent callout handling. The corrected parser passed independent recheck. Focused run passed 3 of 3 after a 3m 52s compile in 0.164s using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(notes_markdown::print_layout::markdown::tests::print_markdown_)'. Diff whitespace verification passed. M7-A1B2 positions text and tables into pages and M7-A1B3 resolves bounded local raster images and Mermaid.

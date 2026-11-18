@@ -87,7 +87,7 @@ fn parse_heading_events(
     headings
 }
 
-fn initial_metadata_end(content: &str) -> usize {
+pub(crate) fn initial_metadata_end(content: &str) -> usize {
     let mut lines = content.split_inclusive('\n');
     let Some(first) = lines.next() else {
         return 0;
