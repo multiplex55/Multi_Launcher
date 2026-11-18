@@ -270,6 +270,17 @@ fn password_with<R: TryRng + ?Sized>(
     }
     Err(GeneratorError::RejectionLimit)
 }
+pub(crate) fn generate_legacy_password(length: usize) -> Result<SecretResult, GeneratorError> {
+    generate_password(
+        &PasswordSettings {
+            length,
+            symbols: false,
+            ..PasswordSettings::default()
+        },
+        0,
+    )
+}
+
 pub fn generate_password(
     settings: &PasswordSettings,
     policy_revision: u64,

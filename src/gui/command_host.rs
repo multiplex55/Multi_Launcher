@@ -14,7 +14,36 @@ use crate::commands::{
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
+use crate::password_generator::{SecretResult, generate_legacy_password};
 use crate::performance::track_c::EventOrigin;
+use crate::platform::protected_clipboard::{ClipboardError, CopyStatus, copy_secret};
+
+#[cfg(test)]
+#[test]
+fn legacy_password_failed_copy_retries_exact_result_and_drops_it_after_acceptance() {
+    let mut copy = LegacyPasswordCopy::default();
+    let mut result_id = None;
+    let refused = copy
+        .attempt(12, |result| {
+            result_id = Some(result.id());
+            assert!(result.expose().bytes().all(|byte| byte.is_ascii_alphanumeric()));
+            Err(ClipboardError::Busy)
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("Run the same command again"));
+    let invalid = copy
+        .attempt(7, |_| panic!("Invalid length must not publish"))
+        .unwrap_err();
+    assert_eq!(invalid.domain, "password");
+    let accepted = copy
+        .attempt(12, |result| {
+            assert_eq!(Some(result.id()), result_id);
+            Ok(CopyStatus::AcceptedAndPersisted)
+        })
+        .unwrap();
+    assert_eq!(accepted, CopyStatus::AcceptedAndPersisted);
+    assert!(copy.pending.is_none());
+}
 
 fn choose_paste_open_context(
     use_empty_qa_context: bool,
@@ -1456,7 +1485,47 @@ fn file_search_mode(kind: crate::file_search::model::SearchKind) -> super::FileS
     }
 }
 
+#[derive(Default)]
+pub(super) struct LegacyPasswordCopy {
+    pending: Option<(usize, SecretResult)>,
+}
+
+impl LegacyPasswordCopy {
+    fn attempt(
+        &mut self,
+        length: usize,
+        publish: impl FnOnce(&SecretResult) -> Result<CopyStatus, ClipboardError>,
+    ) -> Result<CopyStatus, CommandError> {
+        let result = match self.pending.take() {
+            Some((pending_length, result)) if pending_length == length => result,
+            previous => {
+                match generate_legacy_password(length) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.pending = previous;
+                        return Err(CommandError::new("password", error.to_string()));
+                    }
+                }
+            }
+        };
+        match publish(&result) {
+            Ok(status) => Ok(status),
+            Err(error) => {
+                self.pending = Some((length, result));
+                Err(CommandError::new(
+                    "password",
+                    format!("{error} Run the same command again to retry this password."),
+                ))
+            }
+        }
+    }
+}
+
 impl HeadlessCommandHost for LauncherApp {
+    fn copy_generated_password(&mut self, length: usize) -> Result<CopyStatus, CommandError> {
+        self.legacy_password_copy.attempt(length, copy_secret)
+    }
+
     fn execute_headless_command(
         &mut self,
         command: &Command,

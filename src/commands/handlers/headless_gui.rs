@@ -1,7 +1,7 @@
 use super::super::{
-    BrowserTabCommand, Command, CommandError, CommandInvocation, CommandOutcome, ExternalCommand,
-    ExternalNamespace, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, QueryPolicy,
-    StorageCommand, TimerCommand, ToastPolicy, VisibilityPolicy,
+    BrowserTabCommand, ClipboardCommand, Command, CommandError, CommandInvocation, CommandOutcome,
+    ExternalCommand, ExternalNamespace, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy,
+    QueryPolicy, StorageCommand, TimerCommand, ToastPolicy, VisibilityPolicy,
 };
 
 pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
@@ -16,6 +16,29 @@ pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?S
     invocation: &CommandInvocation,
     captured_history_query: Option<&str>,
 ) -> Result<CommandOutcome, CommandError> {
+    if let Command::Clipboard(ClipboardCommand::CopyGeneratedPassword { length }) =
+        &invocation.command
+    {
+        use crate::platform::protected_clipboard::CopyStatus;
+
+        let status = host
+            .copy_generated_password(*length)
+            .map_err(CommandError::with_gui_failure_policy)?;
+        let mut outcome = success_outcome(host, invocation);
+        outcome.history = HistoryPolicy::Skip;
+        outcome.favorite_log = FavoriteLogPolicy::None;
+        outcome.toasts = vec![match status {
+            CopyStatus::AcceptedAndPersisted => {
+                ToastPolicy::Success("Copied a password privately.".into())
+            }
+            CopyStatus::AcceptedButNotPersisted => ToastPolicy::Info(
+                "Windows accepted the private copy. Clipboard persistence could not be confirmed."
+                    .into(),
+            ),
+        }];
+        return Ok(outcome);
+    }
+
     if let Command::Storage(StorageCommand::HistoryLaunch(index)) = &invocation.command
         && let Some(outcome) = handle_history_snippet_replay(
             host,

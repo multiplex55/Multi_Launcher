@@ -1,5 +1,5 @@
 //! Protected clipboard boundary. No value is logged or included in errors.
-use crate::password_generator::SecretResult;
+use crate::password_generator::{SecretResult, SecretResultId};
 use std::{fmt, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,45 @@ impl fmt::Display for ClipboardError {
     }
 }
 impl std::error::Error for ClipboardError {}
+
+/// A rejected headless copy retains its generated result for an explicit retry.
+pub struct RejectedSecretCopy {
+    error: ClipboardError,
+    result: SecretResult,
+}
+
+impl RejectedSecretCopy {
+    pub(crate) fn new(error: ClipboardError, result: SecretResult) -> Self {
+        Self { error, result }
+    }
+
+    pub fn result_id(&self) -> SecretResultId {
+        self.result.id()
+    }
+
+    pub fn retry(self) -> Result<CopyStatus, Self> {
+        copy_secret(&self.result).map_err(|error| Self {
+            error,
+            result: self.result,
+        })
+    }
+}
+
+impl fmt::Debug for RejectedSecretCopy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RejectedSecretCopy")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for RejectedSecretCopy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for RejectedSecretCopy {}
 
 /// Copy only a generator-owned result. A successful return means the OS
 /// accepted the package; persistence failure is a separate accepted status.

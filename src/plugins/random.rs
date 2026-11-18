@@ -1,6 +1,5 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use rand::distr::Alphanumeric;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::sync::Mutex;
@@ -87,23 +86,17 @@ impl Plugin for RandomPlugin {
                 if parts.len() != 2 {
                     return Vec::new();
                 }
-                if let Ok(len) = parts[1].parse::<usize>() {
-                    let mut rng = match self.rng.lock() {
-                        Ok(rng) => rng,
-                        Err(err) => {
-                            tracing::error!(?err, "random plugin rng lock poisoned");
-                            return Vec::new();
-                        }
-                    };
-                    let pw: String = (&mut *rng)
-                        .sample_iter(Alphanumeric)
-                        .take(len)
-                        .map(char::from)
-                        .collect();
+                let raw = parts[1];
+                if !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Vec::new();
+                }
+                if let Ok(length) = raw.parse::<usize>()
+                    && crate::password_generator::PASSWORD_LENGTH_RANGE.contains(&length)
+                {
                     return vec![Action {
-                        label: pw.clone(),
-                        desc: "Random password".into(),
-                        action: format!("clipboard:{pw}"),
+                        label: "Generate and copy password".into(),
+                        desc: format!("Password length: {length}"),
+                        action: format!("password:copy:{length}"),
                         args: None,
                     }];
                 }

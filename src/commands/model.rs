@@ -701,8 +701,9 @@ pub enum ClipboardCommand {
     Clear,
     Copy { index: usize },
     SetText { text: String },
+    CopyGeneratedPassword { length: usize },
 }
-kinds!(ClipboardCommand, Self::Dialog => "dialog", Self::Clear => "clear", Self::Copy { .. } => "copy", Self::SetText { .. } => "set_text");
+kinds!(ClipboardCommand, Self::Dialog => "dialog", Self::Clear => "clear", Self::Copy { .. } => "copy", Self::SetText { .. } => "set_text", Self::CopyGeneratedPassword { .. } => "copy_generated_password");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalculatorCommand {
     CopyResult {

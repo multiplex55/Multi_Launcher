@@ -361,6 +361,28 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+    if s.get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("password:"))
+    {
+        let invalid = || {
+            CommandError::new("clipboard", "Invalid password generation command")
+                .with_gui_failure_policy()
+        };
+        if action.args.is_some() {
+            return Err(invalid());
+        }
+        let raw = s.strip_prefix("password:copy:").ok_or_else(invalid)?;
+        if raw.is_empty() || raw.len() > 3 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let length = raw.parse::<usize>().map_err(|_| invalid())?;
+        if !crate::password_generator::PASSWORD_LENGTH_RANGE.contains(&length) {
+            return Err(invalid());
+        }
+        return Ok(Command::Clipboard(ClipboardCommand::CopyGeneratedPassword {
+            length,
+        }));
+    }
     if s.get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("zip:"))
     {
@@ -3505,5 +3527,27 @@ mod explorer_tabs_parser_tests {
             assert!(parse_action(&action(invalid, None)).is_err());
         }
         assert!(parse_action(&action("explorertabs:open", Some("extra"))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod password_command_tests {
+    use super::*;
+    fn action(wire: &str, args: Option<&str>) -> Action {
+        Action { label: String::new(), desc: String::new(), action: wire.into(), args: args.map(str::to_owned) }
+    }
+    #[test]
+    fn password_wire_is_strict_and_literal_clipboard_is_preserved() {
+        for (wire, length) in [("password:copy:8", 8), ("password:copy:256", 256)] {
+            let parsed = parse_action(&action(wire,None)).unwrap();
+            assert_eq!(parsed, Command::Clipboard(ClipboardCommand::CopyGeneratedPassword { length }));
+            assert_eq!(parsed.kind_name(), "copy_generated_password");
+        }
+        for wire in ["password:copy:", "password:copy:7", "password:copy:257", "password:copy:+8", "password:copy:８", "password:copy:999999999999999999999999", "password:other:8", "PASSWORD:copy:8"] {
+            let error = parse_action(&action(wire,None)).unwrap_err();
+            assert_eq!(error.message, "Invalid password generation command");
+        }
+        assert_eq!(parse_action(&action("password:copy:8",Some("secret"))).unwrap_err().message, "Invalid password generation command");
+        assert_eq!(parse_action(&action("clipboard:password:copy:8",None)).unwrap(), Command::Clipboard(ClipboardCommand::SetText { text:"password:copy:8".into() }));
     }
 }

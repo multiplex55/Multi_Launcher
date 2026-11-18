@@ -324,6 +324,16 @@ pub trait HeadlessCommandHost {
     fn current_query(&self) -> &str;
     fn launcher_should_refocus(&self) -> bool;
 
+    fn copy_generated_password(
+        &mut self,
+        _length: usize,
+    ) -> Result<crate::platform::protected_clipboard::CopyStatus, super::CommandError> {
+        Err(super::CommandError::new(
+            "password",
+            "Private password copying requires the launcher interface.",
+        ))
+    }
+
     fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
         crate::actions::clipboard::set_text(text)
     }
