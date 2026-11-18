@@ -10531,6 +10531,7 @@ impl LauncherApp {
                         | super::Panel::FileSearchDialog
                         | super::Panel::FileSearchPreviewDialog
                         | super::Panel::QrDialog
+                        | super::Panel::ConvertPanel
                         | super::Panel::ExplorerTabsDialog
                         | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
@@ -10621,6 +10622,7 @@ impl LauncherApp {
             ),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HashGenerator,
@@ -10766,7 +10768,7 @@ impl LauncherApp {
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 file_search_layer: self.file_search_host.root_layer(),
-                hosted_utility_layers: NavigationDialogKind::ALL.map(|kind| match kind {
+                hosted_utility_layers: super::jump_mode::ui::NavigationDialogSlots::for_kinds(|kind| match kind {
                     NavigationDialogKind::BatchRename => self.batch_rename_host.root_layer(),
                     NavigationDialogKind::SearchReplace => self.search_replace_host.root_layer(),
                     NavigationDialogKind::ClipboardHistory => {
@@ -10776,6 +10778,7 @@ impl LauncherApp {
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
+                    NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
                     NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
                     NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
@@ -10794,7 +10797,7 @@ impl LauncherApp {
                     self.mouse_gestures_host
                         .root_layer(super::mouse_form_host::MOUSE_GESTURES),
                 ],
-                dialogs: NavigationDialogKind::ALL.map(|kind| {
+                dialogs: super::jump_mode::ui::NavigationDialogSlots::for_kinds(|kind| {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
                         self.regex_tester_dialog.root_navigation_instance(current)
@@ -10838,6 +10841,8 @@ impl LauncherApp {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::FilePreview {
                         self.file_preview_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::Convert {
+                        self.convert_panel.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::QrGenerator {
                         self.qr_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::ExplorerTabs {
@@ -14000,8 +14005,19 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
+        let convert_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+        let popup = self.convert_panel.owned_popup_layer(&ctx, convert_layer);
+        let convert_owner = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(&ctx) == Some(convert_layer)
+            && (!egui::Popup::is_any_open(&ctx) || popup.is_some())
+            && super::jump_mode::ui::focused_response_layer(&ctx).is_none_or(|focus| focus == convert_layer || Some(focus) == popup || focus.order == egui::Order::Background);
+        let nav = self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let scope = match nav {
+            super::jump_mode::ui::NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::Convert, instance } if convert_owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("convert-panel", instance), super::jump_mode::TargetGeneration(self.convert_panel.jump_generation()), "convert-panel/form", ctx.viewport_id(), nav, false),
+            _ => None,
+        }.map(|scope| if first_ui_pass && !ctx.will_discard() { scope } else { scope.registration_only() });
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        let _ = conv_panel.ui(&ctx, first_ui_pass);
+        let _ = conv_panel.ui_with_jump(&ctx, first_ui_pass, convert_owner, scope.as_ref());
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);
@@ -24317,6 +24333,166 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn convert_jump_open_combo_exposes_owned_options_without_selecting() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::ConvertPanel);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let title =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(title, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let category = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Category")
+                    .unwrap()
+                    .clipped_rect();
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(category, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                assert!(egui::Popup::is_any_open(&ctx));
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                let target = targets
+                    .iter()
+                    .find(|target| target.metadata().label() == "Area")
+                    .cloned()
+                    .expect("the visible Area option belongs to the active popup");
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Value")
+                );
+                let before = app.convert_panel.test_category_label();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Area");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(app.convert_panel.test_category_label(), before);
+                assert!(egui::Popup::is_any_open(&ctx));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn convert_jump_replay_retains_value_without_effect() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.focus_panel(super::super::Panel::ConvertPanel);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point =
+                    egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..3 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), true).drop_without_applying_deltas();
+                let instance = app
+                    .jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::Convert)
+                    .unwrap();
+                assert_eq!(
+                    app.jump_mode_ui.frame_navigation_owner(),
+                    NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::Convert,
+                        instance
+                    }
+                );
+                assert!(
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Value")
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -62480,9 +62656,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -64578,9 +64753,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 }
             ),
         );
@@ -67203,9 +67377,8 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    hosted_utility_layers: [None;
-                        crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
-                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
+                    hosted_utility_layers: Default::default(),
+                    dialogs: Default::default(),
                 }
             ),
             app.confirm_modal.is_open(),

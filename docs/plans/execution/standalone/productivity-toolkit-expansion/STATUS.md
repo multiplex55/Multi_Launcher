@@ -86,6 +86,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A1 | complete |
 | M12-A2 | complete |
 | M12-A3 | complete |
+| M12-A4a | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -679,3 +680,10 @@ The first six scoped checks passed (d5200eb1-8db5-4cec-a804-096e479fa1d4). Indep
 File Lock and Folder Size keep their existing retained docked and native hosts. Their current form, result and action targets now participate in Jump. Process rows bind the inspection generation, PID and creation stamp. Folder rows bind the retained projection generation and node identity, with owned context menus excluding parent targets. Keyboard row traversal stages current selection and one-shot reveal. Accepted mouse selection transfers focus to the exact selected folder row without changing its scroll offset. **Open in Folder Size** is available for a current selected directory and invokes the existing guarded drill only after activation.
 
 The new docked focus-only cases and layer inventory passed in the initial run (7e5541b8-bf57-43cf-bc4f-de384c41b577). Three older app fixtures overflowed their default Rust test-thread stack. The new native navigation coordinators were moved out of line. A command-local `RUST_MIN_STACK=16777216` then passed the three unchanged fixtures (e2183eab-9b1b-497e-86c2-cef6009c9bbb). The final seven scoped checks passed with that test-thread setting (285c0882-eee9-4665-bc32-21ec3beefccf), including exact focused file-to-directory Arrow navigation, focus-only Drill target selection, explicit Enter and preserved native-host lifecycle. The test stack setting was applied only to the verifying command.
+
+
+### M12-A4a Convert keyboard ownership
+
+The existing root Convert window now registers its value, choices, searches, favorites, target rows, actions and preferences under its own current owner. Owned ComboBoxes register options on their corresponding popup surfaces. Stable value IDs keep choices attached to their unit. Changes in favorites, filtered membership or target rows retire the corresponding generation. Registration survives a discarded first pass while clipboard and preference effects still require accepted explicit activation. Existing Tab and focused scrolling behavior is preserved.
+
+Adding the 33rd dialog exposed the standard array Default limit. The shared Jump registry now initializes its fixed kind-indexed slots through the complete dialog inventory, preserving each existing slot's identity. The corrected scoped run passed 21 checks including existing Convert behavior, root replay and the actual layer inventory (078cd68a-b96d-401e-9772-b124b39cba19). Its new popup fixture initially targeted the last, clipped category. The visible Area option was then used to verify that the popup alone supplies targets and that the chosen hint moves focus without changing the category. The exact rerun passed (67213882-3644-4063-8d2d-cb6b6d77a8d8).

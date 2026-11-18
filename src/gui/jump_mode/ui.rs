@@ -66,12 +66,13 @@ pub(crate) enum NavigationDialogKind {
     HashGenerator,
     QrGenerator,
     ExplorerTabs,
+    Convert,
     FileLock,
     FolderSize,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 32] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -104,6 +105,7 @@ impl NavigationDialogKind {
         Self::ExplorerTabs,
         Self::FileLock,
         Self::FolderSize,
+        Self::Convert,
     ];
 
     const fn index(self) -> usize {
@@ -138,6 +140,7 @@ impl NavigationDialogKind {
             Self::HashGenerator => 27,
             Self::QrGenerator => 28,
             Self::ExplorerTabs => 29,
+            Self::Convert => 32,
             Self::FileLock => 30,
             Self::FolderSize => 31,
         }
@@ -175,6 +178,7 @@ impl NavigationDialogKind {
             Self::HashGenerator => "hash-generator",
             Self::QrGenerator => "qr-generator",
             Self::ExplorerTabs => "explorer-tabs",
+            Self::Convert => "convert-panel",
             Self::FileLock => "file-lock",
             Self::FolderSize => "folder-size",
         }
@@ -215,6 +219,7 @@ impl NavigationDialogKind {
             Self::HashGenerator => egui::Id::new("hash_generator_dialog"),
             Self::QrGenerator => egui::Id::new("qr_generator_embedded"),
             Self::ExplorerTabs => egui::Id::new("explorer-tabs-window"),
+            Self::Convert => egui::Id::new("convert-panel-window"),
             Self::FileLock => egui::Id::new(Some("File Lock Inspector")),
             Self::FolderSize => egui::Id::new(Some("Folder Size")),
         };
@@ -505,6 +510,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::QrGenerator
                     | NavigationDialogKind::ExplorerTabs
+                    | NavigationDialogKind::Convert
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -557,6 +563,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::HashGenerator
                     | NavigationDialogKind::QrGenerator
                     | NavigationDialogKind::ExplorerTabs
+                    | NavigationDialogKind::Convert
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -1189,6 +1196,35 @@ pub(crate) fn resolve_snippet_prompt_navigation_owner(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationDialogSlots<T>([T; NavigationDialogKind::ALL.len()]);
+
+impl<T> NavigationDialogSlots<T> {
+    pub(crate) fn for_kinds(make: impl FnMut(NavigationDialogKind) -> T) -> Self {
+        Self(NavigationDialogKind::ALL.map(make))
+    }
+}
+
+impl<T: Default> Default for NavigationDialogSlots<T> {
+    fn default() -> Self {
+        Self::for_kinds(|_| T::default())
+    }
+}
+
+impl<T> std::ops::Deref for NavigationDialogSlots<T> {
+    type Target = [T; NavigationDialogKind::ALL.len()];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for NavigationDialogSlots<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
@@ -1201,8 +1237,8 @@ pub(crate) struct NavigationWindows {
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
     pub(crate) file_search_layer: Option<egui::LayerId>,
-    pub(crate) hosted_utility_layers: [Option<egui::LayerId>; NavigationDialogKind::ALL.len()],
-    pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
+    pub(crate) hosted_utility_layers: NavigationDialogSlots<Option<egui::LayerId>>,
+    pub(crate) dialogs: NavigationDialogSlots<Option<u64>>,
 }
 
 impl NavigationWindows {
@@ -2369,7 +2405,7 @@ pub(crate) struct JumpModeUi {
     timer_instance: u64,
     paste_sequence_open: bool,
     paste_sequence_instance: u64,
-    observed_dialogs: [ObservedNavigationDialog; NavigationDialogKind::ALL.len()],
+    observed_dialogs: NavigationDialogSlots<ObservedNavigationDialog>,
     active_session: Option<HintSession>,
     hint_session_generation: u64,
     last_outcome: Option<MatchOutcome>,
@@ -4375,6 +4411,7 @@ mod tests {
                             .show(ctx, |_| {});
                     }
                     NavigationDialogKind::QrGenerator => { egui::Window::new("QR Generator").id(egui::Id::new("qr_generator_embedded")).show(ctx, |_| {}); }
+                    NavigationDialogKind::Convert => { egui::Window::new("Convert").id(egui::Id::new("convert-panel-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::ExplorerTabs => { egui::Window::new("Explorer Tabs").id(egui::Id::new("explorer-tabs-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::HashGenerator => {
                         egui::Window::new("Hash Generator")
@@ -4564,8 +4601,8 @@ mod tests {
             dashboard_editor_layer: None,
             mouse_form_layers: [None; 3],
             file_search_layer: None,
-            hosted_utility_layers: [None; NavigationDialogKind::ALL.len()],
-            dialogs: [None; NavigationDialogKind::ALL.len()],
+            hosted_utility_layers: Default::default(),
+            dialogs: Default::default(),
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));
