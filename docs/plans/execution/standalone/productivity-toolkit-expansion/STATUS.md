@@ -34,7 +34,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C2B1 | complete |
 | M4-C2B2 | complete, with partial interactive smoke |
 | M5-A1 | complete |
-| M5-A, M5-B | pending |
+| M5-A | complete |
+| M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
 | M8-A, M8-B | pending |
@@ -253,3 +254,10 @@ The M4-C2B2 12-case Nextest expression was test(gui::calculation_chart_dialog::t
 M4-C2B2 was pushed at bc356a0ebc0cd512e5b18b3968f6e476b6d2ef11. The typed catalog draws callable spellings and signatures from the shared evaluator inventory. It covers all 27 vector transformation, callback and product calls, with argument ranges, expectations, stable related IDs and name/intent ranking. It reuses the established executable-example assertion. The original implementer handed back the checkpoint without changes, and the root finished it as sole writer. Independent review found no actionable issues.
 
 Windows Nextest passed 4 of 4 (including the grouped legacy examples) using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::reference::tests::reference_) | test(shared_examples_evaluate_to_their_documented_results)'. The Rust compile took 11m 21s. Process counters confirmed resumed output during build diagnosis, so compilation completed without cancellation. Individual tests took 0.288s in total. Diff whitespace verification passed. The rest of the language and the retained help UI are separate pending work.
+
+
+## M5-A complete executable API reference content
+
+M5-A1 was pushed at 934997f887ecb2b5cc404cad63eaa6c41db69f89. The complete offline content has all 119 evaluator function names, with executable typed expectations and a check for the actual arities of fixed overloads. It covers operator spellings, statements, value forms, chart and Sensitivity usage, limits, and all 17 authoritative unit categories and their aliases. Existing grouped examples and their evaluator checks remain in place. Search ranks exact name and alias ahead of incidental matches. Every related ID resolves.
+
+Initial compile exposed a unit macro fragment restriction and was corrected. Both complete targeted runs passed 6 of 6 with cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::reference::tests::reference_) | test(shared_examples_evaluate_to_their_documented_results)'. The final compile took 2m 03s and its six tests took 0.588s. Independent recheck closed the material findings. Two final description-only details were aligned with existing Cumulative behavior (empty vector and linear Y); the same catalog tests will be included in the M5-B run. Diff whitespace verification passed. M5-B owns user-visible navigation and insertion.

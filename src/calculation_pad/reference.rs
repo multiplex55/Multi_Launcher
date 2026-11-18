@@ -1,5 +1,10 @@
 use super::examples::{CalculationExample, ExampleExpectation};
 use super::function_signature_help;
+use crate::unit_conversion::{self, Category, UnitDefinition};
+
+mod functions;
+mod topics;
+mod units;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ReferenceId {
@@ -17,13 +22,38 @@ impl ReferenceId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReferenceCategory {
+    Mathematics,
+    Statistics,
     Vectors,
+    ControlFlow,
+    ProgrammerExact,
+    Units,
+    CalendarTime,
+    Charts,
 }
 
 impl ReferenceCategory {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Mathematics,
+        Self::Statistics,
+        Self::Vectors,
+        Self::ControlFlow,
+        Self::ProgrammerExact,
+        Self::Units,
+        Self::CalendarTime,
+        Self::Charts,
+    ];
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::Mathematics => "Mathematics",
+            Self::Statistics => "Statistics",
             Self::Vectors => "Vectors",
+            Self::ControlFlow => "Control Flow / Functions",
+            Self::ProgrammerExact => "Programmer / Exact Numbers",
+            Self::Units => "Units",
+            Self::CalendarTime => "Calendar / Time",
+            Self::Charts => "Chart Data / Usage",
         }
     }
 }
@@ -32,6 +62,7 @@ impl ReferenceCategory {
 pub(crate) struct ReferenceEntry {
     pub(crate) id: ReferenceId,
     pub(crate) category: ReferenceCategory,
+    spelling: Option<&'static str>,
     pub(crate) aliases: &'static [&'static str],
     pub(crate) concepts: &'static [&'static str],
     pub(crate) summary: &'static str,
@@ -39,18 +70,28 @@ pub(crate) struct ReferenceEntry {
     pub(crate) returns: &'static str,
     pub(crate) limits: &'static str,
     pub(crate) example: CalculationExample,
+    pub(crate) variants: &'static [CalculationExample],
     pub(crate) related: &'static [ReferenceId],
+    unit_category: Option<Category>,
 }
 
 impl ReferenceEntry {
     pub(crate) fn signature(&self) -> &'static str {
         match self.id {
             ReferenceId::Call(name) => function_signature_help(name).unwrap_or(name),
-            ReferenceId::Topic(spelling) => spelling,
+            ReferenceId::Topic(name) => self.spelling.unwrap_or(name),
         }
     }
 
-    fn rank(&self, query: &str, normalized: &str) -> Option<u8> {
+    pub(crate) fn unit_definitions(&self) -> impl Iterator<Item = &'static UnitDefinition> {
+        self.unit_category.into_iter().flat_map(|category| {
+            unit_conversion::catalog()
+                .iter()
+                .filter(move |unit| unit.category == category)
+        })
+    }
+
+    fn rank(&self, query: &str, normalized: &str, unit_category: Option<Category>) -> Option<u8> {
         let name = self.id.name();
         if normalized.is_empty() || query == name {
             return Some(0);
@@ -58,7 +99,11 @@ impl ReferenceEntry {
         if normalized == name.to_lowercase() {
             return Some(1);
         }
-        if self.aliases.contains(&query) {
+        if self.aliases.contains(&query)
+            || self
+                .unit_category
+                .is_some_and(|category| Some(category) == unit_category)
+        {
             return Some(2);
         }
         if self
@@ -95,11 +140,25 @@ impl ReferenceEntry {
         ]
         .into_iter()
         .chain(self.aliases.iter().chain(self.concepts).copied())
+        .chain(
+            self.variants
+                .iter()
+                .flat_map(|example| [example.title, example.source]),
+        )
+        .chain(self.unit_definitions().flat_map(|unit| {
+            std::iter::once(unit.symbol)
+                .chain(unit.aliases.iter().copied())
+                .chain(unit.case_sensitive_aliases.iter().copied())
+        }))
     }
 }
 
 pub(crate) fn entries() -> impl Iterator<Item = &'static ReferenceEntry> {
-    VECTORS.iter()
+    VECTORS
+        .iter()
+        .chain(functions::FUNCTIONS)
+        .chain(topics::TOPICS)
+        .chain(units::UNITS)
 }
 
 pub(crate) fn entry(id: ReferenceId) -> Option<&'static ReferenceEntry> {
@@ -112,9 +171,10 @@ pub(crate) fn search(
 ) -> Vec<&'static ReferenceEntry> {
     let query = query.trim();
     let normalized = query.to_lowercase();
+    let unit_category = unit_conversion::unit_by_alias(query).map(|unit| unit.category());
     let mut matches: Vec<_> = entries()
         .filter(|entry| category.is_none_or(|category| entry.category == category))
-        .filter_map(|entry| Some((entry.rank(query, &normalized)?, entry)))
+        .filter_map(|entry| Some((entry.rank(query, &normalized, unit_category)?, entry)))
         .collect();
     matches.sort_by_key(|(rank, entry)| (*rank, entry.id.name()));
     matches.into_iter().map(|(_, entry)| entry).collect()
@@ -141,6 +201,7 @@ macro_rules! vector_call {
         ReferenceEntry {
             id: ReferenceId::Call($name),
             category: ReferenceCategory::Vectors,
+            spelling: None,
             aliases: &[],
             concepts: &[$($concept),*],
             summary: $summary,
@@ -150,7 +211,9 @@ macro_rules! vector_call {
             example: CalculationExample::new(
                 $name, $example, $summary, ExampleExpectation::$kind($expected),
             ),
+            variants: &[],
             related: &[$(ReferenceId::Call($related)),+],
+            unit_category: None,
         }
     };
 }
@@ -268,10 +331,140 @@ mod tests {
         assert!(search("fictional operation", None).is_empty());
         assert_eq!(
             search("", Some(ReferenceCategory::Vectors)).len(),
-            VECTORS.len()
+            VECTORS.len() + 2
         );
         assert!(pop.summary.contains("shortened vector"));
         assert_eq!(pop.example.result_text(), "[10, 20]");
+    }
+
+    #[test]
+    fn reference_covers_every_evaluator_call_and_all_examples_execute() {
+        use std::collections::HashSet;
+
+        let inventory: HashSet<_> = FUNCTIONS.iter().map(|function| function.name).collect();
+        let covered: HashSet<_> = entries()
+            .filter_map(|item| match item.id {
+                ReferenceId::Call(name) => Some(name),
+                ReferenceId::Topic(_) => None,
+            })
+            .collect();
+        assert_eq!(inventory, covered);
+        let mut ids = HashSet::new();
+        for item in entries() {
+            assert!(ids.insert(item.id), "duplicate {:?}", item.id);
+            assert!(!item.signature().is_empty(), "{:?}", item.id);
+            assert!(
+                !item.summary.is_empty()
+                    && !item.parameters.is_empty()
+                    && !item.returns.is_empty()
+                    && !item.limits.is_empty(),
+                "{:?}",
+                item.id
+            );
+            assert!(
+                item.related
+                    .iter()
+                    .all(|id| *id != item.id && entry(*id).is_some()),
+                "{:?}: {:?}",
+                item.id,
+                item.related
+            );
+            assert_example(&item.example);
+            for example in item.variants {
+                assert_example(example);
+            }
+        }
+        for category in ReferenceCategory::ALL {
+            assert!(
+                entries().any(|item| item.category == category),
+                "empty {category:?}"
+            );
+        }
+        for function in FUNCTIONS {
+            let item = entry(ReferenceId::Call(function.name)).unwrap();
+            let forms: std::collections::BTreeSet<_> = std::iter::once(&item.example)
+                .chain(item.variants)
+                .flat_map(|example| function.documented_example_arities(example.source))
+                .collect();
+            if is_vector_callback(function.name) {
+                assert_eq!(function.arities(), (2..=17).collect::<Vec<_>>());
+                assert!(
+                    !forms.is_empty()
+                        && forms.iter().all(|arity| function.arities().contains(arity))
+                );
+            } else {
+                assert_eq!(
+                    forms.into_iter().collect::<Vec<_>>(),
+                    function.arities(),
+                    "overloads for {}",
+                    function.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reference_operator_and_unit_inventories_use_authoritative_catalogs() {
+        use crate::calculation_pad::operators::ModuloOperators;
+        use exmex::MakeOperators;
+
+        for operator in ModuloOperators::make() {
+            let spelling = operator.repr();
+            let topic = match spelling {
+                "@" => continue,
+                "+" | "-" | "*" | "/" | "^" => Some("Scalar arithmetic"),
+                "%" => Some("Signed remainder"),
+                "PI" | "π" | "E" | "e" | "TAU" | "τ" => Some("Scalar constants"),
+                _ => None,
+            };
+            if let Some(topic) = topic {
+                let item = entry(ReferenceId::Topic(topic)).unwrap();
+                assert!(
+                    item.aliases.contains(&spelling),
+                    "missing {topic} spelling {spelling}"
+                );
+            } else {
+                assert!(
+                    entry(ReferenceId::Call(spelling)).is_some(),
+                    "missing operator {spelling}"
+                );
+            }
+        }
+        for &category in Category::ALL {
+            let documented: Vec<_> = entries()
+                .filter(|item| item.unit_category == Some(category))
+                .collect();
+            assert_eq!(documented.len(), 1, "missing/duplicate {category:?}");
+            for unit in documented[0].unit_definitions() {
+                for spelling in std::iter::once(unit.symbol)
+                    .chain(unit.aliases.iter().copied())
+                    .chain(unit.case_sensitive_aliases.iter().copied())
+                {
+                    assert!(
+                        search(spelling, Some(ReferenceCategory::Units))
+                            .iter()
+                            .any(|item| item.id == documented[0].id),
+                        "{category:?}: {spelling}"
+                    );
+                }
+            }
+        }
+        for (term, id) in [
+            ("min", ReferenceId::Call("min")),
+            ("PI", ReferenceId::Topic("Scalar constants")),
+            ("decimal", ReferenceId::Call("decimal")),
+            ("MB", ReferenceId::Topic("Data units")),
+            ("Mb", ReferenceId::Topic("Data units")),
+            ("MB/s", ReferenceId::Topic("Data rate units")),
+            ("convert", ReferenceId::Topic("Physical conversions")),
+            ("hexadecimal", ReferenceId::Topic("Exact radix conversion")),
+        ] {
+            assert_eq!(
+                search(term, None).first().map(|item| item.id),
+                Some(id),
+                "search: {term}"
+            );
+        }
     }
 
     #[test]

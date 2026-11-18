@@ -20,6 +20,7 @@ pub(super) enum ExampleExpectation {
     ApproximateScalar(f64),
     ScalarWithSkipped(f64),
     ScalarWithDiagnostic { value: f64, line: usize, message: &'static str },
+    Boolean(bool),
     Vector(&'static [f64]),
     Physical {
         value: f64,
@@ -40,7 +41,6 @@ pub(super) enum ExampleExpectation {
 }
 
 impl CalculationExample {
-
     pub(super) const fn new(
         title: &'static str,
         source: &'static str,
@@ -49,6 +49,7 @@ impl CalculationExample {
     ) -> Self {
         Self { title, source, explanation, expected }
     }
+
     pub(crate) fn matches(&self, group: &str, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
@@ -67,6 +68,7 @@ impl CalculationExample {
                 format!("{} (line {}: {message})", format_number(value).unwrap_or_default(), line + 1)
             }
             ExampleExpectation::ApproximateScalar(value) => format!("≈ {}", format_number(value).unwrap_or_default()),
+            ExampleExpectation::Boolean(value) => value.to_string(),
             ExampleExpectation::Vector(values) => format!(
                 "[{}]",
                 values
@@ -747,7 +749,7 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             CalculationExample {
                 title: "Conditional expression in a calculation",
                 source: "price = 100\ndiscount = if(price >= 100, 10, 0)\nprice - discount",
-                explanation: "if(condition, true value, false value) selects a value inside an expression. Multiline if statements are unsupported.",
+                explanation: "if(condition, true value, false value) selects a value inside an expression. The separate if/elif/else block syntax chooses which indented statements execute.",
                 expected: ExampleExpectation::Scalar(90.0),
             },
             CalculationExample {
@@ -948,6 +950,9 @@ pub(super) fn assert_example(example: &CalculationExample) {
         .expect("each example has a result line");
 
     match (example.expected, outcome) {
+        (ExampleExpectation::Boolean(expected), LineOutcome::Value(CalculationValue::Boolean(actual))) => {
+            assert_eq!(*actual, expected, "{}", example.title);
+        }
         (
             ExampleExpectation::Scalar(expected)
             | ExampleExpectation::ScalarWithSkipped(expected)

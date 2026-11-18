@@ -17,6 +17,12 @@ shown even if their group was collapsed. Select **Copy example**, then paste the
 source into the Pad to run it. The arrow beneath each example shows its expected
 result or diagnostic. Clearing search restores the ordinary groups.
 
+The offline API catalog groups evaluator calls and overloads with the
+language's operators, statements, types and limits. Its examples run against
+the same evaluator as Pad source. Unit entries draw accepted symbols and
+aliases from the shared conversion catalog. Chart examples provide source
+data to plot using the Charts window controls.
+
 ## Lines and names
 
 * An empty or whitespace-only line is blank.

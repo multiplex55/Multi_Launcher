@@ -536,6 +536,26 @@ pub(crate) struct FunctionSignature {
     arities: &'static [usize],
     insensitive: bool,
 }
+#[cfg(test)]
+impl FunctionSignature {
+    pub(crate) fn arities(&self) -> &'static [usize] {
+        self.arities
+    }
+
+    pub(crate) fn documented_example_arities(&self, source: &str) -> Vec<usize> {
+        let token = format!("{}(", self.name);
+        syntax::SourceAnalysis::new(source).rows.iter().flat_map(|row| {
+            row.text.match_indices(&token).filter_map(|(start, _)| {
+                if row.text[..start].chars().next_back().is_some_and(is_identifier_continue) {
+                    return None;
+                }
+                let open = start + token.len() - 1;
+                let close = matching(&row.text, open).ok()?;
+                split_arguments(&row.text[open + 1..close]).ok().map(|args| args.len())
+            }).collect::<Vec<_>>()
+        }).collect()
+    }
+}
 pub(crate) const FUNCTIONS: &[FunctionSignature] = &[
     FunctionSignature { name: "append", help: "append(vector, value)", arities: &[2], insensitive: true },
     FunctionSignature { name: "concat", help: "concat(left, right)", arities: &[2], insensitive: true },
