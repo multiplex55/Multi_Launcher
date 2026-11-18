@@ -45,7 +45,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-A1B3 | complete |
 | M7-A2A | complete |
 | M7-A2B | complete |
-| M7-B1A, M7-B1B, M7-B2 | pending |
+| M7-B1A | complete |
+| M7-B1B, M7-B2 | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -345,3 +346,10 @@ Independent bundled pypdf strict reading and pdfinfo confirmed three Letter page
 M7-A2A was pushed at c59241d1241adf7111d19c61de08ebb3ad96fecc. The publication backend reviews one selected literal local PDF leaf and binds approval to its held-parent identity. Existing files additionally require exact native identity, supported metadata and a bounded content fingerprint. Source checks protect the active path including hardlinks, relative Notes origins and a missing leaf under an existing parent. On Windows the worker stages an exact write under no sharing, copies matching owner, group and DACL before any replacement bytes, and refuses alternate streams or unsupported protections and attributes. Existing archive callers keep their original access choices. New output uses relative no-replace publication. Approved replacement moves the exact original to a sibling backup, publishes the exact stage without replacement, and restores the original by its held handle if publication or late admission is revoked. A third-party occupant is preserved and recovery reports the retained backup or stage location and identity when known.
 
 Independent reviews found and closed source sharing, ACL-before-bytes and pre-open races, exact reselection, alternate path spelling and confirmed fingerprint issues. Windows focused publication run passed 9 of 9 after a 4m 12s compile in 0.292s. After narrowing the archive facade, the final union passed 11 of 11 with cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(pdf_publication_) | test(c06_root_relative_publication_commits_exact_bytes_without_replacement) | test(c06_stage_identity_failure_reports_cleanup_and_preserves_foreign_files)'. Covers actual Windows temp files, active hardlink, late foreign occupant, changed parent and destination revision, unsupported properties, early stage reads and cancellation/rollback. The alternate-stream case is conditional on the filesystem admitting one. Diff whitespace verification passed. M7-B connects both editor commands, preview and the native printer workflow.
+
+
+## M7-B1A shared page raster renderer
+
+M7-A2B was pushed at e5d6cd47ed2a37d0e73be8c4bb5c6e9e9149e705. The shared renderer consumes the exact point scene used by PDF and returns one bounded opaque top-down RGBA page with its actual scale. It creates paths from the same embedded face and glyph IDs, applies prepared glyph positions and the same round bold stroke and italic shear, and respects contour winding. It composites immutable raster assets in scene order and draws rules and strike geometry once. The renderer checks dimensions and cumulative pixel/work limits, meters both bold paint passes, and checks cancellation through text runs and pixel preparation.
+
+Independent review confirmed PDF alignment, outline support for all three fonts, compositing and transform conventions. The corrected focused run passed 3 of 3 after a 3m 01s compile in 0.220s using cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::print_layout::raster::tests::)'. Tests exercise glyph counters, styled margin bounds, top-down asymmetric alpha, capped scale, invalid inputs and cancellation during replay. Diff whitespace verification passed. M7-B1B connects retained editor preview and Save PDF. M7-B2 submits the same pages to a real Windows device.
