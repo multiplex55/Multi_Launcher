@@ -64,6 +64,7 @@ pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod ocr;
 pub mod paste_sequence;
+pub mod password_generator;
 #[cfg(feature = "perf-harness")]
 pub mod perf_harness;
 pub mod performance;

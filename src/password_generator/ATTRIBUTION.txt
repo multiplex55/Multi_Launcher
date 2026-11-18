@@ -1,0 +1,13 @@
+EFF Large Wordlist, created by Joseph Bonneau for the Electronic Frontier Foundation.
+
+Canonical file: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
+Project page: https://www.eff.org/dice
+EFF licensing policy: https://www.eff.org/copyright
+The EFF publishes this material under Creative Commons Attribution 4.0:
+https://creativecommons.org/licenses/by/4.0/
+
+This file is retained byte-for-byte (SHA-256
+addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e).
+The generator samples only its 7,772 alphabetic entries; the four original
+hyphenated entries remain in the canonical resource but are excluded so a
+hyphen can unambiguously separate words.

@@ -51,7 +51,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-B1B2 | implementation complete, both live Save As and Cancel verified, live file acceptance unverified |
 | M7-B2A | complete, real Windows virtual print verified |
 | M7-B2B | implementation complete, live chooser and Cancel verified, live device acceptance unverified |
-| M8-A, M8-B | pending |
+| M8-A1 | complete |
+| M8-A2, M8-A3, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
@@ -398,3 +399,12 @@ The first compile exposed one stale test-helper type name. The corrected focused
 Actual Windows Notes and Studio smoke used only the synthetic profile with Paste Sequences Next and Cancel disabled. In Notes, the real launcher command opened Print Smoke Note. An extra unsaved sentence remained present through keyboard Move down of Brief past Appendix and Ctrl+Z returned the original section order. In Studio, the real launcher command opened an unsaved two-page draft. Its outline moved First Section after Second Section and Ctrl+Z restored the original sequence and earlier text. Both moves and undo were performed in docked editors. Studio also opened an actual native Markdown Studio window. The accessible native window exposed only its frame and the launcher inventory did not expose its controls. Moving a section in a popped-out editor remains unverified.
 
 Both dirty editors opened their live two-page Export / Print previews and a Windows Save As dialog with the PDF filter. Escape canceled both. Notes also opened the live Windows printer chooser with the installed Microsoft Print to PDF device, All/Current Page/range settings and one driver copy. Escape closed the chooser and returned to the preview. The filename and device controls were visible in accessibility text but unavailable as targetable owned windows. Indexed filename input could not resolve the embedded element, keyboard focus stayed outside the editable modal controls, and modal window capture timed out. Full native file acceptance and app-driven print submission remain unverified. M7-B2A independently proved actual two-page Windows virtual print job 3. The renderer and native PDF publication focused tests independently verified file output from the retained scene. The synthetic original Note stayed at SHA256 C07195B435E4C9351DD6A7B11BFE2EED94AF5DC4A13CE1FF67B73622A75D230B and the output folder stayed empty after cancellation. All disposable launcher processes used for the smoke were stopped.
+
+
+## M8-A1 secure password and passphrase generation
+
+M7-B2B was pushed at 0be85f2cf872d8077bc8b6a183c3635c3bbb858d. The generator validates shared password and word-count bounds and samples with direct fallible Windows-backed OS randomness. Each range uses bounded rejection and passwords reject completed candidates that lack any configured class. The exact inclusion–exclusion cardinality accounts for required classes and ambiguity filtering. Passphrases count independently sampled words and enabled suffixes. The score rounds down the base-two logarithm. Fixed casing and separators add zero. Generated values are ephemeral, carry a checked typed result ID and policy revision, and redact secret text in Debug.
+
+The embedded EFF long word list retains its original 108800 bytes and SHA256 ADDD35536511597A02FA0A9FF1E5284677B8883B83E986E43F15A3DB996B903E. All 7776 dice keys and words were validated. The generator samples the immutable alphabetic pool of 7772 entries, which allows deterministic separators without ambiguous segmentation. The four hyphenated entries remain in the unmodified licensed resource. The local notice credits Joseph Bonneau and the Electronic Frontier Foundation under CC BY 4.0. M8-B will carry this attribution in the distributed utility.
+
+Three initial focused tests passed. Independent review improved exact class test draws and passphrase punctuation and capitalization coverage. The final run passed 4 of 4 in 0.135s after a 1m 52s compile, including direct OS generation and redacted result checks. Exact command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(password_generator::tests::)'. Diff whitespace verification passed. The next checkpoint adds native protected clipboard publication and capture admission before enabling any generation commands.
