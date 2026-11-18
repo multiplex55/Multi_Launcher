@@ -20,9 +20,7 @@ mod operators;
 mod persistence;
 mod programmer;
 mod quantity;
-// The next reference milestone wires this catalog into the retained help dialog.
-#[allow(dead_code)]
-mod reference;
+pub(crate) mod reference;
 mod session;
 mod sensitivity;
 mod statistics;
@@ -53,7 +51,7 @@ pub use document::{
     MAX_DEPENDENCIES_PER_LINE, MAX_DOCUMENT_BYTES, MAX_EXPRESSION_BYTES, MAX_EXPRESSION_NESTING,
     MAX_NAME_BYTES, MAX_SOURCE_LINES,
 };
-pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
+pub(crate) use examples::{CalculationExample, CalculationExampleGroup, EXAMPLE_GROUPS};
 pub use inspector::{
     DocumentIncarnation, InspectorAnnotation, InspectorError, InspectorFormatOptions,
     InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot, ProgrammerInspector,

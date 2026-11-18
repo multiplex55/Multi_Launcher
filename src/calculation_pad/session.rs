@@ -1447,6 +1447,39 @@ impl CalculationPadSession {
         self.commit_source_edit(source, line_ids, next_line_id, related)
     }
 
+    /// Commits a prepared top-level splice while preserving every retained row.
+    pub(crate) fn apply_reference_example(
+        &mut self,
+        basis: super::EvaluationBasis,
+        prepared: super::reference::insertion::PreparedExampleInsertion,
+    ) -> Result<bool, SessionError> {
+        self.ensure_editable()?;
+        if self.evaluation_basis() != Some(basis) {
+            return Err(SessionError::StaleRelatedEdit);
+        }
+        let current = self.current.as_ref().ok_or(SessionError::NoActiveDocument)?;
+        if current.source == prepared.source {
+            return Ok(false);
+        }
+        validate_source_size(&prepared.source)?;
+        let (prefix, suffix) = prepared.retained_rows();
+        let retained = prefix + suffix;
+        let old_count = current.line_ids.len();
+        let new_count = prepared.source.split('\n').count();
+        if retained > old_count || retained > new_count {
+            return Err(SessionError::LineIdStateMismatch);
+        }
+        let mut ids = Vec::with_capacity(new_count);
+        ids.extend_from_slice(&current.line_ids[..prefix]);
+        let mut next_id = current.next_line_id;
+        for _ in retained..new_count {
+            ids.push(LineId(next_id));
+            next_id = next_id.checked_add(1).ok_or(SessionError::LineIdExhausted)?;
+        }
+        ids.extend_from_slice(&current.line_ids[old_count - suffix..]);
+        self.commit_source_edit(prepared.source, ids, next_id, RelatedReferenceEdits::default())
+    }
+
     /// Restores an unnamed recovery draft over the session's initial blank
     /// document. Recovery starts with fresh line identities, no undo history,
     /// and the blank source as its saved baseline so restored text stays dirty.

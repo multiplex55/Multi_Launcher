@@ -1,3 +1,6 @@
+mod reference_help;
+
+use reference_help::{InsertAction, PendingExampleInsert, ReferenceView};
 use super::utility_host::{
     HostIdentity as PadHostIdentity, UtilityHostState, UtilityPresentation as PadHost,
     ViewportPassProvenance,
@@ -222,10 +225,14 @@ pub(crate) struct CalculationPadDialog {
     examples_open: bool,
     examples_host: UtilityHostState,
     examples_presentation_prepared: bool,
+    examples_raise_root: bool,
     examples_epoch: u64,
     examples_owner: Option<DocumentIncarnation>,
     examples_search: String,
     examples_scroll: f32,
+    reference_view: ReferenceView,
+    pending_reference_insert: Option<PendingExampleInsert>,
+    reference_feedback: Option<String>,
     save_as_open: bool,
     save_as_name: String,
     error: Option<String>,
@@ -302,7 +309,7 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_examples_controls: Option<(egui::Rect, egui::Rect, egui::Rect, egui::Rect)>,
     #[cfg(test)]
-    test_examples_group_rect: Option<egui::Rect>,
+    test_examples_group: Option<(egui::Response, f32)>,
     #[cfg(test)]
     test_examples_rendered_sources: Vec<&'static str>,
     #[cfg(test)]
@@ -344,8 +351,12 @@ struct HelpEffects {
     viewport_info: Option<egui::ViewportInfo>,
     pass: Option<ViewportPassProvenance>,
     accepted: bool,
+    input_authorized: bool,
+    raise_root: Option<egui::LayerId>,
     search: Option<String>,
     scroll: Option<f32>,
+    reference_view: Option<ReferenceView>,
+    reference_insert: Option<InsertAction>,
     copy: Option<String>,
     close: bool,
     native_close: bool,
@@ -757,10 +768,14 @@ impl CalculationPadDialog {
             examples_open: false,
             examples_host: UtilityHostState::docked(),
             examples_presentation_prepared: false,
+            examples_raise_root: false,
             examples_epoch: 0,
             examples_owner: None,
             examples_search: String::new(),
             examples_scroll: 0.0,
+            reference_view: ReferenceView::default(),
+            pending_reference_insert: None,
+            reference_feedback: None,
             save_as_open: false,
             save_as_name: String::new(),
             error: None,
@@ -837,7 +852,7 @@ impl CalculationPadDialog {
             #[cfg(test)]
             test_examples_controls: None,
             #[cfg(test)]
-            test_examples_group_rect: None,
+            test_examples_group: None,
             #[cfg(test)]
             test_examples_rendered_sources: Vec::new(),
             #[cfg(test)]
@@ -927,6 +942,7 @@ impl CalculationPadDialog {
             self.examples_owner = self.examples_owner();
             self.examples_host.retire_to_docked();
             self.examples_presentation_prepared = false;
+            self.examples_raise_root = true;
             self.examples_open = true;
         }
     }
@@ -941,8 +957,12 @@ impl CalculationPadDialog {
             viewport_info: None,
             pass: None,
             accepted: false,
+            input_authorized: false,
+            raise_root: None,
             search: None,
             scroll: None,
+            reference_view: None,
+            reference_insert: None,
             copy: None,
             close: false,
             native_close: false,
@@ -1225,7 +1245,7 @@ impl CalculationPadDialog {
             self.test_examples_copy_rect = None;
             self.test_examples_copy_state = None;
             self.test_examples_controls = None;
-            self.test_examples_group_rect = None;
+            self.test_examples_group = None;
             self.test_examples_rendered_sources.clear();
             self.test_host_button_rect = None;
             self.test_callback_viewport_id = None;
@@ -1506,6 +1526,16 @@ impl CalculationPadDialog {
         }
     }
 
+    fn owns_reference_root_input(ui: &egui::Ui) -> bool {
+        let ctx = ui.ctx();
+        // The previous focused widget can belong to the Pad after Reference has
+        // been raised. Register the exact front window so its first click can
+        // transfer focus through egui's retained widget tree.
+        super::jump_mode::ui::visible_top_middle_layer(ctx)
+            .is_none_or(|top| top == ui.layer_id())
+            && !egui::Popup::is_any_open(ctx)
+    }
+
     fn show_examples(
         &mut self,
         ctx: &egui::Context,
@@ -1548,7 +1578,9 @@ impl CalculationPadDialog {
                             let allowed = ui.is_visible()
                                 && !ui.is_sizing_pass()
                                 && root_input_allowed
+                                && Self::owns_reference_root_input(ui)
                                 && !ctx.memory(|m| m.top_modal_layer().is_some());
+                            effects.input_authorized = allowed;
                             ui.add_enabled_ui(allowed, |ui| {
                                 ui.push_id(reference_namespace, |ui| {
                                     self.examples_ui(ui, &mut effects)
@@ -1567,6 +1599,9 @@ impl CalculationPadDialog {
                         .as_ref()
                         .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
                 effects.pass = effects.accepted.then_some(root_pass);
+                if effects.accepted && root_input_allowed && self.examples_raise_root {
+                    effects.raise_root = output.as_ref().map(|window| window.response.layer_id);
+                }
                 effects.close = effects.accepted
                     && root_input_allowed
                     && !ctx.memory(|memory| memory.top_modal_layer().is_some())
@@ -1623,6 +1658,7 @@ impl CalculationPadDialog {
                                 ui.add_enabled_ui(
                                     allowed && ui.is_visible() && !ui.is_sizing_pass(),
                                     |ui| {
+                                        effects.input_authorized = ui.is_enabled();
                                         ui.push_id(reference_namespace, |ui| {
                                             self.examples_ui(ui, &mut effects)
                                         });
@@ -1635,7 +1671,9 @@ impl CalculationPadDialog {
                             }
                         } else {
                             let visible = child.is_visible() && !child.is_sizing_pass();
-                            child.add_enabled_ui(allowed && visible, |ui| {
+                            let owner = Self::owns_reference_root_input(child);
+                            child.add_enabled_ui(allowed && visible && owner, |ui| {
+                                effects.input_authorized = ui.is_enabled();
                                 ui.push_id(reference_namespace, |ui| {
                                     self.examples_ui(ui, &mut effects)
                                 });
@@ -2524,15 +2562,16 @@ impl CalculationPadDialog {
                 was_open.then(|| self.examples_host.presentation()), remembered,
                 self.examples_host.presentation(), &super::utility_host::ChildOpenOrigin::Parent(receipt),
             );
-            if self.examples_host.transition(desired) {
-                self.examples_host.request_focus();
-            }
+            self.examples_host.transition(desired);
+            self.examples_host.request_focus();
             if desired == PadHost::Popout {
                 super::utility_host::remember_presentation(ctx, key, desired);
             }
             if desired == PadHost::Docked {
+                self.examples_raise_root = true;
                 delivered.push(CalculationPadDialogEffect::ShowRoot);
             }
+            ctx.request_repaint();
         }
         delivered
     }
@@ -2563,8 +2602,11 @@ impl CalculationPadDialog {
         }
         self.examples_host.retire_to_docked();
         self.examples_presentation_prepared = false;
+        self.examples_raise_root = false;
         self.examples_open = false;
         self.examples_owner = None;
+        self.pending_reference_insert = None;
+        self.reference_feedback = None;
         self.examples_epoch = self.examples_epoch.wrapping_add(1);
     }
 
@@ -2600,11 +2642,21 @@ impl CalculationPadDialog {
             return;
         }
         let needs_repaint = help.search.is_some()
+            || help.reference_view.is_some()
+            || help.reference_insert.is_some()
             || help.copy.is_some()
             || help.close
             || help.host_request.is_some()
             || help.focus_viewport
+            || help.raise_root.is_some()
             || self.examples_host.bootstrap_pending();
+        if let Some(view) = help.reference_view.take() {
+            if view.page() != self.reference_view.page() {
+                self.pending_reference_insert = None;
+                self.reference_feedback = None;
+            }
+            self.reference_view = view;
+        }
         if let Some(search) = help.search.take() {
             self.examples_search = search;
         }
@@ -2625,6 +2677,7 @@ impl CalculationPadDialog {
         {
             super::utility_host::remember_presentation(ctx, reference_tool_key(), requested);
             if requested == PadHost::Docked {
+                self.examples_raise_root = true;
                 crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
                     ctx,
                     crate::gui::utility_window_geometry::NativeViewportIdentity {
@@ -2664,10 +2717,17 @@ impl CalculationPadDialog {
             }
         }
         if self.examples_host.identity() == old {
+            if let Some(layer) = help.raise_root {
+                ctx.move_to_top(layer);
+                self.examples_raise_root = false;
+            }
             self.examples_host
                 .complete_bootstrap(old, help.embedded_layer, help.embedded_focus);
-            if let Some(text) = help.copy {
-                delivered.push(CalculationPadDialogEffect::CopyText(text));
+            if help.input_authorized {
+                if let Some(text) = help.copy {
+                    delivered.push(CalculationPadDialogEffect::CopyText(text));
+                }
+                self.complete_reference_insert(ctx, help.reference_insert);
             }
         }
         if needs_repaint {
@@ -4306,6 +4366,31 @@ impl CalculationPadDialog {
     }
 
     fn examples_ui(&mut self, ui: &mut egui::Ui, effects: &mut HelpEffects) {
+        let mut view = self.reference_view.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut view.api_visible, false, "Grouped Examples");
+            ui.selectable_value(&mut view.api_visible, true, "API Reference");
+            if view.api_visible {
+                let (button, requested) = super::utility_host::presentation_button(
+                    ui,
+                    self.examples_host.presentation(),
+                    true,
+                );
+                if button.clicked() {
+                    effects.host_request = Some(requested);
+                }
+            }
+        });
+        if view.api_visible {
+            self.reference_contents(ui, effects, &mut view);
+        }
+        let api_visible = view.api_visible;
+        if view != self.reference_view {
+            effects.reference_view = Some(view);
+        }
+        if api_visible {
+            return;
+        }
         let mut query = self.examples_search.clone();
         #[cfg(test)]
         let mut controls = (
@@ -4348,30 +4433,6 @@ impl CalculationPadDialog {
         let scroll = egui::ScrollArea::vertical().id_salt("calculation-pad-reference-content")
             .vertical_scroll_offset(self.examples_scroll).max_height(ui.available_height())
             .show(ui, |ui| {
-                if !active {
-                    ui.label("Expressions and headers can continue across grouped lines. Use # or // for comments.");
-                    ui.label("Results include scalars, vectors, exact numbers, quantities, dates, times, and timestamps.");
-                    ui.collapsing("Operator and function reference", |ui| {
-                        ui.label("Functions are case-insensitive in call position. Unbound pi and pie mean PI. Infix mod matches signed %, while mod(a, b) is Euclidean.");
-                        ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, max.");
-                        ui.label("Vectors contain 1–128 finite scalar components; +, -, *, / are element-wise, dot/· returns a scalar, and cross/× requires three components.");
-                    });
-                    ui.collapsing("Exact integers, units, and limits", |ui| {
-                        ui.label("Integer constructors and programmer operators use checked exact values and widths from 8 to 128 bits; Inspect bits opens the separate Inspector.");
-                        ui.label("Use +, -, *, ^, idiv, rem and % for checked integer arithmetic; &, |, ~, and/or/xor/not and shifts operate on bits. Shift counts must fit the width; rotl, rotr, popcount, mask and extract use the selected mode.");
-                        ui.label("Checked cast validates a value; Reinterpret bits preserves the low bits. Inspector changes remain private until Insert, and Undo restores the Pad source.");
-                        ui.label("Quantities preserve dimensions and support compatible arithmetic and conversions. Names and rN references use earlier physical source lines.");
-                        ui.label("Compatible units can be added, scaled, multiplied, divided and converted using 'to'. Temperature and fuel-economy units remain conversion-only; month/year conversions may be approximate.");
-                        ui.label("Braced names may contain spaces and Unicode. rN counts physical source lines, including comments and blanks; forward or failed references are diagnosed.");
-                        ui.label("Scalar integer literals are bounded to 2^53. Expressions are limited to 2,048 bytes, nesting to 32, and identifiers to 64 per line and 512 per document. Standard documents evaluate up to 64 KiB and 256 lines; Extended documents allow 128 KiB and 1,024 lines.");
-                        ui.label("Quantity expressions are limited to 256 tokens and unit powers from -8 through 8. Finite operands and intermediate values are required.");
-                    });
-                    ui.collapsing("Dates and times", |ui| {
-                        ui.label("Use date, time, datetime, and zoned_datetime constructors. Ambiguous named-zone times require an earlier or later fold choice.");
-                        ui.label("add_days, add_months, and add_years use calendar shifts. days_between returns signed calendar days. elapsed_between and add_duration use physical time quantities.");
-                    });
-                    ui.separator();
-                }
                 let mut matches = 0;
                 for (group_index, group) in EXAMPLE_GROUPS.iter().enumerate() {
                     let examples = group.examples.iter().filter(|example| example.matches(group.title, &query)).collect::<Vec<_>>();
@@ -4399,7 +4460,10 @@ impl CalculationPadDialog {
                     if active { ui.strong(group.title); body(ui); }
                     else {
                         let header = egui::CollapsingHeader::new(group.title).id_salt(("calculation-pad-example-group", group_index)).default_open(true).show(ui, &mut body);
-                        #[cfg(test)] if self.test_examples_group_rect.is_none() { self.test_examples_group_rect = Some(header.header_response.rect); }
+                        #[cfg(test)]
+                        if self.test_examples_group.is_none() {
+                            self.test_examples_group = Some((header.header_response, header.openness));
+                        }
                         #[cfg(not(test))] let _ = header;
                     }
                 }
@@ -6883,6 +6947,7 @@ mod tests {
     ) -> Vec<CalculationPadDialogEffect> {
         let pass = super::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         help.pass = help.accepted.then_some(pass);
+        help.input_authorized = help.accepted;
         if let Some(host) = host.as_mut() {
             host.pass = host.pass_accepted.then_some(pass);
         }
@@ -6895,6 +6960,99 @@ mod tests {
         let effects = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effects
+    }
+
+
+    fn reference_test_anchor(dialog: &mut CalculationPadDialog, byte: usize) -> super::reference_help::InsertAnchor {
+        let basis = dialog.session.evaluation_basis().unwrap();
+        dialog.inspector_caret_generation += 1;
+        dialog.inspector_caret = Some(super::InspectorCaret {
+            incarnation: basis.incarnation,
+            document: basis.document,
+            revision: basis.revision,
+            range: byte..byte,
+            generation: dialog.inspector_caret_generation,
+        });
+        dialog.reference_anchor().unwrap()
+    }
+
+    #[test]
+    fn reference_api_insert_respects_retention_and_is_one_manual_edit() {
+        use crate::calculation_pad::{CalculationPolicy, DocumentOptions};
+        use crate::calculation_pad::reference::{ReferenceId, entry};
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.session.set_document_options(DocumentOptions {
+            calculation: CalculationPolicy::Manual,
+            ..Default::default()
+        }).unwrap();
+        let original = "pop([10, 20, 30])\nprior_row = 4";
+        dialog.test_replace_source(original);
+        dialog.open_examples();
+        let known_line = dialog.session.line_id(0);
+        let anchor = reference_test_anchor(&mut dialog, 0);
+        let example = entry(ReferenceId::Call("pop")).unwrap().example;
+        let count = dialog.session.evaluation_count();
+
+        let mut discarded = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        discarded.reference_insert = Some(super::InsertAction::Prepare { anchor: anchor.clone(), example });
+        complete_help_effects(&mut dialog, &ctx, discarded, None);
+        assert_eq!(dialog.session.source(), Some(original));
+
+        let mut accept = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        accept.accepted = true;
+        accept.reference_insert = Some(super::InsertAction::Prepare { anchor, example });
+        complete_help_effects(&mut dialog, &ctx, accept, None);
+        assert_eq!(dialog.session.source(), Some("pop([10, 20, 30])\npop([10, 20, 30])\nprior_row = 4"));
+        assert_eq!(dialog.session.line_id(1), known_line);
+        assert_ne!(dialog.session.line_id(0), known_line);
+        assert_eq!(dialog.session.evaluation_count(), count);
+        assert!(dialog.session.undo());
+        assert_eq!(dialog.session.source(), Some(original));
+    }
+
+    #[test]
+    fn reference_api_review_does_not_apply_after_source_or_caret_changed() {
+        use crate::calculation_pad::reference::{ReferenceId, entry};
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        let original = "threshold = 7\nthreshold";
+        dialog.test_replace_source(original);
+        dialog.open_examples();
+        dialog.reference_view.api_visible = true;
+        let anchor = reference_test_anchor(&mut dialog, original.len());
+        let example = entry(ReferenceId::Topic("Chart axes")).unwrap().example;
+
+        let mut request = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        request.accepted = true;
+        request.reference_insert = Some(super::InsertAction::Prepare { anchor: anchor.clone(), example });
+        complete_help_effects(&mut dialog, &ctx, request, None);
+        assert!(dialog.pending_reference_insert.is_some());
+        assert_eq!(dialog.session.source(), Some(original));
+
+
+        let mut navigate = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        navigate.accepted = true;
+        navigate.reference_view = Some(super::ReferenceView::default());
+        navigate.reference_insert = Some(super::InsertAction::Confirm { anchor: anchor.clone(), sample: example.source });
+        complete_help_effects(&mut dialog, &ctx, navigate, None);
+        assert_eq!(dialog.session.source(), Some(original));
+        assert!(dialog.pending_reference_insert.is_none());
+
+        let mut request = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        request.accepted = true;
+        request.reference_insert = Some(super::InsertAction::Prepare { anchor: anchor.clone(), example });
+        complete_help_effects(&mut dialog, &ctx, request, None);
+        assert!(dialog.pending_reference_insert.is_some());
+        let _next_anchor = reference_test_anchor(&mut dialog, original.len());
+        let mut confirm = dialog.empty_examples_effects(egui::ViewportId::ROOT);
+        confirm.accepted = true;
+        confirm.reference_insert = Some(super::InsertAction::Confirm { anchor, sample: example.source });
+        complete_help_effects(&mut dialog, &ctx, confirm, None);
+        assert_eq!(dialog.session.source(), Some(original));
+        assert!(dialog.pending_reference_insert.is_none());
     }
 
     #[test]
@@ -7303,13 +7461,25 @@ mod tests {
         for _ in 0..3 {
             frame(&mut dialog, &ctx, size, Vec::new());
         }
-        let header = dialog.test_examples_group_rect.expect("first group header");
-        click(&mut dialog, &ctx, size, header.center());
+        let (header, _) = dialog.test_examples_group.as_ref().expect("first group header");
+        let hit = header.interact_rect.center();
+        assert!(dialog.test_examples_controls.unwrap().3.contains(hit), "group header must be inside the visible reference body");
+        frame(&mut dialog, &ctx, size, vec![egui::Event::PointerMoved(hit)]);
+        let (hovered, _) = dialog.test_examples_group.as_ref().expect("hovered group header");
+        assert!(hovered.enabled() && hovered.hovered(), "the actual header must own the pointer before pressing: {hovered:?}");
+        frame(&mut dialog, &ctx, size, click_events(hit, true));
+        let pressed = dialog.test_examples_group.clone();
+        frame(&mut dialog, &ctx, size, click_events(hit, false));
+        let released = dialog.test_examples_group.clone();
         frame(&mut dialog, &ctx, size, Vec::new());
         assert!(
             !dialog
                 .test_examples_rendered_sources
-                .contains(&"radius = 3\nPI * radius ^ 2")
+                .contains(&"radius = 3\nPI * radius ^ 2"),
+            "hit {hit:?}, pressed {pressed:?}, released {released:?}, final {:?}, top {:?}, focus {:?}",
+            dialog.test_examples_group,
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx),
+            super::super::jump_mode::ui::focused_response_layer(&ctx),
         );
         dialog.examples_search = "radius".into();
         frame(&mut dialog, &ctx, size, Vec::new());

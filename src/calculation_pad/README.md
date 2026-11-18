@@ -8,20 +8,25 @@ recomputes after an edit, undo, or redo changes that revision. Ordinary small
 calculations use the cached synchronous path; repeated script work runs in a
 bounded background evaluation, with pending results identified in the UI.
 
-The Pad's **Config Menu → Tools → Examples & reference** window has a pinned search and executable
-examples with expected results. Use **Pop Out** to keep it in a separate native
-window, or **Dock** to return it to the launcher; its search and scroll position
-are retained when moving between presentations. Search matches group names,
-titles, source, and keywords without regard to case; matching examples are
-shown even if their group was collapsed. Select **Copy example**, then paste the
-source into the Pad to run it. The arrow beneath each example shows its expected
-result or diagnostic. Clearing search restores the ordinary groups.
+Open **Config Menu → Tools → Examples & Reference** and choose **API Reference**
+to search the offline catalog by name, type, alias or concept. Searching
+`remove last element` finds `pop(vector)`. Press Enter to open the top result,
+or use Tab and Enter to choose a result. Each entry includes an executable
+example, its expected result and related entries. **Back to results** returns to
+the previous search. **Grouped Examples** keeps the existing examples and
+their own search.
 
-The offline API catalog groups evaluator calls and overloads with the
-language's operators, statements, types and limits. Its examples run against
-the same evaluator as Pad source. Unit entries draw accepted symbols and
-aliases from the shared conversion catalog. Chart examples provide source
-data to plot using the Charts window controls.
+Use **Copy Example** to copy the exact source. To insert it, place the source
+caret at the start of a top-level line or the end of the Pad, or select complete
+top-level lines, then choose **Insert Example into Pad**. Review any reported
+name collisions or affected physical row references before confirming. Undo
+restores the previous source in one edit. In Manual mode, use Calculate when
+you want results. Browsing entries leaves the draft and clipboard alone.
+
+Use **Pop Out** to keep the reference in its own native window or **Dock** to
+return it to the launcher. Search, selected entries and scroll positions are
+retained. Physical unit entries show accepted symbols and aliases from the
+shared unit catalog.
 
 ## Lines and names
 
@@ -544,17 +549,28 @@ limited to 1,000 samples.
 
 ## Charts
 
-Open **Config Menu → Tools → Charts…** to plot current numeric vectors or a
-completed current Sensitivity Table. Choose line, bar, or scatter, select the
-series and optional X vector, and adjust labels, visibility, and the view.
-Choose a named X or Y vector to follow its current final binding, including
-values produced by a loop. Physical `rN` choices continue to refer to that
-specific result row. Automatic X positions are indexes 0 through N−1. Empty
-datasets show **No data**, and a one-point line shows a marker. The presentation
-and Close controls sit together at the top of the companion.
-Hover a point for its original value. **Copy Chart as Image** copies the chart
-itself when its data is current. Opening Charts never starts a calculation;
-calculate or generate again when the source data is outdated.
+Open **Config Menu → Tools → Charts…** to plot current numeric vectors, range
+sequences or a completed current Sensitivity Table. Choose Line, Scatter or Bar,
+then select Y series and optionally X. Automatic X positions are indexes 0 through
+N−1. A named series follows its current binding, while a physical `rN` choice
+refers to the specific source row.
+
+Select **Histogram** to bin one vector using Auto, a count from 1 through 1,024
+or a positive fixed width. Auto uses `ceil(sqrt(n))` for nonconstant data. A
+constant vector has one exact-value bin. The intervals include their left edge
+and exclude the right edge, with the final right edge included. Choose Count or
+Percentage for the Y axis. **Cumulative** plots the fraction at or below each
+threshold, and its summary includes the counts and percentages.
+
+**Chart Options** stages fixed or automatic axes, linear or base-10 log scales,
+ticks, labels, grid, references, legend and series appearance. Log scales require
+positive values and bounds. Use an explicit positive X vector for log X. Bar,
+Histogram and Cumulative use a zero-based Y axis. **Reset Axes** restores
+automatic definition bounds, and **Reset View** resets pan and zoom.
+
+Hover a point or use the data summaries to inspect values. **Copy Chart as
+Image** uses the current chart scene. Opening Charts leaves the evaluation
+state alone. Calculate or regenerate when its source is outdated.
 
 ## Resource limits
 

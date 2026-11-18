@@ -11,6 +11,14 @@ pub(crate) struct PreparedExampleInsertion {
     pub source: String,
     pub conflicting_names: Vec<String>,
     pub shifted_row_references: bool,
+    retained_prefix_rows: usize,
+    retained_suffix_rows: usize,
+}
+
+impl PreparedExampleInsertion {
+    pub(crate) fn retained_rows(&self) -> (usize, usize) {
+        (self.retained_prefix_rows, self.retained_suffix_rows)
+    }
 }
 
 fn boundary(source: &str, analysis: &SourceAnalysis, position: usize) -> bool {
@@ -143,13 +151,13 @@ pub(crate) fn prepare_example_insertion(
         insert.push_str(eol);
     }
     insert.push_str(&normalized);
-    if !right.is_empty()
-        && !insert.ends_with('\n')
-        && !right.starts_with('\n')
-        && !right.starts_with("\r\n")
-    {
+    if !right.is_empty() && !insert.ends_with('\n') {
         insert.push_str(eol);
     }
+    let newlines = |text: &str| text.bytes().filter(|&byte| byte == b'\n').count();
+    let retained_prefix_rows =
+        newlines(left) + usize::from(!left.is_empty() && !left.ends_with('\n'));
+    let retained_suffix_rows = newlines(right) + usize::from(!right.is_empty());
     let mut candidate = String::with_capacity(left.len() + insert.len() + right.len());
     candidate.push_str(left);
     candidate.push_str(&insert);
@@ -193,6 +201,8 @@ pub(crate) fn prepare_example_insertion(
         source: candidate,
         conflicting_names: conflicts.into_iter().collect(),
         shifted_row_references: changed_rows,
+        retained_prefix_rows,
+        retained_suffix_rows,
     })
 }
 
@@ -229,6 +239,11 @@ mod tests {
                 .source,
             "1\n4\n5\n2\r\n3"
         );
+        let blank = "x = 1\n\ny = 2";
+        let before_blank = blank.find('\n').unwrap() + 1;
+        let result = prepare_example_insertion(blank, before_blank..before_blank, "3").unwrap();
+        assert_eq!(result.source, "x = 1\n3\n\ny = 2");
+        assert_eq!(result.retained_rows(), (1, 2));
         let multiline = "x = (\n  1 + 2)";
         assert_eq!(
             prepare_example_insertion(multiline, multiline.len()..multiline.len(), "3")

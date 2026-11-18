@@ -257,6 +257,9 @@ conditions, bounded loops, input controls, and named output watches. The Pad
   Sensitivity Tables and Charts companions. The
 [Calculation Pad guide](src/calculation_pad/README.md) covers the language,
 editor, limits, formatting, Programmer Inspector, and persistence.
+Open **Config Menu → Tools → Examples & Reference → API Reference** to look up
+functions and their executable examples, or use **Charts** for histograms,
+empirical cumulative distributions and configurable axes.
 
 ### 3) Convert things quickly
 - Unit conversion:
