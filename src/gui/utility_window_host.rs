@@ -3253,20 +3253,19 @@ pub(super) enum QrHostCommand {
     Apply(Box<super::qr_dialog::QrActions>),
 }
 impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::QrGenerator);
     const KEY: &'static str = "qr-generator";
     const TITLE: &'static str = "QR Generator";
     const SIZE: egui::Vec2 = egui::vec2(620.0, 700.0);
     const MINIMUM: egui::Vec2 = egui::vec2(320.0, 420.0);
     const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
     type Runtime = bool;
     type Actions = super::qr_dialog::QrActions;
     type Checkpoint = ();
     type Command = QrHostCommand;
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("qr_generator_embedded"))
-    }
-    fn navigation_owner(_: u64) -> NavigationOwner {
-        NavigationOwner::Blocked
     }
     fn is_open(&self) -> bool {
         self.open
@@ -3275,7 +3274,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
         self.epoch()
     }
     fn parent_targets_allowed(&self, _: &bool) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -3310,7 +3309,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
         _: NavigationOwner,
         parent: bool,
         _: NavigationOwner,
@@ -3322,6 +3321,7 @@ impl HostedUtilityDialog for super::qr_dialog::QrDialogState {
     ) -> Self::Actions {
         self.render_host(
             ctx,
+            scopes.0,
             if presentation == UtilityPresentation::Docked {
                 *root_input
             } else {

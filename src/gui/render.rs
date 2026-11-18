@@ -5655,7 +5655,12 @@ impl LauncherApp {
             && !self.action_sheet.is_open()
             && !self.pin_list_open;
         let pinned = self.pinned_panels.contains(&super::Panel::QrDialog);
-        self.qr_host.configure_jump(&self.jump_mode_ui, false);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::QrGenerator, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("qr-generator", instance), super::jump_mode::TargetGeneration(self.qr_dialog.epoch()), "qr-generator/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.qr_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() && !self.qr_host.is_popped_out() {
             self.qr_host.prepare_capture_popout(ctx, &self.qr_dialog);
@@ -5669,14 +5674,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -5733,8 +5738,12 @@ impl LauncherApp {
             host: self.explorer_tabs_host.identity(),
             pinned,
         };
-        self.explorer_tabs_host
-            .configure_jump(&self.jump_mode_ui, false);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::ExplorerTabs, instance } if owner => self.jump_mode_ui.scope_for_navigation_owner(super::jump_mode::SurfaceId::dialog("explorer-tabs", instance), super::jump_mode::TargetGeneration(self.explorer_tabs_dialog.jump_generation()), "explorer-tabs/form", ctx.viewport_id(), navigation_owner, false),
+            _ => None,
+        };
+        self.explorer_tabs_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
         self.explorer_tabs_host.show(
             ctx,
             &mut self.explorer_tabs_dialog,
@@ -5744,14 +5753,14 @@ impl LauncherApp {
                 root_visible,
                 root_input,
                 native_input,
-                root_owner: NavigationOwner::Blocked,
+                root_owner: navigation_owner,
                 parent_owner: owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned && !decision_pending,
                 allow_os_close: !pinned,
                 confirmation_owner: NavigationOwner::Blocked,
                 parent_instance: 0,
-                root_scopes: (None, None),
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -10495,6 +10504,8 @@ impl LauncherApp {
                         | super::Panel::PasteSequenceDialog
                         | super::Panel::FileSearchDialog
                         | super::Panel::FileSearchPreviewDialog
+                        | super::Panel::QrDialog
+                        | super::Panel::ExplorerTabsDialog
                         | super::Panel::HashGeneratorDialog
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
@@ -10584,6 +10595,8 @@ impl LauncherApp {
             ),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HashGenerator,
                 self.hash_generator_dialog.open && self.hash_generator_host.root_layer().is_some()),
             (
@@ -10735,6 +10748,8 @@ impl LauncherApp {
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
+                    NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
+                    NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
                     NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
                     NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
@@ -10791,6 +10806,10 @@ impl LauncherApp {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::FilePreview {
                         self.file_preview_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::QrGenerator {
+                        self.qr_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ExplorerTabs {
+                        self.explorer_tabs_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::HashGenerator {
                         self.hash_generator_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
@@ -24266,6 +24285,38 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
         );
+    }
+
+    #[test]
+    fn qr_jump_replay_retains_targets_without_effects() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+            let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.focus_panel(super::super::Panel::QrDialog);
+            app.qr_dialog.set_source("retained source".into());
+            for _ in 0..4 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let layer = app.qr_host.root_layer().unwrap();
+            let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+            let point = egui::Rect::from_min_size(rect.min + egui::vec2(80.0, 10.0), egui::vec2(4.0, 4.0));
+            for pressed in [true, false] {
+                run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(point, pressed), false).drop_without_applying_deltas();
+            }
+            for _ in 0..3 { run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas(); }
+            let before = app.qr_dialog.source.clone();
+            let correction = app.qr_dialog.error_correction;
+            let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), true).drop_without_applying_deltas();
+            let instance = app.jump_mode_ui.dialog_instance(NavigationDialogKind::QrGenerator).unwrap();
+            assert_eq!(app.jump_mode_ui.frame_navigation_owner(), NavigationOwner::Dialog { kind: NavigationDialogKind::QrGenerator, instance });
+            assert!(app.jump_mode_ui.retained_registry().targets().iter().any(|target| target.metadata().label() == "Text or URL"));
+            assert_eq!(app.qr_dialog.source, before);
+            assert_eq!(app.qr_dialog.error_correction, correction);
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }).unwrap().join().unwrap();
     }
 
     #[test]

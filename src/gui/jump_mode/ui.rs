@@ -64,10 +64,12 @@ pub(crate) enum NavigationDialogKind {
     NotificationInbox,
     FilePreview,
     HashGenerator,
+    QrGenerator,
+    ExplorerTabs,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -96,6 +98,8 @@ impl NavigationDialogKind {
         Self::NotificationInbox,
         Self::FilePreview,
         Self::HashGenerator,
+        Self::QrGenerator,
+        Self::ExplorerTabs,
     ];
 
     const fn index(self) -> usize {
@@ -128,6 +132,8 @@ impl NavigationDialogKind {
             Self::NotificationInbox => 25,
             Self::FilePreview => 26,
             Self::HashGenerator => 27,
+            Self::QrGenerator => 28,
+            Self::ExplorerTabs => 29,
         }
     }
 
@@ -161,6 +167,8 @@ impl NavigationDialogKind {
             Self::NotificationInbox => "notification-inbox",
             Self::FilePreview => "file-preview",
             Self::HashGenerator => "hash-generator",
+            Self::QrGenerator => "qr-generator",
+            Self::ExplorerTabs => "explorer-tabs",
         }
     }
 
@@ -197,6 +205,8 @@ impl NavigationDialogKind {
             Self::NotificationInbox => egui::Id::new("notification-inbox-window"),
             Self::FilePreview => egui::Id::new(super::super::file_search_preview_dialog::preview_window_id_source()),
             Self::HashGenerator => egui::Id::new("hash_generator_dialog"),
+            Self::QrGenerator => egui::Id::new("qr_generator_embedded"),
+            Self::ExplorerTabs => egui::Id::new("explorer-tabs-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -483,6 +493,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
                     | NavigationDialogKind::HashGenerator
+                    | NavigationDialogKind::QrGenerator
+                    | NavigationDialogKind::ExplorerTabs
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -531,6 +543,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::FilePreview
                     | NavigationDialogKind::HashGenerator
+                    | NavigationDialogKind::QrGenerator
+                    | NavigationDialogKind::ExplorerTabs
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
                     | NavigationDialogKind::DownloadsTriage
@@ -4348,6 +4362,8 @@ mod tests {
                             .id(egui::Id::new(crate::gui::file_search_preview_dialog::preview_window_id_source()))
                             .show(ctx, |_| {});
                     }
+                    NavigationDialogKind::QrGenerator => { egui::Window::new("QR Generator").id(egui::Id::new("qr_generator_embedded")).show(ctx, |_| {}); }
+                    NavigationDialogKind::ExplorerTabs => { egui::Window::new("Explorer Tabs").id(egui::Id::new("explorer-tabs-window")).show(ctx, |_| {}); }
                     NavigationDialogKind::HashGenerator => {
                         egui::Window::new("Hash Generator")
                             .id(egui::Id::new("hash_generator_dialog"))

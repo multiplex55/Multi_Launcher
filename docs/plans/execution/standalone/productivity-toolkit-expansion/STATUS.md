@@ -84,6 +84,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M11-C | blocked |
 | M11-D | blocked |
 | M12-A1 | complete |
+| M12-A2 | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -663,3 +664,10 @@ This closes the earlier M9-D2, M10-B and M11-B representative native Move and re
 An unregistered executable with valid embedded fixture metadata was launched without setup. The actual Windows process APIs returned `0x3d54` for no package and `0x3d57` for no application identity. The probe exited before requesting consent. This is native evidence for the unavailable identity path.
 
 The user separately authorized the same exact temporary public certificate in Local Computer Trusted People after Current User deployment returned `0x800B0109`. The normal Windows elevation request returned “The operation was canceled by the user” before the elevated helper started. No machine certificate was imported. Exact cleanup verified that the fixture package, Current User trust, Local Computer trust and the disposable Personal signer and its key were all absent. The synthetic sender was never registered and no test toast was emitted. The optional listener and its focused tests are implemented. Actual packaged permission, an external toast entering the Inbox, and native revoke behavior remain blocked in this environment. [Microsoft MSIX certificate troubleshooting](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
+
+
+### M12-A2 QR and Explorer Tabs keyboard ownership
+
+QR and Explorer Tabs now register their real docked and native owners. QR exposes the source editor, inline error-correction choices, advanced controls and available exports through retained targets. Layout replay keeps interactive responses registered while accepted first-pass ownership still controls input effects. Explorer uses stable saved-list IDs and current picker snapshot identities, including after reordering or refresh. Its active saved-folder picker owns Escape before the outer host. Keyboard traversal moves among the filtered original snapshot indices and reveals the current row in the virtualized list. Search and editor focus retain their own input.
+
+The first six scoped checks passed (d5200eb1-8db5-4cec-a804-096e479fa1d4). Independent review led to the replay, stable identity, Escape and paging corrections. The resulting run passed five checks, including the forced-discard QR target/effect fixture and filtered picker keyboard traversal (72d0ae26-fe58-4bf8-a1e2-ee39c25509e2). The older picker fixture still expected a retired incarnation to select an entry after refresh. It now verifies both retired rejection and current selection, and the exact rerun passed (12ff82a1-6834-45c0-b454-685fd4365bb1). Direct native picker navigation and QR effects were outside this focused gate.

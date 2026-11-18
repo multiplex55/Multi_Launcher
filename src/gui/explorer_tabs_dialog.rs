@@ -1,3 +1,7 @@
+use super::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, NavigationDialogKind, register_and_apply_target},
+};
 use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use super::utility_host::{
     HostIdentity, HostedCopyCapture, HostedCopyReceipt, UtilityPresentation, ViewportPassProvenance,
@@ -115,6 +119,20 @@ struct SavedFolderPicker {
     query: String,
     snapshot: Option<SavedFoldersSnapshot>,
     error: Option<String>,
+    selected: Option<usize>,
+}
+
+fn picker_move(matches: &[usize], selected: Option<usize>, delta: isize) -> Option<(usize, usize)> {
+    if matches.is_empty() || delta == 0 {
+        return None;
+    }
+    let position = match selected.and_then(|index| matches.iter().position(|value| *value == index))
+    {
+        Some(current) => current.saturating_add_signed(delta).min(matches.len() - 1),
+        None if delta < 0 => matches.len() - 1,
+        None => 0,
+    };
+    Some((matches[position], position))
 }
 
 fn saved_folder_matches(entry: &folders::FolderEntry, query: &str) -> bool {
@@ -224,7 +242,7 @@ impl ExplorerTabsDialog {
         self.epoch
     }
     pub fn has_pending_decision(&self) -> bool {
-        self.replacement.is_some()
+        self.replacement.is_some() || self.picker.is_some()
     }
     #[cfg(test)]
     pub fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
@@ -499,10 +517,20 @@ impl ExplorerTabsDialog {
         }
         true
     }
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.epoch.wrapping_mul(0x9e3779b97f4a7c15)
+            ^ self.draft.generation
+            ^ self
+                .picker
+                .as_ref()
+                .map_or(0, |picker| picker.incarnation.rotate_left(17))
+            ^ u64::from(self.replacement.is_some()).rotate_left(33)
+    }
     pub fn render_host(
         &mut self,
         ctx: &egui::Context,
         runtime: &ExplorerTabsRuntime,
+        scope: Option<&JumpModeScope>,
         owner: bool,
         first: bool,
         child: Option<&mut egui::Ui>,
@@ -522,9 +550,42 @@ impl ExplorerTabsDialog {
         let mut controls = std::collections::BTreeMap::new();
         #[cfg(test)]
         let mut control_ids = std::collections::BTreeMap::new();
+        let replacement = self.replacement;
+        let picker_active = picker.is_some();
+        let mut order = 0;
         macro_rules! observe {
             ($ui:expr, $name:expr, $response:expr) => {{
                 let response = $response;
+                let label = $name.to_owned();
+                let picker_target = label.starts_with("saved-folder-");
+                let permitted = replacement.is_some() || !picker_active || picker_target;
+                if permitted {
+                    let kind = if label == "name"
+                        || label == "saved-folder-search"
+                        || (label.starts_with("folder-")
+                            && !label.starts_with("folder-down-")
+                            && !label.starts_with("folder-up-"))
+                    {
+                        TargetKind::TextEntry
+                    } else if label.starts_with("list-")
+                        && !label.starts_with("list-down-")
+                        && !label.starts_with("list-up-")
+                    {
+                        TargetKind::Selectable
+                    } else {
+                        TargetKind::Button
+                    };
+                    let identity = format!("control-{:016x}", response.id.value());
+                    register_and_apply_target(
+                        scope,
+                        $ui,
+                        &response,
+                        identity,
+                        label.clone(),
+                        kind,
+                        &mut order,
+                    );
+                }
                 #[cfg(test)]
                 {
                     let name = $name.to_owned();
@@ -561,7 +622,6 @@ impl ExplorerTabsDialog {
             .as_ref()
             .map(|(_, snapshot)| snapshot.name().to_owned());
         let notice = self.notice.clone();
-        let replacement = self.replacement;
         let mut body = |ui: &mut egui::Ui| {
             if ctx.viewport_id() == egui::ViewportId::ROOT {
                 ui.style_mut().interaction.selectable_labels = false;
@@ -577,6 +637,17 @@ impl ExplorerTabsDialog {
                 #[cfg(test)]
                 {
                     host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+                }
+                if replacement.is_none() && !picker_active {
+                    register_and_apply_target(
+                        scope,
+                        ui,
+                        &button,
+                        "presentation",
+                        "Change window presentation",
+                        TargetKind::Button,
+                        &mut order,
+                    );
                 }
                 if button.clicked() && allowed && replacement.is_none() {
                     host_request = Some(next);
@@ -637,7 +708,7 @@ impl ExplorerTabsDialog {
                     }
                     ui.label("Save changes before switching or deleting?");
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() && allowed {
+                        if observe!(ui, "decision-save", ui.button("Save")).clicked() && allowed {
                             intent = Some(Intent::DecisionSave);
                         }
                         if observe!(ui, "decision-discard", ui.button("Discard")).clicked()
@@ -645,51 +716,63 @@ impl ExplorerTabsDialog {
                         {
                             intent = Some(Intent::DecisionDiscard);
                         }
-                        if ui.button("Cancel").clicked() && allowed {
+                        if observe!(ui, "decision-cancel", ui.button("Cancel")).clicked() && allowed
+                        {
                             intent = Some(Intent::DecisionCancel);
                         }
                     });
                     return;
                 }
+                let parent_allowed = allowed && !picker_active;
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("New").clicked() && allowed {
+                    if observe!(ui, "new", ui.button("New")).clicked() && parent_allowed {
                         intent = Some(Intent::New);
                     }
                     for (index, list) in lists.iter().enumerate() {
-                        if observe!(
-                            ui,
-                            format!("list-{}", list.id().get()),
-                            ui.selectable_label(draft.selected == Some(list.id()), list.name())
-                        )
-                        .clicked()
-                            && allowed
-                        {
-                            intent = Some(Intent::Select(list.id()));
-                        }
-                        if ui.small_button("↑").clicked() && allowed && index > 0 {
-                            intent = Some(Intent::Reorder(
-                                list.id(),
-                                index - 1,
-                                lists.iter().map(SavedFolderList::id).collect(),
-                                list.clone(),
-                            ));
-                        }
-                        if observe!(
-                            ui,
-                            format!("list-down-{}", list.id().get()),
-                            ui.small_button("↓")
-                        )
-                        .clicked()
-                            && allowed
-                            && index + 1 < lists.len()
-                        {
-                            intent = Some(Intent::Reorder(
-                                list.id(),
-                                index + 1,
-                                lists.iter().map(SavedFolderList::id).collect(),
-                                list.clone(),
-                            ));
-                        }
+                        ui.push_id(("saved-list", list.id().get()), |ui| {
+                            if observe!(
+                                ui,
+                                format!("list-{}", list.id().get()),
+                                ui.selectable_label(draft.selected == Some(list.id()), list.name())
+                            )
+                            .clicked()
+                                && parent_allowed
+                            {
+                                intent = Some(Intent::Select(list.id()));
+                            }
+                            if observe!(
+                                ui,
+                                format!("list-up-{}", list.id().get()),
+                                ui.add_enabled(index > 0, egui::Button::new("↑"))
+                            )
+                            .clicked()
+                                && parent_allowed
+                                && index > 0
+                            {
+                                intent = Some(Intent::Reorder(
+                                    list.id(),
+                                    index - 1,
+                                    lists.iter().map(SavedFolderList::id).collect(),
+                                    list.clone(),
+                                ));
+                            }
+                            if observe!(
+                                ui,
+                                format!("list-down-{}", list.id().get()),
+                                ui.add_enabled(index + 1 < lists.len(), egui::Button::new("↓"))
+                            )
+                            .clicked()
+                                && parent_allowed
+                                && index + 1 < lists.len()
+                            {
+                                intent = Some(Intent::Reorder(
+                                    list.id(),
+                                    index + 1,
+                                    lists.iter().map(SavedFolderList::id).collect(),
+                                    list.clone(),
+                                ));
+                            }
+                        });
                     }
                 });
                 ui.label("List name");
@@ -726,17 +809,39 @@ impl ExplorerTabsDialog {
                                 )
                             )
                             .changed();
-                            if ui.small_button("Remove").clicked() && allowed {
+                            if observe!(
+                                ui,
+                                format!("remove-{}", draft.row_ids[index]),
+                                ui.small_button("Remove")
+                            )
+                            .clicked()
+                                && parent_allowed
+                            {
                                 remove = Some(index);
                             }
-                            if ui.small_button("↑").clicked() && allowed && index > 0 {
+                            if observe!(
+                                ui,
+                                format!("folder-up-{}", draft.row_ids[index]),
+                                ui.add_enabled(index > 0, egui::Button::new("↑"))
+                            )
+                            .clicked()
+                                && parent_allowed
+                                && index > 0
+                            {
                                 draft.folders.swap(index, index - 1);
                                 draft.row_ids.swap(index, index - 1);
                                 changed = true;
                             }
-                            if observe!(ui, format!("folder-down-{index}"), ui.small_button("↓"))
-                                .clicked()
-                                && allowed
+                            if observe!(
+                                ui,
+                                format!("folder-down-{index}"),
+                                ui.add_enabled(
+                                    index + 1 < draft.folders.len(),
+                                    egui::Button::new("↓")
+                                )
+                            )
+                            .clicked()
+                                && parent_allowed
                                 && index + 1 < draft.folders.len()
                             {
                                 draft.folders.swap(index, index + 1);
@@ -752,7 +857,7 @@ impl ExplorerTabsDialog {
                     changed = true;
                 }
                 if observe!(ui, "add-folder", ui.button("Add folder")).clicked()
-                    && allowed
+                    && parent_allowed
                     && draft.folders.len() < 32
                 {
                     draft.folders.push(String::new());
@@ -769,14 +874,22 @@ impl ExplorerTabsDialog {
                     )
                 )
                 .clicked()
-                    && allowed
+                    && parent_allowed
                 {
                     intent = Some(Intent::OpenSavedFolders);
                 }
                 if let Some(picker) = &mut picker {
                     ui.separator();
                     ui.label("Saved folders");
-                    observe!(
+                    if allowed
+                        && !egui::Popup::is_any_open(ctx)
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        })
+                    {
+                        intent = Some(Intent::CloseSavedFolders);
+                    }
+                    let search = observe!(
                         ui,
                         "saved-folder-search",
                         ui.add(
@@ -785,15 +898,20 @@ impl ExplorerTabsDialog {
                                 .char_limit(256)
                         )
                     );
+                    if search.changed() {
+                        picker.selected = None;
+                    }
+                    let mut picker_button_focused = false;
                     ui.horizontal(|ui| {
-                        if observe!(ui, "saved-folder-refresh", ui.button("Refresh")).clicked()
-                            && allowed
-                        {
+                        let refresh = observe!(ui, "saved-folder-refresh", ui.button("Refresh"));
+                        picker_button_focused |= refresh.has_focus();
+                        if refresh.clicked() && allowed {
                             intent = Some(Intent::RefreshSavedFolders);
                         }
-                        if observe!(ui, "saved-folder-cancel", ui.button("Cancel")).clicked()
-                            && allowed
-                        {
+                        let cancel_button =
+                            observe!(ui, "saved-folder-cancel", ui.button("Cancel"));
+                        picker_button_focused |= cancel_button.has_focus();
+                        if cancel_button.clicked() && allowed {
                             intent = Some(Intent::CloseSavedFolders);
                         }
                     });
@@ -809,61 +927,134 @@ impl ExplorerTabsDialog {
                             .filter(|(_, entry)| saved_folder_matches(entry, &query))
                             .map(|(index, _)| index)
                             .collect();
-                        egui::ScrollArea::vertical()
+                        let focused = ctx.memory(|memory| memory.focused());
+                        let editor_focused = search.has_focus()
+                            || focused
+                                == Some(egui::Id::new((
+                                    "explorer-tabs",
+                                    "name",
+                                    draft.editor_incarnation,
+                                )))
+                            || draft.row_ids.iter().any(|row| {
+                                focused
+                                    == Some(egui::Id::new((
+                                        "explorer-tabs",
+                                        "folder",
+                                        draft.editor_incarnation,
+                                        *row,
+                                    )))
+                            });
+                        let mut reveal = None;
+                        if allowed
+                            && !editor_focused
+                            && !picker_button_focused
+                            && !matches.is_empty()
+                        {
+                            let delta = ctx.input_mut(|input| {
+                                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                                    1
+                                } else if input
+                                    .consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                                {
+                                    -1
+                                } else if input
+                                    .consume_key(egui::Modifiers::NONE, egui::Key::PageDown)
+                                {
+                                    8
+                                } else if input
+                                    .consume_key(egui::Modifiers::NONE, egui::Key::PageUp)
+                                {
+                                    -8
+                                } else {
+                                    0
+                                }
+                            });
+                            if let Some((index, position)) =
+                                picker_move(&matches, picker.selected, delta)
+                            {
+                                picker.selected = Some(index);
+                                reveal = Some(position);
+                            }
+                            if let Some(index) = picker.selected
+                                && ctx.input_mut(|input| {
+                                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                })
+                            {
+                                intent = Some(Intent::SelectSavedFolder(picker.incarnation, index));
+                            }
+                        }
+                        let row_height = ui.spacing().interact_size.y + 2.0;
+                        let mut area = egui::ScrollArea::vertical()
                             .id_salt("saved-folders-picker")
-                            .max_height(180.0)
-                            .show_rows(
-                                ui,
-                                ui.spacing().interact_size.y + 2.0,
-                                matches.len(),
-                                |ui, rows| {
-                                    for row in rows {
-                                        ui.add_space(1.0);
-                                        let index = matches[row];
-                                        let entry = &snapshot.entries[index];
-                                        let label = format!(
-                                            "{}{} — {}",
-                                            entry.label.chars().take(64).collect::<String>(),
-                                            entry
-                                                .alias
-                                                .as_ref()
-                                                .map(|alias| format!(
-                                                    " ({})",
-                                                    alias.chars().take(32).collect::<String>()
-                                                ))
-                                                .unwrap_or_default(),
-                                            entry.path.chars().take(80).collect::<String>()
-                                        );
-                                        if observe!(
-                                            ui,
-                                            format!("saved-folder-{index}"),
-                                            ui.add_sized(
-                                                [
-                                                    ui.available_width(),
-                                                    ui.spacing().interact_size.y
-                                                ],
-                                                egui::Button::new(label).truncate()
+                            .max_height(180.0);
+                        if let Some(row) = reveal {
+                            area = area
+                                .vertical_scroll_offset((row as f32 * row_height - 80.0).max(0.0));
+                        }
+                        area.show_rows(
+                            ui,
+                            ui.spacing().interact_size.y + 2.0,
+                            matches.len(),
+                            |ui, rows| {
+                                for row in rows {
+                                    ui.add_space(1.0);
+                                    let index = matches[row];
+                                    let entry = &snapshot.entries[index];
+                                    let label = format!(
+                                        "{}{} — {}",
+                                        entry.label.chars().take(64).collect::<String>(),
+                                        entry
+                                            .alias
+                                            .as_ref()
+                                            .map(|alias| format!(
+                                                " ({})",
+                                                alias.chars().take(32).collect::<String>()
+                                            ))
+                                            .unwrap_or_default(),
+                                        entry.path.chars().take(80).collect::<String>()
+                                    );
+                                    ui.push_id(
+                                        (
+                                            "saved-folder-entry",
+                                            picker.incarnation,
+                                            snapshot.version,
+                                            index,
+                                        ),
+                                        |ui| {
+                                            if observe!(
+                                                ui,
+                                                format!("saved-folder-{index}"),
+                                                ui.add_sized(
+                                                    [
+                                                        ui.available_width(),
+                                                        ui.spacing().interact_size.y
+                                                    ],
+                                                    egui::Button::new(label)
+                                                        .selected(picker.selected == Some(index))
+                                                        .truncate()
+                                                )
+                                                .on_hover_text(&entry.path)
                                             )
-                                            .on_hover_text(&entry.path)
-                                        )
-                                        .clicked()
-                                            && allowed
-                                        {
-                                            intent = Some(Intent::SelectSavedFolder(
-                                                picker.incarnation,
-                                                index,
-                                            ));
-                                        }
-                                    }
-                                },
-                            );
+                                            .clicked()
+                                                && allowed
+                                            {
+                                                intent = Some(Intent::SelectSavedFolder(
+                                                    picker.incarnation,
+                                                    index,
+                                                ));
+                                            }
+                                        },
+                                    );
+                                }
+                            },
+                        );
                         if matches.is_empty() {
                             ui.label("No matching saved folders");
                         }
                     }
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if observe!(ui, "save", ui.button("Save list")).clicked() && allowed {
+                    if observe!(ui, "save", ui.button("Save list")).clicked() && parent_allowed {
                         intent = Some(Intent::Save);
                     }
                     if observe!(
@@ -872,7 +1063,7 @@ impl ExplorerTabsDialog {
                         ui.add_enabled(draft.selected.is_some(), egui::Button::new("Delete list"))
                     )
                     .clicked()
-                        && allowed
+                        && parent_allowed
                     {
                         intent = Some(Intent::Delete);
                     }
@@ -885,7 +1076,7 @@ impl ExplorerTabsDialog {
                         )
                     )
                     .clicked()
-                        && allowed
+                        && parent_allowed
                     {
                         intent = draft.selected.map(Intent::Run);
                     }
@@ -895,11 +1086,13 @@ impl ExplorerTabsDialog {
                         ui.add_enabled(active.is_some(), egui::Button::new("Cancel run"))
                     )
                     .clicked()
-                        && allowed
+                        && parent_allowed
                     {
                         intent = active.map(Intent::Cancel);
                     }
-                    if ui.button("Reload storage").clicked() && allowed {
+                    if observe!(ui, "reload", ui.button("Reload storage")).clicked()
+                        && parent_allowed
+                    {
                         intent = Some(Intent::Reload);
                     }
                 });
@@ -957,6 +1150,9 @@ impl ExplorerTabsDialog {
         } else {
             None
         };
+        if picker_active {
+            changed = false;
+        }
         if changed {
             draft.generation = draft.generation.wrapping_add(1);
         }
@@ -1025,10 +1221,14 @@ impl ExplorerTabsDialog {
                     query: String::new(),
                     snapshot,
                     error,
+                    selected: None,
                 });
             }
             Some(Intent::RefreshSavedFolders) => {
+                self.picker_incarnation = self.picker_incarnation.wrapping_add(1).max(1);
                 if let Some(picker) = &mut self.picker {
+                    picker.incarnation = self.picker_incarnation;
+                    picker.selected = None;
                     picker.draft_generation = self.draft.generation;
                     picker.editor_incarnation = self.draft.editor_incarnation;
                     match folders::saved_folders_snapshot(&self.folders_path) {
@@ -1164,6 +1364,7 @@ pub(super) enum ExplorerTabsHostCommand {
     Apply(Box<ExplorerTabsActions>),
 }
 impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ExplorerTabs);
     const KEY: &'static str = "explorer-tabs";
     const TITLE: &'static str = "Explorer Tabs";
     const SIZE: egui::Vec2 = egui::vec2(640.0, 520.0);
@@ -1177,17 +1378,17 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
     fn layer() -> egui::LayerId {
         egui::LayerId::new(egui::Order::Middle, egui::Id::new("explorer-tabs-window"))
     }
-    fn navigation_owner(_: u64) -> super::jump_mode::ui::NavigationOwner {
-        super::jump_mode::ui::NavigationOwner::Blocked
-    }
     fn is_open(&self) -> bool {
         self.open
     }
     fn session(&self) -> u64 {
         self.epoch
     }
+    fn target_generation(&self) -> super::jump_mode::TargetGeneration {
+        super::jump_mode::TargetGeneration(self.jump_generation())
+    }
     fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
-        false
+        true
     }
     fn parent_input_allowed(&self) -> bool {
         true
@@ -1222,7 +1423,7 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
     fn render_host(
         &mut self,
         ctx: &egui::Context,
-        _: (
+        scopes: (
             Option<&super::jump_mode::ui::JumpModeScope>,
             Option<&super::jump_mode::ui::JumpModeScope>,
         ),
@@ -1235,7 +1436,7 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
         child: Option<&mut egui::Ui>,
         presentation: UtilityPresentation,
     ) -> Self::Actions {
-        self.render_host(ctx, runtime, parent, first, child, presentation)
+        self.render_host(ctx, runtime, scopes.0, parent, first, child, presentation)
     }
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
         actions.host_request
@@ -1262,6 +1463,38 @@ impl super::utility_window_host::HostedUtilityDialog for ExplorerTabsDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explorer_tabs_picker_keyboard_navigation_keeps_snapshot_indices() {
+        let matches = [2, 5, 9, 15, 22, 30, 38, 45, 60, 75, 90];
+        assert_eq!(picker_move(&matches, None, 1), Some((2, 0)));
+        assert_eq!(picker_move(&matches, Some(2), 8), Some((60, 8)));
+        assert_eq!(picker_move(&matches, Some(60), -1), Some((45, 7)));
+        assert_eq!(picker_move(&matches, Some(90), 8), Some((90, 10)));
+        assert_eq!(picker_move(&[], None, 1), None);
+    }
+
+    #[test]
+    fn explorer_tabs_jump_generation_changes_for_picker_and_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut dialog = ExplorerTabsDialog::new(AppDataRoot::from_path(temp.path()));
+        dialog.open();
+        let initial = dialog.jump_generation();
+        dialog.picker = Some(SavedFolderPicker {
+            incarnation: 7,
+            editor_incarnation: 0,
+            draft_generation: 0,
+            query: String::new(),
+            snapshot: None,
+            error: None,
+            selected: None,
+        });
+        let picker = dialog.jump_generation();
+        assert_ne!(initial, picker);
+        dialog.picker = None;
+        dialog.replacement = Some(Replacement::New);
+        assert_ne!(initial, dialog.jump_generation());
+    }
 
     fn apply(dialog: &mut ExplorerTabsDialog, intent: Intent) {
         let actions = ExplorerTabsActions {
@@ -1309,6 +1542,9 @@ mod tests {
         assert!(dialog.draft.folders.is_empty());
         assert!(dialog.picker.as_ref().unwrap().error.is_some());
         apply(&mut dialog, Intent::RefreshSavedFolders);
+        assert_ne!(dialog.picker.as_ref().unwrap().incarnation, incarnation);
+        apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert!(dialog.draft.folders.is_empty());
         apply(&mut dialog, Intent::CloseSavedFolders);
         assert!(!dialog.draft.dirty());
         apply(&mut dialog, Intent::OpenSavedFolders);
@@ -1321,6 +1557,10 @@ mod tests {
         assert!(dialog.picker.as_ref().unwrap().error.is_some());
         apply(&mut dialog, Intent::RefreshSavedFolders);
         apply(&mut dialog, Intent::SelectSavedFolder(incarnation, 0));
+        assert!(dialog.draft.folders.is_empty());
+        let refreshed = dialog.picker.as_ref().unwrap().incarnation;
+        assert_ne!(refreshed, incarnation);
+        apply(&mut dialog, Intent::SelectSavedFolder(refreshed, 0));
         assert_eq!(dialog.draft.folders, vec![r"C:\second"]);
         std::fs::write(&path, "[]").unwrap();
         assert_eq!(dialog.draft.folders, vec![r"C:\second"]);
