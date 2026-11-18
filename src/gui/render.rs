@@ -23,6 +23,7 @@ enum DialogCopyOwner {
     ProgrammerInspector,
     Converter,
     DateTimeStudio,
+    DataRecovery,
     ImageCompare,
     DuplicateFinder,
     ZipExtractor,
@@ -10601,6 +10602,7 @@ impl LauncherApp {
                         | super::Panel::DuplicateFinderDialog
                         | super::Panel::FolderSizeDialog
                         | super::Panel::DateTimeStudioDialog
+                        | super::Panel::DataRecoveryDialog
                         | super::Panel::CalendarPopover
                         | super::Panel::CalendarEventDetails
                         | super::Panel::CalendarEventEditor
@@ -10678,6 +10680,7 @@ impl LauncherApp {
             (crate::gui::jump_mode::ui::NavigationDialogKind::FilePreview,
                 self.file_search_dialog.preview_dialog.open && self.file_preview_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::HotFolder, self.hotfolder_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DataRecovery, self.data_recovery_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::Convert, self.convert_panel.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::QrGenerator, self.qr_dialog.open && self.qr_host.root_layer().is_some()),
             (crate::gui::jump_mode::ui::NavigationDialogKind::ExplorerTabs, self.explorer_tabs_dialog.open && self.explorer_tabs_host.root_layer().is_some()),
@@ -10839,6 +10842,7 @@ impl LauncherApp {
                     NavigationDialogKind::FilePreview => self.file_preview_host.root_layer(),
                     NavigationDialogKind::HashGenerator => self.hash_generator_host.root_layer(),
                     NavigationDialogKind::HotFolder => self.hotfolder_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hotfolder_manager_window"))),
+                    NavigationDialogKind::DataRecovery => self.data_recovery_dialog.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")))),
                     NavigationDialogKind::Convert => self.convert_panel.open.then_some(egui::LayerId::new(egui::Order::Middle, egui::Id::new("convert-panel-window"))),
                     NavigationDialogKind::QrGenerator => self.qr_host.root_layer(),
                     NavigationDialogKind::ExplorerTabs => self.explorer_tabs_host.root_layer(),
@@ -10912,6 +10916,8 @@ impl LauncherApp {
                         self.file_preview_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::HotFolder {
                         self.hotfolder_dialog.open.then_some(()).and(current)
+                    } else if kind == NavigationDialogKind::DataRecovery {
+                        self.data_recovery_dialog.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::Convert {
                         self.convert_panel.open.then_some(()).and(current)
                     } else if kind == NavigationDialogKind::QrGenerator {
@@ -14128,7 +14134,31 @@ impl LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(&ctx, self);
         self.cpu_list_dialog = cpu_dlg;
-        let (data_actions, data_notices) = self.data_recovery_dialog.ui(&ctx);
+        let data_owner = self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(&ctx)
+                == Some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new(Some("Data & Recovery")),
+                ))
+            && !egui::Popup::is_any_open(&ctx);
+        let navigation_owner = self.jump_mode_ui.frame_navigation_owner();
+        let data_scope = match navigation_owner {
+            super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::DataRecovery,
+                instance,
+            } if data_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("data-recovery", instance),
+                super::jump_mode::TargetGeneration(self.data_recovery_dialog.ui_epoch()),
+                "data-recovery",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let (_, data_notices) =
+            self.data_recovery_dialog
+                .ui(&ctx, data_owner, first_ui_pass, data_scope.as_ref());
         if first_ui_pass {
             for notice in data_notices {
                 if notice.error {
@@ -14142,21 +14172,6 @@ impl LauncherApp {
 
                         style: Default::default(),
                     });
-                }
-            }
-            for action in data_actions {
-                match action {
-                    DataRecoveryUiAction::OpenPath(path) => {
-                        if let Err(error) = open::that(&path) {
-                            self.report_error_message(
-                                "data",
-                                format!("Failed to open {}: {error}", path.display()),
-                            );
-                        }
-                    }
-                    DataRecoveryUiAction::Confirm(intent) => {
-                        self.queue_data_recovery_confirmation(intent);
-                    }
                 }
             }
         }
@@ -15064,6 +15079,37 @@ impl LauncherApp {
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
         self.complete_hotfolder_manager(ctx);
         let mut effects = Vec::new();
+        let data_owner_current = self.native_ui_host_input_allowed(ctx, true)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new(Some("Data & Recovery")),
+                ))
+            && !egui::Popup::is_any_open(ctx);
+        for action in self
+            .data_recovery_dialog
+            .complete_ui(ctx, data_owner_current)
+        {
+            match action {
+                DataRecoveryUiAction::OpenPath(path) => {
+                    if let Err(error) = open::that(&path) {
+                        self.report_error_message(
+                            "data",
+                            format!("Failed to open {}: {error}", path.display()),
+                        );
+                    }
+                }
+                DataRecoveryUiAction::Confirm(intent) => {
+                    self.queue_data_recovery_confirmation(intent)
+                }
+                DataRecoveryUiAction::CopyDiagnostics(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::DataRecovery,
+                        text,
+                    })
+                }
+            }
+        }
         if let Some(text) = self.complete_mouse_gestures_host(ctx) {
             effects.push(RootDialogEffect::CopyText {
                 owner: DialogCopyOwner::MouseGestures,
@@ -16441,6 +16487,11 @@ impl LauncherApp {
                         DialogCopyOwner::Converter => self.convert_panel.copy_completed(result),
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
+                        }
+                        DialogCopyOwner::DataRecovery => {
+                            if let Err(error) = result {
+                                self.report_error_message("data.copy", error);
+                            }
                         }
                         DialogCopyOwner::ImageCompare => {
                             if let Err(error) = result {
@@ -25136,6 +25187,122 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+    #[test]
+    fn data_recovery_jump_focus_and_discard_do_not_change_section() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview)
+                    .unwrap();
+                app.focus_panel(super::super::Panel::DataRecoveryDialog);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Data & Recovery")));
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Backups")
+                    .cloned()
+                    .unwrap();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Backups");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::StorageHealth
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::StorageHealth
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    app.data_recovery_dialog.test_section(),
+                    super::super::data_recovery_dialog::DataDialogSection::Backups
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

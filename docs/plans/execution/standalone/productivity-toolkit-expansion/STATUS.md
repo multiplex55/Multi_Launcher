@@ -91,6 +91,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A5a | complete |
 | M12-A5b | complete |
 | M12-A6a | complete |
+| M12-A6b1 | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -713,3 +714,8 @@ Both surfaces now use separate docked and native Jump scopes and register curren
 The existing root manager exposes current rule, editor, action picker, history and exclusive decision targets. Trigger and sample-event choices use their exact owned popup anchors. The retained root pass owns draft adoption and submission of the existing typed actions. A discarded pass preserves the live draft and sample receiver. File and folder choices run through the verified launcher window and recheck the current editor revision on return. Rule setup, explicit enable and other worker semantics remain with the Hot Folder runtime.
 
 Review identified the ordinary ComboBox ownership conflict and clipped editor footer. The corrected gate passed 5/5 (`a1e15c58-eec3-421b-bd0f-d3c3a214822d`), including exact popup/path-ticket checks, real short-window Tab reveal, the prior read-only sample test and the live root decision that rejects discarded keyboard activation. Native chooser acceptance was not exercised.
+
+
+### M12-A6b1 Data & Recovery parent navigation
+
+The Data & Recovery window exposes its current section, snapshot, store, backup and diagnostics controls. The retained root pass owns section changes and service or shell actions. Recovery preparation rechecks current busy state and exact target and snapshot eligibility. The initial hint and a discarded Enter leave the current section unchanged. A fresh retained Enter changes it. The scoped gate passed 5/5 (`ae4d5c50-d771-427f-9b6a-76bb09a7f82b`). Independent review reported no actionable parent findings. The existing confirmation behavior remains while the exact confirmation owner is added in M12-A6b2.

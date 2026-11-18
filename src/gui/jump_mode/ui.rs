@@ -74,10 +74,11 @@ pub(crate) enum NavigationDialogKind {
     CalendarDetails,
     CalendarEditor,
     HotFolder,
+    DataRecovery,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 38] = [
+    pub(crate) const ALL: [Self; 39] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -116,6 +117,7 @@ impl NavigationDialogKind {
         Self::CalendarDetails,
         Self::CalendarEditor,
         Self::HotFolder,
+        Self::DataRecovery,
     ];
 
     const fn index(self) -> usize {
@@ -158,6 +160,7 @@ impl NavigationDialogKind {
             Self::CalendarDetails => 35,
             Self::CalendarEditor => 36,
             Self::HotFolder => 37,
+            Self::DataRecovery => 38,
         }
     }
 
@@ -201,6 +204,7 @@ impl NavigationDialogKind {
             Self::CalendarDetails => "calendar-event-details",
             Self::CalendarEditor => "calendar-event-editor",
             Self::HotFolder => "hotfolder-manager",
+            Self::DataRecovery => "data-recovery",
         }
     }
 
@@ -247,6 +251,7 @@ impl NavigationDialogKind {
             Self::CalendarDetails => egui::Id::new(Some("Event Details")),
             Self::CalendarEditor => egui::Id::new(Some("Calendar Event")),
             Self::HotFolder => egui::Id::new("hotfolder_manager_window"),
+            Self::DataRecovery => egui::Id::new(Some("Data & Recovery")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -4491,6 +4496,7 @@ mod tests {
                         egui::Window::new("Event Details").show(ctx, |_| {});
                     }
                     NavigationDialogKind::HotFolder => { egui::Window::new("Hot Folder Manager").id(egui::Id::new("hotfolder_manager_window")).show(ctx, |_| {}); }
+                    NavigationDialogKind::DataRecovery => { egui::Window::new("Data & Recovery").show(ctx, |_| {}); }
                     NavigationDialogKind::CalendarEditor => {
                         egui::Window::new("Calendar Event").show(ctx, |_| {});
                     }

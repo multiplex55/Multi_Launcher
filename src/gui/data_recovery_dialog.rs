@@ -78,6 +78,51 @@ pub(crate) fn resolve_confirmed_intent(
 pub(crate) enum DataRecoveryUiAction {
     OpenPath(PathBuf),
     Confirm(PendingRecoveryIntent),
+    CopyDiagnostics(String),
+}
+
+enum DataRecoveryIntent {
+    SetSection(DataDialogSection),
+    SelectSnapshot(String),
+    RefreshHealth,
+    CreateBackup,
+    RefreshSnapshots,
+    CopyDiagnostics,
+    External(DataRecoveryUiAction),
+    Close,
+}
+
+struct PendingDataPass {
+    pass: super::utility_host::ViewportPassProvenance,
+    epoch: u64,
+    intents: Vec<DataRecoveryIntent>,
+}
+
+fn recovery_target(
+    scope: Option<&super::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    id: &str,
+    label: &str,
+    order: &mut u64,
+) {
+    super::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        id,
+        label,
+        super::jump_mode::TargetKind::Button,
+        order,
+    );
+    if response.enabled()
+        && response.gained_focus()
+        && ui.is_visible()
+        && !ui.is_sizing_pass()
+        && !ui.ctx().will_discard()
+    {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +140,8 @@ pub(crate) struct DataUiNotice {
 
 pub(crate) struct DataRecoveryDialog {
     pub open: bool,
+    ui_epoch: u64,
+    pending_ui: Option<PendingDataPass>,
     section: DataDialogSection,
     root: AppDataRoot,
     settings: Settings,
@@ -117,6 +164,127 @@ pub(crate) struct DataRecoveryDialog {
 }
 
 impl DataRecoveryDialog {
+    pub(super) fn ui_epoch(&self) -> u64 {
+        self.ui_epoch
+    }
+    #[cfg(test)]
+    pub(super) fn test_section(&self) -> DataDialogSection {
+        self.section
+    }
+
+    pub(super) fn complete_ui(
+        &mut self,
+        ctx: &egui::Context,
+        owner_current: bool,
+    ) -> Vec<DataRecoveryUiAction> {
+        let Some(pending) = self.pending_ui.take() else {
+            return Vec::new();
+        };
+        if !self.open
+            || !owner_current
+            || pending.epoch != self.ui_epoch
+            || !pending.pass.was_retained(ctx)
+        {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        for intent in pending.intents {
+            match intent {
+                DataRecoveryIntent::SetSection(section) => {
+                    self.section = section;
+                    if matches!(
+                        section,
+                        DataDialogSection::Backups | DataDialogSection::Recovery
+                    ) {
+                        self.request_snapshot_list_or_defer();
+                    }
+                }
+                DataRecoveryIntent::SelectSnapshot(id) => {
+                    if self
+                        .snapshots
+                        .iter()
+                        .any(|snapshot| snapshot.manifest.snapshot_id == id)
+                    {
+                        self.selected_snapshot = Some(id);
+                    }
+                }
+                DataRecoveryIntent::RefreshHealth if !self.any_request_busy() => {
+                    if let Err(error) = self.refresh_health() {
+                        self.service_error = Some(error);
+                    }
+                }
+                DataRecoveryIntent::CreateBackup if !self.any_request_busy() => {
+                    if let Err(error) = self.request_backup() {
+                        self.service_error = Some(error);
+                    }
+                }
+                DataRecoveryIntent::RefreshSnapshots if !self.any_request_busy() => {
+                    if let Err(error) = self.list_snapshots() {
+                        self.service_error = Some(error);
+                    }
+                }
+                DataRecoveryIntent::RefreshHealth
+                | DataRecoveryIntent::CreateBackup
+                | DataRecoveryIntent::RefreshSnapshots => {}
+                DataRecoveryIntent::CopyDiagnostics => actions.push(
+                    DataRecoveryUiAction::CopyDiagnostics(self.safe_diagnostics_text()),
+                ),
+                DataRecoveryIntent::External(DataRecoveryUiAction::Confirm(intent))
+                    if self.confirmation_is_current(&intent) =>
+                {
+                    actions.push(DataRecoveryUiAction::Confirm(intent))
+                }
+                DataRecoveryIntent::External(DataRecoveryUiAction::Confirm(_)) => {}
+                DataRecoveryIntent::External(action) => actions.push(action),
+                DataRecoveryIntent::Close => {
+                    self.open = false;
+                    break;
+                }
+            }
+        }
+        actions
+    }
+
+    fn confirmation_is_current(&self, intent: &PendingRecoveryIntent) -> bool {
+        if self.any_request_busy() || self.section != DataDialogSection::Recovery {
+            return false;
+        }
+        match intent {
+            PendingRecoveryIntent::Reset { store_id } => self.health.iter().any(|store| {
+                store.id == *store_id
+                    && store.ownership == StoreOwnership::ApplicationOwned
+                    && store.reset_eligible
+                    && recovery_target_for_row(store.id).is_some()
+            }),
+            PendingRecoveryIntent::Restore {
+                target,
+                snapshot_id,
+            } => {
+                if self.selected_snapshot.as_deref() != Some(snapshot_id.as_str()) {
+                    return false;
+                }
+                self.health
+                    .iter()
+                    .find(|store| recovery_target_for_row(store.id) == Some(*target))
+                    .is_some_and(|store| {
+                        let eligible = target.members().into_iter().all(|member| {
+                            self.health.iter().any(|report| {
+                                report.id == member
+                                    && report.ownership == StoreOwnership::ApplicationOwned
+                                    && report.restore_eligible
+                            })
+                        });
+                        restore_enabled(
+                            *target,
+                            store.ownership,
+                            eligible,
+                            Some(snapshot_id),
+                            &self.snapshots,
+                        )
+                    })
+            }
+        }
+    }
     pub(crate) fn new(
         root: AppDataRoot,
         settings: Settings,
@@ -124,6 +292,8 @@ impl DataRecoveryDialog {
     ) -> Self {
         Self {
             open: false,
+            ui_epoch: 0,
+            pending_ui: None,
             section: DataDialogSection::StorageHealth,
             root,
             settings,
@@ -180,6 +350,9 @@ impl DataRecoveryDialog {
 
     pub(crate) fn open(&mut self, focus: DataDialogFocus) -> Result<(), String> {
         let was_open = self.open;
+        if !was_open {
+            self.ui_epoch = self.ui_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
         self.section = match focus {
             DataDialogFocus::Overview => DataDialogSection::StorageHealth,
@@ -380,12 +553,16 @@ impl DataRecoveryDialog {
     pub(crate) fn ui(
         &mut self,
         ctx: &egui::Context,
+        owner: bool,
+        first: bool,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> (Vec<DataRecoveryUiAction>, Vec<DataUiNotice>) {
         let notices = self.drain_results();
         if !self.open {
             return (Vec::new(), notices);
         }
-        let mut actions = Vec::new();
+        let mut intents = Vec::new();
+        let mut order = 0;
         let mut open = self.open;
         egui::Window::new("Data & Recovery")
             .default_size([760.0, 560.0])
@@ -402,48 +579,82 @@ impl DataRecoveryDialog {
                     [None, None],
                 ),
                 |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (section, label) in [
-                            (DataDialogSection::StorageHealth, "Storage Health"),
-                            (DataDialogSection::Backups, "Backups"),
-                            (DataDialogSection::Recovery, "Recovery"),
-                            (DataDialogSection::Diagnostics, "Diagnostics"),
-                        ] {
-                            if ui
-                                .selectable_label(self.section == section, label)
-                                .clicked()
-                            {
-                                self.section = section;
-                                if section == DataDialogSection::Backups
-                                    || section == DataDialogSection::Recovery
-                                {
-                                    self.request_snapshot_list_or_defer();
+                    ui.add_enabled_ui(owner, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for (section, label) in [
+                                (DataDialogSection::StorageHealth, "Storage Health"),
+                                (DataDialogSection::Backups, "Backups"),
+                                (DataDialogSection::Recovery, "Recovery"),
+                                (DataDialogSection::Diagnostics, "Diagnostics"),
+                            ] {
+                                let response = ui.selectable_label(self.section == section, label);
+                                recovery_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    &format!("section/{section:?}"),
+                                    label,
+                                    &mut order,
+                                );
+                                if response.clicked() {
+                                    intents.push(DataRecoveryIntent::SetSection(section));
                                 }
+                            }
+                        });
+                        ui.separator();
+                        match self.section {
+                            DataDialogSection::StorageHealth => {
+                                self.health_ui(ui, &mut intents, scope, &mut order)
+                            }
+                            DataDialogSection::Backups => {
+                                self.backups_ui(ui, &mut intents, scope, &mut order)
+                            }
+                            DataDialogSection::Recovery => {
+                                self.recovery_ui(ui, &mut intents, scope, &mut order)
+                            }
+                            DataDialogSection::Diagnostics => {
+                                self.diagnostics_ui(ui, &mut intents, scope, &mut order)
                             }
                         }
                     });
-                    ui.separator();
-                    match self.section {
-                        DataDialogSection::StorageHealth => self.health_ui(ui, &mut actions),
-                        DataDialogSection::Backups => self.backups_ui(ui),
-                        DataDialogSection::Recovery => self.recovery_ui(ui, &mut actions),
-                        DataDialogSection::Diagnostics => self.diagnostics_ui(ui, &mut actions),
-                    }
                 },
             );
-        self.open = open;
-        (actions, notices)
+        if !open {
+            intents.push(DataRecoveryIntent::Close);
+        }
+        if first && owner && !ctx.will_discard() {
+            self.pending_ui = Some(PendingDataPass {
+                pass: super::utility_host::ViewportPassProvenance::current(
+                    ctx,
+                    egui::ViewportId::ROOT,
+                ),
+                epoch: self.ui_epoch,
+                intents,
+            });
+        }
+        (Vec::new(), notices)
     }
 
-    fn health_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
+    fn health_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        intents: &mut Vec<DataRecoveryIntent>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+    ) {
         let busy = self.any_request_busy();
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!busy, egui::Button::new("Refresh"))
-                .clicked()
-                && let Err(error) = self.refresh_health()
-            {
-                self.service_error = Some(error);
+            let response = ui.add_enabled(!busy, egui::Button::new("Refresh"));
+            recovery_target(
+                scope,
+                ui,
+                &response,
+                "health/refresh",
+                "Refresh storage health",
+                order,
+            );
+            if response.clicked() {
+                intents.push(DataRecoveryIntent::RefreshHealth);
             }
             if busy {
                 widgets::secondary_help(ui, "Checking storage…");
@@ -519,13 +730,43 @@ impl DataRecoveryDialog {
                                 for target in targets {
                                     match target {
                                         StoreOpenTarget::File(path) => {
-                                            if ui.button("Open file").clicked() {
-                                                actions.push(DataRecoveryUiAction::OpenPath(path));
+                                            let response = ui
+                                                .push_id((report.id, "file"), |ui| {
+                                                    ui.button("Open file")
+                                                })
+                                                .inner;
+                                            recovery_target(
+                                                scope,
+                                                ui,
+                                                &response,
+                                                &format!("store/{:?}/file", report.id),
+                                                &format!("Open {} file", report.label),
+                                                order,
+                                            );
+                                            if response.clicked() {
+                                                intents.push(DataRecoveryIntent::External(
+                                                    DataRecoveryUiAction::OpenPath(path),
+                                                ));
                                             }
                                         }
                                         StoreOpenTarget::Folder(path) => {
-                                            if ui.button("Open folder").clicked() {
-                                                actions.push(DataRecoveryUiAction::OpenPath(path));
+                                            let response = ui
+                                                .push_id((report.id, "folder"), |ui| {
+                                                    ui.button("Open folder")
+                                                })
+                                                .inner;
+                                            recovery_target(
+                                                scope,
+                                                ui,
+                                                &response,
+                                                &format!("store/{:?}/folder", report.id),
+                                                &format!("Open {} folder", report.label),
+                                                order,
+                                            );
+                                            if response.clicked() {
+                                                intents.push(DataRecoveryIntent::External(
+                                                    DataRecoveryUiAction::OpenPath(path),
+                                                ));
                                             }
                                         }
                                     }
@@ -545,23 +786,32 @@ impl DataRecoveryDialog {
             });
     }
 
-    fn backups_ui(&mut self, ui: &mut egui::Ui) {
+    fn backups_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        intents: &mut Vec<DataRecoveryIntent>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+    ) {
         let backup_busy = self.any_request_busy();
         let list_busy = backup_busy;
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!backup_busy, egui::Button::new("Create backup"))
-                .clicked()
-                && let Err(error) = self.request_backup()
-            {
-                self.service_error = Some(error);
+            let backup = ui.add_enabled(!backup_busy, egui::Button::new("Create backup"));
+            recovery_target(scope, ui, &backup, "backup/create", "Create backup", order);
+            if backup.clicked() {
+                intents.push(DataRecoveryIntent::CreateBackup);
             }
-            if ui
-                .add_enabled(!list_busy, egui::Button::new("Refresh list"))
-                .clicked()
-                && let Err(error) = self.list_snapshots()
-            {
-                self.service_error = Some(error);
+            let list = ui.add_enabled(!list_busy, egui::Button::new("Refresh list"));
+            recovery_target(
+                scope,
+                ui,
+                &list,
+                "backup/refresh",
+                "Refresh backup list",
+                order,
+            );
+            if list.clicked() {
+                intents.push(DataRecoveryIntent::RefreshSnapshots);
             }
         });
         if backup_busy {
@@ -576,21 +826,44 @@ impl DataRecoveryDialog {
             .max_height(ui.available_height().max(0.0))
             .show(ui, |ui| {
                 for snapshot in &self.snapshots {
-                    ui.radio_value(
-                        &mut self.selected_snapshot,
-                        Some(snapshot.manifest.snapshot_id.clone()),
-                        format!(
-                            "{} — {:?} — {} stores",
-                            snapshot.manifest.snapshot_id,
-                            snapshot.manifest.status,
-                            snapshot.manifest.included.len()
-                        ),
+                    let response = ui
+                        .push_id(&snapshot.manifest.snapshot_id, |ui| {
+                            ui.radio(
+                                self.selected_snapshot.as_deref()
+                                    == Some(snapshot.manifest.snapshot_id.as_str()),
+                                format!(
+                                    "{} — {:?} — {} stores",
+                                    snapshot.manifest.snapshot_id,
+                                    snapshot.manifest.status,
+                                    snapshot.manifest.included.len()
+                                ),
+                            )
+                        })
+                        .inner;
+                    recovery_target(
+                        scope,
+                        ui,
+                        &response,
+                        &format!("snapshot/{}", snapshot.manifest.snapshot_id),
+                        &format!("Backup {}", snapshot.manifest.snapshot_id),
+                        order,
                     );
+                    if response.clicked() {
+                        intents.push(DataRecoveryIntent::SelectSnapshot(
+                            snapshot.manifest.snapshot_id.clone(),
+                        ));
+                    }
                 }
             });
     }
 
-    fn recovery_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
+    fn recovery_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        intents: &mut Vec<DataRecoveryIntent>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+    ) {
         widgets::secondary_help(
             ui,
             "Restore or reset is validated now, staged without changing live data, and applied on the next launch. Multi Launcher preserves current data before replacement.",
@@ -632,28 +905,50 @@ impl DataRecoveryDialog {
                         let label = recovery_target_label(target, store.label);
                         ui.label(label)
                             .on_hover_text(store.path.display().to_string());
-                        if ui
-                            .add_enabled(
-                                restore && !recovery_busy,
-                                egui::Button::new("Restore selected backup"),
-                            )
-                            .clicked()
-                        {
-                            actions.push(DataRecoveryUiAction::Confirm(
-                                PendingRecoveryIntent::Restore {
+                        let restore_button = ui
+                            .push_id((store.id, "restore"), |ui| {
+                                ui.add_enabled(
+                                    restore && !recovery_busy,
+                                    egui::Button::new("Restore selected backup"),
+                                )
+                            })
+                            .inner;
+                        recovery_target(
+                            scope,
+                            ui,
+                            &restore_button,
+                            &format!("restore/{target:?}"),
+                            &format!("Restore {label}"),
+                            order,
+                        );
+                        if restore_button.clicked() {
+                            intents.push(DataRecoveryIntent::External(
+                                DataRecoveryUiAction::Confirm(PendingRecoveryIntent::Restore {
                                     target,
                                     snapshot_id: selected
                                         .clone()
                                         .expect("enabled restore has snapshot"),
-                                },
+                                }),
                             ));
                         }
-                        if ui
-                            .add_enabled(reset && !recovery_busy, egui::Button::new("Reset"))
-                            .clicked()
-                        {
-                            actions.push(DataRecoveryUiAction::Confirm(
-                                PendingRecoveryIntent::Reset { store_id: store.id },
+                        let reset_button = ui
+                            .push_id((store.id, "reset"), |ui| {
+                                ui.add_enabled(reset && !recovery_busy, egui::Button::new("Reset"))
+                            })
+                            .inner;
+                        recovery_target(
+                            scope,
+                            ui,
+                            &reset_button,
+                            &format!("reset/{:?}", store.id),
+                            &format!("Reset {label}"),
+                            order,
+                        );
+                        if reset_button.clicked() {
+                            intents.push(DataRecoveryIntent::External(
+                                DataRecoveryUiAction::Confirm(PendingRecoveryIntent::Reset {
+                                    store_id: store.id,
+                                }),
                             ));
                         }
                         if store.ownership == StoreOwnership::External {
@@ -667,20 +962,39 @@ impl DataRecoveryDialog {
             });
     }
 
-    fn diagnostics_ui(&self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
+    fn diagnostics_ui(
+        &self,
+        ui: &mut egui::Ui,
+        intents: &mut Vec<DataRecoveryIntent>,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+    ) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Open data folder").clicked() {
-                actions.push(DataRecoveryUiAction::OpenPath(
-                    self.root.path().to_path_buf(),
+            let open = ui.button("Open data folder");
+            recovery_target(
+                scope,
+                ui,
+                &open,
+                "diagnostics/open",
+                "Open data folder",
+                order,
+            );
+            if open.clicked() {
+                intents.push(DataRecoveryIntent::External(
+                    DataRecoveryUiAction::OpenPath(self.root.path().to_path_buf()),
                 ));
             }
-            if ui.button("Copy diagnostics").clicked() {
-                let diagnostics = self.safe_diagnostics_text();
-                ui.output_mut(|output| {
-                    output
-                        .commands
-                        .push(egui::OutputCommand::CopyText(diagnostics));
-                });
+            let copy = ui.button("Copy diagnostics");
+            recovery_target(
+                scope,
+                ui,
+                &copy,
+                "diagnostics/copy",
+                "Copy diagnostics",
+                order,
+            );
+            if copy.clicked() {
+                intents.push(DataRecoveryIntent::CopyDiagnostics);
             }
         });
         ui.separator();
