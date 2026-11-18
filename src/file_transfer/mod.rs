@@ -15,8 +15,8 @@ mod tree;
 
 pub use copy::{
     CopiedFile, CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure,
-    CopyRecoveryArtifact, CopyVerification, CrossMoveEffect, CrossMoveSourceState,
-    CrossVolumeMovedFile, ReplacementBackup, ReplacementState, copy_to_vacancy,
+    CopyRecoveryArtifact, CopyVerification, ReplacementBackup, ReplacementState, StagedMoveEffect,
+    StagedMoveSourceState, StagedMovedFile, copy_to_vacancy,
 };
 pub use execute::{
     CopyExecution, DirectoryCopy, DirectoryTimes, ExecutionProgress, ExecutionRow, ExecutionState,

@@ -5,13 +5,13 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub(super) enum TransferJournalEvent {
-    CrossSourceIntent {
-        action: super::copy::CrossSourceAction,
-        effect: super::CrossMoveEffect,
+    StagedSourceIntent {
+        action: super::copy::StagedSourceAction,
+        effect: super::StagedMoveEffect,
     },
-    CrossSourceObserved {
-        action: super::copy::CrossSourceAction,
-        effect: super::CrossMoveEffect,
+    StagedSourceObserved {
+        action: super::copy::StagedSourceAction,
+        effect: super::StagedMoveEffect,
     },
     MoveRenameIntent {
         source: PathBuf,

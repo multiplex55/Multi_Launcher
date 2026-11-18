@@ -3530,7 +3530,7 @@ pub(crate) mod transfer_native {
         ) -> Result<TransferRelocation, NativeArchiveError> {
             self.open_relocation_inner(leaf, expected, true, verify_content, false)
         }
-        pub(crate) fn open_cross_volume_move_source(
+        pub(crate) fn open_staged_move_source(
             &self,
             leaf: &OsStr,
             expected: NativeFileIdentity,

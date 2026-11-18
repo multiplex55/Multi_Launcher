@@ -1,4 +1,4 @@
-//! Verified cross-volume publication followed by journaled source retirement.
+//! Verified staged publication followed by journaled source retirement.
 
 use super::*;
 use crate::archive::transfer_native::TransferRelocation;
@@ -8,7 +8,7 @@ use crate::file_transfer::journal::{TransferJournal, TransferJournalEvent as Eve
 use rand::TryRng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrossMoveSourceState {
+pub enum StagedMoveSourceState {
     Original,
     Quarantined,
     Removed,
@@ -16,59 +16,68 @@ pub enum CrossMoveSourceState {
 }
 
 #[derive(Clone, Debug)]
-pub struct CrossMoveEffect {
+pub struct StagedMoveEffect {
     pub source: PathBuf,
     pub source_parent: NativeFileIdentity,
     pub source_identity: NativeFileIdentity,
     pub recovery: Option<PathBuf>,
-    pub source_state: CrossMoveSourceState,
+    pub source_state: StagedMoveSourceState,
     pub output: CopyArtifact,
     pub verification: CopyVerification,
+    pub replacement: Option<ReplacementBackup>,
     pub restoration_error: Option<String>,
 }
 
 #[derive(Debug)]
-pub struct CrossVolumeMovedFile {
-    pub effect: CrossMoveEffect,
+pub struct StagedMovedFile {
+    pub effect: StagedMoveEffect,
     pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::file_transfer) enum CrossSourceAction {
+pub(in crate::file_transfer) enum StagedSourceAction {
     Relocate,
     Dispose,
     Restore,
 }
 
-pub(in crate::file_transfer) fn move_across_volumes(
+pub(in crate::file_transfer) fn move_file_by_copy(
     entry: &ApprovedTransferEntry,
+    target: &TargetSnapshot,
     control: &CopyControl,
     progress: impl FnMut(u64),
     verification: impl FnOnce(bool),
     removing_source: impl FnOnce(),
     journal: &mut dyn TransferJournal,
-) -> Result<CrossVolumeMovedFile, CopyError> {
-    let ApprovedTarget::CreateAt(target) = entry.destination() else {
-        return Err(CopyFailure::UnsupportedPlan.into());
+) -> Result<StagedMovedFile, CopyError> {
+    let replacement = match entry.destination() {
+        ApprovedTarget::Replace(approved) if approved == target => true,
+        ApprovedTarget::CreateAt(approved) if approved == target => false,
+        _ => return Err(CopyFailure::UnsupportedPlan.into()),
     };
-    let guarded = GuardedCopy::open_cross_volume(entry.source(), target, control)?;
-    let lease = publish_vacant(
-        guarded,
-        true,
-        control,
-        progress,
-        (|_| {}, || {}),
-        verification,
-        Some(journal),
-    )?;
-    let mut effect = CrossMoveEffect {
+    let guarded = GuardedCopy::open_staged_move(entry.source(), target, control, replacement)?;
+    let lease = if replacement {
+        publish_replacement(guarded, true, control, progress, verification, journal)?
+    } else {
+        publish_vacant(
+            guarded,
+            true,
+            control,
+            progress,
+            (|_| {}, || {}),
+            verification,
+            Some(journal),
+        )?
+    };
+    let mut effect = StagedMoveEffect {
         source: entry.source().path(),
         source_parent: entry.source().parent().identity(),
         source_identity: entry.source().identity(),
         recovery: None,
-        source_state: CrossMoveSourceState::Original,
+        source_state: StagedMoveSourceState::Original,
         output: lease.copied.output.clone(),
         verification: lease.copied.verification,
+        replacement: lease.copied.replacement.clone(),
         restoration_error: None,
     };
     removing_source();
@@ -77,11 +86,11 @@ pub(in crate::file_transfer) fn move_across_volumes(
         return Err(CopyError {
             failure,
             recovery_error: effect.restoration_error.clone(),
-            artifact: Some(CopyRecoveryArtifact::CrossVolume(Box::new(effect))),
-            replacement: None,
+            replacement: effect.replacement.clone(),
+            artifact: Some(CopyRecoveryArtifact::StagedMove(Box::new(effect))),
         });
     }
-    Ok(CrossVolumeMovedFile {
+    Ok(StagedMovedFile {
         effect,
         bytes: entry
             .source()
@@ -93,15 +102,15 @@ pub(in crate::file_transfer) fn move_across_volumes(
 
 fn record_source(
     journal: &mut dyn TransferJournal,
-    effect: &CrossMoveEffect,
-    action: CrossSourceAction,
+    effect: &StagedMoveEffect,
+    action: StagedSourceAction,
     observed: bool,
 ) -> Result<(), CopyFailure> {
     let effect = effect.clone();
     let event = if observed {
-        Event::CrossSourceObserved { action, effect }
+        Event::StagedSourceObserved { action, effect }
     } else {
-        Event::CrossSourceIntent { action, effect }
+        Event::StagedSourceIntent { action, effect }
     };
     journal.record(event).map_err(CopyFailure::Journal)
 }
@@ -123,6 +132,9 @@ fn check_verified_output(
         .copy
         .target_parent
         .check_chain(control.cancellation())?;
+    if let Some(incumbent) = &lease.replacement_hold {
+        incumbent.check()?;
+    }
     checked_final_path(file, &lease.copied.output.path)?;
     if native_file_identity(file)? != lease.copied.output.identity
         || observe_entry_metadata(file)? != lease.revision
@@ -256,7 +268,7 @@ fn retire_verified_source(
     mut lease: VerifiedPublication<'_>,
     control: &CopyControl,
     journal: &mut dyn TransferJournal,
-    effect: &mut CrossMoveEffect,
+    effect: &mut StagedMoveEffect,
 ) -> Result<(), CopyFailure> {
     let output_zone = lease.staged.zone.take();
     let zone = output_zone.as_ref().map(|zone| zone.length);
@@ -300,7 +312,7 @@ fn retire_verified_source(
         return Err(CopyFailure::DestinationOccupied);
     }
     effect.recovery = Some(candidate.clone());
-    record_source(journal, effect, CrossSourceAction::Relocate, false)?;
+    record_source(journal, effect, StagedSourceAction::Relocate, false)?;
     let claim = loop {
         control.check()?;
         let Some(epoch) = control.admission_epoch()? else {
@@ -321,16 +333,16 @@ fn retire_verified_source(
         return renamed.map_err(CopyFailure::from);
     }
     effect.source_state = if held_at_recovery {
-        CrossMoveSourceState::Quarantined
+        StagedMoveSourceState::Quarantined
     } else {
-        CrossMoveSourceState::Uncertain
+        StagedMoveSourceState::Uncertain
     };
     let observed_revision = if held_at_recovery {
         Some(observe_entry_metadata(relocation.file()))
     } else {
         None
     };
-    record_source(journal, effect, CrossSourceAction::Relocate, true)?;
+    record_source(journal, effect, StagedSourceAction::Relocate, true)?;
     if let Err(error) = renamed {
         restore_quarantined(source, relocation, journal, effect)?;
         return Err(error.into());
@@ -341,7 +353,7 @@ fn retire_verified_source(
             observed_revision.ok_or(CopyFailure::ContentMismatch)??,
         )?;
         check_source_payload(&lease, &quarantine, expected, control)?;
-        record_source(journal, effect, CrossSourceAction::Dispose, false)?;
+        record_source(journal, effect, StagedSourceAction::Dispose, false)?;
         loop {
             control.check()?;
             let Some(epoch) = control.admission_epoch()? else {
@@ -378,6 +390,7 @@ fn retire_verified_source(
         published,
         staged,
         revision,
+        replacement_hold,
         ..
     } = lease;
     let GuardedCopy {
@@ -402,19 +415,22 @@ fn retire_verified_source(
     let still_at_recovery =
         inspect_exact_name(&source_parent, &quarantine, effect.source_identity, &fresh);
     effect.source_state = match (still_at_original, still_at_recovery, disposition.is_ok()) {
-        (Some(true), Some(false), _) => CrossMoveSourceState::Original,
-        (Some(false), Some(true), _) => CrossMoveSourceState::Quarantined,
-        (Some(false), Some(false), true) => CrossMoveSourceState::Removed,
-        _ => CrossMoveSourceState::Uncertain,
+        (Some(true), Some(false), _) => StagedMoveSourceState::Original,
+        (Some(false), Some(true), _) => StagedMoveSourceState::Quarantined,
+        (Some(false), Some(false), true) => StagedMoveSourceState::Removed,
+        _ => StagedMoveSourceState::Uncertain,
     };
-    record_source(journal, effect, CrossSourceAction::Dispose, true)?;
+    record_source(journal, effect, StagedSourceAction::Dispose, true)?;
     disposition?;
-    if effect.source_state != CrossMoveSourceState::Removed {
+    if effect.source_state != StagedMoveSourceState::Removed {
         return Err(CopyFailure::ContentMismatch);
     }
     // The destination stays held through exact source observation and this
     // terminal check. A subsequent change remains an explicit partial result.
     target_parent.check_chain(&fresh)?;
+    if let Some(incumbent) = &replacement_hold {
+        incumbent.check()?;
+    }
     checked_final_path(published.file(), &effect.output.path)?;
     if native_file_identity(published.file())? != effect.output.identity
         || observe_entry_metadata(published.file())? != revision
@@ -429,12 +445,12 @@ fn restore_quarantined(
     copy: &GuardedCopy<'_>,
     relocation: &TransferRelocation,
     journal: &mut dyn TransferJournal,
-    effect: &mut CrossMoveEffect,
+    effect: &mut StagedMoveEffect,
 ) -> Result<(), CopyFailure> {
     let Some(candidate) = effect.recovery.clone() else {
         return Ok(());
     };
-    if effect.source_state != CrossMoveSourceState::Quarantined {
+    if effect.source_state != StagedMoveSourceState::Quarantined {
         return Ok(());
     }
     let fresh = ScanCancellation::new();
@@ -449,17 +465,17 @@ fn restore_quarantined(
     if !can_restore() {
         return Ok(());
     }
-    record_source(journal, effect, CrossSourceAction::Restore, false)?;
+    record_source(journal, effect, StagedSourceAction::Restore, false)?;
     if !can_restore() {
         return Ok(());
     }
     let repaired = relocation.rename_no_replace(copy.source_parent.directory(), source.as_os_str());
     if exact_held_leaf(relocation.file(), &effect.source) {
-        effect.source_state = CrossMoveSourceState::Original;
+        effect.source_state = StagedMoveSourceState::Original;
     } else if !exact_held_leaf(relocation.file(), &candidate) {
-        effect.source_state = CrossMoveSourceState::Uncertain;
+        effect.source_state = StagedMoveSourceState::Uncertain;
     }
-    record_source(journal, effect, CrossSourceAction::Restore, true)?;
+    record_source(journal, effect, StagedSourceAction::Restore, true)?;
     if let Err(error) = repaired {
         effect.restoration_error = Some(error.to_string());
     }

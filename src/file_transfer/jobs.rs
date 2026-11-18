@@ -171,7 +171,7 @@ impl TransferJobResult {
             match &row.state {
                 ExecutionState::Copied(_)
                 | ExecutionState::Moved(_)
-                | ExecutionState::MovedAcrossVolumes(_) => retained = true,
+                | ExecutionState::MovedByCopy(_) => retained = true,
                 ExecutionState::CreatedDirectory(directory) => {
                     retained = true;
                     incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);

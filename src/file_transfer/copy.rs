@@ -149,6 +149,7 @@ pub enum CopyFailure {
     UnsupportedStreams,
     UnsupportedMetadata,
     ContentMismatch,
+    BackupChanged,
     Journal(io::Error),
     Admission(AdmissionError),
     Native(io::Error),
@@ -167,6 +168,7 @@ impl fmt::Display for CopyFailure {
                 "This copy cannot preserve the file's attributes or timestamps."
             }
             Self::ContentMismatch => "The copied bytes did not match the source.",
+            Self::BackupChanged => "The retained destination changed after replacement.",
             Self::Journal(error) => return write!(f, "Transfer journal failed ({error})."),
             Self::Admission(error) => return write!(f, "{error}"),
             Self::Native(error) => return write!(f, "Windows copy failed ({error})."),
@@ -205,7 +207,7 @@ impl From<NativeArchiveError> for CopyFailure {
 pub enum CopyRecoveryArtifact {
     Owned(CopyArtifact),
     Relocation(Box<super::relocate::MoveEffect>),
-    CrossVolume(Box<CrossMoveEffect>),
+    StagedMove(Box<StagedMoveEffect>),
     UncertainPublication {
         stage: PathBuf,
         target: PathBuf,
@@ -260,10 +262,10 @@ impl fmt::Display for CopyError {
 
 impl std::error::Error for CopyError {}
 
-mod cross_move;
+mod staged_move;
 
-pub use cross_move::{CrossMoveEffect, CrossMoveSourceState, CrossVolumeMovedFile};
-pub(super) use cross_move::{CrossSourceAction, move_across_volumes};
+pub use staged_move::{StagedMoveEffect, StagedMoveSourceState, StagedMovedFile};
+pub(super) use staged_move::{StagedSourceAction, move_file_by_copy};
 
 struct HeldZone {
     file: TransferFile,
@@ -291,12 +293,13 @@ impl<'a> GuardedCopy<'a> {
         Self::open_scoped(source, target, control, replacement, false)
     }
 
-    fn open_cross_volume(
+    fn open_staged_move(
         source: &'a EntrySnapshot,
         target: &'a TargetSnapshot,
         control: &CopyControl,
+        replacement: bool,
     ) -> Result<Self, CopyFailure> {
-        Self::open_scoped(source, target, control, false, true)
+        Self::open_scoped(source, target, control, replacement, true)
     }
 
     fn open_scoped(
@@ -304,7 +307,7 @@ impl<'a> GuardedCopy<'a> {
         target: &'a TargetSnapshot,
         control: &CopyControl,
         replacement: bool,
-        cross_volume: bool,
+        staged_move: bool,
     ) -> Result<Self, CopyFailure> {
         control.check()?;
         let metadata = source.metadata();
@@ -331,16 +334,17 @@ impl<'a> GuardedCopy<'a> {
         {
             return Err(AdmissionError::StaleParent.into());
         }
-        if cross_volume
+        if staged_move
+            && !replacement
             && source_parent.snapshot.identity().volume_serial_number()
                 == target_parent.snapshot.identity().volume_serial_number()
         {
             return Err(CopyFailure::UnsupportedPlan);
         }
-        let source_relocation = if cross_volume {
+        let source_relocation = if staged_move {
             let held = source_parent
                 .directory()
-                .open_cross_volume_move_source(source.leaf().as_os_str(), source.identity())?;
+                .open_staged_move_source(source.leaf().as_os_str(), source.identity())?;
             held.require_no_extended_attributes()?;
             Some(held)
         } else {
@@ -363,7 +367,7 @@ impl<'a> GuardedCopy<'a> {
         let source_zone = inventory
             .zone
             .map(|length| {
-                let file = if cross_volume {
+                let file = if staged_move {
                     source_parent
                         .directory()
                         .open_move_source_zone(source.leaf().as_os_str(), source.identity())?
@@ -847,6 +851,30 @@ struct VerifiedPublication<'a> {
     staged: StagedCopy,
     copied: CopiedFile,
     revision: EntryMetadata,
+    replacement_hold: Option<HeldReplacement>,
+}
+
+struct HeldReplacement {
+    file: TransferRelocation,
+    path: PathBuf,
+    revision: EntryMetadata,
+}
+
+impl HeldReplacement {
+    fn check(&self) -> Result<(), CopyFailure> {
+        check_replacement_revision(&self.file, &self.path, self.revision)
+    }
+}
+
+fn check_replacement_revision(
+    held: &TransferRelocation,
+    path: &Path,
+    expected: EntryMetadata,
+) -> Result<(), CopyFailure> {
+    if !exact_held_leaf(held.file(), path) || observe_entry_metadata(held.file())? != expected {
+        return Err(CopyFailure::BackupChanged);
+    }
+    Ok(())
 }
 
 fn publish_vacant<'a>(
@@ -1041,6 +1069,7 @@ fn publish_vacant<'a>(
         staged,
         copied,
         revision,
+        replacement_hold: None,
     })
 }
 
@@ -1544,20 +1573,42 @@ pub(super) fn copy_to_replacement_reporting(
     verification_progress: impl FnOnce(bool),
     journal: &mut dyn super::journal::TransferJournal,
 ) -> Result<CopiedFile, CopyError> {
-    use super::TransferLeaf;
-    use super::journal::TransferJournalEvent as Event;
-    use rand::TryRng;
-
     let ApprovedTarget::Replace(target) = entry.destination() else {
         return Err(CopyFailure::UnsupportedPlan.into());
     };
+    let copy = GuardedCopy::open(entry.source(), target, control, true)?;
+    Ok(publish_replacement(
+        copy,
+        entry.verify_content(),
+        control,
+        progress,
+        verification_progress,
+        journal,
+    )?
+    .copied)
+}
+
+fn publish_replacement<'a>(
+    copy: GuardedCopy<'a>,
+    verify_content: bool,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    verification_progress: impl FnOnce(bool),
+    journal: &mut dyn super::journal::TransferJournal,
+) -> Result<VerifiedPublication<'a>, CopyError> {
+    use super::TransferLeaf;
+    use super::journal::TransferJournalEvent as Event;
+    use rand::TryRng;
+    if copy.source_relocation.is_some() && !verify_content {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    }
+    let target = copy.target;
     let TargetOccupancy::Occupied(incumbent) = target.occupancy() else {
         return Err(CopyFailure::UnsupportedPlan.into());
     };
     if incumbent.metadata().kind != EntryKind::File {
         return Err(CopyFailure::UnsupportedPlan.into());
     }
-    let copy = GuardedCopy::open(entry.source(), target, control, true)?;
     let parent = target.parent().identity();
     let original = incumbent.path();
     let final_path = target
@@ -1601,7 +1652,7 @@ pub(super) fn copy_to_replacement_reporting(
             CopyFailure::Journal(error),
         ));
     }
-    let staged = match fill_stage(&stage, &copy, entry.verify_content(), control, progress) {
+    let staged = match fill_stage(&stage, &copy, verify_content, control, progress) {
         Ok(staged) => staged,
         Err(failure) => return Err(abort_stage(stage, stage_artifact, failure)),
     };
@@ -1710,6 +1761,7 @@ pub(super) fn copy_to_replacement_reporting(
         return Err(failure);
     }
     backup.state = ReplacementState::Retained;
+    let backup_revision = observe_entry_metadata(held.file());
     if let Err(error) = journal.record(Event::DisplacementObserved {
         original: original.clone(),
         backup: backup_path.clone(),
@@ -1720,6 +1772,15 @@ pub(super) fn copy_to_replacement_reporting(
         failure.replacement = Some(backup);
         return Err(failure);
     }
+    let backup_revision = match backup_revision {
+        Ok(revision) => revision,
+        Err(error) => {
+            let mut failure = abort_stage(stage, stage_artifact, error.into());
+            failure.replacement = Some(backup);
+            restore_incumbent(&copy, &held, journal, &mut failure);
+            return Err(failure);
+        }
+    };
     if let Err(error) = journal.record(Event::PublishIntent {
         stage: stage_path.clone(),
         target: final_path.clone(),
@@ -1740,6 +1801,7 @@ pub(super) fn copy_to_replacement_reporting(
             };
             copy.check_source(control)?;
             copy.check_vacancy_after_displacement(control)?;
+            check_replacement_revision(&held, &backup_path, backup_revision)?;
             if let Some(acquired) = control.try_claim(epoch)? {
                 claim = Some(acquired);
                 return Ok(());
@@ -1830,13 +1892,32 @@ pub(super) fn copy_to_replacement_reporting(
             recovery_error: None,
             replacement: Some(backup.clone()),
         })?;
-    Ok(CopiedFile {
+    let replacement_hold = HeldReplacement {
+        file: held,
+        path: backup_path,
+        revision: backup_revision,
+    };
+    replacement_hold.check().map_err(|failure| CopyError {
+        failure,
+        artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+        recovery_error: None,
+        replacement: Some(backup.clone()),
+    })?;
+    let copied = CopiedFile {
         source: copy.source.identity(),
         output: artifact,
         bytes: copy.length,
         zone_bytes: copy.streams().zone,
         verification,
         replacement: Some(backup),
+    };
+    Ok(VerifiedPublication {
+        copy,
+        published,
+        staged,
+        copied,
+        revision,
+        replacement_hold: Some(replacement_hold),
     })
 }
 

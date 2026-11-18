@@ -12,15 +12,15 @@ use crate::file_operations::set_replace_basic_info;
 
 use super::copy::{
     copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_reporting,
-    move_across_volumes, require_no_directory_streams,
+    move_file_by_copy, require_no_directory_streams,
 };
 use super::journal::TransferJournal;
 use super::relocate::{MovedFile, move_same_volume_file};
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
     CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact,
-    CrossVolumeMovedFile, DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, ParentSnapshot,
-    SourceNodeId, TargetOccupancy, TargetSnapshot, TransferAction, checked_final_path,
+    DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, ParentSnapshot, SourceNodeId,
+    StagedMovedFile, TargetOccupancy, TargetSnapshot, TransferAction, checked_final_path,
     copy_to_vacancy, directory_stamp, inspect_target, observe_entry_metadata,
 };
 
@@ -63,7 +63,7 @@ pub struct DirectoryCopy {
 pub enum ExecutionState {
     Copied(CopiedFile),
     Moved(MovedFile),
-    MovedAcrossVolumes(CrossVolumeMovedFile),
+    MovedByCopy(StagedMovedFile),
     CreatedDirectory(DirectoryCopy),
     MergedDirectory(ParentSnapshot),
     Skipped,
@@ -201,11 +201,17 @@ enum ExecutionStrategy {
 }
 
 fn supports_regular_file_move(entry: &ApprovedTransferEntry) -> bool {
-    let ApprovedTarget::CreateAt(target) = entry.destination() else {
+    if entry.source().metadata().kind != EntryKind::File {
         return false;
-    };
-    entry.source().metadata().kind == EntryKind::File
-        && matches!(target.occupancy(), TargetOccupancy::Vacant)
+    }
+    match entry.destination() {
+        ApprovedTarget::CreateAt(target) => matches!(target.occupancy(), TargetOccupancy::Vacant),
+        ApprovedTarget::Replace(target) => matches!(
+            target.occupancy(), TargetOccupancy::Occupied(incumbent)
+                if incumbent.metadata().kind == EntryKind::File
+        ),
+        _ => false,
+    }
 }
 
 fn execute_entry(
@@ -222,15 +228,19 @@ fn execute_entry(
         let Some(journal) = journal else {
             return Err(CopyFailure::UnsupportedPlan.into());
         };
-        let ApprovedTarget::CreateAt(target) = entry.destination() else {
-            return Err(CopyFailure::UnsupportedPlan.into());
+        let (target, replace) = match entry.destination() {
+            ApprovedTarget::CreateAt(target) => (target, false),
+            ApprovedTarget::Replace(target) => (target, true),
+            _ => return Err(CopyFailure::UnsupportedPlan.into()),
         };
-        if entry.source().identity().volume_serial_number()
-            != target.parent().identity().volume_serial_number()
+        if replace
+            || entry.source().identity().volume_serial_number()
+                != target.parent().identity().volume_serial_number()
         {
             let callback = std::cell::RefCell::new(&mut *progress);
-            let moved = move_across_volumes(
+            let moved = move_file_by_copy(
                 entry,
+                target,
                 control,
                 |staged_bytes| {
                     (callback.borrow_mut())(ExecutionProgress::Copying {
@@ -251,7 +261,7 @@ fn execute_entry(
                 entry: id,
                 bytes: moved.bytes,
             });
-            return Ok(ExecutionState::MovedAcrossVolumes(moved));
+            return Ok(ExecutionState::MovedByCopy(moved));
         }
         let moved = move_same_volume_file(
             entry,
@@ -522,7 +532,7 @@ fn finalize_directory_times(
         let complete = match state {
             ExecutionState::Copied(_)
             | ExecutionState::Moved(_)
-            | ExecutionState::MovedAcrossVolumes(_)
+            | ExecutionState::MovedByCopy(_)
             | ExecutionState::Skipped => true,
             ExecutionState::CreatedDirectory(created) => {
                 created.times = if incomplete[index] || control.is_cancelled() {
@@ -1700,8 +1710,8 @@ mod tests {
         execute_copy_with_hooks(&fixture.plan, control, |_| {}, |_| {}, Some(journal)).unwrap()
     }
 
-    use super::super::CrossMoveSourceState;
-    use super::super::copy::CrossSourceAction;
+    use super::super::StagedMoveSourceState;
+    use super::super::copy::StagedSourceAction;
 
     #[test]
     #[ignore = "requires two distinct local fixture volumes set by the harness"]
@@ -1712,13 +1722,13 @@ mod tests {
             on_record: |_: &JournalEvent| Ok(()),
         };
         let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
-        let ExecutionState::MovedAcrossVolumes(moved) = &report.rows[0].state else {
+        let ExecutionState::MovedByCopy(moved) = &report.rows[0].state else {
             panic!(
                 "expected cross-volume success, got {:?}, receipts {:?}",
                 report.rows[0], journal.accepted
             );
         };
-        assert_eq!(moved.effect.source_state, CrossMoveSourceState::Removed);
+        assert_eq!(moved.effect.source_state, StagedMoveSourceState::Removed);
         assert_eq!(moved.effect.source, fixture.source);
         assert_eq!(moved.effect.output.path, fixture.target);
         assert!(matches!(
@@ -1757,20 +1767,20 @@ mod tests {
                     verification: CopyVerification::Verified { .. },
                     ..
                 },
-                JournalEvent::CrossSourceIntent {
-                    action: CrossSourceAction::Relocate,
+                JournalEvent::StagedSourceIntent {
+                    action: StagedSourceAction::Relocate,
                     ..
                 },
-                JournalEvent::CrossSourceObserved {
-                    action: CrossSourceAction::Relocate,
+                JournalEvent::StagedSourceObserved {
+                    action: StagedSourceAction::Relocate,
                     ..
                 },
-                JournalEvent::CrossSourceIntent {
-                    action: CrossSourceAction::Dispose,
+                JournalEvent::StagedSourceIntent {
+                    action: StagedSourceAction::Dispose,
                     ..
                 },
-                JournalEvent::CrossSourceObserved {
-                    action: CrossSourceAction::Dispose,
+                JournalEvent::StagedSourceObserved {
+                    action: StagedSourceAction::Dispose,
                     ..
                 },
             ]
@@ -1798,10 +1808,10 @@ mod tests {
                 report.rows[0], journal.accepted
             );
         };
-        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
             panic!("expected verified destination and retained source");
         };
-        assert_eq!(effect.source_state, CrossMoveSourceState::Original);
+        assert_eq!(effect.source_state, StagedMoveSourceState::Original);
         assert!(effect.recovery.is_none());
         assert_eq!(
             fs::read(&fixture.source).unwrap(),
@@ -1823,8 +1833,8 @@ mod tests {
             on_record: |event: &JournalEvent| {
                 if matches!(
                     event,
-                    JournalEvent::CrossSourceObserved {
-                        action: CrossSourceAction::Relocate,
+                    JournalEvent::StagedSourceObserved {
+                        action: StagedSourceAction::Relocate,
                         ..
                     }
                 ) {
@@ -1841,10 +1851,10 @@ mod tests {
                 report.rows[0], journal.accepted
             );
         };
-        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
             panic!("expected verified destination and quarantined original");
         };
-        assert_eq!(effect.source_state, CrossMoveSourceState::Quarantined);
+        assert_eq!(effect.source_state, StagedMoveSourceState::Quarantined);
         assert_eq!(
             fs::read(&fixture.source).unwrap(),
             b"foreign original-name occupant"
@@ -1862,8 +1872,8 @@ mod tests {
         );
         assert!(matches!(
             journal.accepted.last(),
-            Some(JournalEvent::CrossSourceObserved {
-                action: CrossSourceAction::Relocate,
+            Some(JournalEvent::StagedSourceObserved {
+                action: StagedSourceAction::Relocate,
                 ..
             })
         ));
@@ -1975,7 +1985,7 @@ mod tests {
                 report.rows[0], journal.accepted
             );
         };
-        let Some(CopyRecoveryArtifact::CrossVolume(effect)) = &error.artifact else {
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
             panic!("expected output and retained source");
         };
         assert!(
@@ -1985,7 +1995,7 @@ mod tests {
             ),
             "{error:?}"
         );
-        assert_eq!(effect.source_state, CrossMoveSourceState::Original);
+        assert_eq!(effect.source_state, StagedMoveSourceState::Original);
         assert_eq!(
             inspect_source(&fixture.target, &ScanCancellation::new())
                 .unwrap()
@@ -1997,6 +2007,272 @@ mod tests {
             fs::read(&fixture.source).unwrap(),
             fs::read(&fixture.target).unwrap()
         );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::Verified { .. })
+        ));
+    }
+
+    fn staged_move_replace_fixture(
+        source_root: tempfile::TempDir,
+        target_root: tempfile::TempDir,
+    ) -> CrossVolumeFixture {
+        let source = source_root.path().join("replace-and-move.txt");
+        let target = target_root.path().join("replace-and-move.txt");
+        fs::write(&source, vec![43; 160 * 1024]).unwrap();
+        fs::write(
+            alternate_stream_path(&source, ":Zone.Identifier:$DATA"),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+        fs::write(&target, b"original destination").unwrap();
+        fs::write(
+            alternate_stream_path(&target, ":FixtureAlternate:$DATA"),
+            b"original alternate stream",
+        )
+        .unwrap();
+        let cancel = ScanCancellation::new();
+        let tree = inspect_source_tree(std::slice::from_ref(&source), &cancel).unwrap();
+        let review = review_transfer(
+            Arc::new(tree),
+            TransferDraft {
+                action: TransferAction::MoveTo(target_root.path().to_path_buf()),
+                verify: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        let review = review
+            .choose(
+                review.generation(),
+                review.rows()[0].source(),
+                ReviewChoice::Replace,
+                &cancel,
+            )
+            .unwrap();
+        CrossVolumeFixture {
+            _source_root: source_root,
+            _target_root: target_root,
+            source,
+            target,
+            plan: approve(&review),
+        }
+    }
+
+    fn assert_staged_move_replace(fixture: &CrossVolumeFixture, distinct_volumes: bool) {
+        let ApprovedTarget::Replace(target) = fixture.plan.entries()[0].destination() else {
+            panic!("expected an explicit Replace target");
+        };
+        let TargetOccupancy::Occupied(incumbent) = target.occupancy() else {
+            panic!("expected the original occupant");
+        };
+        assert_eq!(
+            fixture.plan.entries()[0]
+                .source()
+                .identity()
+                .volume_serial_number()
+                != target.parent().identity().volume_serial_number(),
+            distinct_volumes,
+        );
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_cross_volume_move(fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::MovedByCopy(moved) = &report.rows[0].state else {
+            panic!(
+                "expected staged Move with Replace, got {:?}, receipts {:?}",
+                report.rows[0], journal.accepted
+            );
+        };
+        assert_eq!(moved.effect.source_state, StagedMoveSourceState::Removed);
+        assert!(!fixture.source.exists());
+        let backup = moved.effect.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Retained);
+        assert_eq!(backup.identity, incumbent.identity());
+        assert_eq!(
+            inspect_source(&backup.backup, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            incumbent.identity()
+        );
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original destination");
+        assert_eq!(
+            fs::read(alternate_stream_path(
+                &backup.backup,
+                ":FixtureAlternate:$DATA"
+            ))
+            .unwrap(),
+            b"original alternate stream"
+        );
+        assert_eq!(fs::read(&fixture.target).unwrap(), vec![43; 160 * 1024]);
+        assert_eq!(
+            fs::read(alternate_stream_path(
+                &fixture.target,
+                ":Zone.Identifier:$DATA"
+            ))
+            .unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+        assert!(matches!(
+            moved.effect.verification,
+            CopyVerification::Verified {
+                zone_sha256: Some(_),
+                ..
+            }
+        ));
+        let verified = journal
+            .accepted
+            .iter()
+            .position(|event| matches!(event, JournalEvent::Verified { .. }))
+            .unwrap();
+        let retire = journal
+            .accepted
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    JournalEvent::StagedSourceIntent {
+                        action: StagedSourceAction::Relocate,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(verified < retire);
+    }
+
+    #[test]
+    fn transfer_move_replace_native_same_volume_keeps_exact_incumbent_and_moves_source() {
+        let parent = tempfile::tempdir().unwrap();
+        let fixture = staged_move_replace_fixture(
+            tempfile::tempdir_in(parent.path()).unwrap(),
+            tempfile::tempdir_in(parent.path()).unwrap(),
+        );
+        assert_staged_move_replace(&fixture, false);
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_move_replace_native_distinct_volumes_keeps_exact_incumbent_and_moves_source() {
+        let source = std::env::var_os("MULTI_LAUNCHER_CROSS_SOURCE_TEST_ROOT").unwrap();
+        let target = std::env::var_os("MULTI_LAUNCHER_CROSS_DESTINATION_TEST_ROOT").unwrap();
+        let fixture = staged_move_replace_fixture(
+            tempfile::tempdir_in(source).unwrap(),
+            tempfile::tempdir_in(target).unwrap(),
+        );
+        assert_staged_move_replace(&fixture, true);
+    }
+
+    #[test]
+    fn transfer_move_replace_native_revalidates_held_incumbent_before_source_effect() {
+        let parent = tempfile::tempdir().unwrap();
+        let fixture = staged_move_replace_fixture(
+            tempfile::tempdir_in(parent.path()).unwrap(),
+            tempfile::tempdir_in(parent.path()).unwrap(),
+        );
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if let JournalEvent::StagedSourceIntent {
+                    action: StagedSourceAction::Relocate,
+                    effect,
+                } = event
+                {
+                    let backup = effect.replacement.as_ref().expect("incumbent receipt");
+                    assert!(
+                        fs::remove_file(&backup.backup).is_err(),
+                        "exact incumbent was not held"
+                    );
+                    edit_held_file_creation_for_fixture(&backup.backup, edited_time)?;
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected a changed backup, got {:?}", report.rows[0]);
+        };
+        assert!(
+            matches!(error.failure, CopyFailure::BackupChanged),
+            "{error:?}"
+        );
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
+            panic!("expected the exact retained source and output");
+        };
+        assert_eq!(effect.source_state, StagedMoveSourceState::Original);
+        let backup = effect.replacement.as_ref().unwrap();
+        assert_eq!(
+            inspect_source(&backup.backup, &ScanCancellation::new())
+                .unwrap()
+                .metadata()
+                .created,
+            edited_time
+        );
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original destination");
+        assert_eq!(
+            fs::read(&fixture.source).unwrap(),
+            fs::read(&fixture.target).unwrap()
+        );
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::StagedSourceIntent {
+                action: StagedSourceAction::Relocate,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn transfer_move_replace_native_refused_source_intent_keeps_output_original_and_backup() {
+        let parent = tempfile::tempdir().unwrap();
+        let fixture = staged_move_replace_fixture(
+            tempfile::tempdir_in(parent.path()).unwrap(),
+            tempfile::tempdir_in(parent.path()).unwrap(),
+        );
+        let original_source = fixture.plan.entries()[0].source().identity();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(
+                    event,
+                    JournalEvent::StagedSourceIntent {
+                        action: StagedSourceAction::Relocate,
+                        ..
+                    }
+                ) {
+                    return Err(io::Error::other("fixture refusal before source admission"));
+                }
+                Ok(())
+            },
+        };
+        let report = run_cross_volume_move(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected refused source intent, got {:?}", report.rows[0]);
+        };
+        assert!(
+            matches!(error.failure, CopyFailure::Journal(_)),
+            "{error:?}"
+        );
+        let Some(CopyRecoveryArtifact::StagedMove(effect)) = &error.artifact else {
+            panic!("expected the verified output and original source evidence");
+        };
+        assert_eq!(effect.source_state, StagedMoveSourceState::Original);
+        assert_eq!(effect.source_identity, original_source);
+        assert_eq!(
+            inspect_source(&fixture.source, &ScanCancellation::new())
+                .unwrap()
+                .identity(),
+            original_source
+        );
+        assert_eq!(
+            fs::read(&fixture.target).unwrap(),
+            fs::read(&fixture.source).unwrap()
+        );
+        let backup = effect.replacement.as_ref().unwrap();
+        assert_eq!(error.replacement.as_ref(), Some(backup));
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original destination");
         assert!(matches!(
             journal.accepted.last(),
             Some(JournalEvent::Verified { .. })

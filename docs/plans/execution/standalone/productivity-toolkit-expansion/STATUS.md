@@ -65,7 +65,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B3A | complete |
 | M9-B3B | complete |
 | M9-B3C | complete |
-| M9-B3D1, M9-B3D2, M9-C, M9-D | pending |
+| M9-B3D1 | complete |
+| M9-B3D2, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -509,3 +510,6 @@ M9-B3B passed 44 focused Windows Nextest tests after independent review. Native 
 
 
 M9-B3C passed 50 focused Nextest tests after independent review, including six opt-in real C: and G: disposable fixtures with distinct native volume identities. A 192 KiB file and its Zone Identifier were published, verified, and retained while the exact guarded source was relocated and removed. Absence was confirmed after all source handles closed. Cancellation, a refused verification receipt, and changed destination metadata preserved the source. A foreign original-name arrival survived with the former source recoverable by its exact identity. These fixtures use an in-memory receipt adapter. The app still requires the durable recorder before enabling the path.
+
+
+M9-B3D1 passed 54 targeted Windows Nextest checks after independent review. Move with explicitly approved Replace uses the common verified publication and guarded source retirement on one volume and actual C: and G:. Native tests verify the displaced destination's exact ID and alternate stream, the moved output's Zone Identifier, and preservation of all three objects when retirement intent is refused. An attempted deletion of the still-held incumbent was denied. A concurrent attribute-only edit to that backup stopped source retirement and was preserved. The public queue still awaits durable journal activation.
