@@ -39,7 +39,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M5-B | complete, with partial interactive smoke |
 | M6-A | complete |
 | M6-B | implementation complete, native smoke pending |
-| M7-A, M7-B | pending |
+| M7-A1A | complete |
+| M7-A1B, M7-A2, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -295,3 +296,10 @@ M6-A was pushed at 44b8d27166346ddaec403da5333dafde4037cc4d. Both editors now re
 The initial targeted run passed 14 cases and exposed an idle Studio test fixture that supplied no pending action. The corrected retained fixture and reviewed adapters passed 16 of 16. The final prompt-ownership and isolated test-profile correction passed 16 of 16 in 0.948s using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(outline_move_) | test(notes_markdown::section_move::tests::) | test(outline_rows_respect_max_depth_filter) | test(outline_state_is_hidden_and_pending_navigation_ignored_when_disabled)'. Actual egui mouse press/drag/release exercises a valid slot, an invalid slot's feedback and rejection after revision change. Notes and Studio fixtures exercise normal Undo. A first-run generated default config was moved to the ignored evidence directory and the final test fixture generated no root file. Diff whitespace verification passed.
 
 Standalone Windows move and Undo in each editor, including a pop-out, remain pending. Combine that interaction with the M7-B Notes/Studio smoke to avoid a redundant standalone build and preserve explicit native evidence.
+
+
+## M7-A1A page geometry and embedded font shaping
+
+M6-B was pushed at 5c973f5e7ecd66669735e8ef1b0ba8fadcb83d85. The shared print foundation validates point-based paper, orientation, margins, text sizes and single-line header and footer templates. The author supplies exact date and page counts. Shaping reuses the launcher's embedded Ubuntu Light, Hack and Noto Emoji via epaint_default_fonts and Rustybuzz, with explicit bidi and script handling. Font IDs, actual glyph positions, ink bounds and original UTF-8 clusters are available to the shared paginator and output adapters. Missing graphemes produce visible replacement and an exact range warning. The calling layout expands tabs before shaping.
+
+The initial focused offline run passed 2 of 2 and confirmed all dependency versions were already in Cargo.lock. After independent review, canonical coverage, nonprinting bidi controls, original cluster ranges, ink overhang and primary line-height checks were verified again by independent inspection. The final focused run passed 2 of 2 after a 1m 57s compile. Command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::print_layout::tests::)'. Diff whitespace verification passed. M7-A1B adds the shared Markdown page scene and actual pagination.

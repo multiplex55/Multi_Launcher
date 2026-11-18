@@ -6,6 +6,7 @@ pub mod links;
 pub mod mutations;
 pub mod parse;
 pub mod preview;
+pub mod print_layout;
 pub mod sections;
 pub mod section_move;
 pub mod tables;
