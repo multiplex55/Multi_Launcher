@@ -45,6 +45,8 @@ pub mod file_operations;
 pub mod file_search;
 #[cfg(windows)]
 pub mod file_transfer;
+#[cfg(windows)]
+pub(crate) mod downloads_triage;
 pub mod folder_size;
 pub mod help_window;
 pub mod history;

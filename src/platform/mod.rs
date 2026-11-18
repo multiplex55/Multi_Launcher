@@ -9,3 +9,6 @@ pub(crate) mod windows_capture;
 pub(crate) mod windows_capture_test_support;
 
 pub(crate) mod passive_tooltip;
+
+#[cfg(windows)]
+pub(crate) mod downloads;

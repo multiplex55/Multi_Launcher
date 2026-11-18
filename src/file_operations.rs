@@ -9856,30 +9856,18 @@ pub(crate) fn enumerate_transfer_directory(
     remaining_name_bytes: usize,
     cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<TransferDirectoryEntry>, TransferEnumerationError> {
-    enumerate_native_directory_handle(
+    let mut entries = Vec::new();
+    match enumerate_transfer_directory_visit(
         file,
         display_path,
         remaining_entries,
         remaining_name_bytes,
         cancelled,
-    )
-    .map(|entries| {
-        entries.into_iter().map(|entry| {
-            let kind = if entry.cloud_placeholder {
-                TransferDirectoryEntryKind::CloudPlaceholder
-            } else if entry.is_reparse_point {
-                TransferDirectoryEntryKind::ReparsePoint
-            } else {
-                TransferDirectoryEntryKind::Ordinary
-            };
-            TransferDirectoryEntry { name: entry.name, kind }
-        }).collect()
-    })
-    .map_err(|error| match error.kind {
-        BackendFailureKind::ResourceLimit => TransferEnumerationError::Limit,
-        BackendFailureKind::Cancelled => TransferEnumerationError::Cancelled,
-        _ => TransferEnumerationError::Io(error.message),
-    })
+        |entry| entries.push(entry),
+    ) {
+        Some(error) => Err(error),
+        None => Ok(entries),
+    }
 }
 
 #[cfg(windows)]
@@ -9888,8 +9876,66 @@ fn enumerate_native_directory_handle(
     display_path: &Path,
     remaining_entries: usize,
     remaining_path_bytes: usize,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<EnumeratedName>, BackendFailure> {
+    let mut entries = Vec::new();
+    enumerate_native_directory_entries(
+        file,
+        display_path,
+        remaining_entries,
+        remaining_path_bytes,
+        cancelled,
+        |entry| entries.push(entry),
+    )?;
+    Ok(entries)
+}
+
+/// Visit the observed prefix, then report any terminal failure to the caller.
+#[cfg(windows)]
+pub(crate) fn enumerate_transfer_directory_visit(
+    file: &std::fs::File,
+    display_path: &Path,
+    remaining_entries: usize,
+    remaining_name_bytes: usize,
+    cancelled: impl FnMut() -> bool,
+    mut visit: impl FnMut(TransferDirectoryEntry),
+) -> Option<TransferEnumerationError> {
+    enumerate_native_directory_entries(
+        file,
+        display_path,
+        remaining_entries,
+        remaining_name_bytes,
+        cancelled,
+        |entry| {
+            visit(TransferDirectoryEntry {
+                name: entry.name,
+                kind: if entry.cloud_placeholder {
+                    TransferDirectoryEntryKind::CloudPlaceholder
+                } else if entry.is_reparse_point {
+                    TransferDirectoryEntryKind::ReparsePoint
+                } else {
+                    TransferDirectoryEntryKind::Ordinary
+                },
+            });
+        },
+    )
+    .err()
+    .map(|error| match error.kind {
+        BackendFailureKind::ResourceLimit => TransferEnumerationError::Limit,
+        BackendFailureKind::Cancelled => TransferEnumerationError::Cancelled,
+        _ => TransferEnumerationError::Io(error.message),
+    })
+}
+
+#[cfg(windows)]
+fn enumerate_native_directory_entries(
+    file: &std::fs::File,
+    display_path: &Path,
+    remaining_entries: usize,
+    remaining_path_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+    mut visit: impl FnMut(EnumeratedName),
+) -> Result<(), BackendFailure> {
     use std::mem::offset_of;
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
@@ -9901,7 +9947,7 @@ fn enumerate_native_directory_handle(
 
     const BUFFER_WORDS: usize = 8_192;
     let mut buffer = vec![0_u64; BUFFER_WORDS];
-    let mut entries = Vec::new();
+    let mut entries_seen = 0usize;
     let mut names_path_bytes = 0usize;
     let mut information_class = FileIdBothDirectoryRestartInfo;
     loop {
@@ -9942,6 +9988,13 @@ fn enumerate_native_directory_handle(
         let bytes = std::mem::size_of_val(buffer.as_slice());
         let mut offset = 0usize;
         loop {
+            if cancelled() {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::Cancelled,
+                    Some(display_path),
+                    "directory scan was cancelled",
+                ));
+            }
             let header_end = offset
                 .checked_add(offset_of!(FILE_ID_BOTH_DIR_INFO, FileName))
                 .ok_or_else(|| {
@@ -10017,7 +10070,7 @@ fn enumerate_native_directory_handle(
                 OsString::from_wide(name_units)
             };
             if !name.is_empty() && name != OsStr::new(".") && name != OsStr::new("..") {
-                if entries.len() >= remaining_entries {
+                if entries_seen >= remaining_entries {
                     return Err(BackendFailure::new(
                         BackendFailureKind::ResourceLimit,
                         Some(display_path),
@@ -10036,7 +10089,8 @@ fn enumerate_native_directory_handle(
                     ));
                 }
                 names_path_bytes = next_names_path_bytes;
-                entries.push(EnumeratedName {
+                entries_seen += 1;
+                visit(EnumeratedName {
                     name,
                     is_directory: attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
                     is_reparse_point: attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
@@ -10058,7 +10112,7 @@ fn enumerate_native_directory_handle(
             offset = record_end;
         }
     }
-    Ok(entries)
+    Ok(())
 }
 
 #[cfg(windows)]

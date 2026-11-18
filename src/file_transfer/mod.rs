@@ -3,6 +3,8 @@
 //! Snapshots carry observations, with handles reacquired before use. A vacant
 //! leaf is evidence from a single anchored open, never permission to write.
 
+mod downloads_triage;
+pub(crate) use downloads_triage::{scan_downloads_directory, downloads_review_key, DownloadsScan, DownloadsScanCompletion, DownloadsScanRow};
 mod control;
 mod copy;
 pub use control::CopyPauseState;

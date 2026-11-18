@@ -77,7 +77,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C2C2 | complete |
 | M9-D1 | complete |
 | M9-D2 | complete |
-| M10-A, M10-B | pending |
+| M10-A | complete |
+| M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
 | M13-A | pending |
@@ -578,3 +579,12 @@ The retained Windows utility captures exact picker, review, queue and recovery i
 The Windows `fileops` command opens the existing center through the typed GUI command bus. File Search passes a single exact current row through its retained parent action. Activity resolves the full key only after a retained root frame, focuses the associated live/queued/completed job, and reports a job that has aged out while keeping the Activity window open. The final 11 focused checks passed (`88026e16-175c-407f-8a5e-096611b4dca2`), including exact current File Search handoff and aged-out Activity behavior. The ordinary fast-dev executable built before the Activity review repair, then the repaired Windows application code compiled in the final scoped test run.
 
 Native smoke used an isolated profile with both Paste Sequences shortcuts disabled. The real launcher returned and activated the File Operations command, displayed the draft and opened the Windows file picker from the docked panel using the keyboard. The first cancel returned to the center. Native path entry remained unverified because the owned chooser's edit control was unavailable to the automation, and restarted-window foreground selection failed. The exact disposable source hash stayed `46D8621A473CE45AAF4757BD7B14E60812D12E67CE3808450329D34561459B03` and the destination remained empty. Native acceptance of a picker, real copy through the window and Activity click-through remain for the bounded later smoke. The M9 worker tests already verify actual Copy/Move and the hosted controller separately verifies Review, Queue and Start.
+
+
+### M10-A Downloads observations and reviewed metadata
+
+The current Windows Downloads known-folder resolver honors redirection, retrieves the path without creating the directory and frees Shell memory on either HRESULT. A saved explicit root is retained even when unavailable. A held local root yields only direct exact native entries, skips listed cloud/reparse items without opening them, and reports unavailable or changed roots and partial, limited or cancelled observations. The direct-item ceiling is 10,000 plus a name-storage budget. Existing Rename and Transfer adapters continue to reject incomplete enumerations.
+
+The scan captures native Created and Modified fields, type, size, conventional unfinished names, older installers and same-size suspected peers. At most 512 guarded Zone probes read up to 16 KiB each and 512 KiB total; valid Internet/Restricted attachment metadata can show a web host. Other origins are Unknown. The profile store atomically saves the selected root, destination preference and at most 10,000 review marks. An exact leaf, ancestor identities and creation stamps, item identity and full observed revision bind each mark. Read-only open leaves an absent store absent and retains malformed data for diagnosis.
+
+The initial six native enumeration checks passed (`697e6fbd-a3a2-4266-ab6b-e90d2be21810`). The final 12 checks passed (`699a639a-3acb-4370-8d2a-009c40f2535b`), including real disposable Zone.Identifier input, shallow native cap, strict wrapper parity, explicit missing root, durable review reopening and rejection after edit/replacement. The complete slice received independent source review. No user's Downloads directory was scanned for verification. M10-B will wire the view and explicit actions.
