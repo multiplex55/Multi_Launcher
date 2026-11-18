@@ -43,6 +43,10 @@ mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
 mod password_generator_dialog;
+#[cfg(windows)]
+mod file_operations_center_dialog;
+#[cfg(windows)]
+mod file_operations_center_runtime;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
@@ -754,6 +758,7 @@ pub enum Panel {
     PasteSequenceDialog,
     HashGeneratorDialog,
     PasswordGeneratorDialog,
+    FileOperationsCenterDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -833,6 +838,7 @@ impl Panel {
             Self::PasteSequenceDialog => "Paste Sequences",
             Self::HashGeneratorDialog => "Hash Generator",
             Self::PasswordGeneratorDialog => "Password Generator",
+            Self::FileOperationsCenterDialog => "File Operations Center",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -913,6 +919,7 @@ struct PanelStates {
     paste_sequence_dialog: bool,
     hash_generator_dialog: bool,
     password_generator_dialog: bool,
+    file_operations_center_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -1287,6 +1294,12 @@ pub struct LauncherApp {
     hash_generator_host: utility_window_host::HashGeneratorWindowHost,
     password_generator_dialog: password_generator_dialog::PasswordGeneratorDialog,
     password_generator_host: utility_window_host::UtilityWindowHost<password_generator_dialog::PasswordGeneratorDialog>,
+    #[cfg(windows)]
+    file_operations_center_dialog: file_operations_center_dialog::FileOperationsCenterDialog,
+    #[cfg(windows)]
+    file_operations_center_host: utility_window_host::UtilityWindowHost<file_operations_center_dialog::FileOperationsCenterDialog>,
+    #[cfg(windows)]
+    file_operations_center_runtime: file_operations_center_runtime::FileOperationsCenterRuntime,
     file_preview_host: utility_window_host::FilePreviewWindowHost,
     note_templates_host: utility_window_host::NoteTemplatesWindowHost,
     unused_assets_host: utility_window_host::UnusedAssetsWindowHost,
@@ -3003,6 +3016,43 @@ impl LauncherApp {
         }
     }
 
+    #[cfg(windows)]
+    fn close_file_operations_center(&mut self) {
+        self.file_operations_center_runtime.close_view();
+        self.file_operations_center_dialog.close();
+        self.file_operations_center_host.close_from_app(&self.egui_ctx);
+        self.panel_stack.retain(|panel| *panel != Panel::FileOperationsCenterDialog);
+    }
+
+    #[cfg(windows)]
+    fn open_file_operations_from_origin<S>(
+        &mut self,
+        sources: Option<Vec<std::path::PathBuf>>,
+        origin: &utility_host::ChildOpenOrigin<S>,
+    ) -> bool {
+        let was_open = self.file_operations_center_dialog.open;
+        if let Some(sources) = sources {
+            self.file_operations_center_dialog.open_with_sources(sources);
+        } else {
+            self.file_operations_center_dialog.ensure_open();
+        }
+        let desired = self.file_operations_center_host.open_from_origin(
+            &self.egui_ctx,
+            &self.file_operations_center_dialog,
+            was_open,
+            origin,
+        );
+        self.panel_stack.retain(|panel| *panel != Panel::FileOperationsCenterDialog);
+        self.panel_stack.push(Panel::FileOperationsCenterDialog);
+        self.panel_states.file_operations_center_dialog = true;
+        if desired == Some(utility_host::UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+            true
+        } else {
+            false
+        }
+    }
+
     fn close_password_generator_dialog(&mut self) {
         self.password_generator_dialog.close();
         self.password_generator_host.close_from_app(&self.egui_ctx);
@@ -4193,6 +4243,12 @@ impl LauncherApp {
             hash_generator_host: Default::default(),
             password_generator_dialog: password_generator_dialog::PasswordGeneratorDialog::new(settings.password_generator.clone()),
             password_generator_host: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_dialog: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_host: Default::default(),
+            #[cfg(windows)]
+            file_operations_center_runtime: Default::default(),
             file_preview_host: Default::default(),
             note_templates_host: Default::default(),
             unused_assets_host: Default::default(),
@@ -5033,7 +5089,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 74] = [
+    const TRACKED_PANELS: [Panel; 75] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -5048,6 +5104,7 @@ impl LauncherApp {
         Panel::PasteSequenceDialog,
         Panel::HashGeneratorDialog,
         Panel::PasswordGeneratorDialog,
+        Panel::FileOperationsCenterDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -5126,6 +5183,7 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => self.paste_sequence_dialog.open,
             Panel::HashGeneratorDialog => self.hash_generator_dialog.open,
             Panel::PasswordGeneratorDialog => self.password_generator_dialog.open,
+            Panel::FileOperationsCenterDialog => self.file_operations_center_is_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -5213,6 +5271,7 @@ impl LauncherApp {
             Panel::FileSearchPreviewDialog => self.file_preview_host.root_layer().is_some(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer().is_some(),
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer().is_some(),
+            Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer().is_some(),
             Panel::TodoViewDialog => self.todo_view_host.root_layer().is_some(),
             Panel::UnusedAssetsDialog => self.unused_assets_host.root_layer().is_some(),
             Panel::ImagePanel => self
@@ -5613,6 +5672,10 @@ impl LauncherApp {
                 self.hash_generator_dialog.request_close();
             }
             Panel::PasswordGeneratorDialog => self.close_password_generator_dialog(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.close_file_operations_center();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -5971,6 +6034,10 @@ impl LauncherApp {
                 self.hash_generator_dialog.request_close();
             }
             Panel::PasswordGeneratorDialog => self.close_password_generator_dialog(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.close_file_operations_center();
+            }
             Panel::FileSearchPreviewDialog => {
                 self.file_search_dialog.preview_dialog.request_close();
             }
@@ -6310,6 +6377,10 @@ impl LauncherApp {
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
             Panel::PasswordGeneratorDialog => self.password_generator_dialog.ensure_open(),
+            Panel::FileOperationsCenterDialog => {
+                #[cfg(windows)]
+                self.file_operations_center_dialog.ensure_open();
+            }
             Panel::FileSearchPreviewDialog => {}
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
@@ -6767,6 +6838,9 @@ impl LauncherApp {
             self.open_unused_assets_from_origin(&utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::TodoViewDialog {
             self.open_todo_view_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
+        } else if panel == Panel::FileOperationsCenterDialog {
+            #[cfg(windows)]
+            self.open_file_operations_from_origin(None, &utility_host::ChildOpenOrigin::<()>::Root);
         } else if panel == Panel::PasswordGeneratorDialog {
             let was_open = self.password_generator_dialog.open;
             self.password_generator_dialog.ensure_open();
@@ -6988,6 +7062,8 @@ impl LauncherApp {
         check!(paste_sequence_dialog, Panel::PasteSequenceDialog);
         check!(hash_generator_dialog, Panel::HashGeneratorDialog);
         check!(password_generator_dialog, Panel::PasswordGeneratorDialog);
+        #[cfg(windows)]
+        check!(file_operations_center_dialog, Panel::FileOperationsCenterDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);

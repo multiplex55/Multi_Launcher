@@ -59,10 +59,11 @@ pub(crate) enum NavigationDialogKind {
     CalculationChart,
     MarkdownPrint,
     PasswordGenerator,
+    FileOperations,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -86,6 +87,7 @@ impl NavigationDialogKind {
         Self::CalculationChart,
         Self::MarkdownPrint,
         Self::PasswordGenerator,
+        Self::FileOperations,
     ];
 
     const fn index(self) -> usize {
@@ -113,6 +115,7 @@ impl NavigationDialogKind {
             Self::CalculationChart => 20,
             Self::MarkdownPrint => 21,
             Self::PasswordGenerator => 22,
+            Self::FileOperations => 23,
         }
     }
 
@@ -141,6 +144,7 @@ impl NavigationDialogKind {
             Self::CalculationChart => "calculation-chart",
             Self::MarkdownPrint => "markdown-print",
             Self::PasswordGenerator => "password-generator",
+            Self::FileOperations => "file-operations-center",
         }
     }
 
@@ -172,6 +176,7 @@ impl NavigationDialogKind {
             Self::CalculationChart => egui::Id::new("calculation-chart-window"),
             Self::MarkdownPrint => egui::Id::new("markdown-print-window"),
             Self::PasswordGenerator => egui::Id::new("password-generator-window"),
+            Self::FileOperations => egui::Id::new("file-operations-center-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -458,6 +463,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
+                    | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
@@ -501,6 +507,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::CalculationChart
                     | NavigationDialogKind::MarkdownPrint
                     | NavigationDialogKind::PasswordGenerator
+                    | NavigationDialogKind::FileOperations
                     | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets),
                 ..
@@ -4307,6 +4314,11 @@ mod tests {
                     }
                     NavigationDialogKind::CalculationChart => {
                         egui::Window::new("Charts").id(egui::Id::new("calculation-chart-window")).show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::FileOperations => {
+                        egui::Window::new("File Operations Center")
+                            .id(egui::Id::new("file-operations-center-window"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::PasswordGenerator => {
                         egui::Window::new("Password Generator")

@@ -2223,6 +2223,7 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer(),
             Panel::HashGeneratorDialog => self.hash_generator_host.root_layer(),
             Panel::PasswordGeneratorDialog => self.password_generator_host.root_layer(),
+            Panel::FileOperationsCenterDialog => self.file_operations_center_root_layer(),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
             Panel::MkMacroDialog => self
                 .mkmacro_dialog
@@ -5063,6 +5064,7 @@ impl LauncherApp {
                 || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
                 || self.markdown_print_dialog.output.busy()
                 || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
+                || self.file_operations_center_needs_root_ui()
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -6197,6 +6199,143 @@ impl LauncherApp {
             },
         );
     }
+    pub(super) fn file_operations_center_is_open(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_dialog.open
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn file_operations_center_root_layer(&self) -> Option<egui::LayerId> {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_host.root_layer()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    fn file_operations_center_needs_root_ui(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.file_operations_center_runtime.needs_poll()
+                || self.file_operations_center_host.needs_root_ui_when_hidden(self.file_operations_center_dialog.open)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    fn show_file_operations_center(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        if first {
+            self.file_operations_center_runtime.poll(
+                ctx,
+                &mut self.file_operations_center_dialog,
+                &mut self.transfer_jobs,
+            );
+        }
+        let open = self.file_operations_center_dialog.open;
+        if !open || (!root_visible && !self.file_operations_center_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.file_operations_center_host.root_layer();
+        let parent_owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = parent_owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::FileOperations, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("file-operations-center", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "file-operations-center/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let pinned = self.pinned_panels.contains(&super::Panel::FileOperationsCenterDialog);
+        self.file_operations_center_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        let runtime = self.file_operations_center_runtime.snapshot(&self.transfer_jobs);
+        if runtime.busy || runtime.history_waiting || runtime.queue.active.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+        self.file_operations_center_host.show(
+            ctx,
+            &mut self.file_operations_center_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: navigation_owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && (layer.is_none() || keyboard_owner),
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+        );
+    }
+
+
+    #[cfg(windows)]
+    fn complete_file_operations_center(&mut self, ctx: &egui::Context) {
+        use super::file_operations_center_dialog::Command;
+
+        let Some(completion) = self.file_operations_center_host
+            .complete(ctx, &mut self.file_operations_center_dialog)
+        else {
+            return;
+        };
+        for command in completion.commands {
+            if matches!(command, Command::Closed) {
+                self.close_file_operations_center();
+            } else if completion.origin.as_ref().is_some_and(|origin| {
+                self.file_operations_center_host
+                    .accepts_origin(&self.file_operations_center_dialog, origin)
+            }) {
+                self.file_operations_center_runtime.dispatch(
+                    ctx,
+                    &mut self.file_operations_center_dialog,
+                    &mut self.transfer_jobs,
+                    command,
+                );
+                ctx.request_repaint_of(completion.owner_viewport);
+            }
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+    }
+
     fn show_password_generator(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use super::jump_mode::ui::{
             NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
@@ -10192,6 +10331,7 @@ impl LauncherApp {
                         | super::Panel::JsonUtilityDialog
                         | super::Panel::CalculationChartDialog
                         | super::Panel::PasswordGeneratorDialog
+                        | super::Panel::FileOperationsCenterDialog
                         | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
@@ -10273,6 +10413,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::PasswordGenerator,
                 self.password_generator_dialog.open && self.password_generator_host.root_layer().is_some(),
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::FileOperations,
+                self.file_operations_center_is_open() && self.file_operations_center_root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
@@ -10411,6 +10555,7 @@ impl LauncherApp {
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
                     NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
                     NavigationDialogKind::PasswordGenerator => self.password_generator_host.root_layer(),
+                    NavigationDialogKind::FileOperations => self.file_operations_center_root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10450,6 +10595,8 @@ impl LauncherApp {
                         self.json_utility_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::PasswordGenerator {
                         self.password_generator_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::FileOperations {
+                        self.file_operations_center_root_layer().and(current)
                     } else if kind == NavigationDialogKind::MarkdownPrint {
                         self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
@@ -11162,6 +11309,8 @@ impl LauncherApp {
             self.show_markdown_studio(&ctx, first_ui_pass, false);
             self.show_markdown_print(&ctx, first_ui_pass, false);
             self.show_password_generator(&ctx, first_ui_pass, false);
+            #[cfg(windows)]
+            self.show_file_operations_center(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -13585,6 +13734,8 @@ impl LauncherApp {
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_print(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_password_generator(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        #[cfg(windows)]
+        self.show_file_operations_center(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
@@ -16091,6 +16242,7 @@ impl eframe::App for LauncherApp {
             || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
             || self.markdown_print_dialog.output.busy()
             || self.password_generator_host.needs_root_ui_when_hidden(self.password_generator_dialog.open)
+                || self.file_operations_center_needs_root_ui()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -16198,6 +16350,8 @@ impl eframe::App for LauncherApp {
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_markdown_print(_ctx);
         self.complete_password_generator(_ctx);
+        #[cfg(windows)]
+        self.complete_file_operations_center(_ctx);
         self.complete_quick_notes_dialog(_ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
@@ -16444,6 +16598,8 @@ impl LauncherApp {
         self.complete_markdown_diagram_handoff(ctx);
         self.complete_markdown_print(ctx);
         self.complete_password_generator(ctx);
+        #[cfg(windows)]
+        self.complete_file_operations_center(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);

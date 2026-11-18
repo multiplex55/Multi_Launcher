@@ -594,37 +594,18 @@ fn durable_preview(plan: &ApprovedTransferPlan) -> Result<QueuePreview, Transfer
     })
 }
 
-impl TransferJobs {
-    pub fn new(activity: ActivityCenter) -> Self {
-        Self {
-            shared: Arc::new(Shared::default()),
-            activity,
-            worker: None,
-        }
-    }
+/// Borrowable queue commands for background callers. The transfer worker
+/// and its lifetime remain owned by TransferJobs.
+pub(crate) struct TransferQueueClient {
+    shared: Arc<Shared>,
+    activity: ActivityCenter,
+}
 
-    pub fn with_data_root(
-        activity: ActivityCenter,
-        root: crate::platform::app_data::AppDataRoot,
-    ) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                receipt_store: Some(ReceiptStore::new(&root)),
-                ..Shared::default()
-            }),
-            activity,
-            worker: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn fail_terminal_for_test(&mut self) {
-        if let Some(shared) = Arc::get_mut(&mut self.shared) {
-            shared.fail_terminal = true;
-        }
-    }
-
-    pub fn enqueue(&self, plan: ApprovedTransferPlan) -> Result<TransferJobId, TransferJobError> {
+impl TransferQueueClient {
+    pub(crate) fn enqueue(
+        &self,
+        plan: ApprovedTransferPlan,
+    ) -> Result<TransferJobId, TransferJobError> {
         let _mutation = self
             .shared
             .queue_mutation
@@ -711,41 +692,7 @@ impl TransferJobs {
         Ok(id)
     }
 
-    /// Start the approvals currently in the queue. Later enqueue calls need
-    /// their own explicit Start, even while an earlier batch is still running.
-    pub fn start(&mut self) -> Result<usize, TransferJobError> {
-        let mut state = self.shared.lock();
-        if state.closing {
-            return Err(TransferJobError::Closed);
-        }
-        if state.persistence_uncertain {
-            return Err(TransferJobError::Persistence);
-        }
-        let count = state.queued.iter().filter(|job| !job.info.armed).count();
-        if count == 0 {
-            return Ok(0);
-        }
-        if self.worker.is_none() {
-            let shared = Arc::clone(&self.shared);
-            self.worker = Some(
-                thread::Builder::new()
-                    .name("file-transfer".into())
-                    .spawn(move || worker_loop(&shared))
-                    .map_err(TransferJobError::WorkerUnavailable)?,
-            );
-        }
-        for job in &mut state.queued {
-            job.info.armed = true;
-        }
-        self.shared.ready.notify_one();
-        Ok(count)
-    }
-
-    /// Move an exact queued job without crossing the explicit Start boundary.
-    pub fn reorder(&self, id: TransferJobId, before: Option<TransferJobId>) -> bool {
-        self.try_reorder(id, before).unwrap_or(false)
-    }
-    pub fn try_reorder(
+    pub(crate) fn try_reorder(
         &self,
         id: TransferJobId,
         before: Option<TransferJobId>,
@@ -805,28 +752,7 @@ impl TransferJobs {
         Ok(true)
     }
 
-    pub fn pause(&self, id: TransferJobId) -> bool {
-        self.shared
-            .lock()
-            .active
-            .as_ref()
-            .filter(|job| job.info.id == id)
-            .is_some_and(|job| job.control.request_pause())
-    }
-
-    pub fn resume(&self, id: TransferJobId) -> bool {
-        self.shared
-            .lock()
-            .active
-            .as_ref()
-            .filter(|job| job.info.id == id)
-            .is_some_and(|job| job.control.resume())
-    }
-
-    pub fn cancel(&self, id: TransferJobId) -> bool {
-        self.try_cancel(id).unwrap_or(false)
-    }
-    pub fn try_cancel(&self, id: TransferJobId) -> Result<bool, TransferJobError> {
+    pub(crate) fn try_cancel(&self, id: TransferJobId) -> Result<bool, TransferJobError> {
         {
             let state = self.shared.lock();
             if let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) {
@@ -871,6 +797,126 @@ impl TransferJobs {
             );
         }
         Ok(true)
+    }
+}
+
+impl TransferJobs {
+    pub(crate) fn queue_client(&self) -> TransferQueueClient {
+        TransferQueueClient {
+            shared: self.shared.clone(),
+            activity: self.activity.clone(),
+        }
+    }
+    pub fn new(activity: ActivityCenter) -> Self {
+        Self {
+            shared: Arc::new(Shared::default()),
+            activity,
+            worker: None,
+        }
+    }
+
+    pub fn with_data_root(
+        activity: ActivityCenter,
+        root: crate::platform::app_data::AppDataRoot,
+    ) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                receipt_store: Some(ReceiptStore::new(&root)),
+                ..Shared::default()
+            }),
+            activity,
+            worker: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_terminal_for_test(&mut self) {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.fail_terminal = true;
+        }
+    }
+
+    pub fn enqueue(&self, plan: ApprovedTransferPlan) -> Result<TransferJobId, TransferJobError> {
+        self.queue_client().enqueue(plan)
+    }
+
+    /// Start the approvals currently in the queue. Later enqueue calls need
+    /// their own explicit Start, even while an earlier batch is still running.
+    pub fn start(&mut self) -> Result<usize, TransferJobError> {
+        let mut state = self.shared.lock();
+        if state.closing {
+            return Err(TransferJobError::Closed);
+        }
+        if state.persistence_uncertain {
+            return Err(TransferJobError::Persistence);
+        }
+        let count = state.queued.iter().filter(|job| !job.info.armed).count();
+        if count == 0 {
+            return Ok(0);
+        }
+        if self.worker.is_none() {
+            let shared = Arc::clone(&self.shared);
+            self.worker = Some(
+                thread::Builder::new()
+                    .name("file-transfer".into())
+                    .spawn(move || worker_loop(&shared))
+                    .map_err(TransferJobError::WorkerUnavailable)?,
+            );
+        }
+        for job in &mut state.queued {
+            job.info.armed = true;
+        }
+        self.shared.ready.notify_one();
+        Ok(count)
+    }
+
+    /// Move an exact queued job without crossing the explicit Start boundary.
+    pub fn reorder(&self, id: TransferJobId, before: Option<TransferJobId>) -> bool {
+        self.try_reorder(id, before).unwrap_or(false)
+    }
+    pub fn try_reorder(
+        &self,
+        id: TransferJobId,
+        before: Option<TransferJobId>,
+    ) -> Result<bool, TransferJobError> {
+        self.queue_client().try_reorder(id, before)
+    }
+
+    pub fn pause(&self, id: TransferJobId) -> bool {
+        self.shared
+            .lock()
+            .active
+            .as_ref()
+            .filter(|job| job.info.id == id)
+            .is_some_and(|job| job.control.request_pause())
+    }
+
+    pub fn resume(&self, id: TransferJobId) -> bool {
+        self.shared
+            .lock()
+            .active
+            .as_ref()
+            .filter(|job| job.info.id == id)
+            .is_some_and(|job| job.control.resume())
+    }
+
+    pub(crate) fn cancel_active(&self, id: TransferJobId) -> bool {
+        let state = self.shared.lock();
+        let Some(job) = state.active.as_ref().filter(|job| job.info.id == id) else {
+            return false;
+        };
+        if let Some(activity) = &job.activity {
+            activity.mark_cancelling();
+        }
+        job.control.cancel();
+        true
+    }
+
+    pub fn cancel(&self, id: TransferJobId) -> bool {
+        self.try_cancel(id).unwrap_or(false)
+    }
+    pub fn try_cancel(&self, id: TransferJobId) -> Result<bool, TransferJobError> {
+        self.queue_client().try_cancel(id)
     }
 
     pub fn snapshot(&self) -> TransferQueueSnapshot {

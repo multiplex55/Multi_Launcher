@@ -75,7 +75,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C2B | complete |
 | M9-C2C1 | complete |
 | M9-C2C2 | complete |
-| M9-D | pending |
+| M9-D1 | complete |
+| M9-D2 | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -565,3 +566,8 @@ The pinned receipt namespace now stores display-only queue generations under exa
 ### M9-C2C2 durable queue and recovery service
 
 Explicit Queue writes an ordered non-authorizing snapshot before acknowledgement. Accepted jobs keep the same durable identity through applied receipt admission and snapshot retirement before the first file effect. Restart previews appear as Interrupted and are never rearmed. Exact queue edits persist while a Copy is active. An uncertain retirement keeps later armed work untouched, with de-duplication on a positively observed applied receipt only. History, details and Retry/Undo preparation use bounded requests on the existing worker, so requests wait during active or paused transfers. The 34 scoped checks passed (`6b1013bc-b078-44c1-9669-2333435c0cd9`), including restart order/discard, stable handoff, real active edits, uncertainty fencing and prior native receipt cases. Three redundant mut bindings identified by that gate were removed. M9-D exposes the service in the launcher.
+
+
+### M9-D1 hosted File Operations Center
+
+The retained Windows utility captures exact picker, review, queue and recovery intents only after an accepted host frame. Review and durable queue edits use background work outside the frame callback. Draft revisions and source-tree identity fence stale pickers, scans and review selections. The center displays actual live job phases, sources, progress, ordered controls and paginated outcomes with retained paths, plus receipt details, interrupted previews and confirmed recovery queue actions. The 14-check worker/controller union passed (`eabc27d7-252a-484f-a87d-fdf9190b224d`). The final three controller/view checks passed (`48fce880-4534-423f-b353-46699fc942dc`), proving missing picker owner refusal, stale draft handling, and actual Review/Queue/Start separation in a disposable fixture. Launcher/File Search/Activity entry points and native-window smoke follow.

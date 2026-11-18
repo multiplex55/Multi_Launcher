@@ -52,6 +52,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "explorer-tabs",
     "favorites",
     "file-preview",
+    "file-operations-center",
     "file-lock",
     "file-search",
     "folder-alias",
