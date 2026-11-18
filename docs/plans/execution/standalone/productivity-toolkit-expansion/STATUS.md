@@ -69,7 +69,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B3D2 | complete |
 | M9-C1A | complete |
 | M9-C1B1 | complete |
-| M9-C1B2, M9-C1B3, M9-C2, M9-D | pending |
+| M9-C1B2 | complete |
+| M9-C1B3, M9-C2, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -529,3 +530,8 @@ Six focused Nextest checks passed (run `5862a6bf-494e-44f6-ad15-0cc2008adece`). 
 ### M9-C1B1 typed receipt evidence and held native files
 
 Twelve targeted Nextest checks passed after independent review and remediation (run `cf2e3755-7905-4136-bfb3-50785d1290bc`). The typed wire validates exact source and runtime destination, effect lane and ordering, verified staged source retirement, guarded rollback, directory creation-time evolution and terminal outcomes. The native bridge uses synchronous held relative files, create-new write-through, no-follow/no-recall, guarded same-handle pruning and bounded frames. Exact applied-engine receipts and restart reconciliation still require the store and runner checkpoints.
+
+
+### M9-C1B2 durable receipt storage
+
+The store is read-only until explicit admission and pins the exact physical profile and receipt chain. Admission charges verified physical file lengths, limits decoded metadata and reserves bounded effect, compensation and terminal space. Corrupt and oversized receipts stay visible and charged. Pressure can remove only exact clean settled files on the same read-and-dispose handle after revalidation. The union passed 18 checks (`308744aa-bf01-46cc-be45-e9847e7d506e`). A final six store checks passed after also refusing a missing previously pinned root (`337ff0af-2c04-46ea-a774-b248a0e4a190`). Applied engine and worker activation follow.

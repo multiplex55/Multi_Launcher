@@ -410,6 +410,35 @@ impl SemanticPrefix {
                     )
             })
     }
+    /// Conservative projection for terminal reporting; engine errors may
+    /// require the caller to choose a more cautious disposition.
+    pub(super) fn suggested_disposition(&self, node: NodeId) -> Option<Disposition> {
+        let state = self.states.get(node.0 as usize)?;
+        if state.pending.is_some() || state.source_unsettled {
+            return Some(Disposition::Uncertain);
+        }
+        if state.stage.is_some() || state.backup.is_some() {
+            return Some(Disposition::Retained);
+        }
+        if state.output.is_some() {
+            if !state.verified && state.lane != Some(OutputLane::Directory) {
+                return Some(Disposition::Retained);
+            }
+            if self.header.map(|h| h.1) == Some(Action::Move)
+                && ((state.lane == Some(OutputLane::Staged)
+                    && state.source_state != Some(SourceState::Removed))
+                    || (state.lane == Some(OutputLane::Directory)
+                        && !matches!(
+                            state.directory_removal,
+                            Some(Removal::Removed | Removal::Replaced(_))
+                        )))
+            {
+                return Some(Disposition::Retained);
+            }
+            return Some(Disposition::Settled);
+        }
+        Some(Disposition::NoEffect)
+    }
     pub(super) fn parent(&self, id: ParentId) -> Result<&ParentProof, SemanticProblem> {
         self.parents
             .get(id.0 as usize)

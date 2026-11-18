@@ -7,6 +7,7 @@ pub(super) struct ReceiptProjection {
     pub prefix: SemanticPrefix,
     cursor: usize,
     active: Option<NodeId>,
+    projected_bytes: u64,
 }
 impl ReceiptProjection {
     pub fn new(
@@ -23,6 +24,7 @@ impl ReceiptProjection {
             prefix: SemanticPrefix::default(),
             cursor: 0,
             active: None,
+            projected_bytes: 12,
         };
         this.add(Record::Header {
             id,
@@ -92,8 +94,19 @@ impl ReceiptProjection {
         }
         Ok(this)
     }
-    fn add(&mut self, record: Record) -> Result<(), SemanticProblem> {
+    pub(super) fn add(&mut self, record: Record) -> Result<(), SemanticProblem> {
+        let encoded = super::wire::encode(&record)?;
+        let size =
+            super::frames::FrameWriter::frame_size(encoded.len()).ok_or(SemanticProblem::Limit)?;
+        let total = self
+            .projected_bytes
+            .checked_add(size)
+            .ok_or(SemanticProblem::Limit)?;
+        if total > super::frames::MAX_RECEIPT_BYTES {
+            return Err(SemanticProblem::Limit);
+        }
         if self.prefix.push(record) {
+            self.projected_bytes = total;
             Ok(())
         } else {
             Err(self
