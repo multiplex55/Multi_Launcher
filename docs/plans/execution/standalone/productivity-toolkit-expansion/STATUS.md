@@ -66,7 +66,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B3B | complete |
 | M9-B3C | complete |
 | M9-B3D1 | complete |
-| M9-B3D2, M9-C, M9-D | pending |
+| M9-B3D2 | complete |
+| M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -513,3 +514,6 @@ M9-B3C passed 50 focused Nextest tests after independent review, including six o
 
 
 M9-B3D1 passed 54 targeted Windows Nextest checks after independent review. Move with explicitly approved Replace uses the common verified publication and guarded source retirement on one volume and actual C: and G:. Native tests verify the displaced destination's exact ID and alternate stream, the moved output's Zone Identifier, and preservation of all three objects when retirement intent is refused. An attempted deletion of the still-held incumbent was denied. A concurrent attribute-only edit to that backup stopped source retirement and was preserved. The public queue still awaits durable journal activation.
+
+
+M9-B3D2 passed 62 focused Windows Nextest checks after independent review. The worker resolves planned destinations through the exact created parent. Native nested Move succeeded on one volume and across actual C: and G:, including source cleanup in child-before-parent order, directory timestamps and Zone bytes. A reviewed skip, late source child, replacement source folder or late target metadata edit preserved the appropriate original. The kernel's nonrecursive disposition independently rejected a nonempty guarded directory. The journal-required worker paths remain private until the durable store is wired.

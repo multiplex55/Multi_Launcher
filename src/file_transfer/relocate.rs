@@ -1,10 +1,10 @@
 //! Journaled, same-volume rename of a held ordinary file.
 use super::copy::{exact_held_leaf, hash_file, stream_inventory};
+use super::execute::ResolvedTransferTarget;
 use super::journal::{TransferJournal, TransferJournalEvent as Event};
 use super::{
-    AdmissionError, ApprovedTarget, ApprovedTransferEntry, CopyControl, CopyError, CopyFailure,
-    CopyRecoveryArtifact, CopyVerification, DirectoryAccess, EntryKind, EntryMetadata, HeldParent,
-    TargetOccupancy,
+    AdmissionError, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact, CopyVerification,
+    DirectoryAccess, EntryKind, EntryMetadata, HeldParent, TargetOccupancy,
 };
 use crate::file_operations::{NativeFileIdentity, ScanCancellation, set_replace_basic_info};
 use std::path::PathBuf;
@@ -51,21 +51,20 @@ fn after_effect(failure: CopyFailure, effect: &MoveEffect) -> CopyError {
 }
 
 pub(super) fn move_same_volume_file(
-    entry: &ApprovedTransferEntry,
+    bound: &ResolvedTransferTarget<'_>,
     control: &CopyControl,
     verify_content: bool,
     mut progress: impl FnMut(bool),
     journal: &mut dyn TransferJournal,
 ) -> Result<MovedFile, CopyError> {
-    let ApprovedTarget::CreateAt(target) = entry.destination() else {
-        return Err(CopyFailure::UnsupportedPlan.into());
-    };
-    if !matches!(target.occupancy(), TargetOccupancy::Vacant)
-        || entry.source().metadata().kind != EntryKind::File
+    let target = bound.target();
+    let source = bound.source();
+    if bound.replacing()
+        || !matches!(target.occupancy(), TargetOccupancy::Vacant)
+        || source.metadata().kind != EntryKind::File
     {
         return Err(CopyFailure::UnsupportedPlan.into());
     }
-    let source = entry.source();
     let length = source
         .metadata()
         .byte_len

@@ -5,6 +5,39 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub(super) enum TransferJournalEvent {
+    DirectoryCreateIntent {
+        entry: super::SourceNodeId,
+        source: super::EntrySnapshot,
+        path: PathBuf,
+        parent: NativeFileIdentity,
+    },
+    DirectoryCreated {
+        entry: super::SourceNodeId,
+        source: super::EntrySnapshot,
+        output: super::CopyArtifact,
+        destination: super::ParentSnapshot,
+    },
+    DirectoryMetadataIntent {
+        entry: super::SourceNodeId,
+        source: super::EntrySnapshot,
+        output: super::CopyArtifact,
+    },
+    DirectoryMetadataObserved {
+        entry: super::SourceNodeId,
+        output: super::CopyArtifact,
+        revision: super::EntryMetadata,
+    },
+    DirectoryRemoveIntent {
+        entry: super::SourceNodeId,
+        source: super::EntrySnapshot,
+        destination: super::ParentSnapshot,
+    },
+    DirectoryRemoveObserved {
+        entry: super::SourceNodeId,
+        source: super::EntrySnapshot,
+        destination: super::ParentSnapshot,
+        observation: super::execute::directory_move::DirectoryRemovalObservation,
+    },
     StagedSourceIntent {
         action: super::copy::StagedSourceAction,
         effect: super::StagedMoveEffect,

@@ -19,8 +19,9 @@ pub use copy::{
     StagedMoveSourceState, StagedMovedFile, copy_to_vacancy,
 };
 pub use execute::{
-    CopyExecution, DirectoryCopy, DirectoryTimes, ExecutionProgress, ExecutionRow, ExecutionState,
-    execute_copy_plan,
+    CopyExecution, DirectoryCopy, DirectoryMove, DirectoryMoveDestination,
+    DirectoryRemovalObservation, DirectorySourceOutcome, DirectoryTimes, ExecutionProgress,
+    ExecutionRow, ExecutionState, execute_copy_plan,
 };
 pub use jobs::{
     TRANSFER_QUEUE_LIMIT, TransferJobError, TransferJobId, TransferJobInfo, TransferJobPhase,

@@ -4,6 +4,7 @@ use super::*;
 use crate::archive::transfer_native::TransferRelocation;
 use crate::file_operations::native_file_identity;
 use crate::file_transfer::TransferLeaf;
+use crate::file_transfer::execute::ResolvedTransferTarget;
 use crate::file_transfer::journal::{TransferJournal, TransferJournalEvent as Event};
 use rand::TryRng;
 
@@ -42,20 +43,16 @@ pub(in crate::file_transfer) enum StagedSourceAction {
 }
 
 pub(in crate::file_transfer) fn move_file_by_copy(
-    entry: &ApprovedTransferEntry,
-    target: &TargetSnapshot,
+    bound: &ResolvedTransferTarget<'_>,
     control: &CopyControl,
     progress: impl FnMut(u64),
     verification: impl FnOnce(bool),
     removing_source: impl FnOnce(),
     journal: &mut dyn TransferJournal,
 ) -> Result<StagedMovedFile, CopyError> {
-    let replacement = match entry.destination() {
-        ApprovedTarget::Replace(approved) if approved == target => true,
-        ApprovedTarget::CreateAt(approved) if approved == target => false,
-        _ => return Err(CopyFailure::UnsupportedPlan.into()),
-    };
-    let guarded = GuardedCopy::open_staged_move(entry.source(), target, control, replacement)?;
+    let source = bound.source();
+    let replacement = bound.replacing();
+    let guarded = GuardedCopy::open_staged_move(source, bound.target(), control, replacement)?;
     let lease = if replacement {
         publish_replacement(guarded, true, control, progress, verification, journal)?
     } else {
@@ -70,9 +67,9 @@ pub(in crate::file_transfer) fn move_file_by_copy(
         )?
     };
     let mut effect = StagedMoveEffect {
-        source: entry.source().path(),
-        source_parent: entry.source().parent().identity(),
-        source_identity: entry.source().identity(),
+        source: source.path(),
+        source_parent: source.parent().identity(),
+        source_identity: source.identity(),
         recovery: None,
         source_state: StagedMoveSourceState::Original,
         output: lease.copied.output.clone(),
@@ -92,8 +89,7 @@ pub(in crate::file_transfer) fn move_file_by_copy(
     }
     Ok(StagedMovedFile {
         effect,
-        bytes: entry
-            .source()
+        bytes: source
             .metadata()
             .byte_len
             .ok_or(CopyFailure::UnsupportedPlan)?,

@@ -14,7 +14,7 @@ use super::copy::{
     copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_reporting,
     move_file_by_copy, require_no_directory_streams,
 };
-use super::journal::TransferJournal;
+use super::journal::{TransferJournal, TransferJournalEvent};
 use super::relocate::{MovedFile, move_same_volume_file};
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
@@ -22,6 +22,11 @@ use super::{
     DirectoryAccess, EntryKind, EntrySnapshot, HeldParent, ParentSnapshot, SourceNodeId,
     StagedMovedFile, TargetOccupancy, TargetSnapshot, TransferAction, checked_final_path,
     copy_to_vacancy, directory_stamp, inspect_target, observe_entry_metadata,
+};
+
+pub(super) mod directory_move;
+pub use directory_move::{
+    DirectoryMove, DirectoryMoveDestination, DirectoryRemovalObservation, DirectorySourceOutcome,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +69,7 @@ pub enum ExecutionState {
     Copied(CopiedFile),
     Moved(MovedFile),
     MovedByCopy(StagedMovedFile),
+    MovedDirectory(DirectoryMove),
     CreatedDirectory(DirectoryCopy),
     MergedDirectory(ParentSnapshot),
     Skipped,
@@ -110,7 +116,7 @@ fn execute_copy_with_hooks(
 ) -> Result<CopyExecution, CopyFailure> {
     let strategy = match plan.draft().action {
         TransferAction::MoveTo(_) => {
-            if journal.is_none() || !plan.entries().iter().all(supports_regular_file_move) {
+            if journal.is_none() || !plan.entries().iter().all(supports_move) {
                 return Err(CopyFailure::UnsupportedPlan);
             }
             ExecutionStrategy::Move {
@@ -179,7 +185,16 @@ fn execute_copy_with_hooks(
             progress(ExecutionProgress::DirectoryCreated(id));
         }
     }
-    if journal_failed {
+    if let (ExecutionStrategy::Move { .. }, Some(journal)) = (strategy, journal) {
+        directory_move::finalize_directory_moves(
+            plan,
+            control,
+            &mut rows,
+            &mut progress,
+            journal,
+            journal_failed,
+        );
+    } else if journal_failed {
         for row in &mut rows {
             if let ExecutionState::CreatedDirectory(directory) = &mut row.state {
                 directory.times = DirectoryTimes::Incomplete;
@@ -200,18 +215,60 @@ enum ExecutionStrategy {
     Move { verify: bool },
 }
 
-fn supports_regular_file_move(entry: &ApprovedTransferEntry) -> bool {
-    if entry.source().metadata().kind != EntryKind::File {
-        return false;
-    }
+fn supports_move(entry: &ApprovedTransferEntry) -> bool {
     match entry.destination() {
         ApprovedTarget::CreateAt(target) => matches!(target.occupancy(), TargetOccupancy::Vacant),
-        ApprovedTarget::Replace(target) => matches!(
-            target.occupancy(), TargetOccupancy::Occupied(incumbent)
-                if incumbent.metadata().kind == EntryKind::File
-        ),
-        _ => false,
+        ApprovedTarget::CreateIn { .. } => true,
+        ApprovedTarget::Replace(target) => {
+            entry.source().metadata().kind == EntryKind::File
+                && matches!(target.occupancy(), TargetOccupancy::Occupied(current)
+                if current.metadata().kind == EntryKind::File)
+        }
+        ApprovedTarget::Merge { .. } => entry.source().metadata().kind == EntryKind::Directory,
     }
+}
+
+/// A CreateIn target can be constructed only from the exact directory created
+/// for the approved parent node by this execution.
+pub(super) struct ResolvedTransferTarget<'a> {
+    entry: &'a ApprovedTransferEntry,
+    target: TargetSnapshot,
+}
+
+impl ResolvedTransferTarget<'_> {
+    pub(super) fn source(&self) -> &EntrySnapshot {
+        self.entry.source()
+    }
+
+    pub(super) fn target(&self) -> &TargetSnapshot {
+        &self.target
+    }
+
+    pub(super) fn replacing(&self) -> bool {
+        matches!(self.entry.destination(), ApprovedTarget::Replace(_))
+    }
+}
+
+fn resolve_transfer_target<'a>(
+    entry: &'a ApprovedTransferEntry,
+    rows: &[ExecutionRow],
+    control: &CopyControl,
+) -> Result<ResolvedTransferTarget<'a>, CopyFailure> {
+    let target = match entry.destination() {
+        ApprovedTarget::CreateAt(target) | ApprovedTarget::Replace(target) => target.clone(),
+        ApprovedTarget::CreateIn { parent, leaf } => {
+            let ExecutionState::CreatedDirectory(created) = &rows[parent.index()].state else {
+                return Err(CopyFailure::UnsupportedPlan);
+            };
+            inspect_target(&created.snapshot, leaf, control.cancellation())?
+        }
+        ApprovedTarget::Merge { .. } => return Err(CopyFailure::UnsupportedPlan),
+    };
+    let bound = ResolvedTransferTarget { entry, target };
+    if !bound.replacing() && !matches!(bound.target.occupancy(), TargetOccupancy::Vacant) {
+        return Err(CopyFailure::DestinationOccupied);
+    }
+    Ok(bound)
 }
 
 fn execute_entry(
@@ -224,126 +281,123 @@ fn execute_entry(
     journal: &mut Option<&mut dyn TransferJournal>,
 ) -> Result<ExecutionState, CopyError> {
     let id = entry.id();
-    if let ExecutionStrategy::Move { verify } = strategy {
-        let Some(journal) = journal else {
-            return Err(CopyFailure::UnsupportedPlan.into());
-        };
-        let (target, replace) = match entry.destination() {
-            ApprovedTarget::CreateAt(target) => (target, false),
-            ApprovedTarget::Replace(target) => (target, true),
-            _ => return Err(CopyFailure::UnsupportedPlan.into()),
-        };
-        if replace
-            || entry.source().identity().volume_serial_number()
-                != target.parent().identity().volume_serial_number()
-        {
-            let callback = std::cell::RefCell::new(&mut *progress);
-            let moved = move_file_by_copy(
-                entry,
-                target,
-                control,
-                |staged_bytes| {
-                    (callback.borrow_mut())(ExecutionProgress::Copying {
-                        entry: id,
-                        staged_bytes,
-                    })
-                },
-                |verification_requested| {
-                    (callback.borrow_mut())(ExecutionProgress::Verifying {
-                        entry: id,
-                        verification_requested,
-                    })
-                },
-                || (callback.borrow_mut())(ExecutionProgress::RemovingSource(id)),
-                &mut **journal,
-            )?;
-            (callback.borrow_mut())(ExecutionProgress::FileCompleted {
-                entry: id,
-                bytes: moved.bytes,
-            });
-            return Ok(ExecutionState::MovedByCopy(moved));
-        }
-        let moved = move_same_volume_file(
-            entry,
-            control,
-            verify,
-            |verification_requested| {
-                progress(ExecutionProgress::Verifying {
-                    entry: id,
-                    verification_requested,
-                });
-            },
-            &mut **journal,
-        )?;
-        progress(ExecutionProgress::FileCompleted {
-            entry: id,
-            bytes: moved.bytes,
-        });
-        return Ok(ExecutionState::Moved(moved));
+    let is_directory = entry.source().metadata().kind == EntryKind::Directory;
+    if is_directory && matches!(strategy, ExecutionStrategy::Move { .. }) {
+        directory_move::check_directory_move_source_before_admission(entry.source(), control)?;
     }
     if let ApprovedTarget::Merge { target, directory } = entry.destination() {
         return admit_merge(entry.source(), target, directory, control)
             .map(ExecutionState::MergedDirectory)
             .map_err(CopyError::from);
     }
-
-    let target = match entry.destination() {
-        ApprovedTarget::CreateAt(target) | ApprovedTarget::Replace(target) => target.clone(),
-        ApprovedTarget::CreateIn { parent, leaf } => {
-            let ExecutionState::CreatedDirectory(created) = &rows[parent.index()].state else {
-                return Err(CopyFailure::UnsupportedPlan.into());
-            };
-            inspect_target(&created.snapshot, leaf, control.cancellation())
-                .map_err(CopyFailure::from)?
-        }
-        _ => return Err(CopyFailure::UnsupportedPlan.into()),
-    };
-    if !matches!(entry.destination(), ApprovedTarget::Replace(_))
-        && !matches!(target.occupancy(), TargetOccupancy::Vacant)
-    {
-        return Err(CopyFailure::DestinationOccupied.into());
-    }
-    if entry.source().metadata().kind == EntryKind::Directory {
-        if matches!(entry.destination(), ApprovedTarget::Replace(_)) {
+    let bound = resolve_transfer_target(entry, rows, control)?;
+    if is_directory {
+        if bound.replacing() {
             return Err(CopyFailure::UnsupportedPlan.into());
         }
-        create_directory(entry.source(), &target, control, before_directory_create)
-            .map(ExecutionState::CreatedDirectory)
-    } else {
-        let callback = std::cell::RefCell::new(progress);
-        let report = |staged_bytes| {
-            (callback.borrow_mut())(ExecutionProgress::Copying {
-                entry: id,
-                staged_bytes,
-            })
+        return create_directory(
+            entry,
+            bound.target(),
+            control,
+            before_directory_create,
+            journal,
+        )
+        .map(ExecutionState::CreatedDirectory);
+    }
+    if let ExecutionStrategy::Move { verify } = strategy {
+        let Some(journal) = journal else {
+            return Err(CopyFailure::UnsupportedPlan.into());
         };
-        let verify = |verification_requested| {
-            (callback.borrow_mut())(ExecutionProgress::Verifying {
+        return execute_file_move(&bound, verify, control, progress, &mut **journal);
+    }
+
+    let callback = std::cell::RefCell::new(progress);
+    let report = |staged_bytes| {
+        (callback.borrow_mut())(ExecutionProgress::Copying {
+            entry: id,
+            staged_bytes,
+        })
+    };
+    let verify = |verification_requested| {
+        (callback.borrow_mut())(ExecutionProgress::Verifying {
+            entry: id,
+            verification_requested,
+        })
+    };
+    let copied = match entry.destination() {
+        ApprovedTarget::CreateAt(_) => copy_to_vacancy_reporting(entry, control, report, verify)?,
+        ApprovedTarget::CreateIn { .. } => {
+            copy_to_created_parent(entry, bound.target(), control, report, verify)?
+        }
+        ApprovedTarget::Replace(_) => {
+            let Some(journal) = journal else {
+                return Err(CopyFailure::UnsupportedPlan.into());
+            };
+            copy_to_replacement_reporting(entry, control, report, verify, &mut **journal)?
+        }
+        ApprovedTarget::Merge { .. } => return Err(CopyFailure::UnsupportedPlan.into()),
+    };
+    (callback.borrow_mut())(ExecutionProgress::FileCompleted {
+        entry: id,
+        bytes: copied.bytes,
+    });
+    Ok(ExecutionState::Copied(copied))
+}
+
+fn execute_file_move(
+    bound: &ResolvedTransferTarget<'_>,
+    verify: bool,
+    control: &CopyControl,
+    progress: &mut impl FnMut(ExecutionProgress),
+    journal: &mut dyn TransferJournal,
+) -> Result<ExecutionState, CopyError> {
+    let id = bound.entry.id();
+    if bound.replacing()
+        || bound.source().identity().volume_serial_number()
+            != bound.target().parent().identity().volume_serial_number()
+    {
+        let callback = std::cell::RefCell::new(progress);
+        let moved = move_file_by_copy(
+            bound,
+            control,
+            |staged_bytes| {
+                (callback.borrow_mut())(ExecutionProgress::Copying {
+                    entry: id,
+                    staged_bytes,
+                })
+            },
+            |verification_requested| {
+                (callback.borrow_mut())(ExecutionProgress::Verifying {
+                    entry: id,
+                    verification_requested,
+                })
+            },
+            || (callback.borrow_mut())(ExecutionProgress::RemovingSource(id)),
+            journal,
+        )?;
+        (callback.borrow_mut())(ExecutionProgress::FileCompleted {
+            entry: id,
+            bytes: moved.bytes,
+        });
+        return Ok(ExecutionState::MovedByCopy(moved));
+    }
+    let moved = move_same_volume_file(
+        bound,
+        control,
+        verify,
+        |verification_requested| {
+            progress(ExecutionProgress::Verifying {
                 entry: id,
                 verification_requested,
             })
-        };
-        let copied = match entry.destination() {
-            ApprovedTarget::CreateAt(_) => {
-                copy_to_vacancy_reporting(entry, control, report, verify)?
-            }
-            ApprovedTarget::CreateIn { .. } => {
-                copy_to_created_parent(entry, &target, control, report, verify)?
-            }
-            ApprovedTarget::Replace(_) => {
-                let Some(journal) = journal else {
-                    return Err(CopyFailure::UnsupportedPlan.into());
-                };
-                copy_to_replacement_reporting(entry, control, report, verify, &mut **journal)?
-            }
-            ApprovedTarget::Merge { .. } => return Err(CopyFailure::UnsupportedPlan.into()),
-        };
-        (callback.borrow_mut())(ExecutionProgress::FileCompleted {
-            entry: id,
-            bytes: copied.bytes,
-        });
-        Ok(ExecutionState::Copied(copied))
-    }
+        },
+        journal,
+    )?;
+    progress(ExecutionProgress::FileCompleted {
+        entry: id,
+        bytes: moved.bytes,
+    });
+    Ok(ExecutionState::Moved(moved))
 }
 
 fn open_source_directory(
@@ -406,11 +460,13 @@ fn admit_merge(
 }
 
 fn create_directory(
-    source: &EntrySnapshot,
+    entry: &ApprovedTransferEntry,
     target: &TargetSnapshot,
     control: &CopyControl,
     before_creation: impl FnOnce(&Path),
+    journal: &mut Option<&mut dyn TransferJournal>,
 ) -> Result<DirectoryCopy, CopyError> {
+    let source = entry.source();
     let source_directory = open_source_directory(source, control)?;
     let target_parent = HeldParent::open_with_access(
         target.parent().path(),
@@ -434,6 +490,16 @@ fn create_directory(
         .path()
         .join(target.requested_leaf().as_os_str());
     before_creation(&expected_path);
+    if let Some(journal) = journal {
+        journal
+            .record(TransferJournalEvent::DirectoryCreateIntent {
+                entry: entry.id(),
+                source: source.clone(),
+                path: expected_path.clone(),
+                parent: target_parent.snapshot.identity(),
+            })
+            .map_err(CopyFailure::Journal)?;
+    }
     let claim = loop {
         control.check()?;
         let Some(epoch) = control.admission_epoch()? else {
@@ -460,8 +526,14 @@ fn create_directory(
     };
 
     let result = (|| {
-        control.check()?;
-        target_parent.check_chain(control.cancellation())?;
+        let fresh = crate::file_operations::ScanCancellation::new();
+        let observation = if journal.is_some() {
+            &fresh
+        } else {
+            control.check()?;
+            control.cancellation()
+        };
+        target_parent.check_chain(observation)?;
         let stamp = directory_stamp(&created, output.parent.volume_serial_number())?;
         let path = checked_final_path(created.file(), &output.path)?;
         require_no_directory_streams(created.file())?;
@@ -486,6 +558,21 @@ fn create_directory(
         recovery_error: None,
         replacement: None,
     })?;
+    if let Some(journal) = journal {
+        journal
+            .record(TransferJournalEvent::DirectoryCreated {
+                entry: entry.id(),
+                source: source.clone(),
+                output: output.clone(),
+                destination: snapshot.clone(),
+            })
+            .map_err(|error| CopyError {
+                failure: CopyFailure::Journal(error),
+                artifact: Some(CopyRecoveryArtifact::Owned(output.clone())),
+                recovery_error: None,
+                replacement: None,
+            })?;
+    }
     Ok(DirectoryCopy {
         output,
         times: DirectoryTimes::Pending,
@@ -2277,6 +2364,435 @@ mod tests {
             journal.accepted.last(),
             Some(JournalEvent::Verified { .. })
         ));
+    }
+
+    fn record_directory_timestamps(path: &Path, seconds: i64) {
+        let cancel = ScanCancellation::new();
+        let directory =
+            HeldParent::open_with_access(path, &cancel, DirectoryAccess::WriteDirectoryMetadata)
+                .unwrap();
+        let stamp = (11_644_473_600_i64 + seconds) * 10_000_000;
+        set_replace_basic_info(
+            directory.directory().file(),
+            FILE_BASIC_INFO {
+                CreationTime: stamp,
+                LastWriteTime: stamp,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn assert_nested_directory_move(from: &Path, to: &Path, different_volumes: bool) {
+        let root = from.join("Tree");
+        let branch = root.join("branch");
+        let leaf = branch.join("memo.txt");
+        fs::create_dir_all(&branch).unwrap();
+        fs::write(&leaf, b"approved tree data").unwrap();
+        fs::write(
+            alternate_stream_path(&leaf, ":Zone.Identifier:$DATA"),
+            b"fixture zone",
+        )
+        .unwrap();
+        record_directory_timestamps(&branch, 1_210_000_000);
+        record_directory_timestamps(&root, 1_110_000_000);
+        let plan = approve(&review(
+            std::slice::from_ref(&root),
+            TransferAction::MoveTo(to.to_path_buf()),
+        ));
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = execute_copy_with_hooks(
+            &plan,
+            &CopyControl::default(),
+            |_| {},
+            |_| {},
+            Some(&mut journal),
+        )
+        .unwrap();
+        for node in &report.rows[..2] {
+            let ExecutionState::MovedDirectory(directory) = &node.state else {
+                panic!(
+                    "expected an exact completed directory move, got {node:?}, receipts {:?}",
+                    journal.accepted
+                );
+            };
+            assert!(directory.completed(), "{directory:?}");
+            assert!(
+                matches!(&directory.destination, DirectoryMoveDestination::Created(created)
+                if matches!(created.times, DirectoryTimes::Preserved))
+            );
+        }
+        let source_id = plan.entries()[2].source().identity();
+        if different_volumes {
+            assert!(
+                matches!(report.rows[2].state, ExecutionState::MovedByCopy(_)),
+                "{:?}",
+                report.rows[2]
+            );
+        } else {
+            assert!(
+                matches!(report.rows[2].state, ExecutionState::Moved(_)),
+                "{:?}",
+                report.rows[2]
+            );
+        }
+        assert!(!root.exists());
+        assert_eq!(
+            fs::read(to.join("Tree/branch/memo.txt")).unwrap(),
+            b"approved tree data"
+        );
+        assert_eq!(
+            fs::read(alternate_stream_path(
+                &to.join("Tree/branch/memo.txt"),
+                ":Zone.Identifier:$DATA"
+            ))
+            .unwrap(),
+            b"fixture zone"
+        );
+        let cancel = ScanCancellation::new();
+        let output_file =
+            inspect_source(&to.join("Tree").join("branch").join("memo.txt"), &cancel).unwrap();
+        assert_eq!(
+            source_id.volume_serial_number() != output_file.identity().volume_serial_number(),
+            different_volumes
+        );
+        if !different_volumes {
+            assert_eq!(output_file.identity(), source_id);
+        }
+        for (entry, path) in [(0, to.join("Tree")), (1, to.join("Tree").join("branch"))] {
+            let output = inspect_source(&path, &cancel).unwrap().metadata();
+            let original = plan.entries()[entry].source().metadata();
+            assert_eq!(
+                (output.created, output.modified),
+                (original.created, original.modified)
+            );
+        }
+        let removal_ids: Vec<_> = journal
+            .accepted
+            .iter()
+            .filter_map(|event| {
+                if let JournalEvent::DirectoryRemoveObserved {
+                    entry,
+                    observation: DirectoryRemovalObservation::Removed,
+                    ..
+                } = event
+                {
+                    Some(entry.index())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(removal_ids, [1, 0]);
+    }
+
+    #[test]
+    fn transfer_directory_move_native_nested_create_in_removes_only_empty_sources() {
+        let fixture = tempfile::tempdir().unwrap();
+        let from = fixture.path().join("from");
+        let to = fixture.path().join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        assert_nested_directory_move(&from, &to, false);
+    }
+
+    #[test]
+    #[ignore = "requires two distinct local fixture volumes set by the harness"]
+    fn transfer_directory_move_native_cross_volume_nested_create_in() {
+        let from = tempfile::tempdir_in(
+            std::env::var_os("MULTI_LAUNCHER_CROSS_SOURCE_TEST_ROOT").unwrap(),
+        )
+        .unwrap();
+        let to = tempfile::tempdir_in(
+            std::env::var_os("MULTI_LAUNCHER_CROSS_DESTINATION_TEST_ROOT").unwrap(),
+        )
+        .unwrap();
+        assert_nested_directory_move(from.path(), to.path(), true);
+    }
+
+    #[test]
+    fn transfer_directory_move_native_merge_preserves_unrelated_and_reviewed_skip() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("Source");
+        let destination = fixture.path().join("destination");
+        let merge = destination.join("Source");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(&merge).unwrap();
+        fs::write(source.join("chosen.txt"), b"chosen").unwrap();
+        fs::write(source.join("skipped.txt"), b"retained source").unwrap();
+        fs::write(merge.join("skipped.txt"), b"incumbent").unwrap();
+        fs::write(merge.join("unrelated.txt"), b"foreign unrelated").unwrap();
+        let cancel = ScanCancellation::new();
+        let merge_created = inspect_source(&merge, &cancel).unwrap().metadata().created;
+        let review = review(
+            std::slice::from_ref(&source),
+            TransferAction::MoveTo(destination),
+        );
+        let root = review.rows()[0].source();
+        let review = review
+            .choose(review.generation(), root, ReviewChoice::Merge, &cancel)
+            .unwrap();
+        let skipped = review
+            .source()
+            .entries()
+            .iter()
+            .find(|entry| entry.path().ends_with("skipped.txt"))
+            .unwrap()
+            .id();
+        let review = review
+            .choose(review.generation(), skipped, ReviewChoice::Skip, &cancel)
+            .unwrap();
+        let plan = approve(&review);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = execute_copy_with_hooks(
+            &plan,
+            &CopyControl::default(),
+            |_| {},
+            |_| {},
+            Some(&mut journal),
+        )
+        .unwrap();
+        let ExecutionState::MovedDirectory(directory) = &report.rows[root.index()].state else {
+            panic!("expected merge result, got {:?}", report.rows[root.index()]);
+        };
+        assert!(matches!(
+            &directory.destination,
+            DirectoryMoveDestination::Merged(_)
+        ));
+        assert!(
+            matches!(&directory.source, DirectorySourceOutcome::RetainedChildren { skipped: ids, incomplete }
+            if ids == &[skipped] && incomplete.is_empty())
+        );
+        assert_eq!(
+            fs::read(source.join("skipped.txt")).unwrap(),
+            b"retained source"
+        );
+        assert!(!source.join("chosen.txt").exists());
+        assert_eq!(fs::read(merge.join("chosen.txt")).unwrap(), b"chosen");
+        assert_eq!(fs::read(merge.join("skipped.txt")).unwrap(), b"incumbent");
+        assert_eq!(
+            fs::read(merge.join("unrelated.txt")).unwrap(),
+            b"foreign unrelated"
+        );
+        assert_eq!(
+            inspect_source(&merge, &cancel).unwrap().metadata().created,
+            merge_created
+        );
+        assert!(!journal.accepted.iter().any(|event| matches!(
+            event,
+            JournalEvent::DirectoryMetadataIntent { .. }
+                | JournalEvent::DirectoryRemoveIntent { .. }
+        )));
+    }
+
+    #[test]
+    fn transfer_directory_move_native_late_child_survives_removal_intent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("Source");
+        let destination = fixture.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("approved.txt"), b"approved").unwrap();
+        let plan = approve(&review(
+            std::slice::from_ref(&source),
+            TransferAction::MoveTo(destination.clone()),
+        ));
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::DirectoryRemoveIntent { .. }) {
+                    fs::write(source.join("foreign.txt"), b"arrived late").unwrap();
+                }
+                Ok(())
+            },
+        };
+        let report = execute_copy_with_hooks(
+            &plan,
+            &CopyControl::default(),
+            |_| {},
+            |_| {},
+            Some(&mut journal),
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::MovedDirectory(directory)
+            if matches!(directory.source, DirectorySourceOutcome::NonEmpty)),
+            "{:?}, receipts {:?}",
+            report.rows[0],
+            journal.accepted
+        );
+        assert_eq!(
+            fs::read(source.join("foreign.txt")).unwrap(),
+            b"arrived late"
+        );
+        assert_eq!(
+            fs::read(destination.join("Source/approved.txt")).unwrap(),
+            b"approved"
+        );
+        assert!(
+            !journal
+                .accepted
+                .iter()
+                .any(|event| matches!(event, JournalEvent::DirectoryRemoveObserved { .. }))
+        );
+    }
+
+    #[test]
+    fn transfer_directory_move_native_preserves_late_directory_timestamp_edit() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("Source");
+        let destination = fixture.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("approved.txt"), b"approved").unwrap();
+        let plan = approve(&review(
+            std::slice::from_ref(&source),
+            TransferAction::MoveTo(destination.clone()),
+        ));
+        let edited_time = 130_000_000_000_000_000;
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if let JournalEvent::DirectoryMetadataIntent { output, .. } = event {
+                    let directory = HeldParent::open_with_access(
+                        &output.path,
+                        &ScanCancellation::new(),
+                        DirectoryAccess::WriteDirectoryMetadata,
+                    )
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                    set_replace_basic_info(
+                        directory.directory().file(),
+                        FILE_BASIC_INFO {
+                            LastWriteTime: edited_time,
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                Ok(())
+            },
+        };
+        let report = execute_copy_with_hooks(
+            &plan,
+            &CopyControl::default(),
+            |_| {},
+            |_| {},
+            Some(&mut journal),
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::MovedDirectory(directory)
+            if matches!(directory.source, DirectorySourceOutcome::Failed(CopyFailure::Admission(AdmissionError::StaleTarget)))),
+            "{:?}",
+            report.rows[0]
+        );
+        let cancel = ScanCancellation::new();
+        assert_eq!(
+            inspect_source(&destination.join("Source"), &cancel)
+                .unwrap()
+                .metadata()
+                .modified,
+            edited_time
+        );
+        assert_eq!(
+            inspect_source(&source, &cancel).unwrap().identity(),
+            plan.entries()[0].source().identity()
+        );
+        assert_eq!(
+            fs::read(destination.join("Source").join("approved.txt")).unwrap(),
+            b"approved"
+        );
+        assert!(
+            !journal
+                .accepted
+                .iter()
+                .any(|event| matches!(event, JournalEvent::DirectoryRemoveIntent { .. }))
+        );
+    }
+
+    #[test]
+    fn transfer_directory_move_native_replaced_source_directory_is_not_removed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("Source");
+        let moved_original = fixture.path().join("original empty dir");
+        let destination = fixture.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("approved.txt"), b"approved").unwrap();
+        let plan = approve(&review(
+            std::slice::from_ref(&source),
+            TransferAction::MoveTo(destination.clone()),
+        ));
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = execute_copy_with_hooks(
+            &plan,
+            &CopyControl::default(),
+            |event| {
+                if matches!(event, ExecutionProgress::Finalizing(entry) if entry.index() == 0) {
+                    fs::rename(&source, &moved_original).unwrap();
+                    fs::create_dir(&source).unwrap();
+                    fs::write(source.join("sentinel.txt"), b"foreign replacement").unwrap();
+                }
+            },
+            |_| {},
+            Some(&mut journal),
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.rows[0].state, ExecutionState::MovedDirectory(directory)
+            if matches!(directory.source, DirectorySourceOutcome::Failed(_))),
+            "{:?}",
+            report.rows[0]
+        );
+        assert!(moved_original.is_dir());
+        assert_eq!(
+            fs::read(source.join("sentinel.txt")).unwrap(),
+            b"foreign replacement"
+        );
+        assert_eq!(
+            fs::read(destination.join("Source/approved.txt")).unwrap(),
+            b"approved"
+        );
+        assert!(
+            !journal
+                .accepted
+                .iter()
+                .any(|event| matches!(event, JournalEvent::DirectoryRemoveIntent { .. }))
+        );
+    }
+
+    #[test]
+    fn transfer_directory_move_native_final_disposition_refuses_nonempty_guarded_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("Source");
+        fs::create_dir(&source).unwrap();
+        let cancel = ScanCancellation::new();
+        let reviewed = inspect_source(&source, &cancel).unwrap();
+        let parent = HeldParent::open(fixture.path(), &cancel).unwrap();
+        let guarded = parent
+            .directory()
+            .open_removable_directory_child(reviewed.leaf().as_os_str(), reviewed.identity())
+            .unwrap();
+        fs::write(
+            source.join("sentinel.txt"),
+            b"kept by native nonempty refusal",
+        )
+        .unwrap();
+        let error = guarded.mark_delete_pending().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
+        drop(guarded);
+        assert_eq!(
+            fs::read(source.join("sentinel.txt")).unwrap(),
+            b"kept by native nonempty refusal"
+        );
     }
 
     #[test]

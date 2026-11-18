@@ -3446,6 +3446,39 @@ pub(crate) mod transfer_native {
                 .open_child_with_options(name, false, false, true, true, false)
                 .map(Self)
         }
+        pub(crate) fn open_removable_directory_child(
+            &self,
+            name: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRemovableDirectory, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ATTRIBUTE_NORMAL, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+                FILE_READ_EA, SYNCHRONIZE,
+            };
+            validate_single_component(name, "transfer removable directory name")?;
+            let (file, _) = open_relative(
+                &self.0,
+                name,
+                DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE,
+                shared_directory_access(),
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer removable directory)",
+                || Ok(()),
+            )?;
+            let guard = TransferRemovableDirectory {
+                file,
+                identity: expected,
+                parent: self.0.clone(),
+            };
+            guard.validate()?;
+            Ok(guard)
+        }
         /// Opens the final destination directory with create-file access only.
         pub(crate) fn open_create_file_child(
             &self,
@@ -3902,6 +3935,134 @@ pub(crate) mod transfer_native {
         })
     }
 
+    /// Holds the exact directory and parent; Drop never marks it for deletion.
+    pub(crate) struct TransferRemovableDirectory {
+        file: File,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+    }
+    impl TransferRemovableDirectory {
+        pub(crate) fn file(&self) -> &File {
+            &self.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            self.parent.verify_identity()?;
+            let actual = native_file_identity(&self.file).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer removable directory)",
+                    e,
+                    Some(self.identity),
+                )
+            })?;
+            let metadata = self.file.metadata().map_err(|e| {
+                NativeArchiveError::from_io(
+                    "File::metadata(transfer removable directory)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file.as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32(
+                    "FileStandardInfo(transfer removable directory)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            if actual != self.identity
+                || actual.file_id() == [0; 16]
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || !metadata.is_dir()
+                || standard.Directory.0 == 0
+                || standard.DeletePending.0 != 0
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    metadata.file_attributes(),
+                )
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer removable source is not an ordinary local directory",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            Ok(())
+        }
+        pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            require_no_extended_attributes(&self.file, self.identity)
+        }
+        /// Nonrecursive disposition; caller verifies emptiness and eventual absence.
+        pub(crate) fn mark_delete_pending(&self) -> Result<(), NativeArchiveError> {
+            self.validate()?;
+            delete_open_file(&self.file, self.identity).map_err(|primary| NativeArchiveError {
+                primary,
+                cleanup_attempted: false,
+                cleanup_failure: None,
+                cleanup_failed: false,
+                unconfirmed_name_effect: true,
+            })
+        }
+    }
+
+    fn require_no_extended_attributes(
+        file: &File,
+        identity: NativeFileIdentity,
+    ) -> Result<(), NativeArchiveError> {
+        use windows::Wdk::Storage::FileSystem::{
+            FILE_EA_INFORMATION, FileEaInformation, NtQueryInformationFile,
+        };
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::IO::IO_STATUS_BLOCK;
+        let mut info = FILE_EA_INFORMATION::default();
+        let mut io_status = IO_STATUS_BLOCK::default();
+        // SAFETY: the retained handle and both output buffers remain valid
+        // for this synchronous metadata query.
+        let status = unsafe {
+            NtQueryInformationFile(
+                HANDLE(file.as_raw_handle() as _),
+                &mut io_status,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of::<FILE_EA_INFORMATION>() as u32,
+                FileEaInformation,
+            )
+        };
+        let completed = unsafe { io_status.Anonymous.Status };
+        if status.0 != 0 || completed.0 != 0 {
+            let status = if status.0 != 0 { status } else { completed };
+            return Err(NativeArchiveError::from_ntstatus(
+                "NtQueryInformationFile(FileEaInformation)",
+                status,
+                Some(identity),
+            ));
+        }
+        if io_status.Information < std::mem::size_of::<FILE_EA_INFORMATION>() || info.EaSize != 0 {
+            return Err(NativeArchiveError::validation(
+                "transfer source has extended attributes or an incomplete EA query",
+                io::ErrorKind::Unsupported,
+                Some(identity),
+            ));
+        }
+        Ok(())
+    }
+
     enum RelocationFile {
         Metadata(File),
         Data(TransferFile),
@@ -3983,44 +4144,8 @@ pub(crate) mod transfer_native {
         }
         /// Requires a successful, complete query proving there are no EAs.
         pub(crate) fn require_no_extended_attributes(&self) -> Result<(), NativeArchiveError> {
-            use windows::Wdk::Storage::FileSystem::{
-                FILE_EA_INFORMATION, FileEaInformation, NtQueryInformationFile,
-            };
-            use windows::Win32::Foundation::HANDLE;
-            use windows::Win32::System::IO::IO_STATUS_BLOCK;
             self.validate()?;
-            let mut info = FILE_EA_INFORMATION::default();
-            let mut io_status = IO_STATUS_BLOCK::default();
-            // SAFETY: the retained handle and both output buffers remain valid
-            // for this synchronous metadata query.
-            let status = unsafe {
-                NtQueryInformationFile(
-                    HANDLE(self.file().as_raw_handle() as _),
-                    &mut io_status,
-                    std::ptr::from_mut(&mut info).cast(),
-                    std::mem::size_of::<FILE_EA_INFORMATION>() as u32,
-                    FileEaInformation,
-                )
-            };
-            let completed = unsafe { io_status.Anonymous.Status };
-            if status.0 != 0 || completed.0 != 0 {
-                let status = if status.0 != 0 { status } else { completed };
-                return Err(NativeArchiveError::from_ntstatus(
-                    "NtQueryInformationFile(FileEaInformation)",
-                    status,
-                    Some(self.identity),
-                ));
-            }
-            if io_status.Information < std::mem::size_of::<FILE_EA_INFORMATION>()
-                || info.EaSize != 0
-            {
-                return Err(NativeArchiveError::validation(
-                    "transfer source has extended attributes or an incomplete EA query",
-                    io::ErrorKind::Unsupported,
-                    Some(self.identity),
-                ));
-            }
-            Ok(())
+            require_no_extended_attributes(self.file(), self.identity)
         }
         /// Marks this exact held object for non-POSIX deletion; absence must
         /// be checked independently after all source handles are closed.

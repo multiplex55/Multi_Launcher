@@ -17,8 +17,8 @@ use crate::activity::{
 
 use super::{
     ApprovedTransferPlan, CopyControl, CopyError, CopyExecution, CopyFailure, CopyPauseState,
-    DirectoryTimes, EntryKind, ExecutionProgress, ExecutionState, SourceNodeId, TransferDraft,
-    execute_copy_plan,
+    DirectorySourceOutcome, DirectoryTimes, EntryKind, ExecutionProgress, ExecutionState,
+    SourceNodeId, TransferDraft, execute_copy_plan,
 };
 
 pub const TRANSFER_QUEUE_LIMIT: usize = 32;
@@ -172,6 +172,19 @@ impl TransferJobResult {
                 ExecutionState::Copied(_)
                 | ExecutionState::Moved(_)
                 | ExecutionState::MovedByCopy(_) => retained = true,
+                ExecutionState::MovedDirectory(directory) => {
+                    retained |= directory.has_retained_effect();
+                    let kept_by_review = matches!(
+                        &directory.source,
+                        DirectorySourceOutcome::RetainedChildren { skipped, incomplete }
+                            if !skipped.is_empty() && incomplete.is_empty()
+                    );
+                    let finished = directory.completed() || kept_by_review;
+                    let stopped = matches!(directory.source, DirectorySourceOutcome::Cancelled);
+                    incomplete |= !finished;
+                    cancelled |= stopped;
+                    failed |= !finished && !stopped;
+                }
                 ExecutionState::CreatedDirectory(directory) => {
                     retained = true;
                     incomplete |= !matches!(directory.times, DirectoryTimes::Preserved);
@@ -895,6 +908,46 @@ mod tests {
                 artifact: Some(super::super::CopyRecoveryArtifact::Owned(artifact)), ..
             })) if artifact.state == super::super::CopyArtifactState::Published
         ));
+    }
+
+    #[test]
+    fn transfer_jobs_reviewed_only_skip_completes_without_any_move() {
+        use crate::file_transfer::{
+            DirectoryMove, DirectoryMoveDestination, ExecutionRow, inspect_parent,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("existing");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("skipped.txt"), b"approved skip").unwrap();
+        let cancel = ScanCancellation::new();
+        let source_tree = inspect_source_tree(&[source], &cancel).unwrap();
+        let [root, child] = source_tree.entries() else {
+            panic!("expected one child");
+        };
+        let result = TransferJobResult::Finished(CopyExecution {
+            rows: vec![
+                ExecutionRow {
+                    entry: root.id(),
+                    state: ExecutionState::MovedDirectory(DirectoryMove {
+                        destination: DirectoryMoveDestination::Merged(
+                            inspect_parent(&destination, &cancel).unwrap(),
+                        ),
+                        source: DirectorySourceOutcome::RetainedChildren {
+                            skipped: vec![child.id()],
+                            incomplete: Vec::new(),
+                        },
+                    }),
+                },
+                ExecutionRow {
+                    entry: child.id(),
+                    state: ExecutionState::Skipped,
+                },
+            ],
+            cancelled: false,
+        });
+        assert_eq!(result.status(), TransferJobStatus::Completed);
     }
 
     #[test]
