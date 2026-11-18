@@ -6,6 +6,8 @@ mod assets;
 mod document;
 pub mod pdf;
 pub mod raster;
+#[cfg(windows)]
+pub mod printer;
 pub use assets::PrintRaster;
 pub use publication::{review_pdf_destination, publish_pdf, PdfDestinationReview, PdfPublishError, PdfPublishOutcome, PdfPublishPermit, PdfTargetKind};
 pub use document::{paginate_with_assets, paginate, Drawable, LinkDestination, Page, PaginatedDocument, PrintError, PrintWarning, TextStyle};

@@ -49,7 +49,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M7-B1B1A | complete |
 | M7-B1B1B | complete |
 | M7-B1B2 | implementation complete, native editor smoke pending |
-| M7-B2A, M7-B2B | pending |
+| M7-B2A | complete, real Windows virtual print verified |
+| M7-B2B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -379,3 +380,10 @@ M7-B1B1B was pushed at 0228db6c03ebc4927277fe075ce9e12350216f24. The Save PDF ac
 The assigned implementer declined this integration without source edits, so the orchestrator completed it sequentially. Independent review prompted the admission, late completion, root lifetime and keyboard changes. Windows tests exercise actual new/replacement PDF bytes, replacement cancellation, refusal at final admission with clean restoration, active-source and native no-replace guards, and exact retained app action acceptance. The app fixture used a disposable profile and disabled both Paste Sequences shortcuts. Separate launch and editor Save As proof is scheduled with B2B.
 
 The first compile exposed an import through the private publication module; corrected through its public facade. The final focused Nextest run passed 26 of 26 in 2.047s after a 3m 53s compile. Exact command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(markdown_print_) | test(pdf_publication_) | test(c06_root_relative_publication_commits_exact_bytes_without_replacement)'. Diff whitespace verification passed.
+
+
+## M7-B2A native GDI printer adapter
+
+M7-B1B2 was pushed at 91250e64c7d566893624542aa0d934e24321a999. The native adapter owns a unique printer DC and the exact immutable prepared scene. It validates device capabilities, page selection and dimensions. Actual Size uses the device hard-margin offsets. Fit centers a uniform physical scale in the printable rectangle and calculates potential clipping from the rounded destination GDI receives. It renders one bounded top-down opaque BGRA page at a time from the same scene as preview and PDF, and admits the job immediately before StartDoc. It reports Windows submission after successful EndDoc. Cancellation checks span raster preparation and native page boundaries, and failure after StartDoc attempts AbortDoc once. The scoped callback reports spool exhaustion and user/application cancellation accurately.
+
+The independent review identified drawable clipping, device capability, late source revocation and GDI callback issues. Initial focused verification passed 3 of 3 with real Microsoft Print to PDF job 2. The corrected run passed 4 of 4 after 1m 59s including a real worker-thread DC handoff and job 3. Exact focused command: cargo nextest run --offline --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast --run-ignored all --success-output immediate -E 'test(notes_markdown::print_layout::printer::tests::)' with MULTI_LAUNCHER_TEST_PRINTER_PDF set to a fresh absolute synthetic workspace path. The Windows driver produced target/productivity-toolkit-expansion-evidence/m7-b2a/virtual-1dabe0c47728414c8cc01ca86e72fb58.pdf, 303382 bytes, SHA256 0C35E709364052E78F2D91B4789ABD035A7A5C2FDB2767119C1AEDFCAD172156. Poppler and the strict PDF parser found two Letter pages. Both pages rendered with the expected distinct synthetic text and were visually inspected. This proves direct spooling at the adapter boundary. B2B adds accepted chooser ownership, app confirmation and native editor workflows. Diff whitespace verification passed.
