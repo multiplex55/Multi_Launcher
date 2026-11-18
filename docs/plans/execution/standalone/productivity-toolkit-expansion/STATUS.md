@@ -41,7 +41,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M6-B | implementation complete, native smoke pending |
 | M7-A1A | complete |
 | M7-A1B1 | complete |
-| M7-A1B2, M7-A1B3, M7-A2, M7-B | pending |
+| M7-A1B2 | complete |
+| M7-A1B3, M7-A2, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
@@ -311,3 +312,10 @@ The initial focused offline run passed 2 of 2 and confirmed all dependency versi
 M7-A1A was pushed at 61fdcaef2bf17db0aca3df25ff53f51a2b63ffd3. The print parser uses a flat bounded arena from the existing offset-aware Markdown event stream. It retains rich block and inline structure, source ranges and existing anchor identities. It applies the shared Notes callout normalization and returns the exact consumed header source range. Print page breaks require a canonical physical source line authenticated by a complete top-level HTML block. Existing paired metadata and nested, inline, escaped, fenced and larger HTML/comment constructs cannot introduce breaks. Renderable unsupported HTML remains readable warned source. Source bytes, events, nesting, owned text and cancellation are checked.
 
 Independent review identified an overlapping-delimiter panic, empty named anchors and divergent callout handling. The corrected parser passed independent recheck. Focused run passed 3 of 3 after a 3m 52s compile in 0.164s using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(notes_markdown::print_layout::markdown::tests::print_markdown_)'. Diff whitespace verification passed. M7-A1B2 positions text and tables into pages and M7-A1B3 resolves bounded local raster images and Mermaid.
+
+
+## M7-A1B2 text and table pagination
+
+M7-A1B1 was pushed at e4d53751b85f96688c9f3ad4b438b4a088b6576b. The shared point-based page scene now places selectable shaped text, links, rules, title, headers and footers with actual page counters. It wraps code with its own configured font size, uses translated glyph ink and common line baselines, and records heading destinations after actual placement. The layout preserves ordered list children and constrained nesting, formats callouts from the existing header evidence, repeats continuation table headers and splits long cell rows. Tables that cannot fit use a readable labeled fallback, including header-only tables. Work, retained shape payloads and link annotations are bounded, share immutable glyph/data payloads, and check cancellation. Unsupported font, link, asset and mixed or wrapped directional cases disclose their limitations.
+
+Two read-only reviews found and rechecked memory, exact-fit rounding, ordering, ink, decoration, and link-placement defects. The final correction passed 7 of 7 after a 4m 12s compile with 1.353s of tests using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(notes_markdown::print_layout::document::tests::paginate_)'. Diff whitespace verification passed. Real local images, Mermaid and completing keep-with-next for compatible following tables and raster blocks remain in M7-A1B3.
