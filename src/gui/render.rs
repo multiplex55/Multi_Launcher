@@ -5221,6 +5221,24 @@ impl LauncherApp {
         root_visible: bool,
         jump_escape_preempted: bool,
     ) {
+        use super::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let kind = NavigationDialogKind::DateTimeStudio;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.dialog_instance(kind);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::DateTimeStudio,
+                instance,
+            } => self.jump_mode_ui.scope_for_navigation_owner(
+                super::jump_mode::SurfaceId::dialog("date-time-studio", instance),
+                super::jump_mode::TargetGeneration(self.date_time_studio_dialog.jump_generation()),
+                "date-time-studio",
+                ctx.viewport_id(),
+                navigation_owner,
+                false,
+            ),
+            _ => None,
+        };
         let owner = self.date_time_studio_root_owner_current(ctx, root_visible);
         let allowed = self.native_ui_application_input_allowed(ctx)
             && !self.ocr_surface_visible()
@@ -5238,6 +5256,10 @@ impl LauncherApp {
             self.pinned_panels
                 .contains(&super::Panel::DateTimeStudioDialog),
             shortcut,
+            scope.as_ref(),
+            Some(&self.jump_mode_ui),
+            self.jump_mode_enabled(),
+            instance,
         );
     }
 
@@ -10549,6 +10571,7 @@ impl LauncherApp {
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
                         | super::Panel::FolderSizeDialog
+                        | super::Panel::DateTimeStudioDialog
                         | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
@@ -10649,6 +10672,7 @@ impl LauncherApp {
             ),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FileLock, self.file_lock_dialog.open),
             (crate::gui::jump_mode::ui::NavigationDialogKind::FolderSize, self.folder_size_dialog.open),
+            (crate::gui::jump_mode::ui::NavigationDialogKind::DateTimeStudio, self.date_time_studio_dialog.open),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
                 self.regex_tester_dialog.open,
@@ -10815,6 +10839,8 @@ impl LauncherApp {
                         self.file_lock_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::FolderSize {
                         self.folder_size_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DateTimeStudio {
+                        self.date_time_studio_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -28368,6 +28394,104 @@ mod tests {
             assert_eq!(host.presentation(), UtilityPresentation::Docked);
         }
         workers2.join_all();
+    }
+
+    #[test]
+    fn date_time_studio_jump_focus_requires_fresh_copy_activation() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::commands::DialogCommandHost;
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                DialogCommandHost::open_date_time_studio_dialog(&mut app);
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let layer = app.date_time_studio_dialog.root_layer().unwrap();
+                let rect = ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+                let point = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(80.0, 10.0),
+                    egui::vec2(4.0, 4.0),
+                );
+                for pressed in [true, false] {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        tool_dialog_pointer_events(point, pressed),
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let target = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .find(|target| target.metadata().label() == "Copy difference")
+                    .cloned()
+                    .expect("current copy target");
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Copy difference");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(target.response_id())
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).iter().any(
+                    |effect| matches!(
+                        effect,
+                        RootDialogEffect::CopyText {
+                            owner: DialogCopyOwner::DateTimeStudio,
+                            ..
+                        }
+                    )
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

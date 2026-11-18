@@ -236,6 +236,10 @@ pub(crate) struct DateTimeStudioDialog {
     host: super::utility_host::UtilityHostState,
     presentation_prepared: bool,
     host_epoch: u64,
+    host_jump: Box<super::jump_mode::ui::JumpModeUi>,
+    host_jump_frame: Option<u64>,
+    jump_scope: Option<super::jump_mode::ui::JumpModeScope>,
+    jump_order: u64,
     host_pending: Option<HostedFrame>,
     host_os_close_pending: bool,
     host_focus: bool,
@@ -262,6 +266,28 @@ pub(crate) struct DateTimeStudioDialog {
 }
 
 impl DateTimeStudioDialog {
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.host_epoch
+    }
+
+    fn jump_target(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        id: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: super::jump_mode::TargetKind,
+    ) {
+        super::jump_mode::ui::register_and_apply_target(
+            self.jump_scope.as_ref(),
+            ui,
+            response,
+            id,
+            label,
+            kind,
+            &mut self.jump_order,
+        );
+    }
     pub(crate) fn open(&mut self) {
         self.initialize_reference_if_needed();
         if !self.open {
@@ -420,6 +446,10 @@ impl DateTimeStudioDialog {
             true,
             false,
             true,
+            None,
+            None,
+            false,
+            None,
         );
         None
     }
@@ -497,6 +527,8 @@ impl DateTimeStudioDialog {
     }
 
     pub(super) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
         if self.open {
             let key = crate::settings::UtilityToolKey::parse("date-time-studio")
                 .expect("stable Date & Time Studio key");
@@ -574,6 +606,10 @@ impl DateTimeStudioDialog {
         input_allowed: bool,
         pinned: bool,
         shortcut_allowed: bool,
+        root_scope: Option<&super::jump_mode::ui::JumpModeScope>,
+        launcher_jump: Option<&super::jump_mode::ui::JumpModeUi>,
+        jump_enabled: bool,
+        instance: Option<u64>,
     ) {
         use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
         self.prepare_open_presentation(ctx);
@@ -614,6 +650,13 @@ impl DateTimeStudioDialog {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                             || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     });
+                let scope = root_scope.map(|scope| {
+                    if first && !ctx.will_discard() {
+                        scope.clone()
+                    } else {
+                        scope.registration_only()
+                    }
+                });
                 staged = Some(self.hosted_draw(
                     ctx,
                     first,
@@ -621,6 +664,7 @@ impl DateTimeStudioDialog {
                     calendar_editor_open,
                     None,
                     host.host,
+                    scope.as_ref(),
                 ));
                 if let Some(result) = &mut staged {
                     result.close |= shortcut;
@@ -669,6 +713,68 @@ impl DateTimeStudioDialog {
                 } else {
                     root_owner && input_allowed
                 };
+                let mut binding = None;
+                let mut navigation = super::jump_mode::ui::NavigationOwner::Blocked;
+                if native && let Some(jump) = launcher_jump {
+                    let (chord, alphabet) = jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    binding =
+                        instance.map(|instance| super::jump_mode::ui::NavigationViewportBinding {
+                            viewport,
+                            owner: super::jump_mode::ui::NavigationOwner::Dialog {
+                                kind: super::jump_mode::ui::NavigationDialogKind::DateTimeStudio,
+                                instance,
+                            },
+                            base_layer: parent,
+                        });
+                    if let Some(bound) = binding {
+                        navigation = self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            bound,
+                            allowed && jump_enabled,
+                        );
+                        self.host_jump.handle_viewport_input(
+                            &c,
+                            bound.owner == navigation,
+                            child_first,
+                            viewport,
+                        );
+                    }
+                    self.host_jump.begin_ui_pass();
+                }
+                let native_scope = binding
+                    .filter(|b| b.owner == navigation)
+                    .and_then(|b| {
+                        self.host_jump.scope_for_viewport_binding(
+                            super::jump_mode::SurfaceId::dialog(
+                                "date-time-studio",
+                                instance.unwrap_or_default(),
+                            ),
+                            super::jump_mode::TargetGeneration(self.host_epoch),
+                            "date-time-studio",
+                            b,
+                        )
+                    })
+                    .map(|s| {
+                        if child_first && !c.will_discard() {
+                            s
+                        } else {
+                            s.registration_only()
+                        }
+                    });
+                let embedded_scope = root_scope.map(|s| {
+                    if child_first && !c.will_discard() {
+                        s.clone()
+                    } else {
+                        s.registration_only()
+                    }
+                });
                 if native && child_first && child.input(|i| i.viewport().close_requested()) {
                     child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     if !pinned {
@@ -679,6 +785,7 @@ impl DateTimeStudioDialog {
                     && allowed
                     && shortcut_allowed
                     && !pinned
+                    && (!native || self.host_jump.active_session().is_none())
                     && !egui::Popup::is_any_open(&c)
                     && c.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -694,6 +801,7 @@ impl DateTimeStudioDialog {
                             calendar_editor_open,
                             Some(ui),
                             host.host,
+                            native_scope.as_ref(),
                         ));
                     });
                     result
@@ -705,8 +813,35 @@ impl DateTimeStudioDialog {
                         calendar_editor_open,
                         None,
                         host.host,
+                        embedded_scope.as_ref(),
                     ))
                 };
+                if native && launcher_jump.is_some() {
+                    self.host_jump.finish_ui_pass();
+                    if let Some(bound) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(
+                            &c,
+                            bound,
+                            allowed && jump_enabled,
+                        );
+                        if self.host_jump.prepare_pass_for_viewport(
+                            &c,
+                            bound,
+                            current,
+                            allowed && jump_enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&c, &self.host_jump);
+                        }
+                        if !c.will_discard() {
+                            self.host_jump.complete_frame_for_viewport(
+                                &c,
+                                bound,
+                                current,
+                                allowed && jump_enabled,
+                            );
+                        }
+                    }
+                }
                 if let Some(result) = &mut result {
                     if !pinned {
                         result.close |= shortcut || self.host_os_close_pending;
@@ -738,6 +873,7 @@ impl DateTimeStudioDialog {
         calendar_editor_open: bool,
         child_ui: Option<&mut egui::Ui>,
         presentation: super::utility_host::UtilityPresentation,
+        scope: Option<&super::jump_mode::ui::JumpModeScope>,
     ) -> HostedFrame {
         use super::utility_host::ViewportPassProvenance;
         let installed_focus = self.deferred_host_focus.filter(|focus| {
@@ -759,6 +895,8 @@ impl DateTimeStudioDialog {
         let mut request = None;
         let mut window_open = self.open;
         let mut visible = false;
+        self.jump_scope = scope.cloned();
+        self.jump_order = 0;
         let start = ctx.output(|o| o.commands.len());
         self.host_popups.clear();
         let mut body = |ui: &mut egui::Ui| {
@@ -770,6 +908,13 @@ impl DateTimeStudioDialog {
                 presentation,
                 allowed && ui.is_visible() && !ui.is_sizing_pass(),
             );
+            self.jump_target(
+                ui,
+                &button,
+                "presentation",
+                "Dock or pop out",
+                super::jump_mode::TargetKind::Button,
+            );
             #[cfg(test)]
             {
                 self.host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
@@ -778,7 +923,7 @@ impl DateTimeStudioDialog {
             if authorized && button.clicked() {
                 request = Some(target);
             }
-            ui.add_enabled_ui(authorized, |ui| {
+            ui.add_enabled_ui(allowed && ui.is_visible() && !ui.is_sizing_pass(), |ui| {
                 self.contents_ui(
                     ui,
                     &mut draft,
@@ -824,6 +969,7 @@ impl DateTimeStudioDialog {
                 self.test_window_rect = output.as_ref().map(|o| o.response.rect);
             }
         }
+        self.jump_scope = None;
         self.host_popup = self.host_popups.iter().find_map(|anchor| {
             (anchor.epoch == self.host_epoch
                 && anchor.viewport == ctx.viewport_id()
@@ -951,7 +1097,10 @@ impl DateTimeStudioDialog {
         let show_root = frame.request == Some(UtilityPresentation::Docked);
         if let Some(next) = frame.request {
             if self.host.transition(next) {
-                let key = crate::settings::UtilityToolKey::parse("date-time-studio").expect("stable Date & Time Studio key");
+                self.host_jump.cancel_all();
+                self.host_jump_frame = None;
+                let key = crate::settings::UtilityToolKey::parse("date-time-studio")
+                    .expect("stable Date & Time Studio key");
                 super::utility_host::remember_presentation(ctx, key, next);
                 self.retire_owned_popup(ctx);
                 self.deferred_host_focus = None;
@@ -1039,6 +1188,7 @@ impl DateTimeStudioDialog {
                         ui.horizontal_wrapped(|ui| {
                             for mode in StudioMode::ALL {
                                 let response = ui.selectable_label(draft.mode == mode, mode.label());
+                                self.jump_target(ui, &response, format!("mode/{:?}", mode), mode.label(), super::jump_mode::TargetKind::Button);
                                 reveal_when_focused(&response);
                                 if response.clicked() && draft.mode != mode {
                                     draft.mode = mode;
@@ -1065,6 +1215,7 @@ impl DateTimeStudioDialog {
                                 ));
                             }
                             let refresh_button = ui.button("Refresh now");
+                            self.jump_target(ui, &refresh_button, "refresh", "Refresh now", super::jump_mode::TargetKind::Button);
                             reveal_when_focused(&refresh_button);
                             if refresh_button.clicked() {
                                 refresh = true;
@@ -1093,13 +1244,14 @@ impl DateTimeStudioDialog {
                         .id(studio_root_id().with("help"))
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
-                        egui::CollapsingHeader::new("Date & Time Studio help")
+                        let help = egui::CollapsingHeader::new("Date & Time Studio help")
                             .id_salt("date-time-studio-help")
                             .show(ui, |ui| {
                                 ui.label("Date and local time fields accept keyboard input; calendars and hour/minute controls are also available.");
                                 ui.label("Named-zone comparisons use the bundled offline IANA rules. Repeated times need an explicit fold choice; skipped times remain errors.");
                                 ui.label("The frozen reference stays fixed until Refresh now. Schedule preview never creates events or alarms by itself.");
                             });
+                        self.jump_target(ui, &help.header_response, "help", "Date and Time Studio help", super::jump_mode::TargetKind::Button);
                     },
                 );
                 ui.separator();
@@ -1165,6 +1317,13 @@ impl DateTimeStudioDialog {
             focus_id,
         );
         let include = ui.checkbox(&mut draft.between_include_time, "Include local times");
+        self.jump_target(
+            ui,
+            &include,
+            "between/include-time",
+            "Include local times",
+            super::jump_mode::TargetKind::Checkbox,
+        );
         if include.changed() {
             *changed = true;
         }
@@ -1208,6 +1367,13 @@ impl DateTimeStudioDialog {
                     format_calendar_span(result.calendar_span)
                 );
                 let copy = stable_action_button(ui, "copy-between", "Copy difference");
+                self.jump_target(
+                    ui,
+                    &copy,
+                    "between/copy",
+                    "Copy difference",
+                    super::jump_mode::TargetKind::Button,
+                );
                 reveal_when_focused(&copy);
                 if copy.clicked() {
                     *effect = Some(DateTimeStudioEffect::CopyText(copy_text));
@@ -1240,6 +1406,13 @@ impl DateTimeStudioDialog {
                     .desired_width(220.0)
                     .char_limit(128),
             );
+            self.jump_target(
+                ui,
+                &response,
+                "offset/anchor",
+                "Anchor",
+                super::jump_mode::TargetKind::TextEntry,
+            );
             if response.changed() {
                 *changed = true;
                 if let Some(reference) = draft.reference_now
@@ -1259,6 +1432,13 @@ impl DateTimeStudioDialog {
             #[cfg(test)]
             self.record_focusable_control(ui, "offset_anchor", &response);
             let use_now = ui.button("Use frozen now");
+            self.jump_target(
+                ui,
+                &use_now,
+                "offset/now",
+                "Use frozen now",
+                super::jump_mode::TargetKind::Button,
+            );
             reveal_when_focused(&use_now);
             if use_now.clicked()
                 && let Some(reference) = draft.reference_now
@@ -1285,6 +1465,13 @@ impl DateTimeStudioDialog {
         );
         let picker_date_changed = picker_date_before != draft.offset_picker_date;
         let include_time = ui.checkbox(&mut draft.offset_include_time, "Use a local time");
+        self.jump_target(
+            ui,
+            &include_time,
+            "offset/include-time",
+            "Use a local time",
+            super::jump_mode::TargetKind::Checkbox,
+        );
         if include_time.changed() {
             *changed = true;
             if let Some(reference) = draft.reference_now
@@ -1327,6 +1514,13 @@ impl DateTimeStudioDialog {
                     .desired_width(100.0)
                     .char_limit(20),
             );
+            self.jump_target(
+                ui,
+                &amount,
+                "offset/amount",
+                "Offset amount",
+                super::jump_mode::TargetKind::TextEntry,
+            );
             if amount.changed() {
                 *changed = true;
             }
@@ -1334,6 +1528,20 @@ impl DateTimeStudioDialog {
             self.record_focusable_control(ui, "offset_amount", &amount);
             let add = ui.selectable_value(&mut draft.offset_subtract, false, "Add");
             let subtract = ui.selectable_value(&mut draft.offset_subtract, true, "Subtract");
+            self.jump_target(
+                ui,
+                &add,
+                "offset/add",
+                "Add",
+                super::jump_mode::TargetKind::Button,
+            );
+            self.jump_target(
+                ui,
+                &subtract,
+                "offset/subtract",
+                "Subtract",
+                super::jump_mode::TargetKind::Button,
+            );
             if add.changed() || subtract.changed() {
                 *changed = true;
             }
@@ -1344,19 +1552,39 @@ impl DateTimeStudioDialog {
             }
             let previous = draft.offset_unit;
             let options_enabled = ui.is_enabled();
+            let popup_scope = self
+                .jump_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("offset/unit"));
             let combo = egui::ComboBox::from_id_salt("date-time-studio-offset-unit")
                 .selected_text(offset_unit_label(draft.offset_unit))
                 .show_ui(ui, |ui| {
                     ui.add_enabled_ui(options_enabled, |ui| {
                         for unit in DATE_OFFSET_UNITS {
-                            ui.selectable_value(
+                            let response = ui.selectable_value(
                                 &mut draft.offset_unit,
                                 unit,
                                 offset_unit_label(unit),
                             );
+                            super::jump_mode::ui::register_and_apply_target(
+                                popup_scope.as_ref(),
+                                ui,
+                                &response,
+                                format!("unit/{}", offset_unit_label(unit)),
+                                offset_unit_label(unit),
+                                super::jump_mode::TargetKind::Button,
+                                &mut self.jump_order,
+                            );
                         }
                     });
                 });
+            self.jump_target(
+                ui,
+                &combo.response,
+                "offset/unit",
+                "Offset unit",
+                super::jump_mode::TargetKind::ComboBox,
+            );
             self.host_popups
                 .push(StudioPopupAnchor::new(ui, &combo.response, self.host_epoch));
             #[cfg(test)]
@@ -1370,6 +1598,13 @@ impl DateTimeStudioDialog {
             Ok((result, copy_text)) => {
                 ui.heading(format_offset_result(result));
                 let copy = stable_action_button(ui, "copy-offset", "Copy result");
+                self.jump_target(
+                    ui,
+                    &copy,
+                    "offset/copy",
+                    "Copy result",
+                    super::jump_mode::TargetKind::Button,
+                );
                 reveal_when_focused(&copy);
                 if copy.clicked() {
                     *effect = Some(DateTimeStudioEffect::CopyText(copy_text));
@@ -1497,6 +1732,20 @@ impl DateTimeStudioDialog {
                     Some(FoldChoice::Later),
                     "Use later occurrence",
                 );
+                self.jump_target(
+                    ui,
+                    &earlier_button,
+                    "zones/fold/earlier",
+                    "Earlier instant",
+                    super::jump_mode::TargetKind::Button,
+                );
+                self.jump_target(
+                    ui,
+                    &later_button,
+                    "zones/fold/later",
+                    "Later instant",
+                    super::jump_mode::TargetKind::Button,
+                );
                 reveal_when_focused(&earlier_button);
                 reveal_when_focused(&later_button);
                 if earlier_button.changed() || later_button.changed() {
@@ -1541,6 +1790,13 @@ impl DateTimeStudioDialog {
         }
         if let Some(copy_text) = copy_text {
             let copy = stable_action_button(ui, "copy-zones", "Copy current resolution");
+            self.jump_target(
+                ui,
+                &copy,
+                "zones/copy",
+                "Copy current resolution",
+                super::jump_mode::TargetKind::Button,
+            );
             reveal_when_focused(&copy);
             if copy.clicked() {
                 *effect = Some(DateTimeStudioEffect::CopyText(copy_text));
@@ -1611,6 +1867,10 @@ impl DateTimeStudioDialog {
         ui.horizontal_wrapped(|ui| {
             let prior_cadence = draft.schedule_cadence;
             let options_enabled = ui.is_enabled();
+            let popup_scope = self
+                .jump_scope
+                .as_ref()
+                .map(|scope| scope.combo_popup_scope("schedule/cadence"));
             let combo = egui::ComboBox::from_id_salt("date-time-studio-schedule-cadence")
                 .selected_text(match draft.schedule_cadence {
                     ScheduleCadence::Daily => "Daily",
@@ -1618,18 +1878,43 @@ impl DateTimeStudioDialog {
                 })
                 .show_ui(ui, |ui| {
                     ui.add_enabled_ui(options_enabled, |ui| {
-                        ui.selectable_value(
+                        let daily = ui.selectable_value(
                             &mut draft.schedule_cadence,
                             ScheduleCadence::Daily,
                             "Daily",
                         );
-                        ui.selectable_value(
+                        let weekly = ui.selectable_value(
                             &mut draft.schedule_cadence,
                             ScheduleCadence::Weekly,
                             "Weekly",
                         );
+                        super::jump_mode::ui::register_and_apply_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &daily,
+                            "daily",
+                            "Daily",
+                            super::jump_mode::TargetKind::Button,
+                            &mut self.jump_order,
+                        );
+                        super::jump_mode::ui::register_and_apply_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &weekly,
+                            "weekly",
+                            "Weekly",
+                            super::jump_mode::TargetKind::Button,
+                            &mut self.jump_order,
+                        );
                     });
                 });
+            self.jump_target(
+                ui,
+                &combo.response,
+                "schedule/cadence",
+                "Schedule cadence",
+                super::jump_mode::TargetKind::ComboBox,
+            );
             self.host_popups
                 .push(StudioPopupAnchor::new(ui, &combo.response, self.host_epoch));
             #[cfg(test)]
@@ -1643,6 +1928,13 @@ impl DateTimeStudioDialog {
                     .id(id)
                     .desired_width(50.0)
                     .char_limit(2),
+            );
+            self.jump_target(
+                ui,
+                &count,
+                "schedule/count",
+                "Occurrence count",
+                super::jump_mode::TargetKind::TextEntry,
             );
             if count.changed() {
                 *changed = true;
@@ -1685,14 +1977,17 @@ impl DateTimeStudioDialog {
             .show(ui, |ui| {
                 for occurrence in &occurrences {
                     let selected = draft.selected_schedule_index == Some(occurrence.index);
-                    let response = ui.selectable_label(
-                        selected,
-                        format!(
-                            "{} — {}",
-                            occurrence.requested_local.format("%a %Y-%m-%d %H:%M:%S%.f"),
-                            resolution_summary(&occurrence.resolution)
-                        ),
-                    );
+                    let response = ui.push_id((&draft.schedule_zone, occurrence.index, occurrence.requested_local), |ui| {
+                        ui.selectable_label(
+                            selected,
+                            format!(
+                                "{} — {}",
+                                occurrence.requested_local.format("%a %Y-%m-%d %H:%M:%S%.f"),
+                                resolution_summary(&occurrence.resolution)
+                            ),
+                        )
+                    }).inner;
+                    self.jump_target(ui, &response, format!("schedule/occurrence/{}/{}/{}", draft.schedule_zone, occurrence.index, occurrence.requested_local), format!("Occurrence {}", occurrence.index + 1), super::jump_mode::TargetKind::Button);
                     if response.gained_focus() {
                         response.scroll_to_me(Some(egui::Align::Center));
                         focused_row_rect = Some(response.rect);
@@ -1743,6 +2038,8 @@ impl DateTimeStudioDialog {
                     Some(FoldChoice::Later),
                     format!("Later — {}", later.display_label()),
                 );
+                self.jump_target(ui, &earlier_button, "schedule/fold/earlier", "Earlier occurrence", super::jump_mode::TargetKind::Button);
+                self.jump_target(ui, &later_button, "schedule/fold/later", "Later occurrence", super::jump_mode::TargetKind::Button);
                 reveal_when_focused(&earlier_button);
                 reveal_when_focused(&later_button);
                 if earlier_button.changed() || later_button.changed() {
@@ -1771,6 +2068,13 @@ impl DateTimeStudioDialog {
         }
         if let Some(copy_text) = copy_text.take() {
             let copy = stable_action_button(ui, "copy-schedule", "Copy selected occurrence");
+            self.jump_target(
+                ui,
+                &copy,
+                "schedule/copy",
+                "Copy selected occurrence",
+                super::jump_mode::TargetKind::Button,
+            );
             reveal_when_focused(&copy);
             if copy.clicked() {
                 *effect = Some(DateTimeStudioEffect::CopyText(copy_text));
@@ -1806,6 +2110,7 @@ impl DateTimeStudioDialog {
                         "prepare-calendar",
                         "Prepare unsaved calendar entry…",
                     );
+                    self.jump_target(ui, &prepare, "schedule/prepare", "Prepare unsaved calendar entry", super::jump_mode::TargetKind::Button);
                     reveal_when_focused(&prepare);
                     if prepare.clicked() {
                         *effect = Some(DateTimeStudioEffect::PrepareCalendar {
@@ -1848,6 +2153,13 @@ impl DateTimeStudioDialog {
                             .desired_width(120.0)
                             .char_limit(10),
                     );
+                    self.jump_target(
+                        ui,
+                        &response,
+                        format!("date/{control_id}/input"),
+                        label,
+                        super::jump_mode::TargetKind::TextEntry,
+                    );
                     reveal_when_focused(&response);
                     if response.changed() {
                         *changed = true;
@@ -1866,6 +2178,7 @@ impl DateTimeStudioDialog {
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             let previous = ui.button("‹");
+                            self.jump_target(ui, &previous, format!("date/{control_id}/previous"), format!("{label} previous month"), super::jump_mode::TargetKind::Button);
                             reveal_when_focused(&previous);
                             if previous.clicked()
                                 && let Some(next) = month.checked_sub_months(Months::new(1))
@@ -1879,6 +2192,7 @@ impl DateTimeStudioDialog {
                             );
                             ui.label(month.format("%B %Y").to_string());
                             let next = ui.button("›");
+                            self.jump_target(ui, &next, format!("date/{control_id}/next"), format!("{label} next month"), super::jump_mode::TargetKind::Button);
                             reveal_when_focused(&next);
                             if next.clicked()
                                 && let Some(next_month) = month.checked_add_months(Months::new(1))
@@ -1925,7 +2239,20 @@ impl DateTimeStudioDialog {
                                         continue;
                                     };
                                     let response = ui
-                                        .selectable_label(selected == Some(date), day.to_string());
+                                        .push_id(date, |ui| {
+                                            ui.selectable_label(
+                                                selected == Some(date),
+                                                day.to_string(),
+                                            )
+                                        })
+                                        .inner;
+                                    self.jump_target(
+                                        ui,
+                                        &response,
+                                        format!("date/{control_id}/{date}"),
+                                        format!("{label} {date}"),
+                                        super::jump_mode::TargetKind::Button,
+                                    );
                                     reveal_when_focused(&response);
                                     if response.clicked() {
                                         *text = date.format("%Y-%m-%d").to_string();
@@ -1939,6 +2266,13 @@ impl DateTimeStudioDialog {
                                 }
                             });
                     });
+                self.jump_target(
+                    ui,
+                    &_header.header_response,
+                    format!("date/{control_id}/picker"),
+                    format!("Choose {label}"),
+                    super::jump_mode::TargetKind::Button,
+                );
                 if before_date != *text
                     && let Ok(date) = parse_date(text)
                 {
@@ -1975,6 +2309,13 @@ impl DateTimeStudioDialog {
                     .desired_width(120.0)
                     .char_limit(32),
             );
+            self.jump_target(
+                ui,
+                &response,
+                format!("time/{control_id}"),
+                label,
+                super::jump_mode::TargetKind::TextEntry,
+            );
             reveal_when_focused(&response);
             if response.changed() {
                 *changed = true;
@@ -1986,6 +2327,20 @@ impl DateTimeStudioDialog {
                 let mut minute = time.minute();
                 let hours = ui.add(egui::DragValue::new(&mut hour).range(0..=23).prefix("H "));
                 let minutes = ui.add(egui::DragValue::new(&mut minute).range(0..=59).prefix("M "));
+                self.jump_target(
+                    ui,
+                    &hours,
+                    format!("time/{control_id}/hour"),
+                    format!("{label} hour"),
+                    super::jump_mode::TargetKind::Slider,
+                );
+                self.jump_target(
+                    ui,
+                    &minutes,
+                    format!("time/{control_id}/minute"),
+                    format!("{label} minute"),
+                    super::jump_mode::TargetKind::Slider,
+                );
                 reveal_when_focused(&hours);
                 reveal_when_focused(&minutes);
                 if hours.changed() || minutes.changed() {
@@ -2022,6 +2377,13 @@ impl DateTimeStudioDialog {
                     .desired_width(220.0)
                     .char_limit(crate::date_arithmetic::MAX_ZONE_TEXT_BYTES),
             );
+            self.jump_target(
+                ui,
+                &response,
+                format!("zone/{control_id}/input"),
+                label,
+                super::jump_mode::TargetKind::TextEntry,
+            );
             reveal_when_focused(&response);
             changed = response.changed();
             #[cfg(test)]
@@ -2043,7 +2405,16 @@ impl DateTimeStudioDialog {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Matches");
                     for zone in zones {
-                        let response = ui.button(zone.name());
+                        let response = ui
+                            .push_id((_control_id, zone.name()), |ui| ui.button(zone.name()))
+                            .inner;
+                        self.jump_target(
+                            ui,
+                            &response,
+                            format!("zone/{_control_id}/{}", zone.name()),
+                            format!("Choose {}", zone.name()),
+                            super::jump_mode::TargetKind::Button,
+                        );
                         reveal_when_focused(&response);
                         if response.clicked() {
                             select(zone);
@@ -2072,6 +2443,13 @@ impl DateTimeStudioDialog {
                     .desired_width(180.0)
                     .char_limit(crate::date_arithmetic::MAX_ZONE_TEXT_BYTES),
             );
+            self.jump_target(
+                ui,
+                &response,
+                "zones/target-search",
+                "Search target zones",
+                super::jump_mode::TargetKind::TextEntry,
+            );
             reveal_when_focused(&response);
             if response.changed() {
                 *changed = true;
@@ -2089,7 +2467,18 @@ impl DateTimeStudioDialog {
                     if draft.zones_targets.iter().any(|name| name == zone.name()) {
                         continue;
                     }
-                    let add = ui.button(format!("+ {}", zone.name()));
+                    let add = ui
+                        .push_id(("zone-add", zone.name()), |ui| {
+                            ui.button(format!("+ {}", zone.name()))
+                        })
+                        .inner;
+                    self.jump_target(
+                        ui,
+                        &add,
+                        format!("zones/add/{}", zone.name()),
+                        format!("Add {}", zone.name()),
+                        super::jump_mode::TargetKind::Button,
+                    );
                     reveal_when_focused(&add);
                     if add.clicked() && draft.zones_targets.len() < ZONE_TARGET_LIMIT {
                         draft.zones_targets.push(zone.name().to_owned());
@@ -2103,7 +2492,16 @@ impl DateTimeStudioDialog {
         ui.horizontal_wrapped(|ui| {
             for (index, zone) in draft.zones_targets.iter().enumerate() {
                 ui.label(zone);
-                let remove = ui.small_button("Remove");
+                let remove = ui
+                    .push_id(("zone-remove", zone), |ui| ui.small_button("Remove"))
+                    .inner;
+                self.jump_target(
+                    ui,
+                    &remove,
+                    format!("zones/remove/{zone}"),
+                    format!("Remove {zone}"),
+                    super::jump_mode::TargetKind::Button,
+                );
                 reveal_when_focused(&remove);
                 if remove.clicked() {
                     draft.zones_targets.remove(index);

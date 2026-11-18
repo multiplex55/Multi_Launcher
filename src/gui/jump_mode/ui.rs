@@ -69,10 +69,11 @@ pub(crate) enum NavigationDialogKind {
     Convert,
     FileLock,
     FolderSize,
+    DateTimeStudio,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -106,6 +107,7 @@ impl NavigationDialogKind {
         Self::FileLock,
         Self::FolderSize,
         Self::Convert,
+        Self::DateTimeStudio,
     ];
 
     const fn index(self) -> usize {
@@ -143,6 +145,7 @@ impl NavigationDialogKind {
             Self::Convert => 32,
             Self::FileLock => 30,
             Self::FolderSize => 31,
+            Self::DateTimeStudio => 33,
         }
     }
 
@@ -181,6 +184,7 @@ impl NavigationDialogKind {
             Self::Convert => "convert-panel",
             Self::FileLock => "file-lock",
             Self::FolderSize => "folder-size",
+            Self::DateTimeStudio => "date-time-studio",
         }
     }
 
@@ -222,6 +226,7 @@ impl NavigationDialogKind {
             Self::Convert => egui::Id::new("convert-panel-window"),
             Self::FileLock => egui::Id::new(Some("File Lock Inspector")),
             Self::FolderSize => egui::Id::new(Some("Folder Size")),
+            Self::DateTimeStudio => egui::Id::new("date-time-studio-window"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -525,6 +530,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ZipExtractor
                     | NavigationDialogKind::FileLock
                     | NavigationDialogKind::FolderSize
+                    | NavigationDialogKind::DateTimeStudio
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
@@ -4449,6 +4455,11 @@ mod tests {
                     }
                     NavigationDialogKind::FolderSize => {
                         egui::Window::new("Folder Size").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::DateTimeStudio => {
+                        egui::Window::new("Date & Time Studio")
+                            .id(egui::Id::new("date-time-studio-window"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::RegexTester => {
                         egui::Window::new("Regex Tester")

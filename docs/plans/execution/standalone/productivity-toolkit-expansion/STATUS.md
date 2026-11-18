@@ -87,6 +87,7 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A2 | complete |
 | M12-A3 | complete |
 | M12-A4a | complete |
+| M12-A4b | complete |
 | M12-A remaining, M12-B | pending |
 | M13-A | pending |
 
@@ -687,3 +688,8 @@ The new docked focus-only cases and layer inventory passed in the initial run (7
 The existing root Convert window now registers its value, choices, searches, favorites, target rows, actions and preferences under its own current owner. Owned ComboBoxes register options on their corresponding popup surfaces. Stable value IDs keep choices attached to their unit. Changes in favorites, filtered membership or target rows retire the corresponding generation. Registration survives a discarded first pass while clipboard and preference effects still require accepted explicit activation. Existing Tab and focused scrolling behavior is preserved.
 
 Adding the 33rd dialog exposed the standard array Default limit. The shared Jump registry now initializes its fixed kind-indexed slots through the complete dialog inventory, preserving each existing slot's identity. The corrected scoped run passed 21 checks including existing Convert behavior, root replay and the actual layer inventory (078cd68a-b96d-401e-9772-b124b39cba19). Its new popup fixture initially targeted the last, clipped category. The visible Area option was then used to verify that the popup alone supplies targets and that the chosen hint moves focus without changing the category. The exact rerun passed (67213882-3644-4063-8d2d-cb6b6d77a8d8).
+
+
+### M12-A4b Date/Time Studio keyboard navigation
+
+The retained Date/Time Studio registers current docked and native targets, including owned date and option popups. Keyboard hints focus controls before a separate activation. Independent review found no actionable issues. Scoped Nextest passed 5/5 in run `c20b432b-4225-46c6-8ed2-7afb253fc569`. The native popup hint interaction still needs live verification.
