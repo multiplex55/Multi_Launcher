@@ -1386,6 +1386,8 @@ pub struct LauncherApp {
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
+    markdown_print_dialog: markdown_print::PrintDialog,
+    markdown_print_host: utility_window_host::UtilityWindowHost<markdown_print::PrintDialog>,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -4273,6 +4275,8 @@ impl LauncherApp {
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
             markdown_studio_dialog,
+            markdown_print_dialog: Default::default(),
+            markdown_print_host: Default::default(),
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),

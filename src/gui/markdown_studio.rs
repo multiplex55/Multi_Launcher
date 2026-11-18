@@ -58,6 +58,7 @@ enum StudioIntent {
     Save,
     SaveAs,
     Export(MarkdownExportFormat),
+    PrintPreview,
     Close,
     Decision(MarkdownTransitionDecision),
     CopyDiagram {
@@ -99,6 +100,7 @@ struct RootEffects {
 
 #[derive(Debug)]
 pub(crate) enum MarkdownStudioEffect {
+    OpenPrint(super::markdown_print::PrintOpen),
     OpenDiagram {
         source: DiagramSourceCopy,
         origin: MarkdownFenceOrigin,
@@ -902,6 +904,12 @@ impl MarkdownStudioDialog {
                 effects.root_pass, effects.owner_pass.unwrap_or(effects.root_pass),
             );
         }
+        if let Some(MarkdownStudioEffect::OpenPrint(request)) = diagram_effect.as_mut() {
+            request.origin = super::utility_host::AcceptedParentOpen::from_retained(
+                ctx, effects.host, request.stamp.clone(), effects.root_pass,
+                effects.owner_pass.unwrap_or(effects.root_pass),
+            );
+        }
         if !self.open {
             let key = crate::settings::UtilityToolKey::parse("markdown-studio").expect("stable Markdown Studio key");
             super::utility_host::remember_presentation(ctx, key, effects.host.host);
@@ -1084,6 +1092,10 @@ impl MarkdownStudioDialog {
                 }
                 if ui.button("Static HTML (.html)").clicked() {
                     *intent = Some(StudioIntent::Export(MarkdownExportFormat::Html));
+                    ui.close();
+                }
+                if ui.button("Export / Print…").clicked() {
+                    *intent = Some(StudioIntent::PrintPreview);
                     ui.close();
                 }
             });
@@ -1597,6 +1609,23 @@ impl MarkdownStudioDialog {
         };
     }
 
+    pub(super) fn print_draft(&self) -> Option<super::markdown_print::DraftRef<'_>> {
+        if !self.open {
+            return None;
+        }
+        let path = self.document.path();
+        Some(super::markdown_print::DraftRef {
+            stamp: super::markdown_print::DocumentStamp::Studio {
+                epoch: self.host_epoch,
+                host: self.host_state.identity(),
+                path: path.map(Path::to_path_buf),
+                revision: self.document.revision(),
+            },
+            source: self.document.source()?,
+            base: super::markdown_print::AssetBase::Studio(path.and_then(Path::parent).map(Path::to_path_buf)),
+        })
+    }
+
     fn apply_intent(
         &mut self,
         intent: StudioIntent,
@@ -1621,6 +1650,9 @@ impl MarkdownStudioDialog {
             StudioIntent::Save => self.save_current(),
             StudioIntent::SaveAs => self.save_as_current(),
             StudioIntent::Export(format) => self.export_current(format),
+            StudioIntent::PrintPreview => return self.print_draft().map(|draft| {
+                MarkdownStudioEffect::OpenPrint(super::markdown_print::PrintOpen::new(draft.stamp))
+            }),
             StudioIntent::Close => match self.document.request_close() {
                 Ok(outcome) => self.finish_transition(outcome, true),
                 Err(error) => self.set_error(error.to_string()),
@@ -2740,6 +2772,47 @@ mod tests {
         assert_eq!(&formatted[dialog.selection.clone()], "**é**");
     }
 
+
+    #[test]
+    fn markdown_print_studio_opens_from_same_retained_frame_as_draft_edit() {
+        let mut dialog = dialog_with_source("# Saved");
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let pass = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+            dialog.pending_effects = Some(RootEffects {
+                root_pass: pass,
+                host: dialog.host_state.identity(),
+                owner_pass: None,
+                owner_viewport_id: egui::ViewportId::ROOT,
+                owner_pass_accepted: true,
+                owner_context: ui.ctx().clone(),
+                callback_observed: true,
+                callback_class: egui::ViewportClass::Root,
+                native_viewport: None,
+                os_close_requested: false,
+                focus_host: false,
+                embedded_root_layer: None,
+                embedded_root_focused_id: None,
+                source: Some("# Dirty".into()),
+                selection: None,
+                selection_to_install: None,
+                focus_editor_after_open: false,
+                view_mode: None,
+                intent: Some(StudioIntent::PrintPreview),
+                host_request: None,
+            });
+        });
+        let (effect, closed) = dialog.on_ui_frame_complete(&ctx);
+        output.drop_without_applying_deltas();
+        let Some(MarkdownStudioEffect::OpenPrint(request)) = effect else {
+            panic!("Expected a retained Studio preview request");
+        };
+        let draft = dialog.print_draft().unwrap();
+        assert!(!closed && dialog.document.is_dirty());
+        assert_eq!(draft.source, "# Dirty");
+        assert_eq!(draft.stamp, request.stamp);
+        assert!(request.origin.unwrap().is_current(dialog.host_state.identity(), &draft.stamp));
+    }
 
     #[test]
     fn outline_move_studio_retains_one_undo_and_rejects_a_changed_draft() {

@@ -1501,6 +1501,7 @@ pub(crate) enum NotePanelEffect {
         origin: NoteMermaidOrigin,
     },
     Export(NoteExportRequest),
+    OpenPrint(super::markdown_print::PrintOpen),
 }
 
 pub(super) type NoteOpenSession = (u64, String, PathBuf);
@@ -2884,6 +2885,7 @@ impl NotePanel {
                     && self.note.content == origin.source_snapshot
             }
             NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
+            NotePanelEffect::OpenPrint(request) => self.open && request.stamp.same_document(&self.print_stamp()),
         };
         if retained && still_matches {
             let mut effect = staged.effect;
@@ -2892,6 +2894,13 @@ impl NotePanel {
                     ctx, self.host_state.identity(),
                     (self.prompt_identity, self.note.slug.clone(), self.note.path.clone()),
                     staged.root_pass, staged.owner_pass.unwrap_or(staged.root_pass),
+                );
+            }
+            if let NotePanelEffect::OpenPrint(request) = &mut effect {
+                request.stamp = self.print_stamp();
+                request.origin = super::utility_host::AcceptedParentOpen::from_retained(
+                    ctx, self.host_state.identity(), request.stamp.clone(), staged.root_pass,
+                    staged.owner_pass.unwrap_or(staged.root_pass),
                 );
             }
             Some(effect)
@@ -3375,6 +3384,35 @@ impl NotePanel {
 
     pub(crate) fn set_markdown_export_feedback(&mut self, is_error: bool, message: String) {
         self.markdown_export_feedback = Some((is_error, message));
+    }
+
+    fn print_stamp(&self) -> super::markdown_print::DocumentStamp {
+        super::markdown_print::DocumentStamp::Note {
+            panel: self.prompt_identity,
+            host: self.host_state.identity(),
+            slug: self.note.slug.clone(),
+            path: self.note.path.clone(),
+            revision: self.note_find.content_revision(),
+        }
+    }
+
+    pub(super) fn print_draft(&self) -> Option<super::markdown_print::DraftRef<'_>> {
+        self.open.then(|| super::markdown_print::DraftRef {
+            stamp: self.print_stamp(),
+            source: &self.note.content,
+            base: super::markdown_print::AssetBase::Note(crate::plugins::note::notes_dir().join("assets")),
+        })
+    }
+
+    fn stage_print_preview(&mut self, ctx: &egui::Context) {
+        if self.can_stage_markdown_export(ctx) && !ctx.will_discard() {
+            self.pending_root_effect = Some(PendingNoteRootEffect {
+                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                host: self.active_host_pass.map(|(host, _)| host),
+                owner_pass: self.active_host_pass.map(|(_, pass)| pass),
+                effect: NotePanelEffect::OpenPrint(super::markdown_print::PrintOpen::new(self.print_stamp())),
+            });
+        }
     }
 
     fn stage_markdown_export(&mut self, ctx: &egui::Context, format: MarkdownExportFormat) {
@@ -9309,6 +9347,11 @@ impl NotePanel {
                 self.stage_markdown_export(ctx, MarkdownExportFormat::Html);
                 ui.close();
             }
+            let print = ui.add_enabled(export_allowed, egui::Button::new("Export / Print…"));
+            if print.clicked() {
+                self.stage_print_preview(ctx);
+                ui.close();
+            }
             let bold = ui.button("Bold Selection");
             #[cfg(test)]
             if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
@@ -13885,6 +13928,26 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn markdown_print_note_opens_only_after_retained_frame_and_reads_current_draft() {
+        let mut panel = NotePanel::from_note(empty_note("# Saved"));
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            panel.stage_print_preview(ui.ctx());
+            panel.replace_content_from_mutation("# Dirty note".into(), 1.0);
+            assert!(panel.pending_root_effect.is_some());
+        });
+        let Some(NotePanelEffect::OpenPrint(request)) = panel.on_ui_frame_complete(&ctx) else {
+            panic!("Expected a retained Note preview request");
+        };
+        output.drop_without_applying_deltas();
+        let draft = panel.print_draft().unwrap();
+        assert_eq!(draft.source, "# Dirty note");
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(draft.stamp, request.stamp);
+        assert!(request.origin.unwrap().is_current(panel.host_state.identity(), &draft.stamp));
     }
 
     #[test]

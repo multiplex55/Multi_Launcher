@@ -2155,6 +2155,7 @@ impl LauncherApp {
             .chain(self.dashboard_editor.host_layer_if_root())
             .chain(self.diff_dialog.host_layer_if_root())
             .chain(self.diff_dialog.child_root_layers())
+            .chain(self.markdown_print_dialog.current_stamp().and_then(|_| self.markdown_print_host.root_layer()))
             .chain(
                 self.mouse_gestures_dialog
                     .binding_is_open()
@@ -5056,6 +5057,7 @@ impl LauncherApp {
                     .calculation_dependency_host
                     .needs_root_ui_when_hidden(self.calculation_dependency_dialog.open)
                 || self.calculation_chart_host.needs_root_ui_when_hidden(self.calculation_chart_dialog.open)
+                || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
                 || self.calculation_sensitivity_host.needs_root_ui_when_hidden(self.calculation_sensitivity_dialog.open)
                 || self
                     .file_preview_host
@@ -6190,6 +6192,124 @@ impl LauncherApp {
             },
         );
     }
+    fn show_markdown_print(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+
+        let open = self.markdown_print_dialog.current_stamp().is_some();
+        if !open || (!root_visible && !self.markdown_print_host.needs_root_ui_when_hidden(open)) {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.markdown_print_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx);
+        let keyboard_owner = owner && focused_response_layer(ctx)
+            .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = match navigation_owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::MarkdownPrint, instance } if keyboard_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    super::jump_mode::SurfaceId::dialog("markdown-print", instance),
+                    super::jump_mode::TargetGeneration(instance),
+                    "markdown-print/form",
+                    ctx.viewport_id(),
+                    navigation_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.markdown_print_host.configure_jump(&self.jump_mode_ui, self.jump_mode_enabled());
+        self.markdown_print_host.show(ctx, &mut self.markdown_print_dialog, &(), HostInput {
+            first,
+            root_visible,
+            root_input,
+            native_input,
+            root_owner: navigation_owner,
+            parent_owner: owner,
+            root_jump_active: self.jump_mode_ui.active_session().is_some(),
+            close_shortcut: layer.is_none() || keyboard_owner,
+            allow_os_close: true,
+            confirmation_owner: NavigationOwner::Blocked,
+            parent_instance: 0,
+            root_scopes: (scope.as_ref(), None),
+        });
+    }
+
+    fn open_markdown_print(
+        &mut self,
+        ctx: &egui::Context,
+        request: super::markdown_print::PrintOpen,
+    ) {
+        use super::markdown_print::DocumentStamp;
+        use super::utility_host::{ChildOpenOrigin, UtilityPresentation};
+
+        let Some(origin) = request.origin else { return };
+        let draft = match &request.stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        };
+        let Some(draft) = draft else { return };
+        let host = match &draft.stamp {
+            DocumentStamp::Note { host, .. } | DocumentStamp::Studio { host, .. } => *host,
+        };
+        if draft.stamp != request.stamp || !origin.is_current(host, &draft.stamp) {
+            return;
+        }
+        let was_open = self.markdown_print_dialog.current_stamp().is_some();
+        self.markdown_print_dialog.open(draft, ctx);
+        if self.markdown_print_host.open_from_origin(
+            ctx, &self.markdown_print_dialog, was_open, &ChildOpenOrigin::Parent(origin),
+        ) == Some(UtilityPresentation::Docked) {
+            self.request_launcher_visibility(true);
+        }
+    }
+
+    fn complete_markdown_print(&mut self, ctx: &egui::Context) {
+        use super::markdown_print::{DocumentStamp, PrintHostCommand};
+
+        let Some(stamp) = self.markdown_print_dialog.current_stamp() else { return };
+        let draft = match stamp {
+            DocumentStamp::Note { panel, .. } => self.note_panels.iter()
+                .find(|note| note.prompt_identity() == *panel)
+                .and_then(super::NotePanel::print_draft),
+            DocumentStamp::Studio { .. } => self.markdown_studio_dialog.print_draft(),
+        };
+        let viewport = self.markdown_print_host.owner_viewport();
+        if let Some(draft) = draft {
+            self.markdown_print_dialog.refresh(draft, ctx, viewport);
+        } else {
+            self.markdown_print_dialog.close();
+        }
+        if self.markdown_print_dialog.current_stamp().is_none() {
+            self.markdown_print_host.close_from_app(ctx);
+            return;
+        }
+        if let Some(completion) = self.markdown_print_host.complete(ctx, &mut self.markdown_print_dialog) {
+            for command in completion.commands {
+                match command {
+                    PrintHostCommand::Closed => self.markdown_print_dialog.close(),
+                }
+            }
+            if completion.show_root {
+                self.request_launcher_visibility(true);
+            }
+        }
+        self.markdown_print_dialog.poll(ctx);
+    }
+
     fn show_markdown_studio(
         &mut self,
         ctx: &egui::Context,
@@ -9926,6 +10046,10 @@ impl LauncherApp {
                 self.calculation_chart_dialog.open && self.calculation_chart_host.root_layer().is_some(),
             ),
             (
+                crate::gui::jump_mode::ui::NavigationDialogKind::MarkdownPrint,
+                self.markdown_print_dialog.current_stamp().is_some() && self.markdown_print_host.root_layer().is_some(),
+            ),
+            (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
                 self.zip_extractor_dialog.open,
             ),
@@ -10056,6 +10180,7 @@ impl LauncherApp {
                     }
                     NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::CalculationChart => self.calculation_chart_host.root_layer(),
+                    NavigationDialogKind::MarkdownPrint => self.markdown_print_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -10093,6 +10218,8 @@ impl LauncherApp {
                         self.clipboard_history_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::JsonUtility {
                         self.json_utility_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::MarkdownPrint {
+                        self.markdown_print_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::CalculationChart {
                         self.calculation_chart_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
@@ -10801,6 +10928,7 @@ impl LauncherApp {
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_qr_host(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
+            self.show_markdown_print(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
@@ -13221,6 +13349,7 @@ impl LauncherApp {
             self.show_calculation_sensitivity(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_markdown_print(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx,
             first_ui_pass,
@@ -14022,6 +14151,7 @@ impl LauncherApp {
                 continue;
             };
             match note_effect {
+                super::note_panel::NotePanelEffect::OpenPrint(request) => self.open_markdown_print(ctx, request),
                 super::note_panel::NotePanelEffect::Export(request) => {
                     self.complete_note_markdown_export(ctx, panel_index, &request);
                 }
@@ -15723,6 +15853,7 @@ impl eframe::App for LauncherApp {
             || self.screenshot_countdown.is_busy()
             || self.notes_dialog.needs_root_ui_when_hidden()
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
+            || self.markdown_print_host.needs_root_ui_when_hidden(self.markdown_print_dialog.current_stamp().is_some())
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.recording_dialog.needs_setup_root_ui_when_hidden()
@@ -15802,6 +15933,13 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
+        let markdown_effect = match markdown_effect {
+            Some(super::MarkdownStudioEffect::OpenPrint(request)) => {
+                self.open_markdown_print(_ctx, request);
+                None
+            }
+            other => other,
+        };
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
             && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
             && let Some(receipt) = origin.host_origin.clone()
@@ -15821,6 +15959,7 @@ impl eframe::App for LauncherApp {
         }
         let note_aux_visibility = self.complete_note_auxiliaries(_ctx);
         self.complete_markdown_diagram_handoff(_ctx);
+        self.complete_markdown_print(_ctx);
         self.complete_quick_notes_dialog(_ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(_ctx);
@@ -16035,6 +16174,13 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
+        let markdown_effect = match markdown_effect {
+            Some(super::MarkdownStudioEffect::OpenPrint(request)) => {
+                self.open_markdown_print(ctx, request);
+                None
+            }
+            other => other,
+        };
         if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
             && self.markdown_studio_dialog.accepts_diagram_origin(&origin)
         {
@@ -16056,6 +16202,7 @@ impl LauncherApp {
         }
         let note_aux_visibility = self.complete_note_auxiliaries(ctx);
         self.complete_markdown_diagram_handoff(ctx);
+        self.complete_markdown_print(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.finish_note_auxiliary_visibility(note_aux_visibility);
         self.complete_mkmacro_dialog(ctx);
@@ -45037,6 +45184,35 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (app, directory)
+    }
+
+    #[test]
+    fn markdown_print_native_child_keeps_root_ui_alive_when_launcher_hidden() {
+        use super::super::markdown_print::{AssetBase, DocumentStamp, DraftRef};
+        use super::super::utility_host::{AcceptedParentOpen, ChildOpenOrigin, HostIdentity, UtilityPresentation, ViewportPassProvenance};
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (mut app, _directory) = new_prompt_app(&ctx);
+        let host = HostIdentity { host: UtilityPresentation::Popout, generation: 1 };
+        let mut pass = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pass = Some(ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT));
+        });
+        let pass = pass.unwrap();
+        let receipt = AcceptedParentOpen::from_retained(&ctx, host, 1, pass, pass).unwrap();
+        output.drop_without_applying_deltas();
+        app.markdown_print_dialog.open(DraftRef {
+            stamp: DocumentStamp::Studio { epoch: 1, host, path: None, revision: Some(1) },
+            source: "# Draft",
+            base: AssetBase::Studio(None),
+        }, &ctx);
+        assert_eq!(app.markdown_print_host.open_from_origin(
+            &ctx, &app.markdown_print_dialog, false, &ChildOpenOrigin::Parent(receipt),
+        ), Some(UtilityPresentation::Popout));
+        assert!(eframe::App::needs_root_ui_when_hidden(&app));
+        assert!(app.markdown_print_host.needs_root_ui_when_hidden(true));
+        assert!(crate::settings::UtilityToolKey::parse("markdown-print").is_ok());
     }
 
     struct StartupCaptureBackend {

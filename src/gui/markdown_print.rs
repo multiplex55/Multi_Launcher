@@ -1,7 +1,22 @@
 //! Shared retained preview worker for the current Markdown draft.
+
+mod dialog;
+pub(super) use dialog::{Command as PrintHostCommand, DraftRef, PrintDialog};
+
+#[derive(Debug)]
+pub(crate) struct PrintOpen {
+    pub(super) stamp: DocumentStamp,
+    pub(super) origin: Option<super::utility_host::AcceptedParentOpen<DocumentStamp>>,
+}
+
+impl PrintOpen {
+    pub(super) fn new(stamp: DocumentStamp) -> Self {
+        Self { stamp, origin: None }
+    }
+}
 use crate::notes_markdown::print_layout::{
     self, PaginatedDocument, PrintSettings,
-    raster::{RasterPage, raster_page},
+    raster::raster_page,
 };
 use eframe::egui;
 use std::{
@@ -67,7 +82,7 @@ pub(super) struct Ready {
     pub receipt: Arc<SceneReceipt>,
     pub page: usize,
     pub scale: f32,
-    pub raster: RasterPage,
+    pub image: egui::ColorImage,
 }
 pub(super) struct Reply {
     pub serial: u64,
@@ -262,12 +277,22 @@ fn run(shared: Arc<Shared>) {
                 .min(receipt.scene.pages.len().saturating_sub(1));
             let raster = raster_page(&receipt.scene, page, request.scale, &cancelled)
                 .map_err(|e| e.to_string())?;
+            let size = [raster.width as usize, raster.height as usize];
+            let mut pixels = Vec::with_capacity(size[0] * size[1]);
+            for chunk in raster.rgba.chunks(16 * 1024) {
+                if cancelled() {
+                    return Err("Preview cancelled.".into());
+                }
+                pixels.extend(chunk.chunks_exact(4).map(|pixel| {
+                    egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2])
+                }));
+            }
             Ok(Ready {
                 serial: request.serial,
                 receipt,
                 page,
                 scale: request.scale,
-                raster,
+                image: egui::ColorImage::new(size, pixels),
             })
         }))
         .unwrap_or_else(|_| Err("Preview worker failed while preparing the document.".into()));
@@ -445,7 +470,7 @@ mod tests {
         assert!(Arc::ptr_eq(&receipt, &next.receipt));
         assert_eq!(next.page, 1);
         assert_eq!(next.scale, 0.5);
-        assert!(next.raster.width > 0);
+        assert!(next.image.size[0] > 0);
     }
     #[test]
     fn markdown_print_worker_coalesces_latest_and_retires_stale_work() {
