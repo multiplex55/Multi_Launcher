@@ -9816,6 +9816,80 @@ fn enumerate_native_directory(
     remaining_path_bytes: usize,
     cancellation: &ScanCancellation,
 ) -> Result<Vec<EnumeratedName>, BackendFailure> {
+    enumerate_native_directory_handle(
+        &directory.handle,
+        &directory.canonical_path,
+        remaining_entries,
+        remaining_path_bytes,
+        || cancellation.is_cancelled(),
+    )
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) enum TransferEnumerationError {
+    Limit,
+    Cancelled,
+    Io(String),
+}
+
+#[cfg(windows)]
+pub(crate) struct TransferDirectoryEntry {
+    pub(crate) name: OsString,
+    pub(crate) kind: TransferDirectoryEntryKind,
+}
+
+#[cfg(windows)]
+pub(crate) enum TransferDirectoryEntryKind {
+    Ordinary,
+    CloudPlaceholder,
+    ReparsePoint,
+}
+
+/// The caller must hold a listable directory and revalidate its identity and
+/// source stamps around this operation before admitting the returned names.
+#[cfg(windows)]
+pub(crate) fn enumerate_transfer_directory(
+    file: &std::fs::File,
+    display_path: &Path,
+    remaining_entries: usize,
+    remaining_name_bytes: usize,
+    cancelled: impl FnMut() -> bool,
+) -> Result<Vec<TransferDirectoryEntry>, TransferEnumerationError> {
+    enumerate_native_directory_handle(
+        file,
+        display_path,
+        remaining_entries,
+        remaining_name_bytes,
+        cancelled,
+    )
+    .map(|entries| {
+        entries.into_iter().map(|entry| {
+            let kind = if entry.cloud_placeholder {
+                TransferDirectoryEntryKind::CloudPlaceholder
+            } else if entry.is_reparse_point {
+                TransferDirectoryEntryKind::ReparsePoint
+            } else {
+                TransferDirectoryEntryKind::Ordinary
+            };
+            TransferDirectoryEntry { name: entry.name, kind }
+        }).collect()
+    })
+    .map_err(|error| match error.kind {
+        BackendFailureKind::ResourceLimit => TransferEnumerationError::Limit,
+        BackendFailureKind::Cancelled => TransferEnumerationError::Cancelled,
+        _ => TransferEnumerationError::Io(error.message),
+    })
+}
+
+#[cfg(windows)]
+fn enumerate_native_directory_handle(
+    file: &std::fs::File,
+    display_path: &Path,
+    remaining_entries: usize,
+    remaining_path_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Vec<EnumeratedName>, BackendFailure> {
     use std::mem::offset_of;
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
@@ -9831,10 +9905,10 @@ fn enumerate_native_directory(
     let mut names_path_bytes = 0usize;
     let mut information_class = FileIdBothDirectoryRestartInfo;
     loop {
-        if cancellation.is_cancelled() {
+        if cancelled() {
             return Err(BackendFailure::new(
                 BackendFailureKind::Cancelled,
-                Some(&directory.canonical_path),
+                Some(display_path),
                 "directory scan was cancelled",
             ));
         }
@@ -9842,7 +9916,7 @@ fn enumerate_native_directory(
         // the aligned byte buffer is writable and large enough for the API.
         let query = unsafe {
             GetFileInformationByHandleEx(
-                HANDLE(directory.handle.as_raw_handle()),
+                HANDLE(file.as_raw_handle()),
                 information_class,
                 buffer.as_mut_ptr().cast(),
                 (buffer.len() * std::mem::size_of::<u64>()) as u32,
@@ -9860,7 +9934,7 @@ fn enumerate_native_directory(
             };
             return Err(BackendFailure::new(
                 kind,
-                Some(&directory.canonical_path),
+                Some(display_path),
                 format!("could not enumerate the opened directory handle: {error}"),
             ));
         }
@@ -9873,14 +9947,14 @@ fn enumerate_native_directory(
                 .ok_or_else(|| {
                     BackendFailure::new(
                         BackendFailureKind::UnsupportedIdentity,
-                        Some(&directory.canonical_path),
+                        Some(display_path),
                         "directory entry offset overflowed",
                     )
                 })?;
             if header_end > bytes {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
-                    Some(&directory.canonical_path),
+                    Some(display_path),
                     "directory information returned a truncated record",
                 ));
             }
@@ -9902,14 +9976,14 @@ fn enumerate_native_directory(
             if !file_name_length.is_multiple_of(std::mem::size_of::<u16>()) {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
-                    Some(&directory.canonical_path),
+                    Some(display_path),
                     "directory entry returned an invalid UTF-16 name length",
                 ));
             }
             let name_end = header_end.checked_add(file_name_length).ok_or_else(|| {
                 BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
-                    Some(&directory.canonical_path),
+                    Some(display_path),
                     "directory entry name length overflowed",
                 )
             })?;
@@ -9919,7 +9993,7 @@ fn enumerate_native_directory(
                 offset.checked_add(next_offset).ok_or_else(|| {
                     BackendFailure::new(
                         BackendFailureKind::UnsupportedIdentity,
-                        Some(&directory.canonical_path),
+                        Some(display_path),
                         "directory entry next offset overflowed",
                     )
                 })?
@@ -9927,7 +10001,7 @@ fn enumerate_native_directory(
             if name_end > bytes || record_end > bytes || record_end < name_end {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
-                    Some(&directory.canonical_path),
+                    Some(display_path),
                     "directory entry record exceeds the native buffer",
                 ));
             }
@@ -9946,7 +10020,7 @@ fn enumerate_native_directory(
                 if entries.len() >= remaining_entries {
                     return Err(BackendFailure::new(
                         BackendFailureKind::ResourceLimit,
-                        Some(&directory.canonical_path),
+                        Some(display_path),
                         format!("entry limit of {remaining_entries} reached"),
                     ));
                 }
@@ -9955,7 +10029,7 @@ fn enumerate_native_directory(
                 if next_names_path_bytes > remaining_path_bytes {
                     return Err(BackendFailure::new(
                         BackendFailureKind::ResourceLimit,
-                        Some(&directory.canonical_path),
+                        Some(display_path),
                         format!(
                             "discovery path storage limit of {remaining_path_bytes} bytes reached while enumerating names"
                         ),
@@ -9977,7 +10051,7 @@ fn enumerate_native_directory(
             {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
-                    Some(&directory.canonical_path),
+                    Some(display_path),
                     "directory entry returned an invalid next-record offset",
                 ));
             }

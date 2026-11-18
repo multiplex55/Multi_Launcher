@@ -328,17 +328,20 @@ impl HeldDirectory {
     fn open_child_with_access(
         self: &Arc<Self>, component: &OsStr, require_add_file: bool, require_add_subdirectory: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
-        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false)
+        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false, false)
     }
 
     fn open_child_with_options(
         self: &Arc<Self>, component: &OsStr, require_add_file: bool,
-        require_add_subdirectory: bool, no_recall: bool,
+        require_add_subdirectory: bool, no_recall: bool, list: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         let access = windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
             | windows::Win32::Storage::FileSystem::FILE_TRAVERSE
             | windows::Win32::Storage::FileSystem::SYNCHRONIZE
+            | if list {
+                windows::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
             | if require_add_file {
                 windows::Win32::Storage::FileSystem::FILE_ADD_FILE
             } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
@@ -1401,11 +1404,11 @@ fn open_volume_root(path: &Path, require_add_file: bool) -> Result<Arc<HeldDirec
 fn open_volume_root_with_access(
     path: &Path, require_add_file: bool, require_add_subdirectory: bool,
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
-    open_volume_root_with_options(path, require_add_file, require_add_subdirectory, false)
+    open_volume_root_with_options(path, require_add_file, require_add_subdirectory, false, false)
 }
 
 fn open_volume_root_with_options(
-    path: &Path, require_add_file: bool, require_add_subdirectory: bool, no_recall: bool,
+    path: &Path, require_add_file: bool, require_add_subdirectory: bool, no_recall: bool, list: bool,
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
@@ -1430,6 +1433,7 @@ fn open_volume_root_with_options(
         ));
     }
     let mut access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+    if list { access |= windows::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY; }
     if require_add_file {
         access |= FILE_ADD_FILE;
     }
@@ -3044,6 +3048,34 @@ mod tests {
     }
 
     #[test]
+    fn transfer_tree_records_junction_as_unavailable_without_listing_its_target() {
+        use crate::file_operations::ScanCancellation;
+        use crate::file_transfer::{AdmissionError, SourceObservation, inspect_parent, inspect_source_tree};
+
+        let (_temp, selected, _held, outside) = fixture_tree();
+        let outside_file = outside.join("external.txt");
+        fs::write(&outside_file, b"external payload").unwrap();
+        let local_file = selected.join("local.txt");
+        fs::write(&local_file, b"local payload").unwrap();
+        let link = selected.join("link");
+        fs::create_dir(&link).unwrap();
+        let cancellation = ScanCancellation::new();
+        let identity = inspect_parent(&link, &cancellation).unwrap().identity();
+        let mut junction = set_junction_on_existing_directory(&link, identity, &outside).unwrap();
+
+        let tree = inspect_source_tree(&[selected], &cancellation).unwrap();
+        assert_eq!(tree.entries().len(), 3);
+        assert_eq!(tree.entries()[1].path().file_name(), Some(OsStr::new("link")));
+        assert!(matches!(
+            tree.entries()[1].observation(),
+            SourceObservation::Unavailable(AdmissionError::ReparsePoint)
+        ));
+        assert_eq!(tree.entries()[2].path().file_name(), Some(OsStr::new("local.txt")));
+        junction.clear().unwrap();
+        assert_eq!(fs::read(outside_file).unwrap(), b"external payload");
+    }
+
+    #[test]
     fn transfer_admission_distinguishes_definitive_leaf_absence_from_other_failures() {
         use windows::Win32::Foundation::{
             STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
@@ -3164,6 +3196,12 @@ pub(crate) mod transfer_native {
 
     impl TransferDirectory {
         pub(crate) fn open_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            Self::open_root_with_list(root, false)
+        }
+        pub(crate) fn open_listable_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            Self::open_root_with_list(root, true)
+        }
+        fn open_root_with_list(root: &Path, list: bool) -> Result<Self, NativeArchiveError> {
             let (validated_root, components) = split_local_absolute_path(root)?;
             if !components.is_empty() {
                 return Err(NativeArchiveError::validation(
@@ -3172,7 +3210,7 @@ pub(crate) mod transfer_native {
                     None,
                 ));
             }
-            open_volume_root_with_options(&validated_root, false, false, true).map(Self)
+            open_volume_root_with_options(&validated_root, false, false, true, list).map(Self)
         }
 
         pub(crate) fn file(&self) -> &File {
@@ -3186,7 +3224,12 @@ pub(crate) mod transfer_native {
         }
         pub(crate) fn open_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
             self.0
-                .open_child_with_options(name, false, false, true)
+                .open_child_with_options(name, false, false, true, false)
+                .map(Self)
+        }
+        pub(crate) fn open_listable_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true, true)
                 .map(Self)
         }
         pub(crate) fn open_relative_metadata(
@@ -3217,8 +3260,7 @@ pub(crate) mod transfer_native {
     }
 
     pub(crate) fn is_missing_relative_leaf(error: &NativeArchiveError) -> bool {
-        error.primary.nt_status
-            == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
+        error.primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
     }
 }
 

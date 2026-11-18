@@ -3,6 +3,13 @@
 //! Snapshots carry observations, with handles reacquired before use. A vacant
 //! leaf is evidence from a single anchored open, never permission to write.
 
+mod tree;
+
+pub use tree::{
+    SourceNodeId, SourceObservation, SourceTree, SourceTreeEntry, SourceTreeError,
+    inspect_source_tree,
+};
+
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -27,8 +34,9 @@ use crate::batch_rename::{
     compare_paths_windows_ordinal, is_valid_windows_filename_leaf,
 };
 use crate::file_operations::{
-    NativeFileIdentity, ScanCancellation, final_path_for_handle, has_cloud_placeholder_attributes,
-    native_file_identity, query_replace_basic_info,
+    NativeFileIdentity, ScanCancellation, TransferDirectoryEntry, TransferDirectoryEntryKind,
+    TransferEnumerationError, enumerate_transfer_directory, final_path_for_handle,
+    has_cloud_placeholder_attributes, native_file_identity, query_replace_basic_info,
 };
 
 const MAX_DIRECTORY_LEVELS: usize = 128;
@@ -64,7 +72,7 @@ struct DirectoryStamp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParentSnapshot {
-    path: PathBuf,
+    path: Arc<Path>,
     chain: Arc<[DirectoryStamp]>,
 }
 
@@ -377,15 +385,28 @@ impl HeldParent {
     }
 
     fn open(path: &Path, cancellation: &ScanCancellation) -> Result<Self, AdmissionError> {
+        Self::open_with_listing(path, cancellation, false)
+    }
+
+    fn open_with_listing(
+        path: &Path,
+        cancellation: &ScanCancellation,
+        list: bool,
+    ) -> Result<Self, AdmissionError> {
         check_cancel(cancellation)?;
         let (drive, components) = checked_parts(path)?;
-        let root = TransferDirectory::open_root(&drive)?;
+        let root = if list && components.is_empty() {
+            TransferDirectory::open_listable_root(&drive)?
+        } else {
+            TransferDirectory::open_root(&drive)?
+        };
         let volume = root.identity().volume_serial_number();
         let mut stamps = vec![directory_stamp(&root, volume)?];
         let mut canonical = checked_final_path(root.file(), &drive)?;
         let mut descendants = Vec::<TransferDirectory>::with_capacity(components.len());
 
-        for name in components {
+        let final_index = components.len().saturating_sub(1);
+        for (index, name) in components.into_iter().enumerate() {
             check_cancel(cancellation)?;
             let parent = descendants.last().unwrap_or(&root);
             let expected = canonical.join(&name);
@@ -396,7 +417,11 @@ impl HeldParent {
             }
             let identity = native_file_identity(&candidate)?;
             check_identity(identity, volume)?;
-            let child = parent.open_child(&name)?;
+            let child = if list && index == final_index {
+                parent.open_listable_child(&name)?
+            } else {
+                parent.open_child(&name)?
+            };
             let stamp = directory_stamp(&child, volume)?;
             if stamp.identity != identity || stamp.created != info.CreationTime {
                 return Err(AdmissionError::StaleParent);
@@ -410,7 +435,7 @@ impl HeldParent {
             root,
             descendants,
             snapshot: ParentSnapshot {
-                path: canonical,
+                path: canonical.into(),
                 chain: stamps.into(),
             },
         };
@@ -458,37 +483,42 @@ impl HeldParent {
         file: &File,
         requested_leaf: &TransferLeaf,
     ) -> Result<EntrySnapshot, AdmissionError> {
-        let info = query_replace_basic_info(file)?;
-        let kind = classify_attributes(info.FileAttributes)?;
-        if kind == EntryKind::Directory {
-            check_case_policy(file)?;
-        }
+        let metadata = observe_entry_metadata(file)?;
         let identity = native_file_identity(file)?;
         check_identity(identity, self.snapshot.identity().volume_serial_number())?;
         let path = checked_final_path(file, &self.snapshot.path.join(requested_leaf.as_os_str()))?;
         let actual_leaf = path.file_name().ok_or(AdmissionError::Alias)?;
-        let metadata = file.metadata()?;
-        if (kind == EntryKind::Directory && !metadata.is_dir())
-            || (kind == EntryKind::File && !metadata.is_file())
-            || metadata.file_attributes() != info.FileAttributes
-            || basic_stamp(query_replace_basic_info(file)?) != basic_stamp(info)
-        {
-            return Err(AdmissionError::StaleEntry);
-        }
         Ok(EntrySnapshot {
             parent: self.snapshot.clone(),
             leaf: TransferLeaf::new(actual_leaf)?,
             identity,
-            metadata: EntryMetadata {
-                kind,
-                byte_len: (kind == EntryKind::File).then(|| metadata.len()),
-                attributes: info.FileAttributes,
-                created: info.CreationTime,
-                modified: info.LastWriteTime,
-                changed: info.ChangeTime,
-            },
+            metadata,
         })
     }
+}
+
+fn observe_entry_metadata(file: &File) -> Result<EntryMetadata, AdmissionError> {
+    let info = query_replace_basic_info(file)?;
+    let kind = classify_attributes(info.FileAttributes)?;
+    if kind == EntryKind::Directory {
+        check_case_policy(file)?;
+    }
+    let metadata = file.metadata()?;
+    if (kind == EntryKind::Directory && !metadata.is_dir())
+        || (kind == EntryKind::File && !metadata.is_file())
+        || metadata.file_attributes() != info.FileAttributes
+        || basic_stamp(query_replace_basic_info(file)?) != basic_stamp(info)
+    {
+        return Err(AdmissionError::StaleEntry);
+    }
+    Ok(EntryMetadata {
+        kind,
+        byte_len: (kind == EntryKind::File).then(|| metadata.len()),
+        attributes: info.FileAttributes,
+        created: info.CreationTime,
+        modified: info.LastWriteTime,
+        changed: info.ChangeTime,
+    })
 }
 
 fn basic_stamp(info: FILE_BASIC_INFO) -> (i64, i64, i64, u32) {
@@ -570,10 +600,106 @@ pub fn recheck_source_metadata(
     }
 }
 
+struct ChildObservation {
+    name: OsString,
+    entry: Result<EntrySnapshot, AdmissionError>,
+}
+
+fn inspect_listed_entry(
+    listed: &TransferDirectoryEntry,
+    open: impl FnOnce(&TransferLeaf) -> Result<TargetOccupancy, AdmissionError>,
+) -> Result<EntrySnapshot, AdmissionError> {
+    match listed.kind {
+        TransferDirectoryEntryKind::CloudPlaceholder => {
+            return Err(AdmissionError::CloudPlaceholder);
+        }
+        TransferDirectoryEntryKind::ReparsePoint => return Err(AdmissionError::ReparsePoint),
+        TransferDirectoryEntryKind::Ordinary => {}
+    }
+    let leaf = TransferLeaf::new(&listed.name)?;
+    match open(&leaf)? {
+        TargetOccupancy::Occupied(entry) => Ok(entry),
+        TargetOccupancy::Vacant => Err(AdmissionError::StaleEntry),
+    }
+}
+
+fn inspect_children(
+    source: &EntrySnapshot,
+    max_entries: usize,
+    max_name_bytes: usize,
+    cancellation: &ScanCancellation,
+) -> Result<Vec<ChildObservation>, AdmissionError> {
+    check_cancel(cancellation)?;
+    if source.metadata.kind != EntryKind::Directory {
+        return Err(AdmissionError::NotADirectory);
+    }
+
+    let held = HeldParent::open_with_listing(&source.path(), cancellation, true)?;
+    let dir = held.directory().file();
+    let check_source = || {
+        if held.snapshot.chain.split_last().map(|(_, chain)| chain)
+            != Some(source.parent.chain.as_ref())
+            || held.snapshot.identity() != source.identity
+            || !same_path(held.snapshot.path(), &source.path())
+            || observe_entry_metadata(dir)? != source.metadata
+        {
+            return Err(AdmissionError::StaleEntry);
+        }
+        held.check_chain(cancellation)
+    };
+    check_source()?;
+    let mut names = enumerate_transfer_directory(
+        dir,
+        held.snapshot.path(),
+        max_entries,
+        max_name_bytes,
+        || cancellation.is_cancelled(),
+    )
+    .map_err(|failure| match failure {
+        TransferEnumerationError::Limit => AdmissionError::Limit,
+        TransferEnumerationError::Cancelled => AdmissionError::Cancelled,
+        TransferEnumerationError::Io(message) => AdmissionError::Io(io::Error::other(message)),
+    })?;
+
+    names.sort_by(|left, right| {
+        compare_paths_windows_ordinal(Path::new(&left.name), Path::new(&right.name))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let mut entries = Vec::with_capacity(names.len());
+    for listed in names {
+        check_cancel(cancellation)?;
+        let entry = inspect_listed_entry(&listed, |leaf| held.inspect_leaf(leaf, cancellation));
+        match entry {
+            Err(
+                error @ (AdmissionError::StaleEntry
+                | AdmissionError::StaleParent
+                | AdmissionError::Limit
+                | AdmissionError::Cancelled),
+            ) => return Err(error),
+            entry => entries.push(ChildObservation {
+                name: listed.name,
+                entry,
+            }),
+        }
+    }
+    check_source()?;
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn transfer_tree_skips_enumeration_only_placeholder_before_opening() {
+        let listed = TransferDirectoryEntry {
+            name: OsString::from("placeholder.txt"),
+            kind: TransferDirectoryEntryKind::CloudPlaceholder,
+        };
+        let result = inspect_listed_entry(&listed, |_| panic!("placeholder was opened"));
+        assert!(matches!(result, Err(AdmissionError::CloudPlaceholder)));
+    }
 
     #[test]
     fn transfer_admission_vacant_leaf_detects_the_new_occupant() {

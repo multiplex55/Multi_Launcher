@@ -56,7 +56,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M8-A3 | complete |
 | M8-B | implementation complete, live generation/reveal/restart verified, live clipboard unavailable |
 | M9-A1 | complete |
-| M9-A2, M9-B, M9-C, M9-D | pending |
+| M9-A2A | complete |
+| M9-A2B, M9-B, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -447,3 +448,12 @@ The new transfer domain captures an exact local parent and ancestor chain, a rev
 The first native run passed six checks and identified STATUS_INVALID_PARAMETER for the combination of FILE_DIRECTORY_FILE and FILE_OPEN_NO_RECALL. The corrected transfer path keeps no-recall and verifies directory type on the opened handle. The existing ZIP methods retain their prior flags. All ten focused Windows cases passed after review corrections. The filter included transfer_admission_ and the three shared c06 junction tests. These cases exercised a late occupant, a replaced parent, a real hard link and case-only collision, a real retagged junction, cancellation, cloud attribute classification, invalid paths, and exact NTSTATUS separation. Enabling case sensitivity in a separate empty test directory returned Access Denied, so the positive case-sensitive fixture was unavailable. C: and G: both report local NTFS and distinct mounted volume identifiers. This enables a later cross-volume test in disposable roots.
 
 Sources: [Windows NtCreateFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile), [case-sensitive directories on Windows](https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity), [Windows file timestamps](https://learn.microsoft.com/en-us/windows/win32/sysinfo/file-times).
+
+
+## M9-A2A bounded recursive source review
+
+Transfer review now preserves explicitly chosen root order and enumerates each ordinary directory by a held native handle, with Windows ordinal child order and parents before children. The transfer adapter reuses the existing rename enumeration parser. Each child is observed relative to the same held directory. Directory identity, ancestor evidence and source metadata are checked around enumeration. The planner rejects overlapping roots and duplicate native identities, including hard links found deeper in the same tree. It retains unsupported entries with their reason and does not descend into them. The entry, depth, path, retained-metadata and cancellation limits refuse incomplete trees.
+
+Directory listings preserve placeholder and reparse classifications before child admission. Windows can expose recall-on-open attributes during enumeration alone. The planner records those entries as unavailable without opening them. Ordinary child probes still use no-recall and fresh handle metadata. All 14 focused Nextest cases passed after this review correction, including a real junction, hard-link and overlap rejection, sorted snapshots, cancellation/bounds, the regression case for a listing-only cloud flag, and the directly affected native rename and archive cases. Staged whitespace verification passed.
+
+[Windows file attributes](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants)
