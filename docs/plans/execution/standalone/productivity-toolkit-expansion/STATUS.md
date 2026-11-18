@@ -79,7 +79,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-D2 | complete |
 | M10-A | complete |
 | M10-B | complete |
-| M11-A, M11-B, M11-C, M11-D | pending |
+| M11-A | complete |
+| M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
 | M13-A | pending |
 
@@ -599,3 +600,12 @@ Open and Reveal use the current guarded item. Rename uses a held no-replace file
 Recycle requires confirmation of the exact entries, the owning window, and the Shell recycle-only and no-connected-elements flags. The adapter rechecks the item immediately in the Shell pre-delete callback and requires returned Recycle Bin evidence for success. The supported Shell path/PIDL handoff has no documented atomic identity fence between its callback and deletion. The adapter keeps native Restore semantics and reports uncertain or partial outcomes.
 
 The 30 targeted tests passed (`e07a5af5-2716-412a-b147-750bae8cefd0`). The final six checks passed (`a698d911-3780-4f8a-a0b8-5c4da3b6679f`), including the byte-cap continuation and an actual exact HTML fixture sent to the Windows Recycle Bin, with its unselected companion folder preserved. A separately cancelled request attempted zero items. The ordinary fast-dev desktop executable built. It opened in an isolated fixture profile with both Paste Sequences shortcuts disabled. Native automation reached the launcher query but the foreground process check prevented command entry, so the reviewed-to-move, ZIP, Reveal and Recycle-confirmation window sequence remains unverified. The four fixture files remained present and the destination remained empty. No user's Downloads directory was read or used.
+
+
+### M11-A Inbox records, retention and local actions
+
+The profile-owned Inbox stores typed source and event identity, timestamps, severity and status, read and pinned state, local history changes, and current related-item receipts. Internal text comes from a fixed allowlist. Opt-in Windows records keep OS identity and content generation separate. Default retention is seven days and at most 1,000 entries including pins. Capacity drops are disclosed and bounded suppression prevents replay of cleared or retired facts. Source mute and exclusion are separate. External capture, external text, and across-session external persistence have separate controls and default off. Turning off text removes retained external text. The atomic bounded projection excludes Windows rows and their local suppression history until durable retention is explicitly enabled. The notification store is excluded from default data backups.
+
+Exact local action tickets bind the current fact, status and source generation. A typed Create Todo request uses the existing Todo transaction and a deterministic fact-derived ID so an explicit retry returns the same task. Wrong or stale tickets fail without running text from any source. Calendar and Timer related owner adapters follow in M11-B; external installation and native capture remain in M11-C/D.
+
+The initial 10 scoped checks passed (`46ce3a5b-f99b-49ae-ade6-c930c8834f74`). Independent review prompted generation freshness across clock rollback, same-time action invalidation, and count-eviction disclosure. The final 12 checks passed (`f3aae19e-13ca-4936-9f48-676f303f4570`), including typed durability, corrupt/failed write preservation, isolated session payload exclusion, backup policy and exactly one stored Todo after retry.

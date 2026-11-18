@@ -59,6 +59,7 @@ pub mod launcher;
 pub(crate) mod launcher_parking;
 pub mod linking;
 pub mod logging;
+pub(crate) mod notifications;
 pub mod markdown_studio;
 pub mod mkmacro;
 pub mod mouse_gestures;
