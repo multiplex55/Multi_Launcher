@@ -7,6 +7,7 @@ pub mod mutations;
 pub mod parse;
 pub mod preview;
 pub mod sections;
+pub mod section_move;
 pub mod tables;
 pub mod task_list;
 

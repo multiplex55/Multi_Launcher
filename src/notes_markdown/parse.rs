@@ -16,8 +16,7 @@ pub fn analyze_markdown_with_max_outline_depth(
     max_outline_depth: usize,
 ) -> MarkdownAnalysis {
     let lines = line_spans(content);
-    let code_lines = code_line_mask(&lines);
-    let headings = headings::parse_headings(&lines, &code_lines);
+    let headings = headings::parse_headings(content, &lines);
     let sections = sections::parse_sections(&headings, content);
     let task_items = task_list::parse_task_items(content);
     let callouts = callouts::parse_callouts(content);
@@ -63,40 +62,6 @@ pub(crate) fn line_spans(content: &str) -> Vec<LineSpan<'_>> {
 
 pub(crate) fn leading_spaces(line: &str) -> usize {
     line.as_bytes().iter().take_while(|&&b| b == b' ').count()
-}
-
-fn code_line_mask(lines: &[LineSpan<'_>]) -> Vec<bool> {
-    let mut mask = vec![false; lines.len()];
-    let mut in_fence = false;
-    let mut fence_marker = b'`';
-    let mut fence_len = 0usize;
-
-    for (idx, line) in lines.iter().enumerate() {
-        let indent = leading_spaces(line.text);
-        let trimmed = &line.text[indent..];
-        let fence = fence_info(trimmed);
-        if in_fence {
-            mask[idx] = true;
-            if let Some((marker, len)) = fence
-                && marker == fence_marker
-                && len >= fence_len
-            {
-                in_fence = false;
-            }
-            continue;
-        }
-
-        if let Some((marker, len)) = fence.filter(|_| indent <= 3) {
-            mask[idx] = true;
-            in_fence = true;
-            fence_marker = marker;
-            fence_len = len;
-        } else if indent >= 4 && !trimmed.is_empty() {
-            mask[idx] = true;
-        }
-    }
-
-    mask
 }
 
 pub(crate) fn fence_info(trimmed: &str) -> Option<(u8, usize)> {

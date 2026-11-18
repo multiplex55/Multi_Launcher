@@ -37,7 +37,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M5-A | complete |
 | M5-B1 | complete |
 | M5-B | complete, with partial interactive smoke |
-| M6-A, M6-B | pending |
+| M6-A | complete |
+| M6-B | pending |
 | M7-A, M7-B | pending |
 | M8-A, M8-B | pending |
 | M9-A, M9-B, M9-C, M9-D | pending |
@@ -278,3 +279,10 @@ M5-B1 was pushed at c25dfcc0db7d511578c2c835283019d62620db5c. The existing Examp
 The first compile corrected the test profile's data-root type. Independent review led to exact sample confirmation, real foreground ownership, one-shot keyboard focus reveal, and line identity preservation. Initial ownership testing exposed a retained-layer registration issue. Press/hover evidence isolated stale Pad focus disabling the visible Reference header. The corrected foreground-layer gate passed all 18 cases, including the existing preservation, native-host, grouped example and narrow-window fixtures, in 3.910s after compilation. Final command: cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(gui::calculation_pad_dialog::tests::reference_) | test(gui::calculation_pad_dialog::reference_help::tests::reference_api_) | test(calculation_pad::reference::) | test(shared_examples_evaluate_to_their_documented_results)'. Diff whitespace verification passed.
 
 Native Windows smoke on 2026-11-17 Eastern built with cargo build -p multi_launcher --bin multi_launcher --profile fast-dev --locked (exit 0, 4m 53s). Binary SHA-256 280DC838D0FC3D21E1FFBAC6F1AEDCDD729388C9A2439DF4BCFDFFD6D9EB4B7C. Both disposable profiles explicitly disabled Paste Sequences Next and Cancel before launch. The real calc pad command opened the draft, and Config Menu → Tools → Examples & reference opened the docked companion while retaining the synthetic source. A separate profile with remembered Pop Out opened an actual Calculation Pad Examples & Reference window and retained the draft. The docked accessibility tree omitted the companion's children at its child limit, window capture timed out, and the popped-out snapshot exposed the window frame only. Native insertion/Undo and direct query refocus were not observed. The retained UI tests verify actual widget search and navigation, owner fencing and the insertion/Undo path. Carry native keyboard/focus touchpoints into M12-B. Both disposable launcher processes were stopped.
+
+
+## M6-A source-preserving Markdown section moves
+
+M5-B was pushed at 9e2148ba8e01d7b31767931b7989bc232f7311c7. The shared parser now recognizes top-level ATX and Setext headings with exact physical ranges. Section hierarchy is built in one pass. The prepared move rotates one bounded source span, consumes the selected subtree and admits only same-parent placements whose reparsed structure preserves parent identities. Unnamed structural sections keep their own boundaries without becoming public outline rows. Preamble, paired metadata, heading indentation, CRLF/LF, and final-newline presence survive moves. A review warning includes both renamed duplicate anchors and changes to the first resolved target of a colliding anchor.
+
+The initial targeted run exposed the empty-ATX regression. Later corrections handled real base-text seams, sparse hierarchy, unnamed boundaries, Unicode Setext and thematic rules. The final focused Windows Nextest run passed 26 of 26 using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 --no-fail-fast -E 'test(notes_markdown::section_move::tests::) | test(notes_markdown::parse::tests::) | test(notes_markdown::headings::tests::)'. Independent review verified structural corrections and supplied the final Unicode classifier case, now covered. Diff whitespace verification passed. M6-B owns retained Notes and Studio controls.
