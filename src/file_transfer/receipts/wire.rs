@@ -86,6 +86,11 @@ pub(super) enum Action {
     Move,
     Duplicate,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum RecoveryVerb {
+    Retry,
+    Undo,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum PlannedTarget {
     Direct { place: Place, policy: TargetPolicy },
@@ -284,6 +289,11 @@ pub(super) enum Record {
         action: Action,
         verification_requested: bool,
     },
+    RecoveryOrigin {
+        id: ReceiptId,
+        node: u32,
+        verb: RecoveryVerb,
+    },
     Parent(ParentProof),
     Node(OutlineNode),
     Bind(Binding),
@@ -354,6 +364,7 @@ pub(super) struct SemanticPrefix {
     pub records: Vec<Record>,
     pub problem: Option<SemanticProblem>,
     header: Option<(ReceiptId, Action)>,
+    recovery_origin: bool,
     pub(super) parents: Vec<ParentProof>,
     depths: Vec<usize>,
     path_units: Vec<usize>,
@@ -532,6 +543,12 @@ impl SemanticPrefix {
                 self.header = Some((*id, *action));
             }
             _ if self.header.is_none() => return Err(SemanticProblem::MissingHeader),
+            Record::RecoveryOrigin { id, .. } => {
+                if self.recovery_origin || self.records.len() != 1 || id.0 == [0; 16] {
+                    return Err(SemanticProblem::InvalidOrder);
+                }
+                self.recovery_origin = true;
+            }
             Record::Parent(proof) => {
                 if proof.id.0 as usize != self.parents.len()
                     || self.parents.len() >= MAX_PARENTS

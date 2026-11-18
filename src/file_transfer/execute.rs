@@ -282,6 +282,9 @@ impl ResolvedTransferTarget<'_> {
     pub(super) fn replacing(&self) -> bool {
         matches!(self.entry.destination(), ApprovedTarget::Replace(_))
     }
+    pub(super) fn undo_digest(&self) -> Option<super::plan::UndoDigest> {
+        self.entry.undo_digest()
+    }
 }
 
 fn resolve_transfer_target<'a>(
@@ -408,6 +411,13 @@ fn execute_file_move(
     journal: &mut dyn TransferJournal,
 ) -> Result<ExecutionState, CopyError> {
     let id = bound.entry.id();
+    if bound.entry.undo_digest().is_some()
+        && (bound.replacing()
+            || bound.source().identity().volume_serial_number()
+                != bound.target().parent().identity().volume_serial_number())
+    {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    }
     if bound.replacing()
         || bound.source().identity().volume_serial_number()
             != bound.target().parent().identity().volume_serial_number()

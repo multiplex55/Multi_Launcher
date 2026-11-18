@@ -69,6 +69,20 @@ impl SourceTree {
     }
 }
 
+pub(super) fn singleton_file(source: EntrySnapshot) -> Result<SourceTree, AdmissionError> {
+    if source.metadata().kind != EntryKind::File {
+        return Err(AdmissionError::InvalidPath);
+    }
+    Ok(SourceTree {
+        entries: vec![SourceTreeEntry {
+            id: SourceNodeId(0),
+            parent: None,
+            path: source.path(),
+            observation: SourceObservation::Ready(source),
+        }],
+    })
+}
+
 #[derive(Debug)]
 pub enum SourceTreeError {
     EmptySelection,

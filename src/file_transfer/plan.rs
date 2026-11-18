@@ -308,6 +308,42 @@ pub fn review_transfer(
     build_review(source, draft, destination, HashMap::new(), cancel)
 }
 
+pub(super) fn review_exact_file(
+    source: EntrySnapshot,
+    target: TargetSnapshot,
+    action: TransferAction,
+    verify: bool,
+    cancel: &ScanCancellation,
+) -> Result<TransferReview, ReviewError> {
+    if source.metadata().kind != EntryKind::File
+        || !matches!(target.occupancy(), TargetOccupancy::Vacant)
+    {
+        return Err(ReviewError::InvalidChoice);
+    }
+    recheck_source_metadata(&source, cancel)?;
+    recheck_target_metadata(&target, cancel)?;
+    let tree = Arc::new(super::tree::singleton_file(source)?);
+    let id = tree.entries()[0].id();
+    let parent = target.parent().clone();
+    let leaf = target.requested_leaf().clone();
+    let mut choices = HashMap::new();
+    choices.insert(
+        id,
+        BoundChoice::KeepBoth {
+            parent: DestinationParent::Existing(parent.clone()),
+            leaf,
+            vacancy: Some(target),
+        },
+    );
+    build_review(
+        tree,
+        TransferDraft { action, verify },
+        Some(parent),
+        choices,
+        cancel,
+    )
+}
+
 fn build_review(
     source: Arc<SourceTree>,
     draft: TransferDraft,
@@ -658,6 +694,13 @@ pub struct ApprovedTransferEntry {
     source: EntrySnapshot,
     destination: ApprovedTarget,
     verify_content: bool,
+    undo_digest: Option<UndoDigest>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct UndoDigest {
+    pub sha256: [u8; 32],
+    pub zone_sha256: Option<[u8; 32]>,
 }
 
 impl ApprovedTransferEntry {
@@ -676,6 +719,9 @@ impl ApprovedTransferEntry {
     pub fn verify_content(&self) -> bool {
         self.verify_content
     }
+    pub(super) fn undo_digest(&self) -> Option<UndoDigest> {
+        self.undo_digest
+    }
 }
 
 /// Immutable review evidence for a later worker. Publication and removal
@@ -689,9 +735,38 @@ pub struct ApprovedTransferPlan {
     source: Arc<SourceTree>,
     entries: Vec<ApprovedTransferEntry>,
     skipped: Vec<SourceNodeId>,
+    recovery_origin: Option<RecoveryOrigin>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum RecoveryVerb {
+    Retry,
+    Undo,
+}
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RecoveryOrigin {
+    pub receipt: super::TransferReceiptId,
+    pub node: u32,
+    pub verb: RecoveryVerb,
 }
 
 impl ApprovedTransferPlan {
+    pub(super) fn set_recovery_origin(&mut self, origin: RecoveryOrigin) {
+        self.recovery_origin = Some(origin);
+    }
+    pub(super) fn recovery_origin(&self) -> Option<RecoveryOrigin> {
+        self.recovery_origin
+    }
+    pub(super) fn seal_undo(&mut self, digest: UndoDigest) -> Result<(), ReviewError> {
+        if self.entries.len() != 1
+            || !matches!(self.draft.action, TransferAction::MoveTo(_))
+            || !matches!(self.entries[0].destination, ApprovedTarget::CreateAt(_))
+        {
+            return Err(ReviewError::InvalidChoice);
+        }
+        self.entries[0].undo_digest = Some(digest);
+        Ok(())
+    }
     // All approvals sealed from this review share one queue admission.
     pub(super) fn claim_for_queue(&self) -> bool {
         !self.queued.swap(true, AtomicOrdering::AcqRel)
@@ -1002,6 +1077,7 @@ impl TransferReview {
                 destination,
                 verify_content: self.draft.verify
                     || matches!(self.draft.action, TransferAction::MoveTo(_)),
+                undo_digest: None,
             });
         }
         if entries.is_empty() {
@@ -1014,6 +1090,7 @@ impl TransferReview {
             source: self.source.clone(),
             entries,
             skipped,
+            recovery_origin: None,
         })
     }
 }

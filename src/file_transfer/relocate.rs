@@ -59,6 +59,10 @@ pub(super) fn move_same_volume_file(
 ) -> Result<MovedFile, CopyError> {
     let target = bound.target();
     let source = bound.source();
+    let undo_digest = bound.undo_digest();
+    if undo_digest.is_some() && !verify_content {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    }
     if bound.replacing()
         || !matches!(target.occupancy(), TargetOccupancy::Vacant)
         || source.metadata().kind != EntryKind::File
@@ -156,6 +160,11 @@ pub(super) fn move_same_volume_file(
     } else {
         None
     };
+    if let Some(undo) = undo_digest {
+        if expected != Some((undo.sha256, undo.zone_sha256)) {
+            return Err(CopyFailure::ContentMismatch.into());
+        }
+    }
     journal
         .record(Event::MoveRenameIntent {
             source: source_path.clone(),
@@ -174,6 +183,32 @@ pub(super) fn move_same_volume_file(
         check_before()?;
         if let Some(expected_inventory) = inventory {
             if stream_inventory(held.file(), length)? != expected_inventory {
+                return Err(CopyFailure::Admission(AdmissionError::StaleEntry).into());
+            }
+        }
+        if let Some(undo) = undo_digest {
+            let data = held.data_file().ok_or(CopyFailure::UnsupportedPlan)?;
+            let hash = hash_file(data, length, control)?;
+            let zone_hash = match inventory.and_then(|v| v.zone) {
+                Some(zone_length) => {
+                    let named = source_parent
+                        .directory()
+                        .open_move_source_zone(source.leaf().as_os_str(), source.identity())
+                        .map_err(CopyFailure::from)?;
+                    if named.file().metadata().map_err(CopyFailure::from)?.len() != zone_length {
+                        return Err(CopyFailure::ContentMismatch.into());
+                    }
+                    Some(hash_file(&named, zone_length, control)?)
+                }
+                None => None,
+            };
+            if hash != undo.sha256 || zone_hash != undo.zone_sha256 {
+                return Err(CopyFailure::ContentMismatch.into());
+            }
+            check_before()?;
+            if stream_inventory(held.file(), length)?
+                != inventory.ok_or(CopyFailure::UnsupportedPlan)?
+            {
                 return Err(CopyFailure::Admission(AdmissionError::StaleEntry).into());
             }
         }

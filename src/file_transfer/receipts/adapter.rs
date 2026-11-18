@@ -31,6 +31,16 @@ impl ReceiptProjection {
             action,
             verification_requested: plan.draft().verify,
         })?;
+        if let Some(origin) = plan.recovery_origin() {
+            this.add(Record::RecoveryOrigin {
+                id: ReceiptId(origin.receipt.0),
+                node: origin.node,
+                verb: match origin.verb {
+                    crate::file_transfer::plan::RecoveryVerb::Retry => RecoveryVerb::Retry,
+                    crate::file_transfer::plan::RecoveryVerb::Undo => RecoveryVerb::Undo,
+                },
+            })?;
+        }
         let mut approved = std::collections::HashMap::new();
         for entry in plan.entries() {
             approved.insert(entry.id().index(), entry);

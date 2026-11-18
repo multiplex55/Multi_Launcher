@@ -165,7 +165,7 @@ impl<'a> ReceiptHistory<'a> {
             store: Store::Borrowed(store),
         }
     }
-    fn store(&self) -> &ReceiptStore {
+    pub(super) fn store(&self) -> &ReceiptStore {
         match &self.store {
             Store::Owned(store) => store,
             Store::Borrowed(store) => store,
@@ -350,7 +350,7 @@ fn target(
         }
     }
 }
-fn reconcile_entry(
+pub(super) fn reconcile_entry(
     entry: &CatalogEntry,
     cancel: &ScanCancellation,
 ) -> Result<ReceiptDetail, ReceiptHistoryError> {

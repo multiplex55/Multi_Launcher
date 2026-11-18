@@ -72,7 +72,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-C1B2 | complete |
 | M9-C1B3 | complete |
 | M9-C2A | complete |
-| M9-C2B, M9-C2C, M9-D | pending |
+| M9-C2B | complete |
+| M9-C2C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -547,3 +548,8 @@ The app-owned worker opens its profile receipt store after an explicit Start and
 ### M9-C2A read-only restart reconciliation
 
 The receipt history reports Interrupted from a clean unfinished prefix and retains valid evidence before a corrupt tail. Selected details use an exact held receipt and recheck recorded artifact identities, revisions and patched parent creation stamps, with no replay. A generated name without assigned identity never confers ownership. Inaccessible and unsafe entries stay visible without hiding other jobs. Verified atomic Move reversal evidence requires clean completed rows, historical and current original vacancy, and unchanged output together with both historical parent proofs and the stored digest. The 19-test worker/store/recovery union passed (`d100a10a-70c5-4987-8b75-732070d275bd`). The final 12 recovery and store checks passed (`9e95d2e6-010d-4cd5-bde7-20eae80b9704`) including real case-renamed and unsafe sibling receipt fixtures. User-facing Retry, Undo and unstarted queue persistence follow.
+
+
+### M9-C2B explicit Retry and verified atomic Move Undo
+
+Retry prepares a fresh single-file review of an unchanged, untouched row with its exact reviewed parent and leaf. Confirmed nested parent evidence is required. Completed/possibly effected rows, occupied targets and a catalog that could conceal prior Retry are refused. Related receipts record the original job/item and guard actual repeat admission after external output removal. Undo is explicit and restricted to clean completed verified same-volume atomic Move with both historical parent proofs and exact vacancy. It rechecks the held file and current named Zone Identifier digest before rename and uses the guarded no-replace rename. A durable Undo origin refuses generic Retry after interruption. The 26-test union passed (`3c8e5de2-7868-40fc-a828-956207b868b6`) and the final four action checks passed (`747fe525-2d68-4fe3-8552-66c9e608199d`), covering actual nested retry, completed-repeat refusal, named Zone changes, late foreign original, interrupted Undo binding, and successful same-ID restoration of both streams. History/queue service and user-facing actions follow.

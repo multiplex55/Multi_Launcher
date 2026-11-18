@@ -422,11 +422,14 @@ impl ReceiptStore {
         if needed > MAX_RECEIPT_BYTES {
             return Err(ReceiptStoreError::Capacity);
         }
-        let location = self.locate(true)?.ok_or(ReceiptStoreError::Unavailable)?;
+        let location = self
+            .locate(plan.recovery_origin().is_none())?
+            .ok_or(ReceiptStoreError::Unavailable)?;
         let mut catalog = self.scan_location(&location)?;
         if catalog.admission_blocked {
             return Err(ReceiptStoreError::UnsafeNamespace);
         }
+        protect_recovery_relations(&mut catalog, plan.recovery_origin())?;
         self.ensure_room(&location, &mut catalog, needed, MAX_CATALOG_ENTRIES)?;
         let capacity = MAX_RECEIPT_BYTES
             .checked_sub(catalog.charged_bytes)
@@ -622,6 +625,68 @@ impl ReceiptStore {
             .retain(|entry| !removed.contains(&entry.leaf));
         Ok(())
     }
+}
+
+fn protect_recovery_relations(
+    catalog: &mut ReceiptCatalog,
+    origin: Option<crate::file_transfer::plan::RecoveryOrigin>,
+) -> Result<(), ReceiptStoreError> {
+    use crate::file_transfer::plan::RecoveryVerb;
+    let mut protected = std::collections::HashSet::new();
+    if let Some(origin) = origin {
+        protected.insert(ReceiptId(origin.receipt.0));
+        if matches!(origin.verb, RecoveryVerb::Retry) {
+            let origin_present = catalog.entries.iter().any(|entry| {
+                entry.id == Some(ReceiptId(origin.receipt.0))
+                    && matches!(entry.diagnostic, ReceiptDiagnostic::Clean)
+            });
+            // A receipt can declare its recovery origin only in its second
+            // record. If that position couldn't be decoded, it might conceal
+            // a prior attempt. Do not use newly pruned capacity to retry it.
+            let uncertain_origin = catalog.entries.iter().any(|entry| {
+                !matches!(entry.diagnostic, ReceiptDiagnostic::Clean)
+                    && entry.prefix.records.len() < 2
+            });
+            if !origin_present || uncertain_origin {
+                return Err(ReceiptStoreError::InvalidRecord);
+            }
+        }
+    }
+    for entry in &catalog.entries {
+        for record in &entry.prefix.records {
+            if let Record::RecoveryOrigin { id, node, verb } = record {
+                protected.insert(*id);
+                if let Some(own_id) = entry.id {
+                    protected.insert(own_id);
+                }
+                if let Some(requested) = origin
+                    && matches!(requested.verb, RecoveryVerb::Retry)
+                    && *verb == wire::RecoveryVerb::Retry
+                    && id.0 == requested.receipt.0
+                    && *node == requested.node
+                    && (!matches!(entry.diagnostic, ReceiptDiagnostic::Clean)
+                        || entry.prefix.records.iter().any(|r| {
+                            matches!(
+                                r,
+                                Record::Effect { .. }
+                                    | Record::EntryTerminal {
+                                        outcome: EntryOutcome::Completed,
+                                        ..
+                                    }
+                            )
+                        }))
+                {
+                    return Err(ReceiptStoreError::InvalidRecord);
+                }
+            }
+        }
+    }
+    for entry in &mut catalog.entries {
+        if entry.id.is_some_and(|id| protected.contains(&id)) {
+            entry.settled = false;
+        }
+    }
+    Ok(())
 }
 
 fn parse(file: &mut ReceiptFile) -> Result<(SemanticPrefix, ReceiptDiagnostic), ReceiptStoreError> {

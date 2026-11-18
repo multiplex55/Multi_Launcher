@@ -15,9 +15,10 @@ mod relocate;
 mod tree;
 
 pub use receipts::{
-    ReceiptDetail, ReceiptEntryDetail, ReceiptEntryStatus, ReceiptEvidence, ReceiptEvidenceRole,
-    ReceiptHealth, ReceiptHistory, ReceiptHistoryError, ReceiptObservation, ReceiptSummary,
-    ReceiptTarget, ReceiptTargetChoice, VerifiedMoveEvidence,
+    PreparedReceiptRetry, PreparedReceiptUndo, ReceiptDetail, ReceiptEntryDetail,
+    ReceiptEntryStatus, ReceiptEvidence, ReceiptEvidenceRole, ReceiptHealth, ReceiptHistory,
+    ReceiptHistoryError, ReceiptObservation, ReceiptSummary, ReceiptTarget, ReceiptTargetChoice,
+    RecoveryActionError, VerifiedMoveEvidence,
 };
 
 pub use copy::{
