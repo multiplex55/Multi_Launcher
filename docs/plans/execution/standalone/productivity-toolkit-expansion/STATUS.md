@@ -59,7 +59,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-A2A | complete |
 | M9-A2B | complete |
 | M9-B1A | complete |
-| M9-B1B, M9-B2+, M9-C, M9-D | pending |
+| M9-B1B | complete |
+| M9-B2A, M9-B2B, M9-B3+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -477,3 +478,14 @@ An approved vacant-file entry reopens the exact source and destination parent ch
 The adapter checks the source and output stream inventories around copy and verification. It refuses unsupported or unknown alternate streams. A late stream change returns a failure with the still-identifiable published artifact. The next slice admits the specific Zone Identifier stream. Existing archive and PDF callers retain their publication API.
 
 All 11 focused Nextest cases passed. The filter was test(transfer_copy_native_) | test(c06_root_relative_publication_commits_exact_bytes_without_replacement) | test(c06_stage_identity_failure_reports_cleanup_and_preserves_foreign_files) | test(pending_read_cancel_drains_native_result_and_releases_owned_resources). Disposable Windows tests exercised real multi-chunk and empty copies, exact data and timestamps, SHA-256 verification, writer exclusion, stale source and parent refusal, cancellation and stage cleanup, reserved staging names, a late foreign destination, and a late source stream. Staged whitespace verification passed.
+
+
+## M9-B1B guarded Zone Identifier preservation
+
+A bounded NTFS inventory admits the unnamed stream and an optional Zone.Identifier data stream up to 64 KiB. Unexpected, ambiguous or unsupported stream layouts stop the copy with a typed failure. The adapter copies Zone Identifier separately and verifies its digest in both ordinary and requested full-verification modes. The exclusive staged stream stays held from write through no-clobber rename and the final readback. The copy reports unnamed bytes and Zone bytes separately.
+
+Source streams are checked at final namespace admission and after publication. A change observable before rename prevents publication. A change first observed afterward produces an identifiable published-artifact failure. The native fixture attempted a write to the exact staged Zone stream and Windows denied it with a sharing violation. The same fixture proved both streams and creation/modified times after release in both verification modes.
+
+All 14 focused native-copy and shared archive checks passed with the M9-B1A filter. The added cases include actual NTFS Zone bytes, a retained stream guard, bounded malformed record rejection and late-source changes on each side of publication. Other named streams remain explicit unsupported outcomes. Staged whitespace verification passed.
+
+[Windows file streams](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams) · [Windows stream records](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_stream_info)

@@ -3412,7 +3412,10 @@ pub(crate) mod transfer_native {
                     FILE_ACCESS_RIGHTS(0),
                     FILE_SHARE_MODE(0),
                     windows::Wdk::Storage::FileSystem::FILE_WRITE_THROUGH,
-                    Some(TransferStageAdmission { final_leaf, observation: &mut observation }),
+                    Some(TransferStageAdmission {
+                        final_leaf,
+                        observation: &mut observation,
+                    }),
                     next_leaf,
                 )
             })();
@@ -3425,6 +3428,35 @@ pub(crate) mod transfer_native {
                     });
                 TransferStageCreateFailure { error, unresolved }
             })
+        }
+        pub(crate) fn open_source_zone(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+                SYNCHRONIZE,
+            };
+            let name = zone_name(leaf)?;
+            verify_base(&self.0, leaf, expected)?;
+            let (file, _) = open_relative(
+                &self.0,
+                &name,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer Zone.Identifier read)",
+                || Ok(()),
+            )?;
+            let file = verify_zone_file(file, expected)?;
+            verify_base(&self.0, leaf, expected)?;
+            Ok(file)
         }
         pub(crate) fn open_relative_metadata(
             &self,
@@ -3453,6 +3485,102 @@ pub(crate) mod transfer_native {
         }
     }
 
+    fn zone_name(leaf: &OsStr) -> Result<OsString, NativeArchiveError> {
+        validate_single_component(leaf, "transfer Zone.Identifier base name")?;
+        let mut name = leaf.to_os_string();
+        name.push(":Zone.Identifier:$DATA");
+        Ok(name)
+    }
+    fn verify_base(
+        parent: &Arc<HeldDirectory>,
+        leaf: &OsStr,
+        expected: NativeFileIdentity,
+    ) -> Result<(), NativeArchiveError> {
+        use windows::Wdk::Storage::FileSystem::{
+            FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
+        };
+        validate_single_component(leaf, "transfer Zone.Identifier base name")?;
+        let (file, _) = open_relative(
+            parent,
+            leaf,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            shared_directory_access(),
+            FILE_OPEN,
+            FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_ATTRIBUTE_NORMAL,
+            "NtCreateFile(transfer Zone.Identifier base)",
+            || Ok(()),
+        )?;
+        let metadata = file.metadata().map_err(|e| {
+            NativeArchiveError::from_io(
+                "File::metadata(transfer Zone.Identifier base)",
+                e,
+                Some(expected),
+            )
+        })?;
+        let actual = native_file_identity(&file).map_err(|e| {
+            NativeArchiveError::from_io(
+                "FILE_ID_INFO(transfer Zone.Identifier base)",
+                e,
+                Some(expected),
+            )
+        })?;
+        if actual != expected
+            || !metadata.is_file()
+            || metadata.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+        {
+            return Err(NativeArchiveError::validation(
+                "transfer Zone.Identifier base changed or is not ordinary",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            ));
+        }
+        Ok(())
+    }
+    fn verify_zone_file(
+        file: File,
+        expected: NativeFileIdentity,
+    ) -> Result<TransferFile, NativeArchiveError> {
+        let metadata = file.metadata().map_err(|e| {
+            NativeArchiveError::from_io(
+                "File::metadata(transfer Zone.Identifier)",
+                e,
+                Some(expected),
+            )
+        })?;
+        let actual = native_file_identity(&file).map_err(|e| {
+            NativeArchiveError::from_io("FILE_ID_INFO(transfer Zone.Identifier)", e, Some(expected))
+        })?;
+        if actual != expected
+            || !metadata.is_file()
+            || metadata.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+        {
+            return Err(NativeArchiveError::validation(
+                "transfer Zone.Identifier does not match the ordinary base",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            ));
+        }
+        let file = VerifiedOverlappedFile::verify(file).map_err(|_| {
+            NativeArchiveError::validation(
+                "transfer Zone.Identifier is not verified overlapped",
+                io::ErrorKind::InvalidData,
+                Some(actual),
+            )
+        })?;
+        Ok(TransferFile {
+            file,
+            identity: actual,
+        })
+    }
+
     pub(crate) struct TransferFile {
         file: VerifiedOverlappedFile,
         identity: NativeFileIdentity,
@@ -3463,6 +3591,31 @@ pub(crate) mod transfer_native {
         }
         pub(crate) fn identity(&self) -> NativeFileIdentity {
             self.identity
+        }
+    }
+    impl TransferFile {
+        pub(crate) fn flush(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::FlushFileBuffers;
+            let actual = native_file_identity(self.file.as_file()).map_err(|e| {
+                NativeArchiveError::from_io("FILE_ID_INFO(transfer flush)", e, Some(self.identity))
+            })?;
+            if actual != self.identity {
+                return Err(NativeArchiveError::validation(
+                    "transfer file identity changed before flush",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            unsafe { FlushFileBuffers(HANDLE(self.file.as_file().as_raw_handle() as _)) }.map_err(
+                |e| {
+                    NativeArchiveError::from_win32(
+                        "FlushFileBuffers(transfer file)",
+                        e,
+                        Some(actual),
+                    )
+                },
+            )
         }
     }
     #[derive(Clone)]
@@ -3476,6 +3629,14 @@ pub(crate) mod transfer_native {
         }
         pub(crate) fn is_cancelled(&self) -> bool {
             self.0.is_cancelled()
+        }
+        pub(crate) fn write_at(
+            &self,
+            file: &TransferFile,
+            offset: u64,
+            bytes: Box<[u8]>,
+        ) -> io::Result<usize> {
+            self.0.write_at(&file.file, offset, bytes)
         }
         pub(crate) fn read_at(
             &self,
@@ -3519,6 +3680,39 @@ pub(crate) mod transfer_native {
         }
         pub(crate) fn flush(&self) -> Result<(), NativeArchiveError> {
             self.0.flush_final()
+        }
+        pub(crate) fn create_zone(&self) -> Result<TransferFile, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_CREATE, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_WRITE_THROUGH,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+                FILE_WRITE_DATA, SYNCHRONIZE,
+            };
+            let expected = self.0.identity;
+            let name = zone_name(&self.0.leaf)?;
+            verify_base(&self.0.parent, &self.0.leaf, expected)?;
+            let (file, information) = open_relative(
+                &self.0.parent,
+                &name,
+                FILE_WRITE_DATA | FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_DELETE,
+                FILE_CREATE,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer Zone.Identifier create)",
+                || Ok(()),
+            )?;
+            if information != 2 {
+                return Err(NativeArchiveError::validation(
+                    "transfer Zone.Identifier was not created",
+                    io::ErrorKind::InvalidData,
+                    Some(expected),
+                ));
+            }
+            let file = verify_zone_file(file, expected)?;
+            verify_base(&self.0.parent, &self.0.leaf, expected)?;
+            Ok(file)
         }
         pub(crate) fn abort(self) -> Result<(), NativeArchiveError> {
             self.0.abort()

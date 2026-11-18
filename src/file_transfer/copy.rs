@@ -4,14 +4,15 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 use std::os::windows::io::AsRawHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO, FILE_STREAM_INFO,
-    FileStreamInfo, GetFileInformationByHandleEx,
+    FileStreamInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
 };
+use windows::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 
 use crate::archive::transfer_native::{
     NativeArchiveError, TransferFile, TransferIo, TransferStage, TransferStageCreateFailure,
@@ -26,6 +27,7 @@ use super::{
 
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
 const STREAM_INFO_WORDS: usize = 8 * 1024;
+const MAX_ZONE_IDENTIFIER_BYTES: u64 = 64 * 1024;
 const SUPPORTED_ATTRIBUTES: u32 = FILE_ATTRIBUTE_ARCHIVE.0 | FILE_ATTRIBUTE_NORMAL.0;
 
 #[derive(Clone)]
@@ -78,7 +80,10 @@ pub struct CopyArtifact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyVerification {
     NotRequested,
-    Verified { sha256: [u8; 32] },
+    Verified {
+        sha256: [u8; 32],
+        zone_sha256: Option<[u8; 32]>,
+    },
 }
 
 #[derive(Debug)]
@@ -86,6 +91,7 @@ pub struct CopiedFile {
     pub source: NativeFileIdentity,
     pub output: CopyArtifact,
     pub bytes: u64,
+    pub zone_bytes: Option<u64>,
     pub verification: CopyVerification,
 }
 
@@ -110,7 +116,7 @@ impl fmt::Display for CopyFailure {
             Self::Cancelled => "Copy cancelled.",
             Self::DestinationOccupied => "A file or folder now occupies the reviewed destination.",
             Self::UnsupportedStreams => {
-                "Windows could not prove that this file contains only the supported data stream."
+                "Windows could not verify support for the file's data and Zone Identifier streams."
             }
             Self::UnsupportedMetadata => {
                 "This copy cannot preserve the file's attributes or timestamps."
@@ -183,10 +189,16 @@ impl fmt::Display for CopyError {
 
 impl std::error::Error for CopyError {}
 
+struct HeldZone {
+    file: TransferFile,
+    length: u64,
+}
+
 struct GuardedCopy<'a> {
     source: &'a EntrySnapshot,
     source_parent: HeldParent,
     source_file: TransferFile,
+    source_zone: Option<HeldZone>,
     target: &'a TargetSnapshot,
     target_parent: HeldParent,
     length: u64,
@@ -223,10 +235,28 @@ impl<'a> GuardedCopy<'a> {
         let source_file = source_parent
             .directory()
             .open_read(source.leaf().as_os_str())?;
+        let current = source_parent.capture_entry(source_file.file(), source.leaf())?;
+        if current != *source || source_file.identity() != source.identity() {
+            return Err(AdmissionError::StaleEntry.into());
+        }
+        let inventory = stream_inventory(source_file.file(), length)?;
+        let source_zone = inventory
+            .zone
+            .map(|length| {
+                let file = source_parent
+                    .directory()
+                    .open_source_zone(source.leaf().as_os_str(), source.identity())?;
+                if file.file().metadata()?.len() != length {
+                    return Err(CopyFailure::ContentMismatch);
+                }
+                Ok(HeldZone { file, length })
+            })
+            .transpose()?;
         let guarded = Self {
             source,
             source_parent,
             source_file,
+            source_zone,
             target,
             target_parent,
             length,
@@ -244,8 +274,17 @@ impl<'a> GuardedCopy<'a> {
         if current != *self.source || self.source_file.identity() != self.source.identity() {
             return Err(AdmissionError::StaleEntry.into());
         }
-        require_default_stream(self.source_file.file(), self.length)?;
+        if stream_inventory(self.source_file.file(), self.length)? != self.streams() {
+            return Err(AdmissionError::StaleEntry.into());
+        }
         control.check()
+    }
+
+    fn streams(&self) -> StreamInventory {
+        StreamInventory {
+            data: self.length,
+            zone: self.source_zone.as_ref().map(|zone| zone.length),
+        }
     }
 
     fn check_vacancy(&self, control: &CopyControl) -> Result<(), CopyFailure> {
@@ -259,52 +298,115 @@ impl<'a> GuardedCopy<'a> {
     }
 }
 
-fn require_default_stream(file: &File, length: u64) -> Result<(), CopyFailure> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamInventory {
+    data: u64,
+    zone: Option<u64>,
+}
+
+fn stream_inventory(file: &File, length: u64) -> Result<StreamInventory, CopyFailure> {
+    let handle = HANDLE(file.as_raw_handle());
     let mut words = vec![0_u64; STREAM_INFO_WORDS];
-    // SAFETY: file is a live held file. The u64 buffer provides the record's
-    // required alignment, and its full byte length is passed to Windows.
-    unsafe {
+    // SAFETY: the live file is borrowed and the aligned buffer is writable.
+    let inventory = unsafe {
         GetFileInformationByHandleEx(
-            HANDLE(file.as_raw_handle()),
+            handle,
             FileStreamInfo,
             words.as_mut_ptr().cast(),
             std::mem::size_of_val(words.as_slice()) as u32,
         )
+    };
+    if inventory.is_err() {
+        let mut capabilities = 0;
+        // SAFETY: the handle remains live and capabilities is a writable DWORD.
+        let volume = unsafe {
+            GetVolumeInformationByHandleW(handle, None, None, None, Some(&mut capabilities), None)
+        };
+        if volume.is_ok() && capabilities & FILE_NAMED_STREAMS == 0 {
+            return Ok(StreamInventory {
+                data: length,
+                zone: None,
+            });
+        }
+        return Err(CopyFailure::UnsupportedStreams);
     }
-    .map_err(|_| CopyFailure::UnsupportedStreams)?;
+    parse_stream_inventory(&words, length)
+}
 
-    let record = words.as_ptr().cast::<FILE_STREAM_INFO>();
-    // SAFETY: the zero-initialized buffer contains a complete fixed header
-    // after the successful query. Read only fixed fields before checking name.
-    let (next, bytes, size) = unsafe {
-        (
-            (*record).NextEntryOffset,
-            (*record).StreamNameLength as usize,
-            (*record).StreamSize,
-        )
-    };
+fn parse_stream_inventory(words: &[u64], length: u64) -> Result<StreamInventory, CopyFailure> {
+    let size = std::mem::size_of_val(words);
     let header = std::mem::offset_of!(FILE_STREAM_INFO, StreamName);
-    if next != 0
-        || bytes == 0
-        || !bytes.is_multiple_of(2)
-        || bytes > std::mem::size_of_val(words.as_slice()) - header
-    {
-        return Err(CopyFailure::UnsupportedStreams);
+    let mut offset = 0_usize;
+    let mut data = None;
+    let mut zone = None;
+    loop {
+        let name_start = offset
+            .checked_add(header)
+            .filter(|&end| end <= size)
+            .ok_or(CopyFailure::UnsupportedStreams)?;
+        // SAFETY: the aligned record starts within the buffer and all of the
+        // fixed fields before StreamName are inside the verified header.
+        let (next, bytes, stream_size) = unsafe {
+            let record = words
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<FILE_STREAM_INFO>();
+            (
+                (*record).NextEntryOffset as usize,
+                (*record).StreamNameLength as usize,
+                (*record).StreamSize,
+            )
+        };
+        if bytes == 0 || !bytes.is_multiple_of(2) {
+            return Err(CopyFailure::UnsupportedStreams);
+        }
+        let name_end = name_start
+            .checked_add(bytes)
+            .filter(|&end| end <= size)
+            .ok_or(CopyFailure::UnsupportedStreams)?;
+        let next_offset = if next != 0 {
+            let next_offset = offset
+                .checked_add(next)
+                .filter(|&end| {
+                    end >= name_end
+                        && end <= size
+                        && end.is_multiple_of(std::mem::align_of::<FILE_STREAM_INFO>())
+                })
+                .ok_or(CopyFailure::UnsupportedStreams)?;
+            Some(next_offset)
+        } else {
+            None
+        };
+        // SAFETY: the checked UTF-16 name range lies within the aligned buffer.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                words.as_ptr().cast::<u8>().add(name_start).cast::<u16>(),
+                bytes / 2,
+            )
+        };
+        let name = String::from_utf16(name).map_err(|_| CopyFailure::UnsupportedStreams)?;
+        let stream_size =
+            u64::try_from(stream_size).map_err(|_| CopyFailure::UnsupportedStreams)?;
+        if name.eq_ignore_ascii_case("::$DATA") && data.is_none() {
+            data = Some(stream_size);
+        } else if name.eq_ignore_ascii_case(":Zone.Identifier:$DATA")
+            && zone.is_none()
+            && stream_size <= MAX_ZONE_IDENTIFIER_BYTES
+        {
+            zone = Some(stream_size);
+        } else {
+            return Err(CopyFailure::UnsupportedStreams);
+        }
+        let Some(next_offset) = next_offset else {
+            break;
+        };
+        offset = next_offset;
     }
-    // SAFETY: the checked range stays inside the aligned record buffer.
-    let name = unsafe {
-        std::slice::from_raw_parts(
-            words.as_ptr().cast::<u8>().add(header).cast::<u16>(),
-            bytes / 2,
-        )
-    };
-    if !name.iter().copied().eq("::$DATA".encode_utf16()) {
-        return Err(CopyFailure::UnsupportedStreams);
-    }
-    if u64::try_from(size).ok() != Some(length) {
+    if data != Some(length) {
         return Err(CopyFailure::ContentMismatch);
     }
-    Ok(())
+    Ok(StreamInventory { data: length, zone })
 }
 
 fn read_chunks(
@@ -328,15 +430,15 @@ fn read_chunks(
 }
 
 fn write_chunk(
-    stage: &TransferStage,
     control: &CopyControl,
     offset: u64,
     bytes: &[u8],
+    mut write: impl FnMut(u64, &[u8]) -> Result<usize, CopyFailure>,
 ) -> Result<(), CopyFailure> {
     let mut written = 0;
     while written < bytes.len() {
         control.check()?;
-        let progress = stage.write(&control.io, offset + written as u64, &bytes[written..])?;
+        let progress = write(offset + written as u64, &bytes[written..])?;
         if progress == 0 || progress > bytes.len() - written {
             return Err(
                 io::Error::new(io::ErrorKind::WriteZero, "invalid staging write progress").into(),
@@ -365,9 +467,13 @@ fn apply_metadata(stage: &TransferStage, source: EntryMetadata) -> Result<(), Co
     Ok(())
 }
 
-fn check_output(file: &File, source: EntryMetadata, length: u64) -> Result<(), CopyFailure> {
+fn check_output(
+    file: &File,
+    source: EntryMetadata,
+    streams: StreamInventory,
+) -> Result<(), CopyFailure> {
     let copied = observe_entry_metadata(file)?;
-    if copied.kind != EntryKind::File || copied.byte_len != Some(length) {
+    if copied.kind != EntryKind::File || copied.byte_len != Some(streams.data) {
         return Err(CopyFailure::ContentMismatch);
     }
     if copied.created != source.created
@@ -377,7 +483,21 @@ fn check_output(file: &File, source: EntryMetadata, length: u64) -> Result<(), C
     {
         return Err(CopyFailure::UnsupportedMetadata);
     }
-    require_default_stream(file, length)
+    if stream_inventory(file, streams.data)? != streams {
+        return Err(CopyFailure::ContentMismatch);
+    }
+    Ok(())
+}
+
+struct StagedCopy {
+    data_hash: Option<[u8; 32]>,
+    zone: Option<StagedZone>,
+}
+
+struct StagedZone {
+    file: TransferFile,
+    hash: [u8; 32],
+    length: u64,
 }
 
 fn fill_stage(
@@ -386,22 +506,63 @@ fn fill_stage(
     verify: bool,
     control: &CopyControl,
     mut progress: impl FnMut(u64),
-) -> Result<Option<[u8; 32]>, CopyFailure> {
+) -> Result<StagedCopy, CopyFailure> {
     let mut hash = verify.then(Sha256::new);
     read_chunks(&copy.source_file, copy.length, control, |offset, bytes| {
-        write_chunk(stage, control, offset, bytes)?;
+        write_chunk(control, offset, bytes, |at, chunk| {
+            stage
+                .write(&control.io, at, chunk)
+                .map_err(CopyFailure::from)
+        })?;
         if let Some(hash) = &mut hash {
             hash.update(bytes);
         }
         progress(offset + bytes.len() as u64);
         Ok(())
     })?;
+    let zone = copy
+        .source_zone
+        .as_ref()
+        .map(|source| copy_zone(stage, source, control))
+        .transpose()?;
     apply_metadata(stage, copy.source.metadata())?;
     stage.flush()?;
-    check_output(stage.file(), copy.source.metadata(), copy.length)?;
+    check_output(stage.file(), copy.source.metadata(), copy.streams())?;
     copy.check_source(control)?;
     copy.check_vacancy(control)?;
-    Ok(hash.map(|hash| hash.finalize().into()))
+    Ok(StagedCopy {
+        data_hash: hash.map(|hash| hash.finalize().into()),
+        zone,
+    })
+}
+
+fn copy_zone(
+    stage: &TransferStage,
+    source: &HeldZone,
+    control: &CopyControl,
+) -> Result<StagedZone, CopyFailure> {
+    let output = stage.create_zone()?;
+    let mut hash = Sha256::new();
+    read_chunks(&source.file, source.length, control, |offset, bytes| {
+        write_chunk(control, offset, bytes, |at, chunk| {
+            control
+                .io
+                .write_at(&output, at, chunk.into())
+                .map_err(CopyFailure::from)
+        })?;
+        hash.update(bytes);
+        Ok(())
+    })?;
+    output.flush()?;
+    let expected: [u8; 32] = hash.finalize().into();
+    if hash_file(&output, source.length, control)? != expected {
+        return Err(CopyFailure::ContentMismatch);
+    }
+    Ok(StagedZone {
+        file: output,
+        hash: expected,
+        length: source.length,
+    })
 }
 
 /// Publish an ordinary regular file to its approved vacant target. The
@@ -411,14 +572,15 @@ pub fn copy_to_vacancy(
     control: &CopyControl,
     progress: impl FnMut(u64),
 ) -> Result<CopiedFile, CopyError> {
-    copy_with_publication_hook(entry, control, progress, || {})
+    copy_with_publication_hooks(entry, control, progress, |_| {}, || {})
 }
 
-fn copy_with_publication_hook(
+fn copy_with_publication_hooks(
     entry: &ApprovedTransferEntry,
     control: &CopyControl,
     progress: impl FnMut(u64),
-    before_publication: impl FnOnce(),
+    before_publication: impl FnOnce(&Path),
+    after_publication: impl FnOnce(),
 ) -> Result<CopiedFile, CopyError> {
     let copy = GuardedCopy::open(entry, control)?;
     let stage = copy
@@ -426,38 +588,49 @@ fn copy_with_publication_hook(
         .directory()
         .create_stage(copy.target.requested_leaf().as_os_str())
         .map_err(|error| stage_create_error(copy.target, error))?;
-    let stage_artifact = CopyRecoveryArtifact::Owned(CopyArtifact {
+    let stage_artifact = CopyArtifact {
         path: copy.target.parent().path().join(stage.leaf()),
         parent: copy.target.parent().identity(),
         identity: stage.identity(),
         state: CopyArtifactState::StageNeedsReconciliation,
-    });
-    let expected_hash = match fill_stage(&stage, &copy, entry.verify_content(), control, progress) {
+    };
+    let staged = match fill_stage(&stage, &copy, entry.verify_content(), control, progress) {
         Ok(hash) => hash,
         Err(failure) => match stage.abort() {
             Ok(()) => return Err(failure.into()),
             Err(error) => {
                 return Err(CopyError {
                     failure,
-                    artifact: Some(stage_artifact),
+                    artifact: Some(CopyRecoveryArtifact::Owned(stage_artifact)),
                     recovery_error: Some(error.to_string()),
                 });
             }
         },
     };
+    let mut refused = None;
     let published = stage
         .publish(copy.target.requested_leaf().as_os_str(), || {
-            before_publication();
-            !control.is_cancelled()
+            before_publication(&stage_artifact.path);
+            let recheck = copy.check_source(control).and_then(|()| {
+                copy.target_parent
+                    .check_chain(&control.cancellation)
+                    .map_err(CopyFailure::from)
+            });
+            refused = recheck.err();
+            refused.is_none()
         })
         .map_err(|error| {
-            let artifact = error.cleanup_failed().then_some(stage_artifact);
+            let artifact = error
+                .cleanup_failed()
+                .then_some(CopyRecoveryArtifact::Owned(stage_artifact));
             let recovery_error = artifact.as_ref().map(|_| error.to_string());
-            let failure = if error.kind() == io::ErrorKind::AlreadyExists {
-                CopyFailure::DestinationOccupied
-            } else {
-                error.into()
-            };
+            let failure = refused.unwrap_or_else(|| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    CopyFailure::DestinationOccupied
+                } else {
+                    error.into()
+                }
+            });
             CopyError {
                 failure,
                 artifact,
@@ -475,16 +648,20 @@ fn copy_with_publication_hook(
         identity: published.identity(),
         state: CopyArtifactState::Published,
     };
-    let verification = finish_publication(&copy, &published, &artifact, expected_hash, control)
-        .map_err(|failure| CopyError {
-            failure,
-            artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
-            recovery_error: None,
+    after_publication();
+    let verification =
+        finish_publication(&copy, &published, &artifact, staged, control).map_err(|failure| {
+            CopyError {
+                failure,
+                artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+                recovery_error: None,
+            }
         })?;
     Ok(CopiedFile {
         source: copy.source.identity(),
         output: artifact,
         bytes: copy.length,
+        zone_bytes: copy.streams().zone,
         verification,
     })
 }
@@ -515,32 +692,56 @@ fn finish_publication(
     copy: &GuardedCopy<'_>,
     published: &TransferFile,
     artifact: &CopyArtifact,
-    expected_hash: Option<[u8; 32]>,
+    staged: StagedCopy,
     control: &CopyControl,
 ) -> Result<CopyVerification, CopyFailure> {
     published.file().sync_all()?;
     copy.target_parent.check_chain(&control.cancellation)?;
     checked_final_path(published.file(), &artifact.path)?;
-    check_output(published.file(), copy.source.metadata(), copy.length)?;
-    let verification = if let Some(expected) = expected_hash {
-        let mut hash = Sha256::new();
-        read_chunks(published, copy.length, control, |_, bytes| {
-            hash.update(bytes);
-            Ok(())
-        })?;
-        let actual: [u8; 32] = hash.finalize().into();
-        if actual != expected {
+    let streams = copy.streams();
+    check_output(published.file(), copy.source.metadata(), streams)?;
+    let zone_sha256 = staged
+        .zone
+        .as_ref()
+        .map(|zone| {
+            if zone.file.identity() != artifact.identity
+                || hash_file(&zone.file, zone.length, control)? != zone.hash
+            {
+                return Err(CopyFailure::ContentMismatch);
+            }
+            Ok(zone.hash)
+        })
+        .transpose()?;
+    let verification = if let Some(expected_data) = staged.data_hash {
+        let sha256 = hash_file(published, copy.length, control)?;
+        if sha256 != expected_data {
             return Err(CopyFailure::ContentMismatch);
         }
-        CopyVerification::Verified { sha256: actual }
+        CopyVerification::Verified {
+            sha256,
+            zone_sha256,
+        }
     } else {
         CopyVerification::NotRequested
     };
     copy.check_source(control)?;
     copy.target_parent.check_chain(&control.cancellation)?;
-    check_output(published.file(), copy.source.metadata(), copy.length)?;
+    check_output(published.file(), copy.source.metadata(), streams)?;
     control.check()?;
     Ok(verification)
+}
+
+fn hash_file(
+    file: &TransferFile,
+    length: u64,
+    control: &CopyControl,
+) -> Result<[u8; 32], CopyFailure> {
+    let mut hash = Sha256::new();
+    read_chunks(file, length, control, |_, bytes| {
+        hash.update(bytes);
+        Ok(())
+    })?;
+    Ok(hash.finalize().into())
 }
 
 #[cfg(test)]
@@ -550,7 +751,6 @@ mod tests {
         ApprovedTransferPlan, TransferAction, TransferDraft, inspect_source_tree, review_transfer,
     };
     use std::fs;
-    use std::path::Path;
     use std::sync::Arc;
 
     fn approve_file(source: &Path, destination: &Path, verify: bool) -> ApprovedTransferPlan {
@@ -606,7 +806,8 @@ mod tests {
                 assert_eq!(
                     copied.verification,
                     CopyVerification::Verified {
-                        sha256: Sha256::digest(bytes).into()
+                        sha256: Sha256::digest(bytes).into(),
+                        zone_sha256: None,
                     },
                 );
                 assert_eq!(
@@ -634,13 +835,14 @@ mod tests {
         fs::create_dir(&dest).unwrap();
         fs::write(&source, b"original source").unwrap();
         let plan = approve_file(&source, &dest, true);
-        let error = copy_with_publication_hook(
+        let error = copy_with_publication_hooks(
             &plan.entries()[0],
             &CopyControl::default(),
             |_| {},
-            || {
+            |_| {
                 fs::write(&target, b"foreign winner").unwrap();
             },
+            || {},
         )
         .unwrap_err();
         assert!(
@@ -704,6 +906,37 @@ mod tests {
     }
 
     #[test]
+    fn transfer_copy_native_stream_visible_at_final_admission_blocks_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let dest = temp.path().join("output");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&source, b"source payload").unwrap();
+        let plan = approve_file(&source, &dest, true);
+        let mut ads = source.clone().into_os_string();
+        ads.push(":LateExtra:$DATA");
+        let error = copy_with_publication_hooks(
+            &plan.entries()[0],
+            &CopyControl::default(),
+            |_| {},
+            |_| fs::write(Path::new(&ads), b"late stream").unwrap(),
+            || {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.failure,
+                CopyFailure::UnsupportedStreams
+                    | CopyFailure::Admission(AdmissionError::StaleEntry)
+            ),
+            "{error:?}"
+        );
+        assert!(error.artifact.is_none());
+        assert_eq!(fs::read_dir(dest).unwrap().count(), 0);
+        assert_eq!(fs::read(Path::new(&ads)).unwrap(), b"late stream");
+    }
+
+    #[test]
     fn transfer_copy_native_late_source_stream_change_reports_the_published_file() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.txt");
@@ -714,9 +947,10 @@ mod tests {
         let plan = approve_file(&source, &dest, true);
         let mut ads = source.clone().into_os_string();
         ads.push(":LateExtra:$DATA");
-        let error = copy_with_publication_hook(
+        let error = copy_with_publication_hooks(
             &plan.entries()[0],
             &CopyControl::default(),
+            |_| {},
             |_| {},
             || fs::write(Path::new(&ads), b"late stream").unwrap(),
         )
@@ -736,6 +970,80 @@ mod tests {
         assert_eq!(artifact.path, target);
         assert_eq!(fs::read(target).unwrap(), b"source payload");
         assert_eq!(fs::read(Path::new(&ads)).unwrap(), b"late stream");
+    }
+
+    #[test]
+    fn transfer_copy_native_zone_identifier_survives_copy_and_independent_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("output");
+        fs::create_dir(&dest).unwrap();
+        let data = b"ordinary downloaded file";
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.invalid/file\r\n";
+        let zone_path = |base: &Path| {
+            let mut path = base.as_os_str().to_owned();
+            path.push(":Zone.Identifier:$DATA");
+            PathBuf::from(path)
+        };
+
+        for (name, verify) in [("verify.txt", true), ("copy.txt", false)] {
+            let source = temp.path().join(name);
+            fs::write(&source, data).unwrap();
+            fs::write(zone_path(&source), zone).unwrap();
+            let plan = approve_file(&source, &dest, verify);
+            let receipt = copy_with_publication_hooks(
+                &plan.entries()[0],
+                &CopyControl::default(),
+                |_| {},
+                |staged| {
+                    let writer = fs::OpenOptions::new().write(true).open(zone_path(staged));
+                    assert_eq!(writer.unwrap_err().raw_os_error(), Some(32));
+                },
+                || {},
+            )
+            .unwrap();
+            assert_eq!(receipt.zone_bytes, Some(zone.len() as u64));
+            assert_eq!(receipt.bytes, data.len() as u64);
+            assert_eq!(fs::read(&receipt.output.path).unwrap(), data);
+            assert_eq!(fs::read(zone_path(&receipt.output.path)).unwrap(), zone);
+            assert_eq!(fs::read(zone_path(&source)).unwrap(), zone);
+            let recorded = plan.entries()[0].source().metadata();
+            let observed = crate::file_transfer::inspect_source(
+                &receipt.output.path,
+                &ScanCancellation::new(),
+            )
+            .unwrap()
+            .metadata();
+            assert_eq!(observed.created, recorded.created);
+            assert_eq!(observed.modified, recorded.modified);
+            assert_eq!(
+                receipt.verification,
+                if verify {
+                    CopyVerification::Verified {
+                        sha256: Sha256::digest(data).into(),
+                        zone_sha256: Some(Sha256::digest(zone).into()),
+                    }
+                } else {
+                    CopyVerification::NotRequested
+                },
+            );
+        }
+        assert_eq!(fs::read_dir(dest).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn transfer_copy_native_stream_inventory_rejects_records_past_the_buffer() {
+        let mut words = [0_u64; 8];
+        words[0] = (0x200_u64 << 32) | 8;
+        assert!(matches!(
+            parse_stream_inventory(&words, 0),
+            Err(CopyFailure::UnsupportedStreams)
+        ));
+
+        words[0] = (2_u64 << 32) | 0x1_0000;
+        assert!(matches!(
+            parse_stream_inventory(&words, 0),
+            Err(CopyFailure::UnsupportedStreams)
+        ));
     }
 
     #[test]
