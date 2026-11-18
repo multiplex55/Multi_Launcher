@@ -50,6 +50,14 @@ enum RootDialogEffect {
     },
 }
 
+pub(super) struct PendingDataConfirmationPass {
+    pass: super::utility_host::ViewportPassProvenance,
+    modal_generation: u64,
+    parent_epoch: u64,
+    intent: PendingRecoveryIntent,
+    result: ConfirmationResult,
+}
+
 #[cfg(test)]
 const ROOT_DIALOG_EFFECTS_TEST_ID: &str = "retained-root-dialog-effects-test-sink";
 
@@ -10445,6 +10453,9 @@ impl LauncherApp {
 
         navigation_owner != NavigationOwner::Blocked
             && match navigation_owner {
+                NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation, instance } => {
+                    self.jump_mode_enabled() && self.data_recovery_confirmation_owner_current(ctx, root_visible, instance)
+                }
                 NavigationOwner::SnippetPrompt { generation } => {
                     self.jump_mode_enabled()
                         && self.snippet_prompt_native_ui_owner_current(ctx, root_visible)
@@ -10456,6 +10467,41 @@ impl LauncherApp {
                 }
                 _ => self.jump_mode_host_input_allowed(ctx, root_visible),
             }
+    }
+
+    fn data_recovery_confirmation_identity(&self) -> Option<(u64, u64)> {
+        let (generation, parent_epoch) = self.pending_data_recovery_owner?;
+        (self.pending_data_recovery.is_some()
+            && self.confirm_modal.is_open()
+            && self.confirm_modal.generation() == generation
+            && self.data_recovery_dialog.open
+            && self.data_recovery_dialog.ui_epoch() == parent_epoch)
+            .then_some((generation, parent_epoch))
+    }
+
+    fn data_recovery_confirmation_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        generation: u64,
+    ) -> bool {
+        let layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("data-recovery-confirmation", generation)),
+        );
+        self.data_recovery_confirmation_identity()
+            .is_some_and(|(current, _)| current == generation)
+            && root_visible
+            && self.visible_flag.load(Ordering::Relaxed)
+            && !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && !self.action_sheet.is_open()
+            && self.native_ui_application_input_allowed(ctx)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
     }
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -10782,7 +10828,12 @@ impl LauncherApp {
             .snippet_prompt_dialog
             .session()
             .map(|session| session.generation);
-        let (mut candidate, mut combo_popup) = if prompt_is_open {
+        let (mut candidate, mut combo_popup) = if let Some((generation, _)) = self.data_recovery_confirmation_identity() {
+            let owner = if self.jump_mode_enabled() && self.data_recovery_confirmation_owner_current(ctx, root_visible, generation) {
+                NavigationOwner::Dialog { kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation, instance: generation }
+            } else { NavigationOwner::Blocked };
+            (owner, None)
+        } else if prompt_is_open {
             match (prompt_native_owner, prompt_generation) {
                 (true, Some(generation))
                     if self.jump_mode_enabled()
@@ -12531,6 +12582,9 @@ impl LauncherApp {
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.data_recovery_confirmation_identity().is_some_and(|(generation, _)| {
+                        self.data_recovery_confirmation_owner_current(&ctx, frame_logic.should_be_visible, generation)
+                    })
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -12557,6 +12611,7 @@ impl LauncherApp {
                     && !self.dashboard_editor.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                    && !self.hotfolder_inline_owns_escape(&ctx, frame_logic.should_be_visible)
                 {
                     #[cfg(test)]
                     {
@@ -14184,24 +14239,99 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             jump_session_escape_preempted,
         );
-        let confirmation_result = self.confirm_modal.ui(&ctx);
-        if first_ui_pass {
-            match confirmation_result {
-                ConfirmationResult::Confirmed => {
-                    if self.pending_data_recovery.is_some() {
-                        self.resolve_data_recovery_confirmation(true);
+        if let Some((generation, parent_epoch)) = self.pending_data_recovery_owner
+            && self.data_recovery_confirmation_identity().is_none()
+        {
+            if self.confirm_modal.generation() == generation
+                && self.confirm_modal.is_open()
+                && (!self.data_recovery_dialog.open
+                    || self.data_recovery_dialog.ui_epoch() != parent_epoch)
+            {
+                self.confirm_modal.close();
+            }
+            self.pending_data_recovery = None;
+            self.pending_data_recovery_owner = None;
+            self.pending_data_confirmation_pass = None;
+        }
+        if let Some((generation, parent_epoch)) = self.data_recovery_confirmation_identity() {
+            let owner = self.data_recovery_confirmation_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                generation,
+            );
+            let nav_owner = super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::jump_mode::ui::NavigationDialogKind::DataRecoveryConfirmation,
+                instance: generation,
+            };
+            let scope = (owner && self.jump_mode_ui.frame_navigation_owner() == nav_owner)
+                .then(|| {
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        super::jump_mode::SurfaceId::dialog(
+                            "data-recovery-confirmation",
+                            generation,
+                        ),
+                        super::jump_mode::TargetGeneration(generation),
+                        "data-recovery-confirmation",
+                        ctx.viewport_id(),
+                        nav_owner,
+                        false,
+                    )
+                })
+                .flatten()
+                .map(|scope| {
+                    if first_ui_pass && !ctx.will_discard() {
+                        scope
                     } else {
+                        scope.registration_only()
+                    }
+                });
+            let mut modal = self.confirm_modal.clone();
+            let mut result = modal.ui_with_jump_mode(
+                &ctx,
+                egui::Id::new(("data-recovery-confirmation", generation)),
+                scope.as_ref(),
+                owner,
+                owner && first_ui_pass && !ctx.will_discard(),
+            );
+            if owner
+                && first_ui_pass
+                && !ctx.will_discard()
+                && !jump_session_escape_preempted
+                && self.jump_mode_ui.active_session().is_none()
+                && ctx
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                result = ConfirmationResult::Cancelled;
+            }
+            if result != ConfirmationResult::None
+                && owner
+                && first_ui_pass
+                && !ctx.will_discard()
+                && let Some(intent) = self.pending_data_recovery.clone()
+            {
+                self.pending_data_confirmation_pass = Some(PendingDataConfirmationPass {
+                    pass: super::utility_host::ViewportPassProvenance::current(
+                        &ctx,
+                        egui::ViewportId::ROOT,
+                    ),
+                    modal_generation: generation,
+                    parent_epoch,
+                    intent,
+                    result,
+                });
+            }
+        } else {
+            let confirmation_result = self.confirm_modal.ui(&ctx);
+            if first_ui_pass {
+                match confirmation_result {
+                    ConfirmationResult::Confirmed => {
                         self.resolve_pending_confirmation(true);
                     }
-                }
-                ConfirmationResult::Cancelled => {
-                    if self.pending_data_recovery.is_some() {
-                        self.resolve_data_recovery_confirmation(false);
-                    } else {
+                    ConfirmationResult::Cancelled => {
                         self.resolve_pending_confirmation(false);
                     }
+                    ConfirmationResult::None => {}
                 }
-                ConfirmationResult::None => {}
             }
         }
         let prompt_native_owner =
@@ -15079,6 +15209,18 @@ impl LauncherApp {
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
         self.complete_hotfolder_manager(ctx);
         let mut effects = Vec::new();
+        if let Some(pending) = self.pending_data_confirmation_pass.take()
+            && pending.pass.was_retained(ctx)
+            && self.data_recovery_confirmation_identity()
+                == Some((pending.modal_generation, pending.parent_epoch))
+            && self.pending_data_recovery.as_ref() == Some(&pending.intent)
+            && self.data_recovery_confirmation_owner_current(ctx, true, pending.modal_generation)
+        {
+            self.confirm_modal.close();
+            self.resolve_data_recovery_confirmation(
+                pending.result == ConfirmationResult::Confirmed,
+            );
+        }
         let data_owner_current = self.native_ui_host_input_allowed(ctx, true)
             && super::jump_mode::ui::visible_top_middle_layer(ctx)
                 == Some(egui::LayerId::new(
@@ -24536,6 +24678,22 @@ mod tests {
                     false,
                 );
                 assert!(!app.hotfolder_dialog.test_clear_confirmation());
+
+                frame(
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                );
+                app.hotfolder_dialog.test_set_clear_confirmation(true);
+                frame(&mut app, Vec::new(), false);
+                frame(
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                );
+                assert!(!app.hotfolder_dialog.test_clear_confirmation());
+                assert!(app.hotfolder_dialog.open);
+                assert!(app.visible_flag.load(std::sync::atomic::Ordering::Relaxed));
             })
             .unwrap()
             .join()
@@ -25187,6 +25345,192 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+    #[test]
+    fn data_recovery_confirmation_jump_requires_retained_fresh_cancel() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+                let ctx = egui::Context::default();
+                let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+                app.set_jump_mode_enabled(true);
+                prepare_tool_dialog_root(&ctx, &mut app);
+                app.data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview)
+                    .unwrap();
+                app.focus_panel(super::super::Panel::DataRecoveryDialog);
+                for _ in 0..4 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let intent = PendingRecoveryIntent::Reset {
+                    store_id: crate::persistence::PersistentStoreId::Settings,
+                };
+                app.queue_data_recovery_confirmation(intent.clone());
+                for _ in 0..6 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let targets = app.jump_mode_ui.retained_registry().targets();
+                assert!(
+                    targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Confirm")
+                );
+                assert!(
+                    targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Cancel")
+                );
+                assert!(
+                    !targets
+                        .iter()
+                        .any(|target| target.metadata().label() == "Backups")
+                );
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.jump_mode_ui.active_session().is_some());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.confirm_modal.is_open());
+                assert_eq!(app.pending_data_recovery, Some(intent.clone()));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                let hint = dialog_hint_for_label(&app, "Cancel");
+                run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(hint)], false)
+                    .drop_without_applying_deltas();
+                assert_eq!(app.pending_data_recovery, Some(intent.clone()));
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    true,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(app.pending_data_recovery, Some(intent));
+                assert!(app.confirm_modal.is_open());
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                run_tool_dialog_frame(
+                    &ctx,
+                    &mut app,
+                    vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    false,
+                )
+                .drop_without_applying_deltas();
+                assert!(app.pending_data_recovery.is_none());
+                assert!(!app.confirm_modal.is_open());
+                assert!(app.data_recovery_dialog.open);
+                for jump_enabled in [true, false] {
+                    app.set_jump_mode_enabled(jump_enabled);
+                    app.queue_data_recovery_confirmation(PendingRecoveryIntent::Reset {
+                        store_id: crate::persistence::PersistentStoreId::Settings,
+                    });
+                    for _ in 0..6 {
+                        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                            .drop_without_applying_deltas();
+                    }
+                    assert!(app.confirm_modal.is_open());
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        &mut app,
+                        vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    assert!(
+                        !app.confirm_modal.is_open(),
+                        "Escape cancels the current child"
+                    );
+                    assert!(app.pending_data_recovery.is_none());
+                    assert!(
+                        app.data_recovery_dialog.open,
+                        "Escape must preserve the parent"
+                    );
+                    assert!(
+                        app.visible_flag_state(),
+                        "Escape must not hide the launcher"
+                    );
+                }
+                app.queue_data_recovery_confirmation(PendingRecoveryIntent::Reset {
+                    store_id: crate::persistence::PersistentStoreId::Settings,
+                });
+                app.confirm_modal
+                    .open_custom("A different request", "Generic confirmation");
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+                assert!(app.pending_data_recovery.is_none());
+                assert!(
+                    app.confirm_modal.is_open(),
+                    "replacing the modal must not close the generic request"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

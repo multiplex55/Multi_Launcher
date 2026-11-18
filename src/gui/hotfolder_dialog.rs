@@ -362,6 +362,13 @@ impl HotFolderDialog {
         self.popup_anchors = state.popup_anchors;
         self.popup_viewport = state.popup_viewport;
     }
+    pub(super) fn owns_inline_escape(&self, snapshot: &HotFolderDriverSnapshot) -> bool {
+        self.delete_confirmation.is_some()
+            || self.clear_history_confirmation
+            || self.editor.as_ref().is_some_and(|editor| editor.picker_open)
+            || (self.editor.is_none() && !snapshot.enable_previews.is_empty())
+    }
+
     pub(super) fn owned_popup_layer(
         &self,
         ctx: &egui::Context,

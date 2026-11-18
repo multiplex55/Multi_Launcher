@@ -92,7 +92,9 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M12-A5b | complete |
 | M12-A6a | complete |
 | M12-A6b1 | complete |
-| M12-A remaining, M12-B | pending |
+| M12-A6b2 | complete |
+| M12-A | complete |
+| M12-B | pending |
 | M13-A | pending |
 
 ## M0-B platform decisions
@@ -719,3 +721,10 @@ Review identified the ordinary ComboBox ownership conflict and clipped editor fo
 ### M12-A6b1 Data & Recovery parent navigation
 
 The Data & Recovery window exposes its current section, snapshot, store, backup and diagnostics controls. The retained root pass owns section changes and service or shell actions. Recovery preparation rechecks current busy state and exact target and snapshot eligibility. The initial hint and a discarded Enter leave the current section unchanged. A fresh retained Enter changes it. The scoped gate passed 5/5 (`ae4d5c50-d771-427f-9b6a-76bb09a7f82b`). Independent review reported no actionable parent findings. The existing confirmation behavior remains while the exact confirmation owner is added in M12-A6b2.
+
+
+### M12-A6b2 Exact utility confirmations and innermost Escape
+
+Data & Recovery binds its confirmation to the current shared modal opening, parent epoch and typed pending intent. The decision has its own Jump owner and is applied only after its exact root pass is retained. Replacing it with another confirmation retires recovery authority while preserving the replacement. Review exposed the launcher's earlier Escape preflight. The corrected route sends Escape to the exact Recovery child with Jump enabled or disabled and to the current Hot Folder inline decision before either parent can close. A hint still focuses without applying a decision.
+
+The initial child gate passed 5/5 (`37d4f94e-5410-46a0-8800-f13fc0ab49fa`), the Recovery Escape rerun passed 2/2 (`9cc3c86a-2669-42ce-861c-24b2e121f90a`), and the final shared Escape check passed 2/2 (`9d0e0ef8-363d-4eb2-aa1c-576b441f3114`). This closes the declared ordinary utilities in M12-A. Editor and companion coverage continues in M12-B.

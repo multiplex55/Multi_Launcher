@@ -1451,6 +1451,38 @@ impl super::LauncherApp {
         self.egui_ctx.request_repaint();
     }
 
+    fn hotfolder_manager_owner_current(
+        &self,
+        ctx: &eframe::egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        let layer = eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new("hotfolder_manager_window"),
+        );
+        let popup = self.hotfolder_dialog.owned_popup_layer(ctx, layer);
+        self.hotfolder_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && (!eframe::egui::Popup::is_any_open(ctx) || popup.is_some())
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer
+                    || Some(focus) == popup
+                    || focus.order == eframe::egui::Order::Background
+            })
+    }
+
+    pub(super) fn hotfolder_inline_owns_escape(
+        &self,
+        ctx: &eframe::egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        self.hotfolder_manager_owner_current(ctx, root_visible)
+            && self
+                .hotfolder_dialog
+                .owns_inline_escape(&self.hotfolder_runtime.snapshot())
+    }
+
     pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, first: bool) {
         let snapshot = self.hotfolder_runtime.snapshot();
         let root_visible = self.visible_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -1468,19 +1500,7 @@ impl super::LauncherApp {
             self.hotfolder_dialog
                 .set_picker_snapshot(inputs.launcher_targets, inputs.mkmacro_document);
         }
-        let layer = eframe::egui::LayerId::new(
-            eframe::egui::Order::Middle,
-            eframe::egui::Id::new("hotfolder_manager_window"),
-        );
-        let popup = self.hotfolder_dialog.owned_popup_layer(ctx, layer);
-        let owner = self.native_ui_host_input_allowed(ctx, root_visible)
-            && super::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-            && (!eframe::egui::Popup::is_any_open(ctx) || popup.is_some())
-            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
-                focus == layer
-                    || Some(focus) == popup
-                    || focus.order == eframe::egui::Order::Background
-            });
+        let owner = self.hotfolder_manager_owner_current(ctx, root_visible);
         let nav = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let scope = match nav {
             super::jump_mode::ui::NavigationOwner::Dialog {

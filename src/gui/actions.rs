@@ -43,9 +43,16 @@ impl LauncherApp {
         let (description, warning) = intent.confirmation_copy(label);
         self.pending_data_recovery = Some(intent);
         self.confirm_modal.open_custom(description, warning);
+        self.pending_data_recovery_owner = Some((
+            self.confirm_modal.generation(),
+            self.data_recovery_dialog.ui_epoch(),
+        ));
+        self.pending_data_confirmation_pass = None;
     }
 
     pub(crate) fn resolve_data_recovery_confirmation(&mut self, confirmed: bool) {
+        self.pending_data_recovery_owner = None;
+        self.pending_data_confirmation_pass = None;
         if let Some(command) = data_recovery_dialog::resolve_confirmed_intent(
             &mut self.pending_data_recovery,
             confirmed,
