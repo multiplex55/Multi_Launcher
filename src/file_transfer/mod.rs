@@ -4,12 +4,17 @@
 //! leaf is evidence from a single anchored open, never permission to write.
 
 mod copy;
+mod execute;
 mod plan;
 mod tree;
 
 pub use copy::{
     CopiedFile, CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure,
     CopyRecoveryArtifact, CopyVerification, copy_to_vacancy,
+};
+pub use execute::{
+    CopyExecution, DirectoryCopy, DirectoryTimes, ExecutionProgress, ExecutionRow, ExecutionState,
+    execute_copy_plan,
 };
 pub use plan::{
     ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, GroupChoice, ReviewBlock,
@@ -390,6 +395,8 @@ enum DirectoryAccess {
     Observe,
     List,
     CreateFile,
+    CreateDirectory,
+    WriteDirectoryMetadata,
 }
 
 struct HeldParent {
@@ -419,6 +426,12 @@ impl HeldParent {
             (true, DirectoryAccess::CreateFile) => {
                 TransferDirectory::open_create_file_root(&drive)?
             }
+            (true, DirectoryAccess::CreateDirectory) => {
+                TransferDirectory::open_create_directory_root(&drive)?
+            }
+            (true, DirectoryAccess::WriteDirectoryMetadata) => {
+                return Err(AdmissionError::InvalidPath);
+            }
             _ => TransferDirectory::open_root(&drive)?,
         };
         let volume = root.identity().volume_serial_number();
@@ -441,6 +454,12 @@ impl HeldParent {
             let child = match (index == final_index, access) {
                 (true, DirectoryAccess::List) => parent.open_listable_child(&name)?,
                 (true, DirectoryAccess::CreateFile) => parent.open_create_file_child(&name)?,
+                (true, DirectoryAccess::CreateDirectory) => {
+                    parent.open_create_directory_child(&name)?
+                }
+                (true, DirectoryAccess::WriteDirectoryMetadata) => {
+                    parent.open_metadata_write_child(&name)?
+                }
                 _ => parent.open_child(&name)?,
             };
             let stamp = directory_stamp(&child, volume)?;

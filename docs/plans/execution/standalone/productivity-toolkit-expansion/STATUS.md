@@ -60,7 +60,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-A2B | complete |
 | M9-B1A | complete |
 | M9-B1B | complete |
-| M9-B2A, M9-B2B, M9-B3+, M9-C, M9-D | pending |
+| M9-B2A | complete |
+| M9-B2B, M9-B3+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -489,3 +490,6 @@ Source streams are checked at final namespace admission and after publication. A
 All 14 focused native-copy and shared archive checks passed with the M9-B1A filter. The added cases include actual NTFS Zone bytes, a retained stream guard, bounded malformed record rejection and late-source changes on each side of publication. Other named streams remain explicit unsupported outcomes. Staged whitespace verification passed.
 
 [Windows file streams](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams) · [Windows stream records](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_stream_info)
+
+
+M9-B2A verified on Windows with 21 targeted Nextest passes. Copy and Duplicate create guarded directories and apply directory timestamps after completing children. Explicit Merge preserves unrelated contents and reports late source changes. Native fixtures verified late competing directories, replaced parents, named stream refusal, definite no-effect preflight, and existing archive destination behavior.

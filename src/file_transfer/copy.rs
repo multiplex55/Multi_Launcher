@@ -55,7 +55,11 @@ impl CopyControl {
         self.io.is_cancelled()
     }
 
-    fn check(&self) -> Result<(), CopyFailure> {
+    pub(super) fn cancellation(&self) -> &ScanCancellation {
+        &self.cancellation
+    }
+
+    pub(super) fn check(&self) -> Result<(), CopyFailure> {
         if self.is_cancelled() {
             return Err(CopyFailure::Cancelled);
         }
@@ -110,9 +114,7 @@ pub enum CopyFailure {
 impl fmt::Display for CopyFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::UnsupportedPlan => {
-                "Choose an approved regular file and an exact vacant destination."
-            }
+            Self::UnsupportedPlan => "The copy engine cannot run this approved operation.",
             Self::Cancelled => "Copy cancelled.",
             Self::DestinationOccupied => "A file or folder now occupies the reviewed destination.",
             Self::UnsupportedStreams => {
@@ -162,6 +164,11 @@ pub enum CopyRecoveryArtifact {
         path: PathBuf,
         parent: NativeFileIdentity,
     },
+    UnprovenDirectory {
+        path: PathBuf,
+        parent: NativeFileIdentity,
+        creation_observed: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -205,12 +212,12 @@ struct GuardedCopy<'a> {
 }
 
 impl<'a> GuardedCopy<'a> {
-    fn open(entry: &'a ApprovedTransferEntry, control: &CopyControl) -> Result<Self, CopyFailure> {
+    fn open(
+        source: &'a EntrySnapshot,
+        target: &'a TargetSnapshot,
+        control: &CopyControl,
+    ) -> Result<Self, CopyFailure> {
         control.check()?;
-        let source = entry.source();
-        let ApprovedTarget::CreateAt(target) = entry.destination() else {
-            return Err(CopyFailure::UnsupportedPlan);
-        };
         let metadata = source.metadata();
         if metadata.kind != EntryKind::File
             || !matches!(target.occupancy(), TargetOccupancy::Vacant)
@@ -304,33 +311,60 @@ struct StreamInventory {
     zone: Option<u64>,
 }
 
-fn stream_inventory(file: &File, length: u64) -> Result<StreamInventory, CopyFailure> {
-    let handle = HANDLE(file.as_raw_handle());
+fn query_stream_records(file: &File) -> windows::core::Result<Vec<u64>> {
     let mut words = vec![0_u64; STREAM_INFO_WORDS];
     // SAFETY: the live file is borrowed and the aligned buffer is writable.
-    let inventory = unsafe {
+    unsafe {
         GetFileInformationByHandleEx(
-            handle,
+            HANDLE(file.as_raw_handle()),
             FileStreamInfo,
             words.as_mut_ptr().cast(),
             std::mem::size_of_val(words.as_slice()) as u32,
         )
+    }?;
+    Ok(words)
+}
+
+fn volume_has_no_named_streams(file: &File) -> bool {
+    let mut capabilities = 0;
+    // SAFETY: the handle is live and capabilities points to a writable DWORD.
+    let volume = unsafe {
+        GetVolumeInformationByHandleW(
+            HANDLE(file.as_raw_handle()),
+            None,
+            None,
+            None,
+            Some(&mut capabilities),
+            None,
+        )
     };
-    if inventory.is_err() {
-        let mut capabilities = 0;
-        // SAFETY: the handle remains live and capabilities is a writable DWORD.
-        let volume = unsafe {
-            GetVolumeInformationByHandleW(handle, None, None, None, Some(&mut capabilities), None)
-        };
-        if volume.is_ok() && capabilities & FILE_NAMED_STREAMS == 0 {
-            return Ok(StreamInventory {
-                data: length,
-                zone: None,
-            });
-        }
-        return Err(CopyFailure::UnsupportedStreams);
+    volume.is_ok() && capabilities & FILE_NAMED_STREAMS == 0
+}
+
+fn stream_inventory(file: &File, length: u64) -> Result<StreamInventory, CopyFailure> {
+    match query_stream_records(file) {
+        Ok(words) => parse_stream_inventory(&words, length),
+        Err(_) if volume_has_no_named_streams(file) => Ok(StreamInventory {
+            data: length,
+            zone: None,
+        }),
+        Err(_) => Err(CopyFailure::UnsupportedStreams),
     }
-    parse_stream_inventory(&words, length)
+}
+
+pub(super) fn require_no_directory_streams(file: &File) -> Result<(), CopyFailure> {
+    use windows::Win32::Foundation::ERROR_HANDLE_EOF;
+    use windows::core::HRESULT;
+
+    match query_stream_records(file) {
+        Err(error)
+            if error.code() == HRESULT::from_win32(ERROR_HANDLE_EOF.0)
+                || volume_has_no_named_streams(file) =>
+        {
+            Ok(())
+        }
+        _ => Err(CopyFailure::UnsupportedStreams),
+    }
 }
 
 fn parse_stream_inventory(words: &[u64], length: u64) -> Result<StreamInventory, CopyFailure> {
@@ -582,7 +616,45 @@ fn copy_with_publication_hooks(
     before_publication: impl FnOnce(&Path),
     after_publication: impl FnOnce(),
 ) -> Result<CopiedFile, CopyError> {
-    let copy = GuardedCopy::open(entry, control)?;
+    let ApprovedTarget::CreateAt(target) = entry.destination() else {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    };
+    copy_file_bound(
+        entry.source(),
+        target,
+        entry.verify_content(),
+        control,
+        progress,
+        (before_publication, after_publication),
+    )
+}
+
+pub(super) fn copy_to_created_parent(
+    entry: &ApprovedTransferEntry,
+    target: &TargetSnapshot,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+) -> Result<CopiedFile, CopyError> {
+    copy_file_bound(
+        entry.source(),
+        target,
+        entry.verify_content(),
+        control,
+        progress,
+        (|_| {}, || {}),
+    )
+}
+
+fn copy_file_bound(
+    source: &EntrySnapshot,
+    target: &TargetSnapshot,
+    verify_content: bool,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    hooks: (impl FnOnce(&Path), impl FnOnce()),
+) -> Result<CopiedFile, CopyError> {
+    let (before_publication, after_publication) = hooks;
+    let copy = GuardedCopy::open(source, target, control)?;
     let stage = copy
         .target_parent
         .directory()
@@ -594,7 +666,7 @@ fn copy_with_publication_hooks(
         identity: stage.identity(),
         state: CopyArtifactState::StageNeedsReconciliation,
     };
-    let staged = match fill_stage(&stage, &copy, entry.verify_content(), control, progress) {
+    let staged = match fill_stage(&stage, &copy, verify_content, control, progress) {
         Ok(hash) => hash,
         Err(failure) => match stage.abort() {
             Ok(()) => return Err(failure.into()),

@@ -162,6 +162,7 @@ pub(crate) struct NativeArchiveError {
     cleanup_attempted: bool,
     cleanup_failure: Option<Box<NativeFailure>>,
     cleanup_failed: bool,
+    unconfirmed_name_effect: bool,
 }
 
 impl NativeArchiveError {
@@ -183,6 +184,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -196,6 +198,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -209,6 +212,7 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -222,7 +226,13 @@ impl NativeArchiveError {
             cleanup_attempted: false,
             cleanup_failure: None,
             cleanup_failed: false,
+            unconfirmed_name_effect: false,
         }
+    }
+
+    fn with_unconfirmed_name_effect(mut self) -> Self {
+        self.unconfirmed_name_effect = true;
+        self
     }
 
     fn with_cleanup(mut self, cleanup: Result<(), NativeFailure>) -> Self {
@@ -239,6 +249,7 @@ impl NativeArchiveError {
             cleanup_attempted: true,
             cleanup_failed: cleanup_failure.is_some(),
             cleanup_failure,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -248,6 +259,7 @@ impl NativeArchiveError {
             cleanup_attempted: true,
             cleanup_failure: None,
             cleanup_failed: true,
+            unconfirmed_name_effect: false,
         }
     }
 
@@ -328,17 +340,20 @@ impl HeldDirectory {
     fn open_child_with_access(
         self: &Arc<Self>, component: &OsStr, require_add_file: bool, require_add_subdirectory: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
-        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false, false)
+        self.open_child_with_options(component, require_add_file, require_add_subdirectory, false, false, false)
     }
 
     fn open_child_with_options(
         self: &Arc<Self>, component: &OsStr, require_add_file: bool,
-        require_add_subdirectory: bool, no_recall: bool, list: bool,
+        require_add_subdirectory: bool, no_recall: bool, list: bool, write_attributes: bool,
     ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         let access = windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
             | windows::Win32::Storage::FileSystem::FILE_TRAVERSE
             | windows::Win32::Storage::FileSystem::SYNCHRONIZE
+            | if write_attributes {
+                windows::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES
+            } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
             | if list {
                 windows::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY
             } else { windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0) }
@@ -437,7 +452,7 @@ impl HeldDirectory {
                 "NtCreateFile did not report FILE_CREATED for output directory",
                 io::ErrorKind::InvalidData,
                 Some(self.identity),
-            ));
+            ).with_unconfirmed_name_effect());
         }
         on_created();
         let metadata = file.metadata().map_err(|error| {
@@ -1584,6 +1599,7 @@ fn open_relative(
         cleanup_attempted: false,
         cleanup_failure: None,
         cleanup_failed: false,
+        unconfirmed_name_effect: false,
     })?;
     if parent_attributes.FileAttributes
         & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
@@ -1641,17 +1657,23 @@ fn open_relative(
     // Unlike a data ReadFile/WriteFile request, it has no pending completion
     // object; do not accept another nonnegative NTSTATUS as completed work.
     if status.0 != 0 || io_status_value.0 != 0 {
+        let error = NativeArchiveError::from_ntstatus(
+            operation, evidence_status, Some(parent.identity),
+        );
         if !handle.is_invalid() {
-            // The documented NtCreateFile contract is synchronous. Close any
-            // unexpected non-success handle rather than leaking it.
+            // A returned handle on failure leaves the name effect uncertain.
             let unexpected = unsafe { File::from_raw_handle(handle.0 as RawHandle) };
             drop(unexpected);
+            return Err(error.with_unconfirmed_name_effect());
         }
-        return Err(NativeArchiveError::from_ntstatus(
-            operation,
-            evidence_status,
+        return Err(if status.0 >= 0 { error.with_unconfirmed_name_effect() } else { error });
+    }
+    if handle.is_invalid() {
+        return Err(NativeArchiveError::validation(
+            "NtCreateFile returned success without a valid handle",
+            io::ErrorKind::InvalidData,
             Some(parent.identity),
-        ));
+        ).with_unconfirmed_name_effect());
     }
     // SAFETY: NT success returned a new owned file handle; it is transferred
     // once to File and closed by RAII.
@@ -1852,7 +1874,6 @@ fn extended_path_wide_with_nul(path: &Path) -> Result<Vec<u16>, NativeArchiveErr
     Ok(wide)
 }
 
-/// A create-new stage tied to its held parent and file identity.
 fn default_stage_leaf() -> OsString {
     let serial = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
     OsString::from(format!(".multi-launcher-c06-{}-{serial}.stage", std::process::id()))
@@ -1869,6 +1890,7 @@ struct TransferStageAdmission<'a> {
     observation: &'a mut Option<StageCreateObservation>,
 }
 
+/// A create-new stage tied to its held parent and file identity.
 pub(crate) struct OwnedStage {
     file: VerifiedOverlappedFile,
     parent: Arc<HeldDirectory>,
@@ -1962,13 +1984,25 @@ impl OwnedStage {
             let (file, information) = match opened {
                 Ok(opened) => opened,
                 Err(error)
-                    if matches!(error.primary.win32_code, Some(80 | 183))
-                        || error.primary.nt_status == Some(0xc000_0035_u32 as i32) =>
+                    if !error.unconfirmed_name_effect
+                        && (matches!(error.primary.win32_code, Some(80 | 183))
+                            || error.primary.nt_status == Some(0xc000_0035_u32 as i32)) =>
                 {
                     last_collision = Some(error);
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    if error.unconfirmed_name_effect
+                        && let Some(transfer) = &mut transfer
+                    {
+                        *transfer.observation = Some(StageCreateObservation {
+                            leaf,
+                            identity: None,
+                            creation_confirmed: false,
+                        });
+                    }
+                    return Err(error);
+                }
             };
 
             if let Some(transfer) = &mut transfer {
@@ -3134,6 +3168,26 @@ mod tests {
     }
 
     #[test]
+    fn transfer_execute_native_directory_preflight_has_definite_no_effect() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let (root, parts) = split_local_absolute_path(&selected).unwrap();
+        let mut parent = transfer_native::TransferDirectory::open_root(&root).unwrap();
+        for (index, part) in parts.iter().enumerate() {
+            parent = if index + 1 == parts.len() {
+                parent.open_create_directory_child(part).unwrap()
+            } else {
+                parent.open_child(part).unwrap()
+            };
+        }
+
+        let Err(refused) = parent.create_directory(OsStr::new("invalid\\nested")) else {
+            panic!("the native boundary accepted a nonliteral directory name");
+        };
+        assert_eq!(refused.outcome, transfer_native::TransferDirectoryCreateOutcome::NotCreated);
+        assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
+    }
+
+    #[test]
     fn transfer_copy_native_stage_name_excludes_the_exact_final_name() {
         let (_temp, selected, _held, _outside) = fixture_tree();
         let (root, parts) = split_local_absolute_path(&selected).unwrap();
@@ -3274,6 +3328,18 @@ pub(crate) mod transfer_native {
 
     pub(crate) use super::{NativeArchiveError, split_local_absolute_path};
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum TransferDirectoryCreateOutcome {
+        NotCreated,
+        Observed,
+        Ambiguous,
+    }
+    #[derive(Debug)]
+    pub(crate) struct TransferDirectoryCreateFailure {
+        pub(crate) error: NativeArchiveError,
+        pub(crate) outcome: TransferDirectoryCreateOutcome,
+    }
+
     pub(crate) struct TransferDirectory(Arc<HeldDirectory>);
 
     impl TransferDirectory {
@@ -3306,12 +3372,12 @@ pub(crate) mod transfer_native {
         }
         pub(crate) fn open_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
             self.0
-                .open_child_with_options(name, false, false, true, false)
+                .open_child_with_options(name, false, false, true, false, false)
                 .map(Self)
         }
         pub(crate) fn open_listable_child(&self, name: &OsStr) -> Result<Self, NativeArchiveError> {
             self.0
-                .open_child_with_options(name, false, false, true, true)
+                .open_child_with_options(name, false, false, true, true, false)
                 .map(Self)
         }
         /// Opens the final destination directory with create-file access only.
@@ -3320,8 +3386,57 @@ pub(crate) mod transfer_native {
             name: &OsStr,
         ) -> Result<Self, NativeArchiveError> {
             self.0
-                .open_child_with_options(name, true, false, true, false)
+                .open_child_with_options(name, true, false, true, false, false)
                 .map(Self)
+        }
+        /// Grants directory creation only on this final child.
+        pub(crate) fn open_create_directory_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, true, true, false, false)
+                .map(Self)
+        }
+        /// Grants metadata updates only on this final child.
+        pub(crate) fn open_metadata_write_child(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, NativeArchiveError> {
+            self.0
+                .open_child_with_options(name, false, false, true, false, true)
+                .map(Self)
+        }
+        pub(crate) fn open_create_directory_root(root: &Path) -> Result<Self, NativeArchiveError> {
+            let (root, parts) = split_local_absolute_path(root)?;
+            if !parts.is_empty() {
+                return Err(NativeArchiveError::validation(
+                    "transfer root must be a drive root",
+                    io::ErrorKind::InvalidInput,
+                    None,
+                ));
+            }
+            open_volume_root_with_options(&root, false, true, true, false).map(Self)
+        }
+        /// Exclusively creates a child; failures never remove or merge entries.
+        pub(crate) fn create_directory(
+            &self,
+            name: &OsStr,
+        ) -> Result<Self, TransferDirectoryCreateFailure> {
+            let mut observed = false;
+            self.0
+                .create_child_observed(name, || observed = true)
+                .map(Self)
+                .map_err(|error| {
+                    let outcome = if observed {
+                        TransferDirectoryCreateOutcome::Observed
+                    } else if error.unconfirmed_name_effect {
+                        TransferDirectoryCreateOutcome::Ambiguous
+                    } else {
+                        TransferDirectoryCreateOutcome::NotCreated
+                    };
+                    TransferDirectoryCreateFailure { error, outcome }
+                })
         }
         pub(crate) fn open_create_file_root(root: &Path) -> Result<Self, NativeArchiveError> {
             let (root, parts) = split_local_absolute_path(root)?;
@@ -3729,7 +3844,8 @@ pub(crate) mod transfer_native {
     }
 
     pub(crate) fn is_missing_relative_leaf(error: &NativeArchiveError) -> bool {
-        error.primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
+        !error.unconfirmed_name_effect
+            && error.primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
     }
 }
 
