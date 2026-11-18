@@ -14,12 +14,12 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | --- | --- |
 | M0-A | complete |
 | M0-B | complete |
-| M1-A | complete, with interactive smoke pending |
+| M1-A | complete, with partial interactive smoke |
 | M2-A | complete |
-| M2-B | complete, with interactive smoke pending |
+| M2-B | complete |
 | M3-A | complete |
 | M3-B | complete |
-| M3-C | complete, with interactive smoke pending |
+| M3-C | complete |
 | M4-A | complete |
 | M4-B1 | complete |
 | M4-B2A | complete |
@@ -32,7 +32,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M4-C2A1 | complete |
 | M4-C2A2 | complete |
 | M4-C2B1 | complete |
-| M4-C2B2 | complete, with interactive smoke pending |
+| M4-C2B2 | complete, with partial interactive smoke |
+| M5-A1 | complete |
 | M5-A, M5-B | pending |
 | M6-A, M6-B | pending |
 | M7-A, M7-B | pending |
@@ -235,3 +236,20 @@ The first build exposed a test-only Context borrow error. The next run passed se
 M4-C2B1 was pushed at e29ddef9628e956d48c694bce12f228738310797. Chart Options now stages labeled literal and current named reference lines, and per-series color, line/marker style and applicable thickness. Stable reference IDs and keyboard-accessible scalar search are owner-bound. New named lines require an actual current scalar and positive log coordinates; old unavailable bindings remain editable. Distribution styles use an independent typed identity, including across rename/undo collisions. Dormant styles survive compatible mode switches. This closes M4-C implementation; interactive Windows evidence is still pending.
 
 The focused run passed 12 of 12 after substantive review. The final narrow correction rerun passed 2 of 2 using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(gui::calculation_chart_dialog::tests::chart_options_reference_and_style_widgets_apply_and_keep_ids) | test(gui::calculation_chart_dialog::tests::chart_options_reject_new_nonpositive_named_log_reference_with_unresolved_retained_reference)'. Diff whitespace verification passed.
+
+## M1–M4 combined Windows smoke
+
+The 2026-11-17 Eastern run built pushed SHA bc356a0ebc0cd512e5b18b3968f6e476b6d2ef11 with cargo build -p multi_launcher --bin multi_launcher --profile fast-dev --locked. The build exited 0. Binary SHA-256 was F5FABAC797683E5A52C835DA54700A1A27BAE752DDFDCEC752D99D5A00AE5439. The app ran with the isolated target/productivity-toolkit-expansion-evidence/m1a settings and both Paste Sequences shortcuts disabled.
+
+- ZIP: the real launcher command opened ZIP Extractor. Keyboard focus reached Choose ZIP, Enter opened the Windows Open picker, and Escape returned to Choose ZIP. The disposable folder had no extraction destination after cancellation. The automation could see the filename field in the parent accessibility tree but could not address it there, and the native modal was unavailable as a separate target. Selecting a ZIP, reviewing its proposed path and confirming extraction are covered by the targeted Windows tests, with interactive evidence incomplete.
+- Pad: launched calc pad and typed the synthetic source from calculation-fixture.txt. The real editor reported ordered [30, 20, 15, 10], doubled [20, 40, 30, 60], trailing [15, 17.5, 22.5], percentile 13.75 and regression slope 2.
+- Charts: opened from the actual Pad Configuration → Tools menu. Keyboard navigation exposed staged Gridlines, Legend, Reference lines, Series appearance, Apply, Cancel and Reset Axes controls. Histogram showed two bins of two observations each, and Cumulative showed four endpoints with 25%, 50%, 75% and 100%. Pop Out created the actual Charts — 1 window. Its captured accessibility tree exposed the window frame only, and window image capture timed out on both attempts. The targeted tests provide the evidence for viewport state, plot primitives, log/reference behavior and retained chart interaction. Popup content and copied image appearance were not inspected interactively.
+
+The M4-C2B2 12-case Nextest expression was test(gui::calculation_chart_dialog::tests::chart_options_) | test(calculation_pad::session::tests::chart_distribution_style_) | test(calculation_pad::session::tests::chart_styles_and_reference_ids_) | test(calculation_pad::session::tests::chart_hidden_style_) | test(calculation_pad::persistence::tests::chart_options_roundtrip_) | test(calculation_pad::persistence::tests::distribution_style_roundtrip_) | test(calculation_pad::chart::tests::chart_appearance_) | test(calculation_pad::chart::tests::histogram_distribution_style_), using the same productivity settings as the earlier run.
+
+
+## M5-A1 executable vector reference foundation
+
+M4-C2B2 was pushed at bc356a0ebc0cd512e5b18b3968f6e476b6d2ef11. The typed catalog draws callable spellings and signatures from the shared evaluator inventory. It covers all 27 vector transformation, callback and product calls, with argument ranges, expectations, stable related IDs and name/intent ranking. It reuses the established executable-example assertion. The original implementer handed back the checkpoint without changes, and the root finished it as sole writer. Independent review found no actionable issues.
+
+Windows Nextest passed 4 of 4 (including the grouped legacy examples) using cargo nextest run --config-file target/productivity-toolkit-nextest.toml -P productivity --lib --cargo-profile fast-dev --locked -j 1 -E 'test(calculation_pad::reference::tests::reference_) | test(shared_examples_evaluate_to_their_documented_results)'. The Rust compile took 11m 21s. Process counters confirmed resumed output during build diagnosis, so compilation completed without cancellation. Individual tests took 0.288s in total. Diff whitespace verification passed. The rest of the language and the retained help UI are separate pending work.

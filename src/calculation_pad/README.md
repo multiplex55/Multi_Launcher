@@ -261,6 +261,12 @@ intermediate values produce line-local errors. Matching empty element-wise
 operations and valid scalar scaling return `[]`; `dot([], [])` is zero and
 `[] / 0` fails. `+` remains element-wise addition.
 
+The executable reference catalog tracks vector calls against the Pad's evaluator
+signatures, with argument ranges, failure cases and expected results. For
+example, searching for the operation “remove last element” describes
+`pop([10, 20, 30])`, which returns `[10, 20]`. Use `last([10, 20, 30])`
+to read the scalar `30` separately.
+
 Collection calls are case-insensitive and produce new values without changing
 their inputs or previous results. `range()` remains a sequence and can be used
 as a loop iterable, while these operations require vectors.

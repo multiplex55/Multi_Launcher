@@ -20,6 +20,9 @@ mod operators;
 mod persistence;
 mod programmer;
 mod quantity;
+// The next reference milestone wires this catalog into the retained help dialog.
+#[allow(dead_code)]
+mod reference;
 mod session;
 mod sensitivity;
 mod statistics;
