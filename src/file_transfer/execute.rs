@@ -11,8 +11,10 @@ use crate::archive::transfer_native::{
 use crate::file_operations::set_replace_basic_info;
 
 use super::copy::{
-    copy_to_created_parent, copy_to_vacancy_reporting, require_no_directory_streams,
+    copy_to_created_parent, copy_to_replacement_reporting, copy_to_vacancy_reporting,
+    require_no_directory_streams,
 };
+use super::journal::TransferJournal;
 use super::{
     AdmissionError, ApprovedTarget, ApprovedTransferEntry, ApprovedTransferPlan, CopiedFile,
     CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure, CopyRecoveryArtifact,
@@ -62,8 +64,9 @@ pub enum ExecutionState {
     MergedDirectory(ParentSnapshot),
     Skipped,
     BlockedByParent(SourceNodeId),
+    BlockedByReceipt,
     Failed(CopyError),
-    Cancelled,
+    Cancelled(Option<CopyError>),
 }
 
 impl ExecutionState {
@@ -91,7 +94,7 @@ pub fn execute_copy_plan(
     control: &CopyControl,
     progress: impl FnMut(ExecutionProgress),
 ) -> Result<CopyExecution, CopyFailure> {
-    execute_copy_with_hooks(plan, control, progress, |_| {})
+    execute_copy_with_hooks(plan, control, progress, |_| {}, None)
 }
 
 fn execute_copy_with_hooks(
@@ -99,12 +102,14 @@ fn execute_copy_with_hooks(
     control: &CopyControl,
     mut progress: impl FnMut(ExecutionProgress),
     mut before_directory_create: impl FnMut(&Path),
+    mut journal: Option<&mut dyn TransferJournal>,
 ) -> Result<CopyExecution, CopyFailure> {
     if matches!(plan.draft().action, TransferAction::MoveTo(_))
-        || plan
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry.destination(), ApprovedTarget::Replace(_)))
+        || (journal.is_none()
+            && plan
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.destination(), ApprovedTarget::Replace(_))))
     {
         return Err(CopyFailure::UnsupportedPlan);
     }
@@ -118,11 +123,14 @@ fn execute_copy_with_hooks(
             state: ExecutionState::Skipped,
         })
         .collect();
+    let mut journal_failed = false;
     for entry in plan.entries() {
         let id = entry.id();
         let parent = plan.source().get(id).and_then(|source| source.parent());
-        let state = if control.is_cancelled() {
-            ExecutionState::Cancelled
+        let state = if journal_failed {
+            ExecutionState::BlockedByReceipt
+        } else if control.is_cancelled() {
+            ExecutionState::Cancelled(None)
         } else if let Some(parent) =
             parent.filter(|parent| !rows[parent.index()].state.admitted_directory())
         {
@@ -135,15 +143,16 @@ fn execute_copy_with_hooks(
                 control,
                 &mut progress,
                 &mut before_directory_create,
+                &mut journal,
             ) {
                 Ok(state) => state,
-                Err(error)
-                    if error.artifact.is_none()
-                        && matches!(error.failure, CopyFailure::Cancelled) =>
-                {
-                    ExecutionState::Cancelled
+                Err(error) if matches!(error.failure, CopyFailure::Cancelled) => {
+                    ExecutionState::Cancelled(Some(error))
                 }
-                Err(error) => ExecutionState::Failed(error),
+                Err(error) => {
+                    journal_failed = matches!(error.failure, CopyFailure::Journal(_));
+                    ExecutionState::Failed(error)
+                }
             }
         };
 
@@ -153,7 +162,15 @@ fn execute_copy_with_hooks(
             progress(ExecutionProgress::DirectoryCreated(id));
         }
     }
-    finalize_directory_times(plan, control, &mut rows, &mut progress);
+    if journal_failed {
+        for row in &mut rows {
+            if let ExecutionState::CreatedDirectory(directory) = &mut row.state {
+                directory.times = DirectoryTimes::Incomplete;
+            }
+        }
+    } else {
+        finalize_directory_times(plan, control, &mut rows, &mut progress);
+    }
     Ok(CopyExecution {
         rows,
         cancelled: control.is_cancelled(),
@@ -166,6 +183,7 @@ fn execute_entry(
     control: &CopyControl,
     progress: &mut impl FnMut(ExecutionProgress),
     before_directory_create: &mut impl FnMut(&Path),
+    journal: &mut Option<&mut dyn TransferJournal>,
 ) -> Result<ExecutionState, CopyError> {
     let id = entry.id();
     if let ApprovedTarget::Merge { target, directory } = entry.destination() {
@@ -175,7 +193,7 @@ fn execute_entry(
     }
 
     let target = match entry.destination() {
-        ApprovedTarget::CreateAt(target) => target.clone(),
+        ApprovedTarget::CreateAt(target) | ApprovedTarget::Replace(target) => target.clone(),
         ApprovedTarget::CreateIn { parent, leaf } => {
             let ExecutionState::CreatedDirectory(created) = &rows[parent.index()].state else {
                 return Err(CopyFailure::UnsupportedPlan.into());
@@ -185,10 +203,15 @@ fn execute_entry(
         }
         _ => return Err(CopyFailure::UnsupportedPlan.into()),
     };
-    if !matches!(target.occupancy(), TargetOccupancy::Vacant) {
+    if !matches!(entry.destination(), ApprovedTarget::Replace(_))
+        && !matches!(target.occupancy(), TargetOccupancy::Vacant)
+    {
         return Err(CopyFailure::DestinationOccupied.into());
     }
     if entry.source().metadata().kind == EntryKind::Directory {
+        if matches!(entry.destination(), ApprovedTarget::Replace(_)) {
+            return Err(CopyFailure::UnsupportedPlan.into());
+        }
         create_directory(entry.source(), &target, control, before_directory_create)
             .map(ExecutionState::CreatedDirectory)
     } else {
@@ -212,7 +235,13 @@ fn execute_entry(
             ApprovedTarget::CreateIn { .. } => {
                 copy_to_created_parent(entry, &target, control, report, verify)?
             }
-            _ => return Err(CopyFailure::UnsupportedPlan.into()),
+            ApprovedTarget::Replace(_) => {
+                let Some(journal) = journal else {
+                    return Err(CopyFailure::UnsupportedPlan.into());
+                };
+                copy_to_replacement_reporting(entry, control, report, verify, &mut **journal)?
+            }
+            ApprovedTarget::Merge { .. } => return Err(CopyFailure::UnsupportedPlan.into()),
         };
         (callback.borrow_mut())(ExecutionProgress::FileCompleted {
             entry: id,
@@ -360,6 +389,7 @@ fn create_directory(
             CopyRecoveryArtifact::Owned(output.clone())
         }),
         recovery_error: None,
+        replacement: None,
     })?;
     Ok(DirectoryCopy {
         output,
@@ -390,6 +420,7 @@ fn directory_create_error(
             }
         }),
         recovery_error: None,
+        replacement: None,
     }
 }
 
@@ -429,7 +460,7 @@ fn finalize_directory_times(
                 });
                 if let Err(failure) = decision {
                     *state = if matches!(failure, CopyFailure::Cancelled) {
-                        ExecutionState::Cancelled
+                        ExecutionState::Cancelled(None)
                     } else {
                         ExecutionState::Failed(failure.into())
                     };
@@ -665,6 +696,7 @@ mod tests {
                 fs::create_dir(path).unwrap();
                 fs::write(path.join("foreign.txt"), b"foreign").unwrap();
             },
+            None,
         )
         .unwrap();
         assert!(matches!(&outcome.rows[0].state,
@@ -810,6 +842,370 @@ mod tests {
         );
         assert_eq!(fs::read_dir(destination).unwrap().count(), 0);
         assert_eq!(fs::read(Path::new(&ads)).unwrap(), b"directory stream");
+    }
+
+    struct ReplacementFixture {
+        _temp: tempfile::TempDir,
+        destination: std::path::PathBuf,
+        incumbent: std::path::PathBuf,
+        plan: ApprovedTransferPlan,
+    }
+
+    fn replacement_fixture(with_unrelated: bool) -> ReplacementFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        let source = temp.path().join("reviewed.txt");
+        let incumbent = destination.join("Reviewed.TXT");
+        fs::write(&source, b"replacement source").unwrap();
+        fs::write(&incumbent, b"original incumbent").unwrap();
+        // Distinct creation times reproduce NTFS's former-name timestamp
+        // tunneling independently of the scheduler and the current clock.
+        for (path, seconds) in [(&source, 1_010_000_000), (&incumbent, 1_410_000_000)] {
+            let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+            let timestamp = (11_644_473_600_i64 + seconds) * 10_000_000;
+            set_replace_basic_info(
+                &file,
+                FILE_BASIC_INFO {
+                    CreationTime: timestamp,
+                    LastWriteTime: timestamp,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut sources = vec![source];
+        if with_unrelated {
+            let other = temp.path().join("other.txt");
+            fs::write(&other, b"independent").unwrap();
+            sources.push(other);
+        }
+        let review = review(&sources, TransferAction::CopyTo(destination.clone()));
+        let review = review
+            .choose(
+                review.generation(),
+                review.rows()[0].source(),
+                ReviewChoice::Replace,
+                &ScanCancellation::new(),
+            )
+            .unwrap();
+        ReplacementFixture {
+            _temp: temp,
+            destination,
+            incumbent,
+            plan: approve(&review),
+        }
+    }
+
+    use super::super::journal::TransferJournalEvent as JournalEvent;
+    use super::super::{CopyVerification, ReplacementState};
+
+    struct NativeJournal<F> {
+        accepted: Vec<JournalEvent>,
+        on_record: F,
+    }
+
+    impl<F: FnMut(&JournalEvent) -> io::Result<()>> TransferJournal for NativeJournal<F> {
+        fn record(&mut self, event: JournalEvent) -> io::Result<()> {
+            (self.on_record)(&event)?;
+            self.accepted.push(event);
+            Ok(())
+        }
+    }
+
+    fn run_replace(
+        fixture: &ReplacementFixture,
+        control: &CopyControl,
+        journal: &mut dyn TransferJournal,
+    ) -> CopyExecution {
+        execute_copy_with_hooks(&fixture.plan, control, |_| {}, |_| {}, Some(journal)).unwrap()
+    }
+
+    #[test]
+    fn transfer_replace_native_verified_publish_retains_exact_incumbent() {
+        let fixture = replacement_fixture(false);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Copied(copied) = &report.rows[0].state else {
+            panic!("expected guarded replacement, got {:?}", report.rows[0]);
+        };
+        let backup = copied.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Retained);
+        assert_eq!(backup.original, fixture.incumbent);
+        assert_eq!(copied.output.path.file_name().unwrap(), "reviewed.txt");
+        assert_eq!(
+            fs::read(&copied.output.path).unwrap(),
+            b"replacement source"
+        );
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original incumbent");
+        let cancel = ScanCancellation::new();
+        let backup_now = super::super::inspect_source(&backup.backup, &cancel).unwrap();
+        let output_now = super::super::inspect_source(&copied.output.path, &cancel).unwrap();
+        assert_eq!(backup_now.identity(), backup.identity);
+        assert_eq!(output_now.identity(), copied.output.identity);
+        let source_metadata = fixture.plan.entries()[0].source().metadata();
+        assert_eq!(output_now.metadata().created, source_metadata.created);
+        assert_eq!(output_now.metadata().modified, source_metadata.modified);
+        assert_ne!(backup_now.metadata().created, source_metadata.created);
+        assert!(matches!(
+            copied.verification,
+            CopyVerification::Verified { .. }
+        ));
+        assert!(matches!(journal.accepted.as_slice(), [
+            JournalEvent::StageIntent { path: candidate, .. },
+            JournalEvent::StageCreated { path: stage, identity: stage_id, .. },
+            JournalEvent::DisplacementIntent { identity: incumbent, .. },
+            JournalEvent::DisplacementObserved { identity: displaced, .. },
+            JournalEvent::PublishIntent { identity: expected, .. },
+            JournalEvent::PublicationObserved { identity: published, .. },
+            JournalEvent::Verified { identity: verified, verification: CopyVerification::Verified { .. }, bytes: 18, .. },
+        ] if candidate == stage && incumbent == displaced && incumbent == &backup.identity
+            && stage_id == expected && expected == published && published == verified));
+    }
+
+    #[test]
+    fn transfer_replace_native_cancel_restores_original_spelling() {
+        let fixture = replacement_fixture(false);
+        let control = CopyControl::default();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::DisplacementObserved { .. }) {
+                    control.cancel();
+                }
+                Ok(())
+            },
+        };
+        let report = run_replace(&fixture, &control, &mut journal);
+        let ExecutionState::Cancelled(Some(error)) = &report.rows[0].state else {
+            panic!(
+                "expected cancellation after relocation, got {:?}",
+                report.rows[0]
+            );
+        };
+        assert!(matches!(error.failure, CopyFailure::Cancelled));
+        assert!(error.artifact.is_none());
+        let backup = error.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Restored);
+        assert_eq!(fs::read(&fixture.incumbent).unwrap(), b"original incumbent");
+        let entries: Vec<_> = fs::read_dir(&fixture.destination)
+            .unwrap()
+            .map(|result| result.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["Reviewed.TXT"]);
+        assert!(
+            matches!(journal.accepted.last(), Some(JournalEvent::RestoreObserved { original, .. }) if original == &fixture.incumbent)
+        );
+        assert!(
+            journal
+                .accepted
+                .iter()
+                .all(|event| !matches!(event, JournalEvent::PublicationObserved { .. }))
+        );
+    }
+
+    #[test]
+    fn transfer_replace_native_foreign_winner_survives_and_backup_is_retained() {
+        let fixture = replacement_fixture(false);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::DisplacementObserved { .. }) {
+                    fs::write(&fixture.incumbent, b"late foreign winner").unwrap();
+                }
+                Ok(())
+            },
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!("expected late conflict, got {:?}", report.rows[0]);
+        };
+        assert!(matches!(error.failure, CopyFailure::DestinationOccupied));
+        assert!(error.artifact.is_none());
+        let backup = error.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Retained);
+        assert_eq!(
+            fs::read(&fixture.incumbent).unwrap(),
+            b"late foreign winner"
+        );
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original incumbent");
+        assert_eq!(fs::read_dir(&fixture.destination).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn transfer_replace_native_journal_failure_halts_later_namespace_effects() {
+        let fixture = replacement_fixture(true);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::DisplacementObserved { .. }) {
+                    return Err(io::Error::other("fixture receipt unavailable after rename"));
+                }
+                Ok(())
+            },
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!(
+                "expected receipt failure after relocation, got {:?}",
+                report.rows[0]
+            );
+        };
+        assert!(matches!(error.failure, CopyFailure::Journal(_)));
+        assert!(error.artifact.is_none());
+        let backup = error.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Retained);
+        assert!(!fixture.incumbent.exists());
+        assert!(matches!(
+            report.rows[1].state,
+            ExecutionState::BlockedByReceipt
+        ));
+        assert!(!fixture.destination.join("other.txt").exists());
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original incumbent");
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::DisplacementIntent { .. })
+        ));
+        assert_eq!(fs::read_dir(&fixture.destination).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn transfer_replace_native_stage_intent_refusal_has_no_effect() {
+        let fixture = replacement_fixture(false);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Err(io::Error::other("fixture receipt unavailable")),
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        assert!(matches!(&report.rows[0].state,
+            ExecutionState::Failed(error) if matches!(error.failure, CopyFailure::Journal(_))
+                && error.replacement.is_none() && error.artifact.is_none()));
+        assert!(journal.accepted.is_empty());
+        assert_eq!(fs::read(&fixture.incumbent).unwrap(), b"original incumbent");
+        assert_eq!(fs::read_dir(&fixture.destination).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn transfer_replace_native_same_length_replacement_is_stale() {
+        let fixture = replacement_fixture(false);
+        let moved = fixture.destination.join("moved-original.txt");
+        fs::rename(&fixture.incumbent, &moved).unwrap();
+        fs::write(&fixture.incumbent, b"different new file").unwrap();
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |_: &JournalEvent| Ok(()),
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        assert!(
+            matches!(&report.rows[0].state,
+            ExecutionState::Failed(error) if matches!(error.failure, CopyFailure::Admission(AdmissionError::StaleTarget))
+                && error.artifact.is_none() && error.replacement.is_none()),
+            "{:?}",
+            report.rows[0]
+        );
+        assert!(journal.accepted.is_empty());
+        assert_eq!(fs::read(fixture.incumbent).unwrap(), b"different new file");
+        assert_eq!(fs::read(moved).unwrap(), b"original incumbent");
+        assert_eq!(fs::read_dir(fixture.destination).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn transfer_replace_native_late_receipt_failure_retains_both_versions() {
+        let fixture = replacement_fixture(false);
+        let mut journal = NativeJournal {
+            accepted: Vec::new(),
+            on_record: |event: &JournalEvent| {
+                if matches!(event, JournalEvent::Verified { .. }) {
+                    return Err(io::Error::other("fixture verification receipt unavailable"));
+                }
+                Ok(())
+            },
+        };
+        let report = run_replace(&fixture, &CopyControl::default(), &mut journal);
+        let ExecutionState::Failed(error) = &report.rows[0].state else {
+            panic!(
+                "expected a receipt failure after publication, got {:?}",
+                report.rows[0]
+            );
+        };
+        assert!(
+            matches!(error.failure, CopyFailure::Journal(_)),
+            "actual outcome {error:?}, accepted receipts {:?}",
+            journal.accepted
+        );
+        let Some(CopyRecoveryArtifact::Owned(output)) = error.artifact.as_ref() else {
+            panic!("published artifact must be retained");
+        };
+        let backup = error.replacement.as_ref().unwrap();
+        assert_eq!(backup.state, ReplacementState::Retained);
+        assert_eq!(output.state, CopyArtifactState::Published);
+        assert_eq!(fs::read(&output.path).unwrap(), b"replacement source");
+        assert_eq!(fs::read(&backup.backup).unwrap(), b"original incumbent");
+        assert!(matches!(
+            journal.accepted.last(),
+            Some(JournalEvent::PublicationObserved { .. })
+        ));
+    }
+
+    #[test]
+    fn transfer_replace_native_cross_parent_collision_leaves_both_entries_intact() {
+        let fixture = tempfile::tempdir().unwrap();
+        let from = fixture.path().join("from");
+        let into = fixture.path().join("into");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&into).unwrap();
+        let source = from.join("shared.txt");
+        let competitor = into.join("shared.txt");
+        fs::write(&source, b"original").unwrap();
+        fs::write(&competitor, b"foreign").unwrap();
+        let cancel = ScanCancellation::new();
+        let snapshot = super::super::inspect_source(&source, &cancel).unwrap();
+        let original = HeldParent::open(&from, &cancel).unwrap();
+        let destination =
+            HeldParent::open_with_access(&into, &cancel, DirectoryAccess::CreateFile).unwrap();
+        let held = original
+            .directory()
+            .open_relocation(snapshot.leaf().as_os_str(), snapshot.identity())
+            .unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&source).is_err());
+        let error = held
+            .rename_no_replace(destination.directory(), snapshot.leaf().as_os_str())
+            .expect_err("a foreign destination must survive");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!error.unconfirmed_name_effect());
+        assert!(checked_final_path(held.file(), &source).is_ok());
+        assert_eq!(held.identity(), snapshot.identity());
+        drop(held);
+        assert_eq!(fs::read(source).unwrap(), b"original");
+        assert_eq!(fs::read(competitor).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn transfer_replace_native_exact_stage_does_not_probe_another_name() {
+        let fixture = tempfile::tempdir().unwrap();
+        let candidate = fixture.path().join("exact.stage");
+        fs::write(&candidate, b"foreign candidate").unwrap();
+        let directory = HeldParent::open_with_access(
+            fixture.path(),
+            &ScanCancellation::new(),
+            DirectoryAccess::CreateFile,
+        )
+        .unwrap();
+        let error = directory
+            .directory()
+            .create_stage_exact(
+                std::ffi::OsStr::new("output.txt"),
+                candidate.file_name().unwrap(),
+            )
+            .err()
+            .expect("an occupied exact stage must fail");
+        assert_eq!(error.error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.unresolved.is_none());
+        assert_eq!(fs::read(&candidate).unwrap(), b"foreign candidate");
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
     }
 
     #[test]

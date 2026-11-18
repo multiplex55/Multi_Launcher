@@ -62,7 +62,8 @@ M0-A verified the direct parent and clean checkout. The intentional baseline ado
 | M9-B1B | complete |
 | M9-B2A | complete |
 | M9-B2B | complete |
-| M9-B3+, M9-C, M9-D | pending |
+| M9-B3A | complete |
+| M9-B3B+, M9-C, M9-D | pending |
 | M10-A, M10-B | pending |
 | M11-A, M11-B, M11-C, M11-D | pending |
 | M12-A, M12-B | pending |
@@ -497,3 +498,6 @@ M9-B2A verified on Windows with 21 targeted Nextest passes. Copy and Duplicate c
 
 
 M9-B2B passed 40 focused Windows Nextest tests after independent review. A single app-owned worker serves an explicit Start batch in visible order, bounded to 32 queued and active approvals, and projects actual pause, cancellation, progress and retirement to Activity. Native fixtures proved safe pause before cancellation, exact queue and Activity identity, directory finalization and late-cancel preservation of a published file. Guarded Replace, Move, durable receipts and the user-facing center belong to subsequent checkpoints.
+
+
+M9-B3A passed 37 focused Windows Nextest tests after the native review and NTFS timestamp fix. The private journal-required Replace path retains the exact old object, preserves a late foreign winner, restores the incumbent's original spelling on safe cancellation and stops later writes when a receipt fails. Fixed, distinct creation times verified that the exact held published object preserves the approved copy times even with NTFS filename tunneling. An injected rename-result ambiguity after a real rename retained the published bytes and file ID. Ordinary queue activation remains deferred to durable receipts in M9-C.

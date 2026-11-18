@@ -8,12 +8,13 @@ mod copy;
 pub use control::CopyPauseState;
 mod execute;
 mod jobs;
+mod journal;
 mod plan;
 mod tree;
 
 pub use copy::{
     CopiedFile, CopyArtifact, CopyArtifactState, CopyControl, CopyError, CopyFailure,
-    CopyRecoveryArtifact, CopyVerification, copy_to_vacancy,
+    CopyRecoveryArtifact, CopyVerification, ReplacementBackup, ReplacementState, copy_to_vacancy,
 };
 pub use execute::{
     CopyExecution, DirectoryCopy, DirectoryTimes, ExecutionProgress, ExecutionRow, ExecutionState,

@@ -173,6 +173,9 @@ impl NativeArchiveError {
     pub(crate) fn cleanup_failed(&self) -> bool {
         self.cleanup_failed
     }
+    pub(crate) fn unconfirmed_name_effect(&self) -> bool {
+        self.unconfirmed_name_effect
+    }
 
     fn validation(
         operation: &'static str,
@@ -1938,7 +1941,7 @@ impl OwnedStage {
         Self::create_with_options(
             parent, before_native_create, extra, sharing,
             windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS(0),
-            None, default_stage_leaf,
+            None, default_stage_leaf, STAGE_ATTEMPTS,
         )
     }
     fn create_with_options(
@@ -1949,10 +1952,11 @@ impl OwnedStage {
         options: windows::Wdk::Storage::FileSystem::NTCREATEFILE_CREATE_OPTIONS,
         mut transfer: Option<TransferStageAdmission<'_>>,
         mut next_leaf: impl FnMut() -> OsString,
+        attempts: usize,
     ) -> Result<Self, NativeArchiveError> {
         let mut before_native_create = Some(before_native_create);
         let mut last_collision = None;
-        for _ in 0..STAGE_ATTEMPTS {
+        for _ in 0..attempts {
             let leaf = next_leaf();
             if let Some(transfer) = &transfer
                 && crate::batch_rename::compare_paths_windows_ordinal(
@@ -2242,13 +2246,14 @@ impl OwnedStage {
     }
 
     pub(crate) fn publish(self, target_leaf: &OsStr) -> Result<NativeFileIdentity, NativeArchiveError> {
-        self.publish_admitted(target_leaf, || true).map(|(identity, _)| identity)
+        self.publish_admitted(target_leaf, || true, false).map(|(identity, _)| identity)
     }
 
     fn publish_admitted(
         mut self,
         target_leaf: &OsStr,
         admit: impl FnOnce() -> bool,
+        transfer_cleanup_guard: bool,
     ) -> Result<(NativeFileIdentity, VerifiedOverlappedFile), NativeArchiveError> {
         if let Err(error) = validate_single_component(target_leaf, "relative rename target") {
             return Err(self.fail_and_cleanup(error.primary));
@@ -2331,8 +2336,42 @@ impl OwnedStage {
                 self.finished = true;
                 Ok((actual_identity, self.file.clone()))
             }
-            Err(primary) => Err(self.fail_and_cleanup(primary)),
+            Err(primary) => Err(self.finish_rename_failure(primary, transfer_cleanup_guard)),
         }
+    }
+
+    fn finish_rename_failure(
+        &mut self,
+        primary: NativeFailure,
+        transfer_cleanup_guard: bool,
+    ) -> NativeArchiveError {
+        if !transfer_cleanup_guard || self.proves_private_stage_name() {
+            return self.fail_and_cleanup(primary);
+        }
+        self.finished = true;
+        NativeArchiveError {
+            primary,
+            cleanup_attempted: false,
+            cleanup_failure: None,
+            cleanup_failed: false,
+            unconfirmed_name_effect: true,
+        }
+    }
+
+    fn proves_private_stage_name(&self) -> bool {
+        let Ok(parent_identity) = self.parent.verify_identity() else { return false; };
+        if parent_identity != self.parent_identity
+            || native_file_identity(self.file.as_file()).ok() != Some(self.identity)
+        {
+            return false;
+        }
+        let (Ok(parent_path), Ok(file_path)) = (
+            crate::file_operations::final_path_for_handle(&self.parent.file),
+            crate::file_operations::final_path_for_handle(self.file.as_file()),
+        ) else { return false; };
+        crate::batch_rename::compare_paths_windows_ordinal(&parent_path.join(&self.leaf), &file_path).is_eq()
+            && self.parent.verify_identity().ok() == Some(self.parent_identity)
+            && native_file_identity(self.file.as_file()).ok() == Some(self.identity)
     }
 
     fn fail_and_cleanup(&mut self, primary: NativeFailure) -> NativeArchiveError {
@@ -3212,6 +3251,33 @@ mod tests {
     }
 
     #[test]
+    fn transfer_copy_native_uncertain_rename_keeps_the_actual_published_file() {
+        let (_temp, selected, _held, _outside) = fixture_tree();
+        let directory = NativeArchiveDestination::open(&selected).unwrap().open_descendant(&[]).unwrap();
+        let mut stage = directory.create_stage().unwrap();
+        let saved_identity = stage.identity();
+        stage.write_all_and_sync(b"completed transfer").unwrap();
+        let old_private = selected.join(stage.leaf());
+        let final_leaf = OsStr::new("published.txt");
+        rename_open_file_relative_no_replace(
+            stage.file.as_file(), &directory.directory, final_leaf, saved_identity,
+        ).unwrap();
+        // Inject a failed status at the native result boundary after the
+        // real rename. Recovery must leave the held object at its new name.
+        let injected = NativeFailure::validation(
+            "fixture interrupted rename observation", io::ErrorKind::Other, Some(saved_identity),
+        );
+        let result = stage.finish_rename_failure(injected, true);
+        assert!(result.unconfirmed_name_effect());
+        assert!(!result.cleanup_attempted);
+        drop(stage);
+        assert!(!old_private.exists());
+        let published = selected.join(final_leaf);
+        assert_eq!(fs::read(&published).unwrap(), b"completed transfer");
+        assert_eq!(native_file_identity(&File::open(published).unwrap()).unwrap(), saved_identity);
+    }
+
+    #[test]
     fn transfer_admission_distinguishes_definitive_leaf_absence_from_other_failures() {
         use windows::Win32::Foundation::{
             STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
@@ -3449,6 +3515,38 @@ pub(crate) mod transfer_native {
             }
             open_volume_root_with_options(&root, true, false, true, false).map(Self)
         }
+        pub(crate) fn open_relocation(
+            &self,
+            leaf: &OsStr,
+            expected: NativeFileIdentity,
+        ) -> Result<TransferRelocation, NativeArchiveError> {
+            use windows::Wdk::Storage::FileSystem::{
+                FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            };
+            use windows::Win32::Storage::FileSystem::{
+                DELETE, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, SYNCHRONIZE,
+            };
+            validate_single_component(leaf, "transfer relocation source")?;
+            let (file, _) = open_relative(
+                &self.0,
+                leaf,
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_OPEN_NO_RECALL | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_ATTRIBUTE_NORMAL,
+                "NtCreateFile(transfer relocation)",
+                || Ok(()),
+            )?;
+            let relocation = TransferRelocation {
+                file,
+                identity: expected,
+                parent: self.0.clone(),
+            };
+            relocation.validate()?;
+            Ok(relocation)
+        }
         pub(crate) fn open_read(&self, name: &OsStr) -> Result<TransferFile, NativeArchiveError> {
             use windows::Wdk::Storage::FileSystem::{
                 FILE_OPEN, FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT,
@@ -3511,10 +3609,31 @@ pub(crate) mod transfer_native {
             self.create_stage_with_names(final_leaf, default_stage_leaf)
         }
 
+        pub(crate) fn create_stage_exact(
+            &self,
+            final_leaf: &OsStr,
+            candidate: &OsStr,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            validate_single_component(candidate, "transfer stage candidate").map_err(|error| {
+                TransferStageCreateFailure {
+                    error,
+                    unresolved: None,
+                }
+            })?;
+            self.create_stage_with_limit(final_leaf, || candidate.to_os_string(), 1)
+        }
         pub(super) fn create_stage_with_names(
             &self,
             final_leaf: &OsStr,
             next_leaf: impl FnMut() -> OsString,
+        ) -> Result<TransferStage, TransferStageCreateFailure> {
+            self.create_stage_with_limit(final_leaf, next_leaf, STAGE_ATTEMPTS)
+        }
+        fn create_stage_with_limit(
+            &self,
+            final_leaf: &OsStr,
+            next_leaf: impl FnMut() -> OsString,
+            attempts: usize,
         ) -> Result<TransferStage, TransferStageCreateFailure> {
             use windows::Win32::Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_SHARE_MODE};
             let mut observation = None;
@@ -3532,6 +3651,7 @@ pub(crate) mod transfer_native {
                         observation: &mut observation,
                     }),
                     next_leaf,
+                    attempts,
                 )
             })();
             result.map(TransferStage).map_err(|error| {
@@ -3696,6 +3816,103 @@ pub(crate) mod transfer_native {
         })
     }
 
+    /// Owns the exact source handle and its parent; dropping never deletes it.
+    pub(crate) struct TransferRelocation {
+        file: File,
+        identity: NativeFileIdentity,
+        parent: Arc<HeldDirectory>,
+    }
+    impl TransferRelocation {
+        pub(crate) fn file(&self) -> &File {
+            &self.file
+        }
+        pub(crate) fn identity(&self) -> NativeFileIdentity {
+            self.identity
+        }
+        fn validate(&self) -> Result<(), NativeArchiveError> {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+            };
+            self.parent.verify_identity()?;
+            let actual = native_file_identity(&self.file).map_err(|e| {
+                NativeArchiveError::from_io(
+                    "FILE_ID_INFO(transfer relocation)",
+                    e,
+                    Some(self.identity),
+                )
+            })?;
+            let metadata = self.file.metadata().map_err(|e| {
+                NativeArchiveError::from_io("File::metadata(transfer relocation)", e, Some(actual))
+            })?;
+            let mut standard = FILE_STANDARD_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(self.file.as_raw_handle() as _),
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .map_err(|e| {
+                NativeArchiveError::from_win32(
+                    "FileStandardInfo(transfer relocation)",
+                    e,
+                    Some(actual),
+                )
+            })?;
+            if actual != self.identity
+                || actual.volume_serial_number() != self.parent.identity.volume_serial_number()
+                || actual.file_id() == [0; 16]
+                || !metadata.is_file()
+                || metadata.file_attributes()
+                    & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                    != 0
+                || crate::file_operations::has_cloud_placeholder_attributes(
+                    metadata.file_attributes(),
+                )
+                || standard.NumberOfLinks != 1
+                || standard.DeletePending.0 != 0
+            {
+                return Err(NativeArchiveError::validation(
+                    "transfer relocation is not a single-link ordinary local file",
+                    io::ErrorKind::InvalidData,
+                    Some(actual),
+                ));
+            }
+            Ok(())
+        }
+        pub(crate) fn rename_no_replace(
+            &self,
+            target: &TransferDirectory,
+            leaf: &OsStr,
+        ) -> Result<(), NativeArchiveError> {
+            validate_single_component(leaf, "transfer relocation target")?;
+            self.validate()?;
+            target.0.verify_identity()?;
+            if self.identity.volume_serial_number() != target.0.identity.volume_serial_number() {
+                return Err(NativeArchiveError::validation(
+                    "transfer relocation destination is on another volume",
+                    io::ErrorKind::InvalidInput,
+                    Some(self.identity),
+                ));
+            }
+            rename_open_file_relative_no_replace(&self.file, &target.0, leaf, self.identity)
+                .map_err(|primary| {
+                    let confirmed_collision = primary.nt_status == Some(
+                        windows::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION.0,
+                    );
+                    NativeArchiveError {
+                        primary,
+                        cleanup_attempted: false,
+                        cleanup_failure: None,
+                        cleanup_failed: false,
+                        unconfirmed_name_effect: !confirmed_collision,
+                    }
+                })
+        }
+    }
+
     pub(crate) struct TransferFile {
         file: VerifiedOverlappedFile,
         identity: NativeFileIdentity,
@@ -3838,14 +4055,15 @@ pub(crate) mod transfer_native {
             admit: impl FnOnce() -> bool,
         ) -> Result<TransferFile, NativeArchiveError> {
             self.0
-                .publish_admitted(name, admit)
+                .publish_admitted(name, admit, true)
                 .map(|(identity, file)| TransferFile { file, identity })
         }
     }
 
     pub(crate) fn is_missing_relative_leaf(error: &NativeArchiveError) -> bool {
         !error.unconfirmed_name_effect
-            && error.primary.nt_status == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
+            && error.primary.nt_status
+                == Some(windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.0)
     }
 }
 
@@ -4244,7 +4462,7 @@ pub(crate) mod print_publication {
         {
             let leaf = self.0.leaf.clone();
             let identity = self.0.identity();
-            self.0.publish_admitted(name, admit).map(|(identity, _)| identity).map_err(|e| {
+            self.0.publish_admitted(name, admit, false).map(|(identity, _)| identity).map_err(|e| {
                 let retained = e.cleanup_failed().then_some((leaf, identity));
                 (error(e), retained)
             })

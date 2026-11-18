@@ -108,6 +108,28 @@ pub enum CopyVerification {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplacementState {
+    Retained,
+    Restored,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplacementBackup {
+    pub original: PathBuf,
+    pub backup: PathBuf,
+    pub parent: NativeFileIdentity,
+    pub identity: NativeFileIdentity,
+    pub state: ReplacementState,
+}
+
+impl ReplacementBackup {
+    pub fn retained_or_uncertain(&self) -> bool {
+        self.state != ReplacementState::Restored
+    }
+}
+
 #[derive(Debug)]
 pub struct CopiedFile {
     pub source: NativeFileIdentity,
@@ -115,6 +137,7 @@ pub struct CopiedFile {
     pub bytes: u64,
     pub zone_bytes: Option<u64>,
     pub verification: CopyVerification,
+    pub replacement: Option<ReplacementBackup>,
 }
 
 #[derive(Debug)]
@@ -125,6 +148,7 @@ pub enum CopyFailure {
     UnsupportedStreams,
     UnsupportedMetadata,
     ContentMismatch,
+    Journal(io::Error),
     Admission(AdmissionError),
     Native(io::Error),
 }
@@ -142,6 +166,7 @@ impl fmt::Display for CopyFailure {
                 "This copy cannot preserve the file's attributes or timestamps."
             }
             Self::ContentMismatch => "The copied bytes did not match the source.",
+            Self::Journal(error) => return write!(f, "Transfer journal failed ({error})."),
             Self::Admission(error) => return write!(f, "{error}"),
             Self::Native(error) => return write!(f, "Windows copy failed ({error})."),
         };
@@ -178,6 +203,12 @@ impl From<NativeArchiveError> for CopyFailure {
 #[derive(Debug)]
 pub enum CopyRecoveryArtifact {
     Owned(CopyArtifact),
+    UncertainPublication {
+        stage: PathBuf,
+        target: PathBuf,
+        parent: NativeFileIdentity,
+        identity: NativeFileIdentity,
+    },
     UnprovenStage {
         path: PathBuf,
         parent: NativeFileIdentity,
@@ -194,6 +225,17 @@ pub struct CopyError {
     pub failure: CopyFailure,
     pub artifact: Option<CopyRecoveryArtifact>,
     pub recovery_error: Option<String>,
+    pub replacement: Option<ReplacementBackup>,
+}
+
+impl CopyError {
+    pub(super) fn has_retained_effect(&self) -> bool {
+        self.artifact.is_some()
+            || self
+                .replacement
+                .as_ref()
+                .is_some_and(ReplacementBackup::retained_or_uncertain)
+    }
 }
 
 impl From<CopyFailure> for CopyError {
@@ -202,6 +244,7 @@ impl From<CopyFailure> for CopyError {
             failure,
             artifact: None,
             recovery_error: None,
+            replacement: None,
         }
     }
 }
@@ -234,11 +277,15 @@ impl<'a> GuardedCopy<'a> {
         source: &'a EntrySnapshot,
         target: &'a TargetSnapshot,
         control: &CopyControl,
+        replacement: bool,
     ) -> Result<Self, CopyFailure> {
         control.check()?;
         let metadata = source.metadata();
         if metadata.kind != EntryKind::File
-            || !matches!(target.occupancy(), TargetOccupancy::Vacant)
+            || !matches!(
+                (target.occupancy(), replacement),
+                (TargetOccupancy::Vacant, false) | (TargetOccupancy::Occupied(_), true)
+            )
         {
             return Err(CopyFailure::UnsupportedPlan);
         }
@@ -287,7 +334,7 @@ impl<'a> GuardedCopy<'a> {
             length,
         };
         guarded.check_source(control)?;
-        guarded.check_vacancy(control)?;
+        guarded.check_target(control)?;
         Ok(guarded)
     }
 
@@ -312,13 +359,27 @@ impl<'a> GuardedCopy<'a> {
         }
     }
 
-    fn check_vacancy(&self, control: &CopyControl) -> Result<(), CopyFailure> {
+    fn check_vacancy_after_displacement(&self, control: &CopyControl) -> Result<(), CopyFailure> {
         match self
             .target_parent
             .inspect_leaf(self.target.requested_leaf(), &control.cancellation)?
         {
             TargetOccupancy::Vacant => Ok(()),
             TargetOccupancy::Occupied(_) => Err(CopyFailure::DestinationOccupied),
+        }
+    }
+
+    fn check_target(&self, control: &CopyControl) -> Result<(), CopyFailure> {
+        let current = self
+            .target_parent
+            .inspect_leaf(self.target.requested_leaf(), &control.cancellation)?;
+        let reviewed = self.target.occupancy();
+        if &current == reviewed {
+            return Ok(());
+        }
+        match reviewed {
+            TargetOccupancy::Vacant => Err(CopyFailure::DestinationOccupied),
+            TargetOccupancy::Occupied(_) => Err(AdmissionError::StaleTarget.into()),
         }
     }
 }
@@ -583,7 +644,7 @@ fn fill_stage(
     stage.flush()?;
     check_output(stage.file(), copy.source.metadata(), copy.streams())?;
     copy.check_source(control)?;
-    copy.check_vacancy(control)?;
+    copy.check_target(control)?;
     Ok(StagedCopy {
         data_hash: hash.map(|hash| hash.finalize().into()),
         zone,
@@ -710,42 +771,11 @@ fn copy_file_bound(
     verification_progress: impl FnOnce(bool),
 ) -> Result<CopiedFile, CopyError> {
     let (before_publication, after_publication) = hooks;
-    let copy = GuardedCopy::open(source, target, control)?;
-    let claim = loop {
-        control.check()?;
-        let Some(epoch) = control.admission_epoch()? else {
-            continue;
-        };
-        copy.check_source(control)?;
-        copy.check_vacancy(control)?;
-        if let Some(claim) = control.try_claim(epoch)? {
-            break claim;
-        }
-    };
-    let stage_result = copy
-        .target_parent
-        .directory()
-        .create_stage(copy.target.requested_leaf().as_os_str());
-    drop(claim);
-    let stage = stage_result.map_err(|error| stage_create_error(copy.target, error))?;
-    let stage_artifact = CopyArtifact {
-        path: copy.target.parent().path().join(stage.leaf()),
-        parent: copy.target.parent().identity(),
-        identity: stage.identity(),
-        state: CopyArtifactState::StageNeedsReconciliation,
-    };
+    let copy = GuardedCopy::open(source, target, control, false)?;
+    let (stage, stage_artifact) = start_guarded_stage(&copy, control, None)?;
     let staged = match fill_stage(&stage, &copy, verify_content, control, progress) {
         Ok(hash) => hash,
-        Err(failure) => match stage.abort() {
-            Ok(()) => return Err(failure.into()),
-            Err(error) => {
-                return Err(CopyError {
-                    failure,
-                    artifact: Some(CopyRecoveryArtifact::Owned(stage_artifact)),
-                    recovery_error: Some(error.to_string()),
-                });
-            }
-        },
+        Err(failure) => return Err(abort_stage(stage, stage_artifact, failure)),
     };
     let mut refused = None;
     let mut claim = None;
@@ -770,9 +800,22 @@ fn copy_file_bound(
     });
     drop(claim);
     let published = published_result.map_err(|error| {
-        let artifact = error
-            .cleanup_failed()
-            .then_some(CopyRecoveryArtifact::Owned(stage_artifact));
+        let artifact = if error.unconfirmed_name_effect() {
+            Some(CopyRecoveryArtifact::UncertainPublication {
+                stage: stage_artifact.path.clone(),
+                target: copy
+                    .target
+                    .parent()
+                    .path()
+                    .join(copy.target.requested_leaf().as_os_str()),
+                parent: stage_artifact.parent,
+                identity: stage_artifact.identity,
+            })
+        } else {
+            error
+                .cleanup_failed()
+                .then_some(CopyRecoveryArtifact::Owned(stage_artifact))
+        };
         let recovery_error = artifact.as_ref().map(|_| error.to_string());
         let failure = refused.unwrap_or_else(|| {
             if error.kind() == io::ErrorKind::AlreadyExists {
@@ -785,6 +828,7 @@ fn copy_file_bound(
             failure,
             artifact,
             recovery_error,
+            replacement: None,
         }
     })?;
 
@@ -806,6 +850,7 @@ fn copy_file_bound(
                 failure,
                 artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
                 recovery_error: None,
+                replacement: None,
             }
         })?;
     Ok(CopiedFile {
@@ -814,7 +859,42 @@ fn copy_file_bound(
         bytes: copy.length,
         zone_bytes: copy.streams().zone,
         verification,
+        replacement: None,
     })
+}
+
+fn start_guarded_stage(
+    copy: &GuardedCopy<'_>,
+    control: &CopyControl,
+    exact_candidate: Option<&super::TransferLeaf>,
+) -> Result<(TransferStage, CopyArtifact), CopyError> {
+    let claim = loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        copy.check_source(control)?;
+        copy.check_target(control)?;
+        if let Some(claim) = control.try_claim(epoch)? {
+            break claim;
+        }
+    };
+    let directory = copy.target_parent.directory();
+    let final_leaf = copy.target.requested_leaf().as_os_str();
+    let result = if let Some(candidate) = exact_candidate {
+        directory.create_stage_exact(final_leaf, candidate.as_os_str())
+    } else {
+        directory.create_stage(final_leaf)
+    };
+    drop(claim);
+    let stage = result.map_err(|error| stage_create_error(copy.target, error))?;
+    let artifact = CopyArtifact {
+        path: copy.target.parent().path().join(stage.leaf()),
+        parent: copy.target.parent().identity(),
+        identity: stage.identity(),
+        state: CopyArtifactState::StageNeedsReconciliation,
+    };
+    Ok((stage, artifact))
 }
 
 fn stage_create_error(target: &TargetSnapshot, failed: TransferStageCreateFailure) -> CopyError {
@@ -836,6 +916,7 @@ fn stage_create_error(target: &TargetSnapshot, failed: TransferStageCreateFailur
         failure: failed.error.into(),
         artifact,
         recovery_error,
+        replacement: None,
     }
 }
 
@@ -846,11 +927,38 @@ fn finish_publication(
     staged: StagedCopy,
     control: &CopyControl,
 ) -> Result<CopyVerification, CopyFailure> {
-    published.file().sync_all()?;
-    copy.target_parent.check_chain(&control.cancellation)?;
-    checked_final_path(published.file(), &artifact.path)?;
+    let file = published.file();
+    let source = copy.source.metadata();
+    loop {
+        control.check()?;
+        let Some(epoch) = control.admission_epoch()? else {
+            continue;
+        };
+        copy.target_parent.check_chain(control.cancellation())?;
+        checked_final_path(file, &artifact.path)?;
+        let current = observe_entry_metadata(file)?;
+        if current.created == source.created && current.modified == source.modified {
+            break;
+        }
+        // NTFS can inherit the former occupant's creation time on rename.
+        // Restore the approved times on the still-held published object.
+        if let Some(claim) = control.try_claim(epoch)? {
+            let result = set_replace_basic_info(
+                file,
+                FILE_BASIC_INFO {
+                    CreationTime: source.created,
+                    LastWriteTime: source.modified,
+                    ..Default::default()
+                },
+            );
+            drop(claim);
+            result?;
+            break;
+        }
+    }
+    file.sync_all()?;
     let streams = copy.streams();
-    check_output(published.file(), copy.source.metadata(), streams)?;
+    check_output(file, source, streams)?;
     let zone_sha256 = staged
         .zone
         .as_ref()
@@ -1234,5 +1342,403 @@ mod tests {
         assert!(matches!(error.failure, CopyFailure::Native(_)), "{error:?}");
         assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
         drop(writer);
+    }
+}
+
+// Only an explicitly approved occupied target may enter this path. The journal
+// records each namespace transition before its corresponding native mutation.
+pub(super) fn copy_to_replacement_reporting(
+    entry: &ApprovedTransferEntry,
+    control: &CopyControl,
+    progress: impl FnMut(u64),
+    verification_progress: impl FnOnce(bool),
+    journal: &mut dyn super::journal::TransferJournal,
+) -> Result<CopiedFile, CopyError> {
+    use super::TransferLeaf;
+    use super::journal::TransferJournalEvent as Event;
+    use rand::TryRng;
+
+    let ApprovedTarget::Replace(target) = entry.destination() else {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    };
+    let TargetOccupancy::Occupied(incumbent) = target.occupancy() else {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    };
+    if incumbent.metadata().kind != EntryKind::File {
+        return Err(CopyFailure::UnsupportedPlan.into());
+    }
+    let copy = GuardedCopy::open(entry.source(), target, control, true)?;
+    let parent = target.parent().identity();
+    let original = incumbent.path();
+    let final_path = target
+        .parent()
+        .path()
+        .join(target.requested_leaf().as_os_str());
+    let mut random = rand::rngs::SysRng;
+    let stage_number = random
+        .try_next_u64()
+        .map_err(|e| CopyFailure::Native(io::Error::other(e.to_string())))?;
+    let backup_number = random
+        .try_next_u64()
+        .map_err(|e| CopyFailure::Native(io::Error::other(e.to_string())))?;
+    let stage_leaf = TransferLeaf::new(std::ffi::OsStr::new(&format!(
+        ".multi-launcher-{stage_number:016x}.stage"
+    )))
+    .map_err(CopyFailure::from)?;
+    let backup_leaf = TransferLeaf::new(std::ffi::OsStr::new(&format!(
+        ".multi-launcher-{backup_number:016x}.backup"
+    )))
+    .map_err(CopyFailure::from)?;
+    super::check_target_bounds(target.parent(), &stage_leaf).map_err(CopyFailure::from)?;
+    super::check_target_bounds(target.parent(), &backup_leaf).map_err(CopyFailure::from)?;
+    let stage_path = target.parent().path().join(stage_leaf.as_os_str());
+    let backup_path = target.parent().path().join(backup_leaf.as_os_str());
+    journal
+        .record(Event::StageIntent {
+            path: stage_path.clone(),
+            parent,
+        })
+        .map_err(CopyFailure::Journal)?;
+    let (stage, stage_artifact) = start_guarded_stage(&copy, control, Some(&stage_leaf))?;
+    if let Err(error) = journal.record(Event::StageCreated {
+        path: stage_path.clone(),
+        parent,
+        identity: stage.identity(),
+    }) {
+        return Err(abort_stage(
+            stage,
+            stage_artifact,
+            CopyFailure::Journal(error),
+        ));
+    }
+    let staged = match fill_stage(&stage, &copy, entry.verify_content(), control, progress) {
+        Ok(staged) => staged,
+        Err(failure) => return Err(abort_stage(stage, stage_artifact, failure)),
+    };
+    let held = match copy
+        .target_parent
+        .directory()
+        .open_relocation(incumbent.leaf().as_os_str(), incumbent.identity())
+    {
+        Ok(held) => held,
+        Err(error) => return Err(abort_stage(stage, stage_artifact, error.into())),
+    };
+    let preflight = (|| -> Result<(), CopyFailure> {
+        if copy
+            .target_parent
+            .capture_entry(held.file(), incumbent.leaf())?
+            != *incumbent
+            || !exact_held_leaf(held.file(), &original)
+        {
+            return Err(AdmissionError::StaleEntry.into());
+        }
+        control.check()?;
+        copy.check_source(control)?;
+        copy.check_target(control)?;
+        Ok(())
+    })();
+    if let Err(failure) = preflight {
+        return Err(abort_stage(stage, stage_artifact, failure));
+    }
+    let mut backup = ReplacementBackup {
+        original: original.clone(),
+        backup: backup_path.clone(),
+        parent,
+        identity: incumbent.identity(),
+        state: ReplacementState::Uncertain,
+    };
+    if let Err(error) = journal.record(Event::DisplacementIntent {
+        original: original.clone(),
+        backup: backup_path.clone(),
+        parent,
+        identity: incumbent.identity(),
+    }) {
+        return Err(abort_stage(
+            stage,
+            stage_artifact,
+            CopyFailure::Journal(error),
+        ));
+    }
+    let claim = loop {
+        let check = (|| -> Result<Option<_>, CopyFailure> {
+            control.check()?;
+            let Some(epoch) = control.admission_epoch()? else {
+                return Ok(None);
+            };
+            copy.check_source(control)?;
+            copy.check_target(control)?;
+            if copy
+                .target_parent
+                .capture_entry(held.file(), incumbent.leaf())?
+                != *incumbent
+                || !exact_held_leaf(held.file(), &original)
+            {
+                return Err(AdmissionError::StaleEntry.into());
+            }
+            control.try_claim(epoch)
+        })();
+        match check {
+            Ok(Some(claim)) => break claim,
+            Ok(None) => continue,
+            Err(failure) => return Err(abort_stage(stage, stage_artifact, failure)),
+        }
+    };
+    let displaced = held.rename_no_replace(copy.target_parent.directory(), backup_leaf.as_os_str());
+    drop(claim);
+    if let Err(error) = displaced {
+        let original_proven = exact_held_leaf(held.file(), &original);
+        let backup_proven = exact_held_leaf(held.file(), &backup_path);
+        if original_proven {
+            return Err(abort_stage(stage, stage_artifact, error.into()));
+        }
+        backup.state = if backup_proven {
+            ReplacementState::Retained
+        } else {
+            ReplacementState::Uncertain
+        };
+        let mut failure = abort_stage(stage, stage_artifact, error.into());
+        failure.replacement = Some(backup);
+        if backup_proven {
+            match journal.record(Event::DisplacementObserved {
+                original: original.clone(),
+                backup: backup_path.clone(),
+                parent,
+                identity: incumbent.identity(),
+            }) {
+                Ok(()) => restore_incumbent(&copy, &held, journal, &mut failure),
+                Err(error) => {
+                    append_recovery_diagnostic(&mut failure.recovery_error, &failure.failure);
+                    failure.failure = CopyFailure::Journal(error);
+                }
+            }
+        }
+        return Err(failure);
+    }
+    if !exact_held_leaf(held.file(), &backup_path) {
+        let mut failure = abort_stage(stage, stage_artifact, CopyFailure::ContentMismatch);
+        failure.replacement = Some(backup);
+        return Err(failure);
+    }
+    backup.state = ReplacementState::Retained;
+    if let Err(error) = journal.record(Event::DisplacementObserved {
+        original: original.clone(),
+        backup: backup_path.clone(),
+        parent,
+        identity: incumbent.identity(),
+    }) {
+        let mut failure = abort_stage(stage, stage_artifact, CopyFailure::Journal(error));
+        failure.replacement = Some(backup);
+        return Err(failure);
+    }
+    if let Err(error) = journal.record(Event::PublishIntent {
+        stage: stage_path.clone(),
+        target: final_path.clone(),
+        parent,
+        identity: stage_artifact.identity,
+    }) {
+        let mut failure = abort_stage(stage, stage_artifact, CopyFailure::Journal(error));
+        failure.replacement = Some(backup);
+        return Err(failure);
+    }
+    let mut refused = None;
+    let mut claim = None;
+    let result = stage.publish(target.requested_leaf().as_os_str(), || {
+        let check = (|| loop {
+            control.check()?;
+            let Some(epoch) = control.admission_epoch()? else {
+                continue;
+            };
+            copy.check_source(control)?;
+            copy.check_vacancy_after_displacement(control)?;
+            if let Some(acquired) = control.try_claim(epoch)? {
+                claim = Some(acquired);
+                return Ok(());
+            }
+        })();
+        refused = check.err();
+        refused.is_none()
+    });
+    drop(claim);
+    let published = match result {
+        Ok(file) => file,
+        Err(error) => {
+            let ambiguous = error.unconfirmed_name_effect();
+            let artifact = if ambiguous {
+                Some(CopyRecoveryArtifact::UncertainPublication {
+                    stage: stage_path,
+                    target: final_path.clone(),
+                    parent,
+                    identity: stage_artifact.identity,
+                })
+            } else if error.cleanup_failed() {
+                Some(CopyRecoveryArtifact::Owned(stage_artifact))
+            } else {
+                None
+            };
+            let recovery_error = artifact.as_ref().map(|_| error.to_string());
+            let failure = refused.unwrap_or_else(|| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    CopyFailure::DestinationOccupied
+                } else {
+                    error.into()
+                }
+            });
+            let mut outcome = CopyError {
+                failure,
+                artifact,
+                recovery_error,
+                replacement: Some(backup),
+            };
+            if !ambiguous {
+                restore_incumbent(&copy, &held, journal, &mut outcome);
+            }
+            return Err(outcome);
+        }
+    };
+    let artifact = CopyArtifact {
+        path: final_path.clone(),
+        parent,
+        identity: published.identity(),
+        state: CopyArtifactState::Published,
+    };
+    if let Err(error) = journal.record(Event::PublicationObserved {
+        target: final_path.clone(),
+        parent,
+        identity: artifact.identity,
+    }) {
+        return Err(CopyError {
+            failure: CopyFailure::Journal(error),
+            artifact: Some(CopyRecoveryArtifact::Owned(artifact)),
+            recovery_error: None,
+            replacement: Some(backup),
+        });
+    }
+    verification_progress(staged.data_hash.is_some() || staged.zone.is_some());
+    let verification =
+        finish_publication(&copy, &published, &artifact, staged, control).map_err(|failure| {
+            CopyError {
+                failure,
+                artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+                recovery_error: None,
+                replacement: Some(backup.clone()),
+            }
+        })?;
+    journal
+        .record(Event::Verified {
+            target: final_path,
+            parent,
+            identity: artifact.identity,
+            verification,
+            bytes: copy.length,
+        })
+        .map_err(|error| CopyError {
+            failure: CopyFailure::Journal(error),
+            artifact: Some(CopyRecoveryArtifact::Owned(artifact.clone())),
+            recovery_error: None,
+            replacement: Some(backup.clone()),
+        })?;
+    Ok(CopiedFile {
+        source: copy.source.identity(),
+        output: artifact,
+        bytes: copy.length,
+        zone_bytes: copy.streams().zone,
+        verification,
+        replacement: Some(backup),
+    })
+}
+
+fn exact_held_leaf(file: &File, expected: &Path) -> bool {
+    checked_final_path(file, expected).is_ok()
+        && crate::file_operations::final_path_for_handle(file)
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_os_string()))
+            == expected.file_name().map(|s| s.to_os_string())
+}
+
+fn abort_stage(stage: TransferStage, artifact: CopyArtifact, failure: CopyFailure) -> CopyError {
+    match stage.abort() {
+        Ok(()) => failure.into(),
+        Err(error) => CopyError {
+            failure,
+            artifact: Some(CopyRecoveryArtifact::Owned(artifact)),
+            recovery_error: Some(error.to_string()),
+            replacement: None,
+        },
+    }
+}
+
+fn append_recovery_diagnostic(detail: &mut Option<String>, error: impl fmt::Display) {
+    match detail {
+        Some(detail) => {
+            use std::fmt::Write;
+            let _ = write!(detail, "\n{error}");
+        }
+        None => *detail = Some(error.to_string()),
+    }
+}
+
+fn restore_incumbent(
+    copy: &GuardedCopy<'_>,
+    held: &crate::archive::transfer_native::TransferRelocation,
+    journal: &mut dyn super::journal::TransferJournal,
+    outcome: &mut CopyError,
+) {
+    use super::journal::TransferJournalEvent as Event;
+    let Some(backup) = outcome.replacement.as_mut() else {
+        return;
+    };
+    let fresh = ScanCancellation::new();
+    if !exact_held_leaf(held.file(), &backup.backup)
+        || !matches!(
+            copy.target_parent
+                .inspect_leaf(copy.target.requested_leaf(), &fresh),
+            Ok(TargetOccupancy::Vacant)
+        )
+    {
+        return;
+    }
+    let event = || Event::RestoreIntent {
+        original: backup.original.clone(),
+        backup: backup.backup.clone(),
+        parent: backup.parent,
+        identity: backup.identity,
+    };
+    if let Err(error) = journal.record(event()) {
+        append_recovery_diagnostic(&mut outcome.recovery_error, &outcome.failure);
+        outcome.failure = CopyFailure::Journal(error);
+        return;
+    }
+    if !exact_held_leaf(held.file(), &backup.backup) {
+        backup.state = ReplacementState::Uncertain;
+        return;
+    }
+    if !matches!(
+        copy.target_parent
+            .inspect_leaf(copy.target.requested_leaf(), &fresh),
+        Ok(TargetOccupancy::Vacant)
+    ) {
+        return;
+    }
+    // No-replace protects a winner that appears after the vacancy check.
+    let result = held.rename_no_replace(
+        copy.target_parent.directory(),
+        backup.original.file_name().unwrap_or_default(),
+    );
+    if exact_held_leaf(held.file(), &backup.original) {
+        backup.state = ReplacementState::Restored;
+        if let Err(error) = journal.record(Event::RestoreObserved {
+            original: backup.original.clone(),
+            backup: backup.backup.clone(),
+            parent: backup.parent,
+            identity: backup.identity,
+        }) {
+            append_recovery_diagnostic(&mut outcome.recovery_error, &outcome.failure);
+            outcome.failure = CopyFailure::Journal(error);
+        }
+    } else if !exact_held_leaf(held.file(), &backup.backup) {
+        backup.state = ReplacementState::Uncertain;
+    }
+    if let Err(error) = result {
+        append_recovery_diagnostic(&mut outcome.recovery_error, error);
     }
 }

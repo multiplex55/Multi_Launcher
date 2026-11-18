@@ -16,8 +16,9 @@ use crate::activity::{
 };
 
 use super::{
-    ApprovedTransferPlan, CopyControl, CopyExecution, CopyFailure, CopyPauseState, DirectoryTimes,
-    EntryKind, ExecutionProgress, ExecutionState, SourceNodeId, TransferDraft, execute_copy_plan,
+    ApprovedTransferPlan, CopyControl, CopyError, CopyExecution, CopyFailure, CopyPauseState,
+    DirectoryTimes, EntryKind, ExecutionProgress, ExecutionState, SourceNodeId, TransferDraft,
+    execute_copy_plan,
 };
 
 pub const TRANSFER_QUEUE_LIMIT: usize = 32;
@@ -169,19 +170,18 @@ impl TransferJobResult {
                     failed |= matches!(directory.times, DirectoryTimes::Failed(_));
                 }
                 ExecutionState::Failed(error) => {
-                    retained |= error.artifact.is_some();
+                    retained |= error.has_retained_effect();
                     incomplete = true;
-                    if matches!(error.failure, CopyFailure::Cancelled) {
-                        cancelled = true;
-                    } else {
-                        failed = true;
-                    }
+                    failed = true;
                 }
-                ExecutionState::Cancelled => {
+                ExecutionState::Cancelled(error) => {
+                    retained |= error.as_ref().is_some_and(CopyError::has_retained_effect);
                     incomplete = true;
                     cancelled = true;
                 }
-                ExecutionState::BlockedByParent(_) => incomplete = true,
+                ExecutionState::BlockedByParent(_) | ExecutionState::BlockedByReceipt => {
+                    incomplete = true
+                }
                 ExecutionState::MergedDirectory(_) | ExecutionState::Skipped => {}
             }
         }
@@ -883,9 +883,9 @@ mod tests {
         };
         assert!(matches!(
             &report.rows[0].state,
-            ExecutionState::Failed(super::super::CopyError {
+            ExecutionState::Cancelled(Some(CopyError {
                 artifact: Some(super::super::CopyRecoveryArtifact::Owned(artifact)), ..
-            }) if artifact.state == super::super::CopyArtifactState::Published
+            })) if artifact.state == super::super::CopyArtifactState::Published
         ));
     }
 
